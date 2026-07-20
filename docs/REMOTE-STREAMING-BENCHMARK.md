@@ -1,6 +1,6 @@
 # Remote-Streaming-Benchmark und Stack-Empfehlung
 
-Stand: 20. Juli 2026
+Stand: 21. Juli 2026
 
 Dieser Bericht trennt Messwerte, Funktionsnachweise und Architekturentscheidungen bewusst voneinander. Die Zahlen stammen aus lokalen Läufen auf derselben Entwicklungsmaschine, aber nicht aus einem vollständig kontrollierten Laboraufbau. Sie sind eine belastbare Richtungsentscheidung für das Mobile-MVP, kein allgemeines Produktversprechen.
 
@@ -58,6 +58,20 @@ Der kalte 1024-×-576-Lauf enthält einen Browserdownload und ist daher nicht di
 - Die WebSocket-Verbindungszeit war in beiden warmen Läufen klein und ist hier nicht der dominante Faktor.
 
 Diese Relationen sind eine Inferenz aus den lokalen Messwerten. Für eine belastbare Release-Regression müssen mindestens fünf identische Wiederholungen pro Konfiguration mit Median und p95 folgen.
+
+### Frischer Browser-Adapter-Nachtest (fünf warme Läufe)
+
+Ein zusätzlicher, frischer Runner-Lauf vom 20. Juli 2026 (UTC) prüfte den bereits verbundenen lokalen Managerbrowser fünfmal. Er misst nur die beobachtbaren TCP-/HTTP- beziehungsweise WebSocket-Upgrade-Meilensteine und trennt sie bewusst von Startzeit, erstem Bild, Eingabeantwort und Internet-Latenz. Die Werte sind daher eine lokale Regressionsbasis für den bestehenden Pfad — **kein** fairer Geschwindigkeitsvergleich mit nicht eingerichteten oder architektonisch abweichenden Stacks.
+
+| Kandidat | Läufe | Ergebnis | Median | p95 | Einordnung |
+|---|---:|---|---:|---:|---|
+| KasmVNC Manager health | 5/5 | erreichbar | HTTP First Byte 8,196 ms | 182,855 ms | lokaler Control-Plane-Smoketest; ein Ausreißer ist im p95 sichtbar |
+| KasmVNC/noVNC live WebSocket | 5/5 | Upgrade erreichbar | WebSocket-Handshake 66,627 ms | 68,595 ms | derselbe echte Browser-Stream-Pfad, warm und lokal |
+| Selkies WebSocket POC | – | `not_installed` | – | – | GStreamer/Selkies war auf diesem Host nicht installiert; keine erfundene Zeit |
+| Sunshine + Moonlight | – | `architecture_only` | – | – | nativer Clientpfad, kein eingebetteter Browser-WebSocket konfiguriert |
+| Apache Guacamole | – | `architecture_only` | – | – | Gateway-Pfad, in diesem Lauf nicht provisioniert |
+
+Der daraus erzeugte, serverseitig redigierte Report wurde außerdem in einer frischen Manager-Instanz in einer iPhone-14-Ansicht geladen und aktualisiert. Die mobile Seite zeigte alle fünf Kandidaten bei exakt 390 px Inhaltsbreite ohne horizontalen Overflow; „2 measured / 5 listed“ bleibt sichtbar und verhindert, dass die drei nicht gemessenen Kandidaten als Leistungswerte gelesen werden. Lokale Endpunkte, Profilkennungen und Header erscheinen weder im Browserreport noch in dieser Dokumentation.
 
 ## KasmVNC 1.3.3 gegen 1.4.0: isolierter A/B-Lauf
 

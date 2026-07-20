@@ -88,6 +88,8 @@ python3 scripts/streaming_benchmark_runner.py \
 
 The administrator-only **Streaming benchmarks** view reads the configured report through `/api/benchmarks/latest`; set `BENCHMARK_REPORT_PATH` on the manager if its persistent report file is not `/data/benchmark-report.json`. The runner emits JSONL progress events for a browser UI, writes JSON plus Markdown reports, and separates `measured` candidates from `not_installed` or `architecture_only` entries. Its browser-facing output deliberately omits local paths, endpoints, commands, raw process output, and request headers. Pair it with `scripts/mobile_ui_gate.py` when a candidate also needs proof that the real mobile UI and live canvas still work.
 
+The latest verified warm local baseline used five runs: the Manager health endpoint reached a median first byte at **8.196 ms**, and the real KasmVNC/noVNC WebSocket upgrade reached a median **66.627 ms** handshake. Selkies was explicitly `not_installed`; Sunshine/Moonlight and Guacamole were explicitly `architecture_only`. The redacted report was rendered and refreshed in an iPhone-14-sized manager view with no horizontal overflow. These are loopback regression probes for the existing path, not a cross-technology winner claim; the full context and limits are in [docs/REMOTE-STREAMING-BENCHMARK.md](docs/REMOTE-STREAMING-BENCHMARK.md).
+
 ## Development
 
 ### Backend

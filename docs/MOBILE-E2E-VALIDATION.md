@@ -1,6 +1,6 @@
 # Mobile E2E-Validierung
 
-Stand: 20. Juli 2026
+Stand: 21. Juli 2026
 
 ## Ergebnis
 
@@ -35,6 +35,21 @@ Der daraufhin neu gebaute und erneut isoliert gestartete Nachtest bestand **100/
 Der Dashboard-Gate ist Teil von `scripts/mobile_ui_gate.py` und wird mit `--access-dashboard` nur zusammen mit einem lokal referenzierten Token-Environment aktiviert. Tokenwerte erscheinen weder im Report noch in Screenshots. Ein repräsentativer iPhone-Workspace-Screenshot mit verbundenem Live-Canvas und ein iPhone-14-Screenshot des Access Dashboards wurden visuell kontrolliert. Der isolierte Testcontainer und seine Testdaten sind nicht die laufende Alltagsinstanz.
 
 Diese Prüfung beweist die geschützte Browser-/VNC- und Dashboard-Oberfläche im Browser. Sie ersetzt nicht den noch offenen physischen iPhone-Safari-Test über private Tailscale-HTTPS, weil Tailscale Serve in diesem Tailnet derzeit administrativ deaktiviert ist.
+
+## Finaler Mobile-Overflow-Nachtest für das Access Dashboard
+
+Die Mobile-UX wurde danach noch einmal gegen eine lange Sandbox-Kennung nachgetestet. Auslöser war ein echter iPhone-14-Befund: Das zweispaltige Dashboard-Grid erzeugte auf 390 px eine implizite zu breite Spalte. Die Oberfläche verwendet dort nun explizit einen einspaltigen Grid-Pfad; Eingabefelder und Schlüsselbereich dürfen schrumpfen beziehungsweise umbrechen.
+
+Der frische authentifizierte Nachtest lief in einem isolierten aktuellen Container ohne ausgewähltes Live-Profil. Deshalb ist er ein Layout-/Dashboard-Gate und ersetzt **nicht** die oben dokumentierte Live-VNC-Abnahme. Alle **73/73** Prüfungen bestanden:
+
+| Bereich | Nachweis | Ergebnis |
+|---|---|---|
+| iPhone 14, Pro Max, Landscape und Touch-Tablet | Workspace-Struktur, Split-Geometrie, Chat/Composer, Grid, Vollbild, Fokus-Rückgabe, kein Overflow und 44-px-Touch-Ziele | 68/68 bestanden (17 je Viewport) |
+| Access Dashboard auf 390 × 844 | Aktion, Rendering, langer Sandbox-Name ohne horizontalen Overflow, alle sichtbaren Buttons, Selects und Textinputs mindestens 44 × 44 px sowie Screenshot-Artefakt | 5/5 bestanden |
+
+Für das Dashboard betrugen `scrollWidth` und `clientWidth` jeweils exakt 390 px. Der iPhone-14-Screenshot wurde nach dem automatisierten Lauf visuell kontrolliert: Die Kennung ist sinnvoll gekürzt, die Bedienelemente bleiben erreichbar und es gibt keinen seitlichen Scrollbereich. Der vollständig getrennte Live-VNC-Nachweis bleibt der r20-Lauf mit verbundenem Canvas und RFB-/CDP-Eingabeprobe.
+
+Zum dokumentierten Endstand bestanden außerdem der Produktionsbuild, **63 Frontend-Tests** und **220 Backend-Tests** (eine bekannte Starlette-Deprecation-Warnung). Der spezifische Streaming-Runner-Test und die Python-Kompilationsprüfung des Mobile-Gate-Runners waren ebenfalls grün.
 
 ## Nachtest: iOS-Paste-Fallback
 

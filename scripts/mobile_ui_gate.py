@@ -271,6 +271,54 @@ def current_remote_pages(base_url: str, profile_id: str, timeout: float) -> list
     return [page for page in payload if page.get("type") == "page"]
 
 
+def current_remote_clipboard(base_url: str, profile_id: str, timeout: float) -> str:
+    endpoint = urljoin(base_url.rstrip("/") + "/", f"api/profiles/{quote(profile_id)}/clipboard")
+    with urlopen(endpoint, timeout=timeout) as response:
+        payload = json.load(response)
+    if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+        raise GateError("Profile clipboard endpoint did not return text")
+    return payload["text"]
+
+
+def manual_remote_paste(
+    browser: AgentBrowser,
+    result: dict[str, Any],
+    base_url: str,
+    profile_id: str,
+    timeout: float,
+) -> None:
+    """Exercise the iOS-safe fallback that does not depend on navigator.clipboard."""
+    marker = f"mobile-manual-paste-{int(time.time() * 1000)}"
+    browser.run("click", "button[aria-label='Paste text into remote browser']")
+    browser.wait_for(
+        "!!document.querySelector('textarea[id^=remote-paste-]')",
+        "manual remote paste field",
+        5,
+    )
+    panel_touch = browser.eval(TOUCH_TARGET_SCRIPT)
+    add_check(result, "manual paste has 44px touch targets", not panel_touch.get("offenders"), panel_touch)
+
+    browser.run("fill", "textarea[id^=remote-paste-]", marker)
+    browser.run("click", "button[aria-label='Send pasted text to remote browser']")
+    browser.wait_for(
+        "!document.querySelector('textarea[id^=remote-paste-]') && document.body.innerText.includes('Connected')",
+        "manual remote paste completion",
+        10,
+    )
+    actual = current_remote_clipboard(base_url, profile_id, min(timeout, 10))
+    matched = actual == marker
+    add_check(
+        result,
+        "manual device paste reaches remote profile clipboard",
+        matched,
+        {
+            "matched": matched,
+            "expected_length": len(marker),
+            "actual_length": len(actual),
+        },
+    )
+
+
 def remote_keyboard_navigation(
     browser: AgentBrowser,
     result: dict[str, Any],
@@ -410,6 +458,7 @@ def run_viewport(
 
     if profile_id:
         select_and_connect(browser, result, profile_id, timeout)
+        manual_remote_paste(browser, result, base_url, profile_id, timeout)
         if remote_probe_url:
             remote_keyboard_navigation(
                 browser,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ClipboardCopy, Code2, Maximize2, Minimize2 } from "lucide-react";
 import { api } from "../lib/api";
 
@@ -16,8 +16,12 @@ const RECONNECT_DELAYS_MS = [500, 1000, 2000, 5000, 10000] as const;
 
 type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
 
-function isCoarsePointerDevice() {
-  return window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
+function supportsClipboardSync() {
+  return (
+    typeof navigator !== "undefined" &&
+    typeof navigator.clipboard?.readText === "function" &&
+    typeof navigator.clipboard?.writeText === "function"
+  );
 }
 
 function shouldPollClipboard() {
@@ -37,9 +41,69 @@ export function ProfileViewer({
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
-  const [clipboardSupported] = useState(() => !isCoarsePointerDevice());
-  const [clipboardSync, setClipboardSync] = useState(initialClipboardSync && !isCoarsePointerDevice());
+  const [clipboardSupported] = useState(supportsClipboardSync);
+  const [clipboardSync, setClipboardSync] = useState(
+    () => initialClipboardSync && supportsClipboardSync(),
+  );
   const [cdpCopied, setCdpCopied] = useState(false);
+  const [pastePanelOpen, setPastePanelOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const [pasting, setPasting] = useState(false);
+
+  const sendRemotePasteKeystroke = useCallback(() => {
+    const rfb = rfbRef.current;
+    if (!rfb) return false;
+
+    try {
+      rfb.sendKey(0xffe3, "ControlLeft", true);
+      rfb.sendKey(XK_v, "KeyV", true);
+      rfb.sendKey(XK_v, "KeyV", false);
+      rfb.sendKey(0xffe3, "ControlLeft", false);
+      return true;
+    } catch (err) {
+      console.warn("[clipboard] remote paste keystroke failed:", err);
+      return false;
+    }
+  }, []);
+
+  const sendTextToRemoteClipboard = useCallback(
+    async (text: string) => {
+      if (!rfbRef.current || !text) return false;
+
+      try {
+        await api.setClipboard(profileId, text);
+
+        // Send the entire Ctrl+V sequence. Clipboard reads and API calls are
+        // asynchronous, so we cannot rely on the original key still being held.
+        return sendRemotePasteKeystroke();
+      } catch (err) {
+        console.warn("[clipboard] remote paste failed:", err);
+        return false;
+      }
+    },
+    [profileId, sendRemotePasteKeystroke],
+  );
+
+  const submitManualPaste = useCallback(async () => {
+    if (!pasteText) {
+      setPasteError("Paste or type text before sending it to the remote browser.");
+      return;
+    }
+
+    setPasting(true);
+    setPasteError(null);
+    const pasted = await sendTextToRemoteClipboard(pasteText);
+    setPasting(false);
+
+    if (!pasted) {
+      setPasteError("The remote browser is not ready. Reconnect and try again.");
+      return;
+    }
+
+    setPasteText("");
+    setPastePanelOpen(false);
+  }, [pasteText, sendTextToRemoteClipboard]);
 
   useEffect(() => {
     let rfb: any = null;
@@ -189,34 +253,25 @@ export function ProfileViewer({
       e.stopPropagation();
       e.preventDefault();
 
-      const rfb = rfbRef.current;
-      if (!rfb) {
-        return;
-      }
-
       try {
         const text = await navigator.clipboard.readText();
-        if (text) {
-          await api.setClipboard(profileId, text);
-        }
+        if (!text) return;
+        const pasted = await sendTextToRemoteClipboard(text);
+        if (!pasted) setClipboardSync(false);
       } catch (err) {
         console.warn("[clipboard] error:", err);
         setClipboardSync(false);
-        return;
+        // Preserve the user's Ctrl+V intent even when browser clipboard
+        // permission is denied. The remote browser receives its native paste
+        // shortcut, using the clipboard it already has available.
+        sendRemotePasteKeystroke();
       }
-
-      // Send full Ctrl+V sequence to VNC. We can't rely on Ctrl still being
-      // held because the user may have released it during the async API call.
-      rfb.sendKey(0xffe3, "ControlLeft", true);   // Ctrl press
-      rfb.sendKey(XK_v, "KeyV", true);             // V press
-      rfb.sendKey(XK_v, "KeyV", false);            // V release
-      rfb.sendKey(0xffe3, "ControlLeft", false);   // Ctrl release
     };
 
     // capture: true ensures we fire before noVNC's canvas listener
     container.addEventListener("keydown", handleKeyDown, true);
     return () => container.removeEventListener("keydown", handleKeyDown, true);
-  }, [profileId, clipboardSync, connected]);
+  }, [clipboardSync, connected, sendRemotePasteKeystroke, sendTextToRemoteClipboard]);
 
   // VNC→Host: listen for noVNC "clipboard" event (fired when proxy converts
   // KasmVNC BinaryClipboard type 180 → standard ServerCutText type 3)
@@ -408,6 +463,7 @@ export function ProfileViewer({
         <div className="flex items-center gap-1">
           {cdpUrl && (
             <button
+              type="button"
               onClick={() => {
                 const base = `${window.location.protocol}//${window.location.host}${cdpUrl}`;
                 navigator.clipboard?.writeText(base).then(() => {
@@ -422,20 +478,36 @@ export function ProfileViewer({
             </button>
           )}
           <button
+            type="button"
+            onClick={() => {
+              setPasteError(null);
+              setPastePanelOpen(true);
+            }}
+            className="rounded px-2 py-1 text-xs text-gray-300 hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-gray-600"
+            title="Paste text from this device into the remote browser"
+            aria-label="Paste text into remote browser"
+            disabled={!connected}
+          >
+            Paste
+          </button>
+          <button
+            type="button"
             onClick={() => setClipboardSync(!clipboardSync)}
             className={`p-1 ${clipboardSync ? "text-accent" : "text-gray-500 hover:text-gray-300"}`}
+            aria-label={clipboardSync ? "Disable clipboard sync" : "Enable clipboard sync"}
             title={
               clipboardSupported
                 ? clipboardSync
                   ? "Disable clipboard sync"
                   : "Enable clipboard sync"
-                : "Clipboard sync is disabled on touch devices"
+                : "Clipboard sync is unavailable in this browser"
             }
             disabled={!connected || !clipboardSupported}
           >
             <ClipboardCopy className="h-3.5 w-3.5" />
           </button>
           <button
+            type="button"
             onClick={toggleFullscreen}
             className="text-gray-500 hover:text-gray-300 p-1"
             title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
@@ -444,6 +516,54 @@ export function ProfileViewer({
           </button>
         </div>
       </div>
+
+      {pastePanelOpen && (
+        <form
+          className="border-b border-border bg-surface-1 px-3 py-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitManualPaste();
+          }}
+        >
+          <label htmlFor={`remote-paste-${profileId}`} className="block text-xs text-gray-300">
+            Paste text into the remote browser
+          </label>
+          <textarea
+            id={`remote-paste-${profileId}`}
+            value={pasteText}
+            onChange={(event) => setPasteText(event.target.value)}
+            autoFocus
+            rows={3}
+            placeholder="Paste or type text here"
+            className="mt-1 w-full resize-y rounded border border-border bg-surface-2 px-2 py-1.5 text-sm text-gray-100 outline-none placeholder:text-gray-500 focus:border-accent"
+          />
+          {pasteError && (
+            <p role="alert" className="mt-1 text-xs text-red-400">
+              {pasteError}
+            </p>
+          )}
+          <div className="mt-2 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setPastePanelOpen(false);
+                setPasteError(null);
+              }}
+              className="min-h-11 rounded px-3 py-1 text-xs text-gray-400 hover:bg-surface-2"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="min-h-11 rounded bg-accent px-3 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label="Send pasted text to remote browser"
+              disabled={!pasteText || pasting}
+            >
+              {pasting ? "Pasting..." : "Paste"}
+            </button>
+          </div>
+        </form>
+      )}
 
       {/* VNC canvas container */}
       <div

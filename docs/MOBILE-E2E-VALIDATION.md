@@ -15,6 +15,12 @@ Der Produktionscontainer und der echte KasmVNC/noVNC-Stream wurden mit dem repro
 
 Die Tabelle stammt aus dem finalen Wiederholungslauf gegen einen bereits laufenden Browser. In einem unmittelbar vorangehenden Lauf startete derselbe Build das gestoppte Testprofil und erreichte die erste Live-Verbindung nach 4.904,8 ms. Dieser Einzelwert ist ein E2E-Smoke-Nachweis, kein belastbarer Median.
 
+## Nachtest: iOS-Paste-Fallback
+
+Der aktuelle Source-Build wurde anschließend über den lokalen Vite-Proxy gegen denselben laufenden Testbrowser geprüft. Alle vier Viewports bestanden erneut. Zusätzlich öffnete jeder Durchlauf den manuellen **Paste text**-Dialog, validierte alle sichtbaren Touch-Ziele mit mindestens 44 × 44 CSS-Pixeln und bestätigte Browser → API → Remote-Clipboard bei weiterhin verbundenem VNC-Canvas. Der zugehörige Frontend-Test deckt die vollständige RFB-`Ctrl+V`-Sequenz ab.
+
+Der Nachtest prüft den manuellen Fallback unabhängig von `navigator.clipboard`, damit eine fehlende oder von Mobile Safari abgelehnte Clipboard-Berechtigung keinen Paste-Flow blockiert. Der Report speichert keine Clipboard-Inhalte, sondern nur Match-Status und Längen eines nicht sensitiven Einmal-Markers. Die Artefakte lagen ausschließlich temporär außerhalb des Git-Repositories; repräsentative Workspace- und Vollbild-Screenshots wurden visuell kontrolliert.
+
 ## Isolierter KasmVNC-A/B-Nachtest
 
 Die komplette Suite wurde zusätzlich gegen je einen isolierten KasmVNC-1.3.3- und KasmVNC-1.4.0-Container mit gleichem 1024-×-576-Profil ausgeführt. Beide Varianten bestanden vier Viewports, exakt einen echten VNC-Canvas, Grid, Vollbild, den lokalen Browser-Use-inspirierten Composer sowie die RFB-Keyboard-zu-CDP-Probe; pro Variante waren **88/88 Checks** und **13 Screenshots** grün.

@@ -387,11 +387,12 @@ Die UI-Datenstruktur soll Demo- und Live-Daten über ein gemeinsames Interface a
 iOS/Safari behandelt Clipboard und Keyboard restriktiver als Desktop-Chromium.
 
 - Polling pausiert bei versteckter Seite.
-- Auf Touch-/Coarse-Pointer-Geräten wird automatisches Host-Clipboard-Polling im MVP explizit deaktiviert, nicht stillschweigend ignoriert.
-- Der Button zeigt einen verständlichen Disabled-State und ein erklärendes Label/Tooltip.
-- Clipboard-Inhalte werden niemals geloggt.
-- Ein manueller, nutzergesteuerter Paste-/Copy-Flow ist der bevorzugte iOS-Fallback.
-- Clipboard-API-Fehler dürfen keine Keyboard-Eingaben verschlucken.
+- Touch-/Coarse-Pointer allein ist kein Grund, Clipboard-Sync abzuschalten. Automatischer Sync bleibt möglich, wenn die sichere Browser-Clipboard-API `readText` und `writeText` unterstützt.
+- Fehlt diese API oder der Secure Context, ist nur der Sync-Schalter deaktiviert und erklärt den Grund; der manuelle Fallback bleibt immer verfügbar.
+- Es gibt einen sichtbaren, nutzergesteuerten **Paste text**-Flow: Nutzer können Text in ein lokales Textfeld einfügen oder tippen; erst der explizite Send-Button schreibt ihn in die Remote-Clipboard-Bridge und sendet `Ctrl+V` an den bestehenden VNC-Viewer.
+- Die manuellen Aktionen und das Textfeld sind auf Mobile mindestens 44 × 44 CSS-Pixel groß.
+- Clipboard-API-Fehler deaktivieren den automatischen Sync für spätere Tastenkombinationen, leiten die gerade ausgelöste normale `Ctrl+V`-Absicht aber noch an den Remote-Browser weiter, damit keine Eingabe verschluckt wird.
+- Reale Clipboard-Inhalte werden niemals geloggt, in Screenshots gezeigt oder in Testreports gespeichert. Kontrollierte Tests verwenden ausschließlich einen nicht sensitiven Einmal-Marker und berichten nur Match-Status und Länge.
 - HTTPS/Secure Context ist für produktive Clipboard-Funktionen Voraussetzung.
 
 ### 19. Suche pro Profil
@@ -665,6 +666,7 @@ P0 – mergefähiges Mobile-MVP:
 - Demo-Chat;
 - CSS-Vollbild mit einem Canvas;
 - Reconnect;
+- manueller iOS-Paste-Fallback;
 - Tests und Browser-Screenshots;
 - 1024 × 576 Testprofil.
 
@@ -674,7 +676,6 @@ P1 – produktiver Task-Workspace:
 - Stream von Steps und Messages;
 - echte Grid-Thumbnails;
 - Snap-Resize;
-- manuelle iOS-Clipboard-Aktion;
 - Tailscale Serve/HTTPS nach Freigabe;
 - reale iPhone-Safari-Abnahme.
 

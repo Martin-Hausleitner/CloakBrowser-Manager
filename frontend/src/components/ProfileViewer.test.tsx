@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../lib/api";
 import { ProfileViewer } from "./ProfileViewer";
@@ -109,6 +109,8 @@ describe("ProfileViewer", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     rfbMock.instances.length = 0;
+    apiMock.getClipboard.mockClear();
+    apiMock.setClipboard.mockClear();
     apiMock.getClipboard.mockResolvedValue({ text: "" });
     apiMock.setClipboard.mockResolvedValue({ ok: true });
     setVisibilityState("visible");
@@ -269,29 +271,89 @@ describe("ProfileViewer", () => {
     });
   });
 
-  it("pauses clipboard polling while hidden and disables sync on coarse pointer devices", async () => {
+  it("pauses clipboard polling while hidden", async () => {
     setVisibilityState("hidden");
-    const hiddenViewer = await renderProfileViewer();
+    await renderProfileViewer();
 
     act(() => rfbMock.instances[0]?.emit("connect"));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(api.getClipboard).not.toHaveBeenCalled();
+  });
 
-    hiddenViewer.unmount();
-    api.getClipboard.mockClear();
-    rfbMock.instances.length = 0;
-    setVisibilityState("visible");
+  it("keeps clipboard sync and manual paste available on coarse-pointer devices", async () => {
     setCoarsePointer(true);
     await renderProfileViewer();
+
     act(() => rfbMock.instances[0]?.emit("connect"));
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5000);
-    });
-    expect(api.getClipboard).not.toHaveBeenCalled();
     expect(
-      (screen.getByTitle("Clipboard sync is disabled on touch devices") as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "Disable clipboard sync" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Paste text into remote browser" }));
+    fireEvent.change(screen.getByLabelText("Paste text into the remote browser"), {
+      target: { value: "hello from an iPhone" },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send pasted text to remote browser" }));
+      await Promise.resolve();
+    });
+
+    expect(api.setClipboard).toHaveBeenCalledWith("profile-1", "hello from an iPhone");
+    expect(rfbMock.instances[0]?.sendKeyCalls).toEqual([
+      [0xffe3, "ControlLeft", true],
+      [0x0076, "KeyV", true],
+      [0x0076, "KeyV", false],
+      [0xffe3, "ControlLeft", false],
+    ]);
+  });
+
+  it("keeps manual paste available when the browser clipboard API is unavailable", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+    setCoarsePointer(true);
+    await renderProfileViewer();
+
+    act(() => rfbMock.instances[0]?.emit("connect"));
+    expect(
+      (screen.getByRole("button", { name: "Enable clipboard sync" }) as HTMLButtonElement).disabled,
     ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Paste text into remote browser" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("forwards Ctrl+V to VNC when browser clipboard permission is denied", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        readText: vi.fn().mockRejectedValue(new Error("clipboard permission denied")),
+        writeText: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+    await renderProfileViewer();
+
+    act(() => rfbMock.instances[0]?.emit("connect"));
+    const vncContainer = document.querySelector("[data-vnc-layout]");
+    expect(vncContainer).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.keyDown(vncContainer!, { key: "v", code: "KeyV", ctrlKey: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(api.setClipboard).not.toHaveBeenCalled();
+    expect(rfbMock.instances[0]?.sendKeyCalls).toEqual([
+      [0xffe3, "ControlLeft", true],
+      [0x0076, "KeyV", true],
+      [0x0076, "KeyV", false],
+      [0xffe3, "ControlLeft", false],
+    ]);
+    expect(screen.getByRole("button", { name: "Enable clipboard sync" })).toBeTruthy();
   });
 });

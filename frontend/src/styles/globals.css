@@ -199,6 +199,10 @@
     @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
+  .mobile-logout-button {
+    @apply inline-flex h-11 min-w-11 items-center justify-center rounded-md px-3 text-xs text-gray-500 underline transition-colors hover:bg-surface-2 hover:text-gray-300 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
   .mobile-composer-select {
     @apply h-11 w-full truncate rounded-md border border-border bg-surface-2 px-2 text-xs text-gray-200 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }

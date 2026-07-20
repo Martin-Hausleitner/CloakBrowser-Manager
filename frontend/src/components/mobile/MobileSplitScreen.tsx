@@ -561,7 +561,12 @@ export function MobileSplitScreen({
         {authRequired ? (
           <div className="mx-3 mb-3 flex items-center justify-between gap-2">
             {identityName ? <span className="truncate text-xs text-gray-500">Signed in as {identityName}</span> : <span />}
-            <button type="button" onClick={onLogout} className="text-xs text-gray-500 underline">
+            <button
+              type="button"
+              onClick={onLogout}
+              className="mobile-logout-button"
+              aria-label="Log out"
+            >
               Log out
             </button>
           </div>

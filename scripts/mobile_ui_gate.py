@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 VIEWPORTS = (
@@ -186,6 +186,45 @@ TOUCH_TARGET_SCRIPT = r"""(() => {
 })()"""
 
 
+ACCESS_DASHBOARD_SCRIPT = r"""(() => {
+  const dashboard = document.querySelector('main[aria-label="Browser access controls"]');
+  const visible = (element) => {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+      Number(style.opacity) !== 0 && rect.width > 1 && rect.height > 1;
+  };
+  const elements = dashboard ? [...dashboard.querySelectorAll('button, select, textarea, input')]
+    .filter((element) => !['hidden', 'file', 'checkbox', 'radio'].includes(element.type || ''))
+    .filter(visible) : [];
+  const controls = elements.map((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      label: element.getAttribute('aria-label') || element.title || element.textContent?.trim().slice(0, 60) || element.tagName,
+      tag: element.tagName,
+      width: Math.round(rect.width * 10) / 10,
+      height: Math.round(rect.height * 10) / 10,
+    };
+  });
+  const dashboardRect = dashboard?.getBoundingClientRect();
+  return {
+    ready: !!dashboard,
+    innerWidth: window.innerWidth,
+    scrollWidth: document.scrollingElement?.scrollWidth ?? 0,
+    dashboard: dashboardRect ? {
+      width: Math.round(dashboardRect.width * 10) / 10,
+      height: Math.round(dashboardRect.height * 10) / 10,
+      scrollWidth: dashboard.scrollWidth,
+      clientWidth: dashboard.clientWidth,
+    } : null,
+    touchTargets: {
+      count: controls.length,
+      offenders: controls.filter((item) => item.width < 44 || item.height < 44),
+    },
+  };
+})()"""
+
+
 CANVAS_SCRIPT = r"""(() => {
   const canvases = [...document.querySelectorAll('.mobile-browser-content canvas')];
   const host = document.querySelector('[data-vnc-layout]');
@@ -262,18 +301,67 @@ def select_and_connect(
     add_check(result, "exactly one live VNC canvas", canvas.get("count") == 1, canvas)
 
 
-def current_remote_pages(base_url: str, profile_id: str, timeout: float) -> list[dict[str, Any]]:
+def _authenticated_request(url: str, timeout: float, auth_token: str | None):
+    headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+    return urlopen(Request(url, headers=headers), timeout=timeout)
+
+
+def authenticate_workspace(browser: AgentBrowser, auth_token: str | None) -> None:
+    if not auth_token:
+        return
+    browser.wait_for(
+        r"""(() => Boolean(document.querySelector('.mobile-split-root, input[placeholder="Access token"]')) || [...document.querySelectorAll('button')].some((candidate) => candidate.textContent?.includes('administrator token')))()""",
+        "mobile workspace or policy login",
+        10,
+    )
+    if browser.eval("!!document.querySelector('.mobile-split-root')"):
+        return
+    token_input = browser.eval("!!document.querySelector(\"input[placeholder='Access token']\")")
+    if not token_input:
+        switched = browser.eval(r"""(() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((candidate) => candidate.textContent?.includes('administrator token'));
+          if (!button) return false;
+          button.click();
+          return true;
+        })()""")
+        if not switched:
+            raise GateError("Could not switch the policy login page to administrator-token mode")
+    browser.wait_for(
+        "!!document.querySelector(\"input[placeholder='Access token']\")",
+        "administrator token login",
+        10,
+    )
+    # The token is read from a local environment variable and is never written
+    # to JSON report or screenshot artifacts. The browser CLI receives it only
+    # to enter the login form, so use this option exclusively with a disposable
+    # token on an isolated E2E deployment, never a production administrator key.
+    browser.run("fill", "input[placeholder='Access token']", auth_token)
+    browser.run("click", "button[type='submit']")
+
+
+def current_remote_pages(
+    base_url: str,
+    profile_id: str,
+    timeout: float,
+    auth_token: str | None = None,
+) -> list[dict[str, Any]]:
     endpoint = urljoin(base_url.rstrip("/") + "/", f"api/profiles/{quote(profile_id)}/cdp/json/list")
-    with urlopen(endpoint, timeout=timeout) as response:
+    with _authenticated_request(endpoint, timeout, auth_token) as response:
         payload = json.load(response)
     if not isinstance(payload, list):
         raise GateError("CDP page list did not return a list")
     return [page for page in payload if page.get("type") == "page"]
 
 
-def current_remote_clipboard(base_url: str, profile_id: str, timeout: float) -> str:
+def current_remote_clipboard(
+    base_url: str,
+    profile_id: str,
+    timeout: float,
+    auth_token: str | None = None,
+) -> str:
     endpoint = urljoin(base_url.rstrip("/") + "/", f"api/profiles/{quote(profile_id)}/clipboard")
-    with urlopen(endpoint, timeout=timeout) as response:
+    with _authenticated_request(endpoint, timeout, auth_token) as response:
         payload = json.load(response)
     if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
         raise GateError("Profile clipboard endpoint did not return text")
@@ -286,6 +374,7 @@ def manual_remote_paste(
     base_url: str,
     profile_id: str,
     timeout: float,
+    auth_token: str | None,
 ) -> None:
     """Exercise the iOS-safe fallback that does not depend on navigator.clipboard."""
     marker = f"mobile-manual-paste-{int(time.time() * 1000)}"
@@ -305,7 +394,7 @@ def manual_remote_paste(
         "manual remote paste completion",
         10,
     )
-    actual = current_remote_clipboard(base_url, profile_id, min(timeout, 10))
+    actual = current_remote_clipboard(base_url, profile_id, min(timeout, 10), auth_token)
     matched = actual == marker
     add_check(
         result,
@@ -326,6 +415,7 @@ def remote_keyboard_navigation(
     profile_id: str,
     target_url: str,
     timeout: float,
+    auth_token: str | None,
 ) -> None:
     target = urlsplit(target_url)
     if target.scheme not in {"http", "https"} or not target.hostname or target.username or target.password:
@@ -333,7 +423,7 @@ def remote_keyboard_navigation(
     if not target_url.isascii():
         raise GateError("--remote-probe-url must be ASCII so keyboard mapping is deterministic")
 
-    before = current_remote_pages(base_url, profile_id, min(timeout, 10))
+    before = current_remote_pages(base_url, profile_id, min(timeout, 10), auth_token)
     if any(page.get("url") == target_url for page in before):
         raise GateError("Remote probe URL is already active; use a unique harmless query value")
 
@@ -379,7 +469,7 @@ def remote_keyboard_navigation(
     deadline = time.monotonic() + timeout
     pages: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
-        pages = current_remote_pages(base_url, profile_id, min(timeout, 10))
+        pages = current_remote_pages(base_url, profile_id, min(timeout, 10), auth_token)
         if any(page.get("url") == target_url for page in pages):
             break
         time.sleep(0.4)
@@ -407,6 +497,7 @@ def run_viewport(
     expected_layout: str,
     timeout: float,
     remote_probe_url: str | None,
+    auth_token: str | None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "name": name,
@@ -420,6 +511,7 @@ def run_viewport(
     browser.run("set", "viewport", str(width), str(height))
     navigation_started = time.monotonic()
     browser.run("open", base_url)
+    authenticate_workspace(browser, auth_token)
     browser.wait_for("!!document.querySelector('.mobile-split-root')", "mobile workspace", 20)
     result["workspace_ready_ms"] = round((time.monotonic() - navigation_started) * 1000, 1)
 
@@ -458,7 +550,7 @@ def run_viewport(
 
     if profile_id:
         select_and_connect(browser, result, profile_id, timeout)
-        manual_remote_paste(browser, result, base_url, profile_id, timeout)
+        manual_remote_paste(browser, result, base_url, profile_id, timeout, auth_token)
         if remote_probe_url:
             remote_keyboard_navigation(
                 browser,
@@ -467,6 +559,7 @@ def run_viewport(
                 profile_id,
                 remote_probe_url,
                 timeout,
+                auth_token,
             )
             take_screenshot(browser, result, output_dir, name, "remote-input", width, height)
 
@@ -572,6 +665,55 @@ def run_viewport(
     return result
 
 
+def run_access_dashboard_gate(
+    browser: AgentBrowser,
+    base_url: str,
+    auth_token: str,
+    timeout: float,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "name": "access-dashboard-iphone-14-portrait",
+        "width": 390,
+        "height": 844,
+        "checks": [],
+        "errors": [],
+    }
+    browser.run("set", "viewport", "390", "844")
+    browser.run("open", base_url)
+    authenticate_workspace(browser, auth_token)
+    browser.wait_for("!!document.querySelector('.mobile-split-root')", "mobile workspace", 20)
+    clicked = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Browser access controls"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()""")
+    add_check(result, "access controls action available", bool(clicked), {"clicked": clicked})
+    browser.wait_for(
+        "!!document.querySelector('main[aria-label=\"Browser access controls\"]')",
+        "access dashboard",
+        timeout,
+    )
+    dashboard = browser.eval(ACCESS_DASHBOARD_SCRIPT)
+    add_check(result, "access dashboard rendered", bool(dashboard.get("ready")), dashboard)
+    add_check(
+        result,
+        "access dashboard has no horizontal overflow",
+        dashboard.get("scrollWidth", 390) <= dashboard.get("innerWidth", 390) + 1
+        and (dashboard.get("dashboard") or {}).get("scrollWidth", 0)
+        <= (dashboard.get("dashboard") or {}).get("clientWidth", 0) + 1,
+        {
+            "pageScrollWidth": dashboard.get("scrollWidth"),
+            "innerWidth": dashboard.get("innerWidth"),
+            "dashboard": dashboard.get("dashboard"),
+        },
+    )
+    touch = dashboard.get("touchTargets") or {}
+    add_check(result, "access dashboard 44px visible touch targets", not touch.get("offenders"), touch)
+    result["passed"] = all(check["passed"] for check in result["checks"])
+    return result
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8080/")
@@ -591,12 +733,29 @@ def parse_args() -> argparse.Namespace:
         "--remote-probe-url",
         help="Harmless unique URL to type through the live noVNC canvas and verify through CDP.",
     )
+    parser.add_argument(
+        "--auth-token-env",
+        help=(
+            "Optional environment-variable name containing a disposable E2E "
+            "bootstrap token; its value is never reported."
+        ),
+    )
+    parser.add_argument(
+        "--access-dashboard",
+        action="store_true",
+        help="Also run an authenticated iPhone-size Access Dashboard touch-target and overflow gate.",
+    )
     parser.add_argument("--keep-session", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    auth_token = os.environ.get(args.auth_token_env) if args.auth_token_env else None
+    if args.auth_token_env and not auth_token:
+        raise GateError(f"--auth-token-env is set but {args.auth_token_env} is empty")
+    if args.access_dashboard and not auth_token:
+        raise GateError("--access-dashboard requires --auth-token-env")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     media_emulation_script = args.output_dir / "mobile-media-emulation.js"
     media_emulation_script.write_text(
@@ -626,9 +785,11 @@ def main() -> int:
         "base_url": public_url(args.base_url),
         "profile_id": args.profile_id,
         "live_vnc_required": bool(args.profile_id),
+        "authenticated_run": bool(auth_token),
         "pointer_emulation": "iPhone 14 device profile plus coarse-pointer matchMedia init script",
         "remote_probe_url": public_url(args.remote_probe_url) if args.remote_probe_url else None,
         "session": args.session,
+        "access_dashboard_required": bool(args.access_dashboard),
         "viewports": [],
     }
     browser = AgentBrowser(args.session, args.timeout, media_emulation_script)
@@ -648,6 +809,7 @@ def main() -> int:
                     expected_layout,
                     args.timeout,
                     args.remote_probe_url if index == 0 else None,
+                    auth_token,
                 )
             except Exception as exc:  # Collect every viewport before failing the gate.
                 result = {
@@ -667,6 +829,23 @@ def main() -> int:
                 except Exception as screenshot_error:
                     result["errors"].append(f"diagnostic screenshot failed: {screenshot_error}")
             report["viewports"].append(result)
+        if args.access_dashboard:
+            try:
+                report["access_dashboard"] = run_access_dashboard_gate(
+                    browser,
+                    args.base_url,
+                    auth_token or "",
+                    args.timeout,
+                )
+            except Exception as exc:
+                report["access_dashboard"] = {
+                    "name": "access-dashboard-iphone-14-portrait",
+                    "width": 390,
+                    "height": 844,
+                    "passed": False,
+                    "checks": [],
+                    "errors": [f"{type(exc).__name__}: {exc}"],
+                }
     except Exception as exc:
         report["fatal_error"] = f"{type(exc).__name__}: {exc}"
     finally:
@@ -681,6 +860,7 @@ def main() -> int:
         "fatal_error" not in report
         and len(report["viewports"]) == len(VIEWPORTS)
         and all(viewport.get("passed") for viewport in report["viewports"])
+        and (not args.access_dashboard or bool((report.get("access_dashboard") or {}).get("passed")))
     )
     report_path = args.output_dir / "report.json"
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -691,6 +871,14 @@ def main() -> int:
             {"name": item["name"], "passed": item.get("passed", False), "errors": item.get("errors", [])}
             for item in report["viewports"]
         ],
+        "access_dashboard": (
+            {
+                "passed": (report.get("access_dashboard") or {}).get("passed", False),
+                "errors": (report.get("access_dashboard") or {}).get("errors", []),
+            }
+            if args.access_dashboard
+            else None
+        ),
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0 if report["passed"] else 1

@@ -157,6 +157,15 @@ describe("MobileSplitScreen", () => {
     expect(within(grid).getByText("Live Checkout QA")).toBeTruthy();
   });
 
+  it("provides a mobile-sized logout action for authenticated sessions", () => {
+    const { props } = renderMobileSplit({ authRequired: true, identityName: "Scoped viewer" });
+
+    const logout = screen.getByRole("button", { name: "Log out" });
+    expect(logout.className).toContain("mobile-logout-button");
+    fireEvent.click(logout);
+    expect(props.onLogout).toHaveBeenCalledTimes(1);
+  });
+
   it("opens a fullscreen touch viewer without losing the stream content", () => {
     const { props } = renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
 

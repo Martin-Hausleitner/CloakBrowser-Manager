@@ -19,7 +19,20 @@ Die Tabelle stammt aus dem finalen Wiederholungslauf gegen einen bereits laufend
 
 Nach dem Frontend-Kompatibilitätsfix für einen offenen Legacy-Backend-Status wurde der aktuelle Vite-Build erneut gegen denselben bereits laufenden KasmVNC/noVNC-Browser ausgeführt. **95/95 Prüfungen** bestanden: 26 im iPhone-14-Portrait-Lauf sowie je 23 auf iPhone Pro Max, iPhone Landscape und Touch-Tablet. Der Lauf prüfte den echten 1024-×-576-Canvas, Verbindungsstatus, CSS-Vollbild, Grid, die Browser-Use-inspirierte Demo-Composer-Interaktion, 44-px-Touch-Ziele und den kontrollierten Remote-Clipboard-/CDP-Pfad.
 
-Zusätzlich bestanden im identischen Arbeitsstand der Produktionsbuild, **38 Frontend-Tests** und **194 Backend-Tests**. Der Lauf verwendete ausschließlich einen bereits vorhandenen Testbrowser und eine harmlose lokale Status-URL als Remote-Probe; Screenshot-Artefakte sind bewusst ignorierte lokale Testausgaben. Er erhöht die Wiederholbarkeit des Browser-E2E-Nachweises, ersetzt aber die unten genannte Abnahme auf physischem Mobile Safari über Tailscale-HTTPS nicht.
+Zusätzlich bestanden im identischen Arbeitsstand der Produktionsbuild, **40 Frontend-Tests** und **194 Backend-Tests**. Der Lauf verwendete ausschließlich einen bereits vorhandenen Testbrowser und eine harmlose lokale Status-URL als Remote-Probe; Screenshot-Artefakte sind bewusst ignorierte lokale Testausgaben. Er erhöht die Wiederholbarkeit des Browser-E2E-Nachweises, ersetzt aber die unten genannte Abnahme auf physischem Mobile Safari über Tailscale-HTTPS nicht.
+
+## Abgesicherter Policy- und Dashboard-Nachtest
+
+Der aktuelle Source-Build wurde anschließend in einem frischen, isolierten Container mit ausschließlich `127.0.0.1:18081`-Bindung, aktivem `AUTH_TOKEN` und `ACCESS_CONTROL_ENABLED=1` ausgeführt. Der Lauf meldete sich über die echte Policy-Anmeldung an, wählte ein laufendes 1024-×-576-KasmVNC-Profil und bestand **99/99 Assertions**: **95** für die vier Workspace-/VNC-Viewports sowie **4** für den iPhone-14-großen Access-Dashboard-Gate.
+
+| Bereich | Nachweis | Ergebnis |
+|---|---|---|
+| iPhone 14, Pro Max, Landscape und Touch-Tablet | echter Canvas, VNC-Verbindung, Paste, kontrollierter CDP-Keyboard-Pfad, Grid, Vollbild, Composer und 44-px-Touch-Ziele | 95/95 bestanden |
+| Access Dashboard auf 390 × 844 | Dashboard-Aktion, Rendering, kein horizontaler Overflow und alle sichtbaren Buttons, Selects sowie Textinputs mindestens 44 × 44 px | 4/4 bestanden |
+
+Der Dashboard-Gate ist Teil von `scripts/mobile_ui_gate.py` und wird mit `--access-dashboard` nur zusammen mit einem lokal referenzierten Token-Environment aktiviert. Tokenwerte erscheinen weder im Report noch in Screenshots. Ein repräsentativer iPhone-Workspace-Screenshot mit verbundenem Live-Canvas wurde visuell kontrolliert. Der isolierte Testcontainer und seine Testdaten sind nicht die laufende Alltagsinstanz.
+
+Diese Prüfung beweist die geschützte Browser-/VNC- und Dashboard-Oberfläche im Browser. Sie ersetzt nicht den noch offenen physischen iPhone-Safari-Test über private Tailscale-HTTPS, weil Tailscale Serve in diesem Tailnet derzeit administrativ deaktiviert ist.
 
 ## Nachtest: iOS-Paste-Fallback
 

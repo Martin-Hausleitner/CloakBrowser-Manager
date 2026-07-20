@@ -60,6 +60,10 @@ const permissionLabel: Record<AccessPermission, string> = {
   automate: "Automate",
 };
 
+const actionButtonClass = "btn-secondary inline-flex min-h-11 items-center gap-1.5";
+const primaryActionButtonClass = "btn-primary inline-flex min-h-11 items-center gap-1.5";
+const compactActionButtonClass = "min-h-11 rounded-md px-3 text-xs text-gray-500 underline focus:outline-none focus:ring-2 focus:ring-accent/50";
+
 function summarizeGrants(grants: AccessGrant[]) {
   return grants.length
     ? grants.map((grant) => `${grant.sandbox_id}: ${permissionLabel[grant.permission]}`).join(" · ")
@@ -108,7 +112,7 @@ function GrantEditor({
                   <span className="ml-1 font-sans text-gray-500">({sandbox.profile_count} browser{sandbox.profile_count === 1 ? "" : "s"})</span>
                 </span>
                 <select
-                  className="input h-8 w-32 py-1 text-xs"
+                  className="input h-11 w-32 py-2 text-xs"
                   value={permission}
                   aria-label={`Permission for ${sandbox.sandbox_id}`}
                   onChange={(event) => onChange(updateGrant(
@@ -278,11 +282,11 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button type="button" className="btn-secondary inline-flex items-center gap-1.5" onClick={() => void refresh()} disabled={loading}>
+          <button type="button" className={actionButtonClass} onClick={() => void refresh()} disabled={loading}>
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </button>
-          <button type="button" className="btn-secondary inline-flex items-center gap-1.5" onClick={onClose}>
+          <button type="button" className={actionButtonClass} onClick={onClose}>
             <X className="h-3.5 w-3.5" />
             Close
           </button>
@@ -302,14 +306,14 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
               <p className="font-medium text-amber-100">Copy the new key for {revealedKey.name} now</p>
               <p className="mt-1 text-xs text-amber-100/70">It is shown once and is not stored in this dashboard.</p>
             </div>
-            <button type="button" className="btn-secondary inline-flex items-center gap-1.5" onClick={() => setRevealedKey(null)}>
+            <button type="button" className={actionButtonClass} onClick={() => setRevealedKey(null)}>
               <X className="h-3.5 w-3.5" />
               Hide key
             </button>
           </div>
           <div className="mt-3 flex gap-2">
-            <input className="input font-mono text-xs" value={revealedKey.key} readOnly aria-label="New Paperclip agent key" />
-            <button type="button" className="btn-primary inline-flex shrink-0 items-center gap-1.5" onClick={() => void copyKey()}>
+            <input className="input min-h-11 font-mono text-xs" value={revealedKey.key} readOnly aria-label="New Paperclip agent key" />
+            <button type="button" className={`${primaryActionButtonClass} shrink-0`} onClick={() => void copyKey()}>
               <Copy className="h-3.5 w-3.5" />
               {copied ? "Copied" : "Copy"}
             </button>
@@ -343,7 +347,7 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
                   </div>
                   <button
                     type="button"
-                    className="mobile-icon-button h-9 w-9"
+                    className="mobile-icon-button"
                     aria-label={`Edit ${user.username}`}
                     onClick={() => {
                       setEditingUserId(user.id);
@@ -367,7 +371,7 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
             <div className="flex items-center justify-between gap-2">
               <h4 className="text-sm font-medium">{editingUserId ? "Edit person" : "Add person"}</h4>
               {editingUserId && (
-                <button type="button" className="text-xs text-gray-500 underline" onClick={() => {
+                <button type="button" className={compactActionButtonClass} onClick={() => {
                   setEditingUserId(null);
                   setUserDraft(emptyUserDraft());
                 }}>Cancel edit</button>
@@ -376,17 +380,17 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
             <div className="grid gap-3 sm:grid-cols-2">
               <label>
                 <span className="label">Username</span>
-                <input className="input" value={userDraft.username} disabled={Boolean(editingUserId)} required minLength={1} maxLength={80} onChange={(event) => setUserDraft((current) => ({ ...current, username: event.target.value }))} />
+                <input className="input min-h-11" value={userDraft.username} disabled={Boolean(editingUserId)} required minLength={1} maxLength={80} onChange={(event) => setUserDraft((current) => ({ ...current, username: event.target.value }))} />
               </label>
               <label>
                 <span className="label">{editingUserId ? "New password (optional)" : "Password"}</span>
-                <input className="input" type="password" value={userDraft.password} required={!editingUserId} minLength={12} autoComplete="new-password" onChange={(event) => setUserDraft((current) => ({ ...current, password: event.target.value }))} />
+                <input className="input min-h-11" type="password" value={userDraft.password} required={!editingUserId} minLength={12} autoComplete="new-password" onChange={(event) => setUserDraft((current) => ({ ...current, password: event.target.value }))} />
               </label>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <label>
                 <span className="label">Role</span>
-                <select className="input" value={userDraft.role} onChange={(event) => setUserDraft((current) => ({ ...current, role: event.target.value as AccessRole }))}>
+                <select className="input h-11" value={userDraft.role} onChange={(event) => setUserDraft((current) => ({ ...current, role: event.target.value as AccessRole }))}>
                   <option value="viewer">Viewer</option>
                   <option value="operator">Operator</option>
                   <option value="admin">Administrator</option>
@@ -400,7 +404,7 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
               ) : null}
             </div>
             <GrantEditor sandboxes={sandboxes} grants={userDraft.grants} onChange={(grants) => setUserDraft((current) => ({ ...current, grants }))} />
-            <button type="submit" disabled={saving || !userDraft.username.trim() || (!editingUserId && userDraft.password.length < 12)} className="btn-primary inline-flex items-center gap-1.5 disabled:opacity-50">
+            <button type="submit" disabled={saving || !userDraft.username.trim() || (!editingUserId && userDraft.password.length < 12)} className={`${primaryActionButtonClass} disabled:opacity-50`}>
               <Plus className="h-3.5 w-3.5" />
               {saving ? "Saving…" : editingUserId ? "Save person" : "Add person"}
             </button>
@@ -431,12 +435,12 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
                     <p className="mt-1 truncate text-xs text-gray-500">{summarizeGrants(agent.grants)}</p>
                   </div>
                   <div className="flex gap-1">
-                    <button type="button" className="mobile-icon-button h-9 w-9" aria-label={`Rotate key for ${agent.display_name}`} title="Rotate key" disabled={saving} onClick={() => void rotateAgentKey(agent)}>
+                    <button type="button" className="mobile-icon-button" aria-label={`Rotate key for ${agent.display_name}`} title="Rotate key" disabled={saving} onClick={() => void rotateAgentKey(agent)}>
                       <RefreshCw className="h-3.5 w-3.5" />
                     </button>
                     <button
                       type="button"
-                      className="mobile-icon-button h-9 w-9"
+                      className="mobile-icon-button"
                       aria-label={`Edit ${agent.display_name}`}
                       onClick={() => {
                         setEditingAgentId(agent.id);
@@ -460,7 +464,7 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
             <div className="flex items-center justify-between gap-2">
               <h4 className="text-sm font-medium">{editingAgentId ? "Edit Paperclip agent" : "Add Paperclip agent"}</h4>
               {editingAgentId && (
-                <button type="button" className="text-xs text-gray-500 underline" onClick={() => {
+                <button type="button" className={compactActionButtonClass} onClick={() => {
                   setEditingAgentId(null);
                   setAgentDraft(emptyAgentDraft());
                 }}>Cancel edit</button>
@@ -468,11 +472,11 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
             </div>
             <label>
               <span className="label">Display name</span>
-              <input className="input" value={agentDraft.display_name} required maxLength={120} onChange={(event) => setAgentDraft((current) => ({ ...current, display_name: event.target.value }))} />
+              <input className="input min-h-11" value={agentDraft.display_name} required maxLength={120} onChange={(event) => setAgentDraft((current) => ({ ...current, display_name: event.target.value }))} />
             </label>
             <label>
               <span className="label">Paperclip agent ID (optional)</span>
-              <input className="input font-mono" value={agentDraft.paperclip_agent_id} maxLength={160} placeholder="paperclip-agent-research" onChange={(event) => setAgentDraft((current) => ({ ...current, paperclip_agent_id: event.target.value }))} />
+              <input className="input min-h-11 font-mono" value={agentDraft.paperclip_agent_id} maxLength={160} placeholder="paperclip-agent-research" onChange={(event) => setAgentDraft((current) => ({ ...current, paperclip_agent_id: event.target.value }))} />
             </label>
             {editingAgentId ? (
               <label className="flex items-center gap-2 text-sm text-gray-300">
@@ -481,7 +485,7 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
               </label>
             ) : null}
             <GrantEditor sandboxes={sandboxes} grants={agentDraft.grants} onChange={(grants) => setAgentDraft((current) => ({ ...current, grants }))} />
-            <button type="submit" disabled={saving || !agentDraft.display_name.trim()} className="btn-primary inline-flex items-center gap-1.5 disabled:opacity-50">
+            <button type="submit" disabled={saving || !agentDraft.display_name.trim()} className={`${primaryActionButtonClass} disabled:opacity-50`}>
               <KeyRound className="h-3.5 w-3.5" />
               {saving ? "Saving…" : editingAgentId ? "Save agent" : "Create agent key"}
             </button>

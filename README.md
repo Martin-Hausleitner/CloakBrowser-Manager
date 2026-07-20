@@ -209,6 +209,20 @@ An administrator is unrestricted. A Paperclip agent uses its own opaque key with
 
 Existing installations stay on the previous single-token behavior until `ACCESS_CONTROL_ENABLED=1` is explicitly set. The local SQLite migration runs automatically, and existing profiles start in the `default` sandbox.
 
+### Private Tailscale HTTPS for iPhone access
+
+Do not bind an unauthenticated Manager to a network interface. Once the Manager is already running on loopback with `AUTH_TOKEN` and `ACCESS_CONTROL_ENABLED=1`, use the guarded helper to publish it **only within the tailnet**:
+
+```bash
+# Checks the target without changing Tailscale configuration.
+./scripts/serve_private_tailnet.sh --check http://127.0.0.1:8080
+
+# Configures private Tailscale Serve HTTPS, never Funnel.
+./scripts/serve_private_tailnet.sh --apply http://127.0.0.1:8080
+```
+
+The helper refuses non-loopback, open, and legacy single-token targets. Tailscale Serve also needs HTTPS/Serve enabled by the tailnet administrator; if that policy is disabled, the command safely fails before publishing any URL. After a successful run, use `tailscale serve status` to obtain the private `https://<machine>.<tailnet>.ts.net` URL. Disable the proxy when it is no longer needed with `tailscale serve off`.
+
 ## License
 
 - **This application** (GUI source code) — MIT. See [LICENSE](LICENSE).

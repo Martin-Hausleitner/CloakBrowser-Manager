@@ -74,4 +74,37 @@ describe("AccessDashboard", () => {
     expect((await screen.findByLabelText("New Paperclip agent key") as HTMLInputElement).value)
       .toBe("test-agent-key-only");
   });
+
+  it("keeps mobile access controls at touch-target size", async () => {
+    apiMock.listAccessAgents.mockResolvedValue([
+      {
+        id: "agent-1",
+        display_name: "Research helper",
+        paperclip_agent_id: "paperclip-research",
+        active: true,
+        created_at: "2026-07-20T00:00:00Z",
+        grants: [{ sandbox_id: "research", permission: "automate" }],
+      },
+    ]);
+
+    render(<AccessDashboard onClose={vi.fn()} />);
+
+    expect(await screen.findByText("alice")).toBeTruthy();
+
+    for (const buttonName of ["Refresh", "Close", "Add person", "Create agent key"]) {
+      expect(screen.getByRole("button", { name: buttonName }).className).toContain("min-h-11");
+    }
+
+    for (const permissionSelect of screen.getAllByLabelText("Permission for research")) {
+      expect(permissionSelect.className).toContain("h-11");
+    }
+    expect(screen.getByLabelText("Username").className).toContain("min-h-11");
+    expect(screen.getByLabelText("Password").className).toContain("min-h-11");
+    expect(screen.getByLabelText("Role").className).toContain("h-11");
+    expect(screen.getByLabelText("Display name").className).toContain("min-h-11");
+    expect(screen.getByLabelText("Paperclip agent ID (optional)").className).toContain("min-h-11");
+    expect(screen.getByRole("button", { name: "Edit alice" }).className).toBe("mobile-icon-button");
+    expect(screen.getByRole("button", { name: "Rotate key for Research helper" }).className).toBe("mobile-icon-button");
+    expect(screen.getByRole("button", { name: "Edit Research helper" }).className).toBe("mobile-icon-button");
+  });
 });

@@ -48,5 +48,23 @@ if [[ "$mode" == "--check" ]]; then
   exit 0
 fi
 
-tailscale serve --bg --https=443 "$target"
+existing_config="$(tailscale serve status --json)"
+if ! jq -e 'type == "object" and length == 0' >/dev/null <<<"$existing_config"; then
+  echo "Refusing to overwrite an existing Tailscale Serve configuration. Inspect it with: tailscale serve status" >&2
+  exit 73
+fi
+
+if ! apply_output="$(tailscale serve --bg --https=443 "$target" 2>&1)"; then
+  printf '%s\n' "$apply_output" >&2
+  echo "Tailscale Serve could not be configured." >&2
+  exit 78
+fi
+printf '%s\n' "$apply_output"
+
+configured="$(tailscale serve status --json)"
+if ! jq -e 'type == "object" and length > 0' >/dev/null <<<"$configured"; then
+  echo "Tailscale Serve did not create a configuration; verify that Serve is enabled for this tailnet." >&2
+  exit 78
+fi
+
 tailscale serve status

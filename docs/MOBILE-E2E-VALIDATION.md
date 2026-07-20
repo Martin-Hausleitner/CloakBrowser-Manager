@@ -51,6 +51,22 @@ Für das Dashboard betrugen `scrollWidth` und `clientWidth` jeweils exakt 390 px
 
 Zum dokumentierten Endstand bestanden außerdem der Produktionsbuild, **63 Frontend-Tests** und **220 Backend-Tests** (eine bekannte Starlette-Deprecation-Warnung). Der spezifische Streaming-Runner-Test und die Python-Kompilationsprüfung des Mobile-Gate-Runners waren ebenfalls grün.
 
+## Safari/WebKit-Gate (vorbereitet, lokale Freigabe ausstehend)
+
+Zusätzlich liegt nun `scripts/mobile_webkit_gate.py` vor. Es startet optional einen ausschließlich loopback-gebundenen SafariDriver, prüft auf 390 × 844 die Mobile-Shell, die Navigation zum Benchmark-Report, Kandidaten-/Statuskennzeichnungen, horizontalen Overflow und ein Screenshot-Artefakt. Das Gate ergänzt den Chromium-/Live-VNC-Lauf; Safari auf macOS ist WebKit, aber weiterhin kein Ersatz für Mobile Safari auf einem physischen iPhone.
+
+Der erste reale Lauf am 21. Juli 2026 war bewusst **nicht grün**: SafariDriver war lokal bereit, lehnte die Session aber mit `You must enable 'Allow remote automation'` ab. Der Runner schrieb daher den Status `blocked` in sein lokales Report-Artefakt und änderte keine Safari-Einstellung. Insbesondere wurde `safaridriver --enable` nicht ausgeführt. Sobald Remote Automation bewusst in Safari Settings → Developer aktiviert wurde, lässt sich der Nachtest reproduzierbar ausführen:
+
+```bash
+python3 scripts/mobile_webkit_gate.py \
+  --base-url http://127.0.0.1:8080/ \
+  --output-dir artifacts/mobile-webkit-gate \
+  --start-driver \
+  --min-benchmark-cards 5
+```
+
+Der isolierte Vertrags-Test `scripts/test_mobile_webkit_gate.py` simuliert den WebDriver-Austausch und prüft den erfolgreichen Report-, Redaktions- und Screenshotpfad ohne eine Safari- oder Netzwerkfreigabe zu benötigen.
+
 ## Nachtest: iOS-Paste-Fallback
 
 Der aktuelle Source-Build wurde anschließend über den lokalen Vite-Proxy gegen denselben laufenden Testbrowser geprüft. Alle vier Viewports bestanden erneut. Zusätzlich öffnete jeder Durchlauf den manuellen **Paste text**-Dialog, validierte alle sichtbaren Touch-Ziele mit mindestens 44 × 44 CSS-Pixeln und bestätigte Browser → API → Remote-Clipboard bei weiterhin verbundenem VNC-Canvas. Der zugehörige Frontend-Test deckt die vollständige RFB-`Ctrl+V`-Sequenz ab.

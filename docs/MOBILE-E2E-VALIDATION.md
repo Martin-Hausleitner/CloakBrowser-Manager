@@ -15,6 +15,12 @@ Der Produktionscontainer und der echte KasmVNC/noVNC-Stream wurden mit dem repro
 
 Die Tabelle stammt aus dem finalen Wiederholungslauf gegen einen bereits laufenden Browser. In einem unmittelbar vorangehenden Lauf startete derselbe Build das gestoppte Testprofil und erreichte die erste Live-Verbindung nach 4.904,8 ms. Dieser Einzelwert ist ein E2E-Smoke-Nachweis, kein belastbarer Median.
 
+## Aktueller Kompatibilitäts-Wiederholungslauf
+
+Nach dem Frontend-Kompatibilitätsfix für einen offenen Legacy-Backend-Status wurde der aktuelle Vite-Build erneut gegen denselben bereits laufenden KasmVNC/noVNC-Browser ausgeführt. **95/95 Prüfungen** bestanden: 26 im iPhone-14-Portrait-Lauf sowie je 23 auf iPhone Pro Max, iPhone Landscape und Touch-Tablet. Der Lauf prüfte den echten 1024-×-576-Canvas, Verbindungsstatus, CSS-Vollbild, Grid, die Browser-Use-inspirierte Demo-Composer-Interaktion, 44-px-Touch-Ziele und den kontrollierten Remote-Clipboard-/CDP-Pfad.
+
+Zusätzlich bestanden im identischen Arbeitsstand der Produktionsbuild, **38 Frontend-Tests** und **194 Backend-Tests**. Der Lauf verwendete ausschließlich einen bereits vorhandenen Testbrowser und eine harmlose lokale Status-URL als Remote-Probe; Screenshot-Artefakte sind bewusst ignorierte lokale Testausgaben. Er erhöht die Wiederholbarkeit des Browser-E2E-Nachweises, ersetzt aber die unten genannte Abnahme auf physischem Mobile Safari über Tailscale-HTTPS nicht.
+
 ## Nachtest: iOS-Paste-Fallback
 
 Der aktuelle Source-Build wurde anschließend über den lokalen Vite-Proxy gegen denselben laufenden Testbrowser geprüft. Alle vier Viewports bestanden erneut. Zusätzlich öffnete jeder Durchlauf den manuellen **Paste text**-Dialog, validierte alle sichtbaren Touch-Ziele mit mindestens 44 × 44 CSS-Pixeln und bestätigte Browser → API → Remote-Clipboard bei weiterhin verbundenem VNC-Canvas. Der zugehörige Frontend-Test deckt die vollständige RFB-`Ctrl+V`-Sequenz ab.

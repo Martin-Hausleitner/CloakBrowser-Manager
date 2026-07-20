@@ -77,6 +77,75 @@ export interface SystemStatus {
   profiles_total: number;
 }
 
+export interface BenchmarkMetricSet {
+  p50_latency_ms?: number | null;
+  p95_latency_ms?: number | null;
+  median_latency_ms?: number | null;
+  avg_latency_ms?: number | null;
+  availability_pct?: number | null;
+  success_rate_pct?: number | null;
+  samples?: number | null;
+  [key: string]: string | number | boolean | null | undefined;
+}
+
+export interface BenchmarkTimingRollup {
+  min?: number | null;
+  median?: number | null;
+  p95?: number | null;
+  max?: number | null;
+}
+
+export interface BenchmarkCandidate {
+  name: string;
+  version?: string | null;
+  technology?: string | null;
+  measured?: boolean | null;
+  state?: "measured" | "not_measured" | "running" | "failed" | string | null;
+  not_measured_reason?: string | null;
+  missing_reason?: string | null;
+  metrics?: BenchmarkMetricSet | null;
+}
+
+export interface BenchmarkRunnerCandidate {
+  id?: string | null;
+  name: string;
+  type?: string | null;
+  metadata?: Record<string, string | number | boolean | null | undefined> | null;
+}
+
+export interface BenchmarkRunnerResult {
+  candidate: BenchmarkRunnerCandidate;
+  status: "measured" | "not_installed" | "architecture_only" | string;
+  availability?: "available" | "unavailable" | "error" | "not_measured" | string | null;
+  summary?: {
+    runs?: number | null;
+    success_rate_pct?: number | null;
+    timings_ms?: Record<string, BenchmarkTimingRollup> | null;
+    [key: string]: Record<string, BenchmarkTimingRollup> | string | number | boolean | null | undefined;
+  } | null;
+  reason?: string | null;
+}
+
+export interface BenchmarkRun {
+  id?: string | null;
+  state?: "queued" | "running" | "complete" | "failed" | string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  generated_at?: string | null;
+}
+
+export interface BenchmarkReport {
+  run?: BenchmarkRun | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  report_url?: string | null;
+  generated_at?: string | null;
+  results?: BenchmarkRunnerResult[];
+  candidates?: BenchmarkCandidate[];
+  expected_technologies?: Array<string | { name: string; version?: string | null }>;
+  notes?: string | null;
+}
+
 export type AccessPermission = "view" | "interact" | "operate" | "automate";
 export type AccessRole = "admin" | "operator" | "viewer";
 export type AccessIdentityKind = "bootstrap" | "user" | "agent" | "anonymous";
@@ -159,6 +228,13 @@ export type LoginCredentials =
   | { token: string }
   | { username: string; password: string };
 
+const viteEnv = (import.meta as ImportMeta & {
+  env?: Record<string, string | undefined>;
+}).env;
+
+export const DEFAULT_BENCHMARK_REPORT_URL =
+  viteEnv?.VITE_BENCHMARK_REPORT_URL || "/api/benchmarks/latest";
+
 class ApiError extends Error {
   constructor(
     public status: number,
@@ -231,6 +307,9 @@ export const api = {
     request<{ ok: boolean }>(`/api/profiles/${id}/stop`, { method: "POST" }),
 
   getStatus: () => request<SystemStatus>("/api/status"),
+
+  getBenchmarkReport: (url = DEFAULT_BENCHMARK_REPORT_URL) =>
+    request<BenchmarkReport>(url),
 
   setClipboard: (id: string, text: string) =>
     request<{ ok: boolean }>(`/api/profiles/${id}/clipboard`, {

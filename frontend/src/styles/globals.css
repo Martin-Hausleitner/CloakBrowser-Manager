@@ -66,15 +66,25 @@
   }
 
   .mobile-split-root {
-    @apply flex h-dvh flex-col overflow-hidden;
+    @apply flex h-dvh w-screen max-w-full flex-col overflow-hidden;
     padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 
   .mobile-live-pane {
-    @apply flex shrink-0 flex-col border-b border-border bg-surface-1;
+    @apply flex w-full min-w-0 shrink-0 flex-col border-b border-border bg-surface-1;
     flex-basis: var(--mobile-live-pane-basis, 42%);
-    min-height: 15rem;
-    max-height: 70dvh;
+    min-height: 16rem;
+    max-height: 82dvh;
+  }
+
+  .mobile-live-pane-running {
+    min-height: min(36rem, 74dvh);
+  }
+
+  .mobile-live-header {
+    @apply flex shrink-0 items-center justify-between gap-3 border-b border-border/70 bg-surface-1 px-3 py-2;
   }
 
   .mobile-live-pane .mobile-browser-wrap {
@@ -83,11 +93,12 @@
   }
 
   .mobile-browser-wrap-live {
-    @apply px-0 pb-0;
+    @apply relative px-0 pb-0;
   }
 
   .mobile-control-pane {
-    @apply flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-0;
+    @apply flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden bg-surface-0;
+    overscroll-behavior: contain;
   }
 
   .mobile-browser-frame {
@@ -97,6 +108,11 @@
 
   .mobile-browser-frame-live {
     @apply rounded-none border-0;
+  }
+
+  .mobile-browser-frame-live .mobile-browser-content > .relative > div:first-child button[title="Fullscreen"],
+  .mobile-browser-frame-live .mobile-browser-content > .relative > div:first-child button[title="Exit fullscreen"] {
+    display: none;
   }
 
   .mobile-browser-content {
@@ -147,6 +163,14 @@
     @apply flex shrink-0 items-center gap-1;
   }
 
+  .mobile-session-bar-live {
+    @apply py-1.5;
+  }
+
+  .mobile-session-bar-live .mobile-session-select {
+    @apply text-xs font-medium;
+  }
+
   .mobile-session-select {
     @apply h-11 w-full min-w-0 appearance-none truncate border-0 bg-transparent p-0 text-sm font-semibold text-gray-100 focus:outline-none focus:ring-0;
   }
@@ -186,27 +210,59 @@
   }
 
   .mobile-live-control-row {
-    @apply grid grid-cols-[minmax(0,1fr)_3.25rem] items-center gap-2 rounded-md border border-border bg-surface-1 px-3 py-1.5;
+    @apply grid grid-cols-[minmax(0,1fr)_3.25rem] items-center gap-2 rounded-md border border-border bg-surface-1 px-2 py-1;
+  }
+
+  .mobile-live-control-row-with-reset {
+    @apply grid-cols-[minmax(0,1fr)_3.25rem_2.75rem];
   }
 
   .mobile-live-control-row label {
-    @apply min-w-0;
+    @apply grid min-w-0 grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-2;
+  }
+
+  .mobile-live-control-row .label {
+    @apply mb-0 truncate;
   }
 
   .mobile-live-control-row input[type="range"] {
-    @apply h-11 w-full accent-accent;
+    @apply min-h-11 w-full accent-accent;
   }
 
   .mobile-live-control-row output {
     @apply rounded-md bg-surface-3 px-2 py-1 text-center text-sm font-medium text-gray-200;
   }
 
-  .mobile-live-reset {
-    @apply inline-flex min-h-11 w-full items-center justify-center;
+  .mobile-live-reset-button {
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-preset-button {
     @apply min-h-11 shrink-0 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-xs text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-phone-fit-button {
+    @apply border-accent/40 text-indigo-100;
+  }
+
+  .mobile-fullscreen-strip {
+    @apply absolute left-3 right-3 top-3 z-[60] flex min-h-11 items-center gap-2 rounded-md border border-border bg-surface-0/95 px-2 py-1.5 shadow-lg backdrop-blur;
+  }
+
+  .mobile-fullscreen-zoom {
+    @apply grid min-w-0 flex-1 grid-cols-[auto_minmax(5rem,1fr)_3rem] items-center gap-2;
+  }
+
+  .mobile-fullscreen-zoom input[type="range"] {
+    @apply min-h-11 w-full accent-accent;
+  }
+
+  .mobile-fullscreen-zoom output {
+    @apply text-center text-xs font-semibold text-gray-200;
+  }
+
+  .mobile-fullscreen-action {
+    @apply inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 px-3 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-grid {
@@ -223,15 +279,32 @@
   }
 
   .mobile-chat-header {
-    @apply flex items-center gap-2 border-b border-border px-3 py-2;
+    @apply flex shrink-0 items-center gap-2 border-b border-border px-3 py-2;
   }
 
   .mobile-chat-log {
     @apply flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-3;
+    scroll-padding-bottom: 7rem;
+  }
+
+  .mobile-step-feed {
+    @apply mb-1 rounded-md border border-border bg-surface-1;
+  }
+
+  .mobile-step-toggle {
+    @apply grid min-h-11 w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-3 text-left text-xs transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-step-count {
+    @apply text-[10px] font-semibold uppercase tracking-wide text-gray-500;
+  }
+
+  .mobile-step-current {
+    @apply truncate text-gray-300;
   }
 
   .mobile-step-list {
-    @apply mb-1 flex flex-col gap-1.5;
+    @apply flex flex-col gap-1.5 border-t border-border p-2;
   }
 
   .mobile-step-pill {
@@ -255,12 +328,17 @@
   }
 
   .mobile-chat-form {
-    @apply flex shrink-0 flex-col gap-2 border-t border-border bg-surface-1 px-3 py-3;
+    @apply sticky bottom-0 z-10 flex w-full max-w-full shrink-0 flex-col gap-2 border-t border-border bg-surface-1 px-3 py-3;
     padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
   }
 
   .mobile-composer-toolbar {
-    @apply flex w-full items-center gap-2;
+    @apply grid w-full items-center gap-2;
+    grid-template-columns: 2.75rem 2.75rem 2.75rem minmax(0, 1fr);
+  }
+
+  .mobile-composer-toolbar label {
+    min-width: 0;
   }
 
   .mobile-composer-button {
@@ -272,7 +350,7 @@
   }
 
   .mobile-composer-select {
-    @apply h-11 w-full truncate rounded-md border border-border bg-surface-2 px-2 text-xs text-gray-200 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply h-11 w-full min-w-0 truncate rounded-md border border-border bg-surface-2 px-2 text-xs text-gray-200 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-send-button {
@@ -312,7 +390,7 @@
   .mobile-live-pane:not(.mobile-live-pane-fullscreen) {
     flex: 0 0 var(--mobile-live-pane-basis, 58%);
     min-width: 0;
-    max-width: 70%;
+    max-width: 82%;
     max-height: none;
     border-right: 1px solid #2a2a2a;
     border-bottom: 0;

@@ -73,6 +73,21 @@ Each CloakBrowser profile generates a completely different device identity. To t
 - **Database**: SQLite
 - **Browser engine**: [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) (stealth Chromium binary)
 
+## Streaming Benchmarks
+
+Streaming stack comparisons are documented in [docs/REMOTE-STREAMING-BENCHMARK.md](docs/REMOTE-STREAMING-BENCHMARK.md). New local runs should use the reproducible runner instead of editing benchmark numbers by hand:
+
+```bash
+python3 scripts/streaming_benchmark_runner.py \
+  --config scripts/streaming_benchmark_example.json \
+  --output-dir artifacts/streaming-benchmark/$(date -u +%Y%m%dT%H%M%SZ) \
+  --iterations 5 \
+  --latest-json "${BENCHMARK_REPORT_PATH:-/data/benchmark-report.json}" \
+  --latest-markdown docs/streaming-benchmark-latest.md
+```
+
+The administrator-only **Streaming benchmarks** view reads the configured report through `/api/benchmarks/latest`; set `BENCHMARK_REPORT_PATH` on the manager if its persistent report file is not `/data/benchmark-report.json`. The runner emits JSONL progress events for a browser UI, writes JSON plus Markdown reports, and separates `measured` candidates from `not_installed` or `architecture_only` entries. Its browser-facing output deliberately omits local paths, endpoints, commands, raw process output, and request headers. Pair it with `scripts/mobile_ui_gate.py` when a candidate also needs proof that the real mobile UI and live canvas still work.
+
 ## Development
 
 ### Backend

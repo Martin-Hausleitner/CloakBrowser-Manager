@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
+import math
 import os
 import struct
 import shutil
@@ -16,6 +18,7 @@ import time
 from contextlib import asynccontextmanager
 from http.cookies import SimpleCookie
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -99,6 +102,28 @@ _LOGIN_BACKOFF_SECONDS = 60.0
 _LOGIN_FAILURE_TTL_SECONDS = 10 * 60.0
 _LOGIN_FAILURE_MAX_KEYS = 1024
 _login_failures: dict[tuple[str, str], tuple[int, float, float]] = {}
+
+_BENCHMARK_REPORT_ENV = "BENCHMARK_REPORT_PATH"
+_DEFAULT_BENCHMARK_REPORT_PATH = Path("/data/benchmark-report.json")
+_BENCHMARK_REPORT_MAX_BYTES = 1_048_576
+_BENCHMARK_PUBLIC_TIMING_KEYS = frozenset(
+    {
+        "connect_ms",
+        "tls_ms",
+        "first_byte_ms",
+        "handshake_ms",
+        "total_ms",
+        "process_start_ms",
+        "first_stdout_ms",
+        "first_stderr_ms",
+        "ready_ms",
+        "exit_ms",
+        "frame_ready_ms",
+        "input_response_ms",
+    }
+)
+_BENCHMARK_PUBLIC_STATUS = frozenset({"measured", "not_installed", "architecture_only"})
+_BENCHMARK_PUBLIC_AVAILABILITY = frozenset({"available", "unavailable", "error", "not_measured"})
 
 
 def _check_auth(scope: Scope) -> bool:
@@ -191,6 +216,285 @@ def _record_login_failure(key: tuple[str, str]) -> None:
 
 def _reset_login_failures(key: tuple[str, str]) -> None:
     _login_failures.pop(key, None)
+
+
+def _benchmark_report_path() -> Path:
+    configured = os.environ.get(_BENCHMARK_REPORT_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return _DEFAULT_BENCHMARK_REPORT_PATH
+
+
+def _malformed_benchmark_report() -> HTTPException:
+    return HTTPException(status_code=422, detail="Benchmark report is malformed")
+
+
+def _validate_latest_benchmark_report(report: object) -> dict[str, Any]:
+    """Validate the persisted benchmark-runner report contract.
+
+    GET /api/benchmarks/latest projects a deliberately redacted browser DTO
+    after these checks:
+    - top-level value is an object;
+    - canonical runner fields ``schema_version``, ``started_at``,
+      ``finished_at``, and ``results`` have the expected JSON shapes when
+      present;
+    - each canonical ``results`` item has a candidate object, string status,
+      string availability, a measurements list, and optional summary object;
+    - legacy dashboard fields ``run``, ``candidates``, and
+      ``expected_technologies`` are also accepted while the frontend migrates;
+    - optional URL/timestamp/note fields are strings or null.
+
+    Producers may include extra internal fields, but the public endpoint keeps
+    only a safe allowlist of labels and numeric summaries. The API never
+    accepts a path from the caller and never runs benchmarks.
+    """
+    if not isinstance(report, dict):
+        raise _malformed_benchmark_report()
+
+    for key in ("report_url", "generated_at", "notes"):
+        value = report.get(key)
+        if value is not None and not isinstance(value, str):
+            raise _malformed_benchmark_report()
+
+    schema_version = report.get("schema_version")
+    if schema_version is not None and not isinstance(schema_version, (str, int)):
+        raise _malformed_benchmark_report()
+
+    for key in ("started_at", "finished_at"):
+        value = report.get(key)
+        if value is not None and not isinstance(value, str):
+            raise _malformed_benchmark_report()
+
+    results = report.get("results")
+    if results is not None:
+        if not isinstance(results, list):
+            raise _malformed_benchmark_report()
+        for result in results:
+            if not isinstance(result, dict):
+                raise _malformed_benchmark_report()
+            if not isinstance(result.get("candidate"), dict):
+                raise _malformed_benchmark_report()
+            if not isinstance(result.get("status"), str):
+                raise _malformed_benchmark_report()
+            if not isinstance(result.get("availability"), str):
+                raise _malformed_benchmark_report()
+            if not isinstance(result.get("measurements"), list):
+                raise _malformed_benchmark_report()
+            summary = result.get("summary")
+            if summary is not None and not isinstance(summary, dict):
+                raise _malformed_benchmark_report()
+
+    run = report.get("run")
+    if run is not None and not isinstance(run, dict):
+        raise _malformed_benchmark_report()
+
+    candidates = report.get("candidates")
+    if candidates is not None:
+        if not isinstance(candidates, list):
+            raise _malformed_benchmark_report()
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                raise _malformed_benchmark_report()
+            metrics = candidate.get("metrics")
+            if metrics is not None and not isinstance(metrics, dict):
+                raise _malformed_benchmark_report()
+
+    expected = report.get("expected_technologies")
+    if expected is not None:
+        if not isinstance(expected, list):
+            raise _malformed_benchmark_report()
+        for technology in expected:
+            if isinstance(technology, str):
+                continue
+            if not isinstance(technology, dict) or not isinstance(technology.get("name"), str):
+                raise _malformed_benchmark_report()
+
+    return report
+
+
+def _load_latest_benchmark_report() -> dict[str, Any]:
+    report_path = _benchmark_report_path()
+    try:
+        if not report_path.is_file():
+            raise HTTPException(status_code=404, detail="Benchmark report not found")
+        if report_path.stat().st_size > _BENCHMARK_REPORT_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Benchmark report is too large")
+        data = report_path.read_bytes()
+    except HTTPException:
+        raise
+    except OSError as exc:
+        logger.warning("Benchmark report unavailable: %s", exc)
+        raise HTTPException(status_code=404, detail="Benchmark report not found") from exc
+
+    if len(data) > _BENCHMARK_REPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Benchmark report is too large")
+
+    try:
+        decoded = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _malformed_benchmark_report() from exc
+
+    return _validate_latest_benchmark_report(decoded)
+
+
+def _benchmark_number(value: object) -> float | int | None:
+    """Return a finite numeric value without accepting bools as timings."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if math.isfinite(float(value)) else None
+
+
+def _benchmark_text(value: object, *, fallback: str = "Not reported") -> str:
+    if not isinstance(value, str):
+        return fallback
+    compact = value.strip()
+    return compact[:128] if compact else fallback
+
+
+def _public_benchmark_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Keep labels needed by the dashboard, never configuration internals."""
+    public = {
+        "name": _benchmark_text(candidate.get("name"), fallback=_benchmark_text(candidate.get("id"))),
+        "type": _benchmark_text(candidate.get("type"), fallback="unknown"),
+    }
+    candidate_id = candidate.get("id")
+    if isinstance(candidate_id, str) and candidate_id.strip():
+        public["id"] = candidate_id.strip()[:128]
+
+    metadata = candidate.get("metadata")
+    if isinstance(metadata, dict):
+        allowed_metadata: dict[str, str | int | float | bool | None] = {}
+        for key in ("technology", "version", "comparison_role"):
+            value = metadata.get(key)
+            if value is None or isinstance(value, (str, int, float, bool)):
+                if key in metadata:
+                    allowed_metadata[key] = value
+        if allowed_metadata:
+            public["metadata"] = allowed_metadata
+    return public
+
+
+def _public_benchmark_summary(summary: object) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+
+    public: dict[str, Any] = {}
+    runs = summary.get("runs")
+    if isinstance(runs, int) and not isinstance(runs, bool) and runs >= 0:
+        public["runs"] = runs
+
+    success_rate = _benchmark_number(summary.get("success_rate_pct"))
+    if success_rate is not None:
+        public["success_rate_pct"] = max(0, min(100, success_rate))
+
+    timings = summary.get("timings_ms")
+    if isinstance(timings, dict):
+        public_timings: dict[str, dict[str, float | int]] = {}
+        for name in _BENCHMARK_PUBLIC_TIMING_KEYS:
+            rollup = timings.get(name)
+            if not isinstance(rollup, dict):
+                continue
+            safe_rollup = {
+                key: numeric
+                for key in ("min", "median", "p95", "max")
+                if (numeric := _benchmark_number(rollup.get(key))) is not None
+            }
+            if safe_rollup:
+                public_timings[name] = safe_rollup
+        if public_timings:
+            public["timings_ms"] = public_timings
+    return public
+
+
+def _benchmark_reason(status: str, availability: str) -> str | None:
+    if status == "not_installed":
+        return "The required local dependency was not installed for this run."
+    if status == "architecture_only":
+        return "Architecture-only candidate; no comparable live browser measurement was run."
+    if availability == "error":
+        return "The candidate could not be measured successfully."
+    if availability == "unavailable":
+        return "The candidate was measured but was unavailable during this run."
+    return None
+
+
+def _public_latest_benchmark_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Create the bounded browser DTO from a persisted runner artifact.
+
+    Reports are generated by local tooling and may still contain deployment
+    paths, command lines, loopback URLs, profile IDs, raw process output, or
+    credentials in an old artifact. The API intentionally projects only the
+    labels and numeric summary needed by the dashboard.
+    """
+    public: dict[str, Any] = {
+        "schema_version": report.get("schema_version", 1),
+        "started_at": report.get("started_at"),
+        "finished_at": report.get("finished_at"),
+    }
+
+    results = report.get("results")
+    if isinstance(results, list):
+        public_results: list[dict[str, Any]] = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            raw_status = result.get("status")
+            status = raw_status if raw_status in _BENCHMARK_PUBLIC_STATUS else "not_installed"
+            raw_availability = result.get("availability")
+            availability = (
+                raw_availability if raw_availability in _BENCHMARK_PUBLIC_AVAILABILITY else "not_measured"
+            )
+            row: dict[str, Any] = {
+                "candidate": _public_benchmark_candidate(result.get("candidate", {})),
+                "status": status,
+                "availability": availability,
+                "summary": _public_benchmark_summary(result.get("summary")),
+            }
+            reason = _benchmark_reason(status, availability)
+            if reason:
+                row["reason"] = reason
+            public_results.append(row)
+        public["results"] = public_results
+        return public
+
+    # Older reports can still be rendered safely while deployments migrate to
+    # the runner schema. This is intentionally a one-way projection too.
+    candidates = report.get("candidates")
+    if isinstance(candidates, list):
+        public_candidates: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            state = candidate.get("state")
+            measured = state in {"measured", "complete", "completed", "pass", "passed"}
+            raw_metrics = candidate.get("metrics")
+            metrics: dict[str, float | int] = {}
+            if measured and isinstance(raw_metrics, dict):
+                for key in (
+                    "p50_latency_ms",
+                    "p95_latency_ms",
+                    "median_latency_ms",
+                    "avg_latency_ms",
+                    "availability_pct",
+                    "success_rate_pct",
+                    "samples",
+                ):
+                    numeric = _benchmark_number(raw_metrics.get(key))
+                    if numeric is not None:
+                        metrics[key] = numeric
+            public_candidate = {
+                "name": _benchmark_text(candidate.get("name"), fallback=_benchmark_text(candidate.get("technology"))),
+                "technology": _benchmark_text(candidate.get("technology"), fallback="unknown"),
+                "state": "measured" if measured else "not_measured",
+                "measured": measured,
+            }
+            if metrics:
+                public_candidate["metrics"] = metrics
+            if not measured:
+                public_candidate["not_measured_reason"] = "No comparable live measurement was reported."
+            public_candidates.append(public_candidate)
+        public["candidates"] = public_candidates
+    return public
 
 
 def _is_https(request: Request) -> bool:
@@ -1084,6 +1388,20 @@ async def get_system_status(request: Request):
         binary_version=CHROMIUM_VERSION,
         profiles_total=len(profiles),
     )
+
+
+@app.get("/api/benchmarks/latest")
+async def get_latest_benchmark_report(request: Request) -> dict[str, Any]:
+    """Serve a redacted, administrator-only benchmark summary.
+
+    The source path is server-side only: ``BENCHMARK_REPORT_PATH`` when set,
+    otherwise ``/data/benchmark-report.json`` for persistent container storage.
+    This endpoint reads a bounded JSON file, never starts or shells out to a
+    benchmark runner, and strips local endpoints, commands, paths, raw process
+    output, and per-iteration observations before returning data to the UI.
+    """
+    _require_admin(request.scope)
+    return _public_latest_benchmark_report(_load_latest_benchmark_report())
 
 
 # ── Clipboard Relay ──────────────────────────────────────────────────────────

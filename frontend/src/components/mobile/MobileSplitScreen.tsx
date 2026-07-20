@@ -4,7 +4,10 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Expand,
+  Gauge,
   Grid2X2,
   Globe2,
   MessageSquareText,
@@ -13,6 +16,7 @@ import {
   Pencil,
   Play,
   Plus,
+  RotateCcw,
   Send,
   ShieldCheck,
   SlidersHorizontal,
@@ -44,6 +48,7 @@ interface MobileSplitScreenProps {
   onFullscreenChange: (open: boolean) => void;
   onBrowserZoomChange: (zoom: number) => void;
   onAccessControls: () => void;
+  onOpenBenchmarks?: () => void;
   onLogout: () => void;
 }
 
@@ -60,8 +65,10 @@ const presets = [
 ] as const;
 
 const defaultPreviewPanePercent = 42;
-const defaultLivePanePercent = 58;
+const defaultLivePanePercent = 66;
 const defaultBrowserZoom = 100;
+const minimumPhoneFitWidth = 320;
+const minimumPhoneFitHeight = 480;
 
 const initialMessages: ChatMessage[] = [
   {
@@ -104,6 +111,7 @@ export function MobileSplitScreen({
   onFullscreenChange,
   onBrowserZoomChange,
   onAccessControls,
+  onOpenBenchmarks,
   onLogout,
 }: MobileSplitScreenProps) {
   const [viewport, setViewport] = useState({
@@ -114,6 +122,7 @@ export function MobileSplitScreen({
   const [draft, setDraft] = useState("");
   const [gridOpen, setGridOpen] = useState(false);
   const [viewportOpen, setViewportOpen] = useState(false);
+  const [stepsExpanded, setStepsExpanded] = useState(false);
   const [viewportSaved, setViewportSaved] = useState(false);
   const [viewportSaveFailed, setViewportSaveFailed] = useState(false);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
@@ -135,6 +144,7 @@ export function MobileSplitScreen({
   const liveLabel = selected?.status === "running" ? "Live browser" : "Preview";
   const browserUrl = selected?.cdp_url ?? "Browser preview";
   const isLiveBrowser = selected?.status === "running";
+  const latestTaskStep = taskSteps[taskSteps.length - 1] ?? { label: "Current", detail: "Ready" };
   const livePaneStyle = {
     "--mobile-live-pane-basis": `${panePercent}%`,
   } as CSSProperties;
@@ -209,6 +219,27 @@ export function MobileSplitScreen({
     setPanePercent(value);
   };
 
+  const applyPhoneFitViewport = async () => {
+    const visualViewport = typeof window !== "undefined" ? window.visualViewport : null;
+    const nextViewport = {
+      width: Math.round(Math.max(minimumPhoneFitWidth, visualViewport?.width ?? window.innerWidth ?? presets[0].width)),
+      height: Math.round(
+        Math.max(
+          minimumPhoneFitHeight,
+          (visualViewport?.height ?? window.innerHeight ?? presets[0].height) - (isLiveBrowser ? 96 : 0),
+        ),
+      ),
+    };
+    setViewport(nextViewport);
+    setViewportSaved(false);
+    setViewportSaveFailed(false);
+    if (!selected || !canManageProfiles) return;
+
+    const saved = await onViewportApply(nextViewport.width, nextViewport.height);
+    setViewportSaved(saved);
+    setViewportSaveFailed(!saved);
+  };
+
   const renderLiveViewControls = () => (
     <>
       <div className="mobile-live-control-row">
@@ -217,19 +248,19 @@ export function MobileSplitScreen({
           <input
             id="mobile-pane-size"
             type="range"
-            min={30}
-            max={70}
+            min={42}
+            max={82}
             step={1}
             value={panePercent}
             onChange={(event) => updatePanePercent(Number(event.target.value))}
             aria-valuetext={`${panePercent}% of the workspace`}
           />
         </label>
-        <output htmlFor="mobile-pane-size" aria-label="Browser pane size">
+        <output htmlFor="mobile-pane-size" aria-label="Browser pane size" aria-live="polite">
           {panePercent}%
         </output>
       </div>
-      <div className="mobile-live-control-row">
+      <div className="mobile-live-control-row mobile-live-control-row-with-reset">
         <label htmlFor="mobile-browser-zoom">
           <span className="label">Visual zoom</span>
           <input
@@ -243,11 +274,48 @@ export function MobileSplitScreen({
             aria-valuetext={`${browserZoom}%`}
           />
         </label>
-        <output htmlFor="mobile-browser-zoom" aria-label="Visual zoom level">
+        <output htmlFor="mobile-browser-zoom" aria-label="Visual zoom level" aria-live="polite">
           {browserZoom}%
         </output>
+        <button
+          type="button"
+          className="mobile-live-reset-button"
+          onClick={resetLiveViewport}
+          aria-label="Reset live view"
+          title="Reset live view"
+        >
+          <RotateCcw className="h-4 w-4" aria-hidden="true" />
+          <span className="sr-only">Reset view</span>
+        </button>
       </div>
     </>
+  );
+
+  const renderFullscreenControls = () => (
+    <div className="mobile-fullscreen-strip" aria-label="Fullscreen browser controls">
+      <label className="mobile-fullscreen-zoom" htmlFor="mobile-fullscreen-browser-zoom">
+        <span className="text-[11px] font-semibold uppercase text-gray-400">Zoom</span>
+        <input
+          id="mobile-fullscreen-browser-zoom"
+          type="range"
+          min={75}
+          max={150}
+          step={5}
+          value={browserZoom}
+          onChange={(event) => onBrowserZoomChange(Number(event.target.value))}
+          aria-valuetext={`${browserZoom}%`}
+        />
+        <output htmlFor="mobile-fullscreen-browser-zoom" aria-label="Fullscreen visual zoom level" aria-live="polite">
+          {browserZoom}%
+        </output>
+      </label>
+      <button type="button" className="mobile-fullscreen-action" onClick={applyPhoneFitViewport}>
+        Viewport
+      </button>
+      <button type="button" className="mobile-fullscreen-action" onClick={() => setFullscreenOpen(false)}>
+        Exit
+      </button>
+    </div>
   );
 
   const renderBrowserSurface = () => (
@@ -288,13 +356,13 @@ export function MobileSplitScreen({
   return (
     <main className="mobile-split-root bg-surface-0 text-gray-100">
       <section
-        className={`mobile-live-pane ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
+        className={`mobile-live-pane ${isLiveBrowser ? "mobile-live-pane-running" : ""} ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
         style={livePaneStyle}
         role={fullscreenOpen ? "dialog" : undefined}
         aria-modal={fullscreenOpen ? true : undefined}
         aria-label={fullscreenOpen ? "Fullscreen browser viewer" : undefined}
       >
-        <div className="flex items-center justify-between gap-3 px-3 py-2">
+        <div className="mobile-live-header">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               {selected ? <StatusIndicator status={selected.status} size="md" /> : null}
@@ -310,6 +378,17 @@ export function MobileSplitScreen({
           <div className="flex items-center gap-1">
             {!fullscreenOpen ? (
               <>
+                {onOpenBenchmarks ? (
+                  <button
+                    type="button"
+                    onClick={onOpenBenchmarks}
+                    className="mobile-icon-button"
+                    aria-label="Streaming benchmark results"
+                    title="Streaming benchmark results"
+                  >
+                    <Gauge className="h-4 w-4" />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => {
@@ -318,6 +397,8 @@ export function MobileSplitScreen({
                   }}
                   className="mobile-icon-button"
                   aria-pressed={gridOpen}
+                  aria-expanded={gridOpen}
+                  aria-controls="mobile-running-grid"
                   aria-label="Toggle grid view"
                   title="Toggle grid view"
                 >
@@ -339,8 +420,15 @@ export function MobileSplitScreen({
         </div>
 
         <div className={`mobile-browser-wrap ${isLiveBrowser ? "mobile-browser-wrap-live" : "px-3 pb-2"}`}>
+          {isLiveBrowser && fullscreenOpen ? renderFullscreenControls() : null}
           {renderBrowserSurface()}
         </div>
+
+        {isLiveBrowser && !fullscreenOpen ? (
+          <div className="mobile-live-control-rail" aria-label="Live view controls">
+            {renderLiveViewControls()}
+          </div>
+        ) : null}
       </section>
 
       <section
@@ -354,7 +442,7 @@ export function MobileSplitScreen({
           </div>
         ) : null}
 
-        <div className="mobile-toolbar mobile-session-bar" aria-label="Session control">
+        <div className={`mobile-toolbar mobile-session-bar ${isLiveBrowser ? "mobile-session-bar-live" : ""}`} aria-label="Session control">
           <div className="min-w-0 flex-1">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Session</p>
             <label>
@@ -376,17 +464,17 @@ export function MobileSplitScreen({
             </label>
           </div>
           <div className="mobile-session-actions">
-            {canManageProfiles && (
+            {canManageProfiles && !isLiveBrowser && (
               <button type="button" onClick={onNew} className="mobile-icon-button" aria-label="New profile">
                 <Plus className="h-4 w-4" />
               </button>
             )}
-            {canManageProfiles && selected ? (
+            {canManageProfiles && selected && !isLiveBrowser ? (
               <button type="button" onClick={onEdit} className="mobile-icon-button" aria-label="Edit selected profile">
                 <Pencil className="h-4 w-4" />
               </button>
             ) : null}
-            {canManageAccess && (
+            {canManageAccess && !isLiveBrowser && (
               <button type="button" onClick={onAccessControls} className="mobile-icon-button" aria-label="Browser access controls">
                 <ShieldCheck className="h-4 w-4" />
               </button>
@@ -409,15 +497,6 @@ export function MobileSplitScreen({
             ) : null}
           </div>
         </div>
-
-        {isLiveBrowser ? (
-          <div className="mobile-live-control-rail" aria-label="Live view controls">
-            {renderLiveViewControls()}
-            <button type="button" className="btn-secondary mobile-live-reset" onClick={resetLiveViewport}>
-              Reset view
-            </button>
-          </div>
-        ) : null}
 
         <div className="mobile-viewport-disclosure">
           <button
@@ -454,6 +533,13 @@ export function MobileSplitScreen({
             {canManageProfiles ? (
               <>
                 <div className="flex gap-1 overflow-x-auto">
+                  <button
+                    type="button"
+                    onClick={applyPhoneFitViewport}
+                    className="mobile-preset-button mobile-phone-fit-button"
+                  >
+                    Phone fit
+                  </button>
                   {presets.map((preset) => (
                     <button
                       key={preset.label}
@@ -514,7 +600,7 @@ export function MobileSplitScreen({
                       : viewportSaved
                       ? "Saved"
                       : selected?.status === "running"
-                        ? "Saved dimensions apply on the next browser launch"
+                        ? "Remote viewport saves for the next launch; visual zoom changes now"
                         : "Applied when this profile launches"}
                   </p>
                   <button
@@ -536,7 +622,7 @@ export function MobileSplitScreen({
         ) : null}
 
         {gridOpen ? (
-          <div className="mobile-grid" aria-label="Running browser grid">
+          <div id="mobile-running-grid" className="mobile-grid" aria-label="Running browser grid">
             {(runningProfiles.length > 0 ? runningProfiles : profiles.slice(0, 4)).map((profile) => (
               <button
                 key={profile.id}
@@ -568,15 +654,36 @@ export function MobileSplitScreen({
         </div>
 
         <div className="mobile-chat-log" aria-label="Chat history">
-          <div className="mobile-step-list" aria-label="Agent task steps">
-            {taskSteps.map((step) => (
-              <div key={step.label} className="mobile-step-pill">
-                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
-                <span className="font-medium">{step.label}</span>
-                <span className="truncate text-gray-500">{step.detail}</span>
+          <section className="mobile-step-feed" aria-label="Agent task steps">
+            <button
+              type="button"
+              className="mobile-step-toggle"
+              aria-expanded={stepsExpanded}
+              aria-controls="mobile-task-step-list"
+              onClick={() => setStepsExpanded((expanded) => !expanded)}
+            >
+              <span className="mobile-step-count">Steps · {taskSteps.length}</span>
+              <span className="mobile-step-current">
+                {latestTaskStep.label}: {latestTaskStep.detail}
+              </span>
+              {stepsExpanded ? (
+                <ChevronUp className="h-3.5 w-3.5 shrink-0 text-gray-500" aria-hidden="true" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5 shrink-0 text-gray-500" aria-hidden="true" />
+              )}
+            </button>
+            {stepsExpanded ? (
+              <div id="mobile-task-step-list" className="mobile-step-list">
+                {taskSteps.map((step) => (
+                  <div key={step.label} className="mobile-step-pill">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                    <span className="font-medium">{step.label}</span>
+                    <span className="truncate text-gray-500">{step.detail}</span>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            ) : null}
+          </section>
           {messages.map((message) => (
             <div
               key={message.id}
@@ -643,6 +750,9 @@ export function MobileSplitScreen({
             >
               <SlidersHorizontal className="h-4 w-4" />
             </button>
+            <button type="submit" className="mobile-send-button" aria-label="Run task">
+              <Send className="h-4 w-4" />
+            </button>
             <label className="min-w-0 flex-1">
               <span className="sr-only">Select agent runner</span>
               <select
@@ -654,9 +764,6 @@ export function MobileSplitScreen({
                 <option value="local-runner">Local runner</option>
               </select>
             </label>
-            <button type="submit" className="mobile-send-button" aria-label="Run task">
-              <Send className="h-4 w-4" />
-            </button>
           </div>
           {attachmentName ? (
             <p className="truncate text-[11px] text-gray-500" aria-live="polite">

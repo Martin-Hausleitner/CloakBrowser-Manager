@@ -158,6 +158,25 @@ describe("api.getClipboard", () => {
   });
 });
 
+describe("api.getBenchmarkReport", () => {
+  it("fetches a benchmark report from the configured URL", async () => {
+    const report = { run: { state: "complete" }, candidates: [] };
+    mockFetch.mockResolvedValueOnce(jsonResponse(report));
+
+    await expect(api.getBenchmarkReport("/reports/latest.json")).resolves.toEqual(report);
+    expect(mockFetch).toHaveBeenCalledWith("/reports/latest.json", {
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+
+  it("does not use an unauthenticated static fallback after a missing report", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ detail: "No benchmark report" }, 404));
+
+    await expect(api.getBenchmarkReport("/api/benchmarks/latest")).rejects.toThrow("No benchmark report");
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual(["/api/benchmarks/latest"]);
+  });
+});
+
 // ── Error handling ──────────────────────────────────────────────────────────
 
 describe("error handling", () => {

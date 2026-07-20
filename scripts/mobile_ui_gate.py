@@ -576,7 +576,7 @@ def verify_live_viewport_controls(
     })()""")
     add_check(result, "live viewport controls reset", bool(reset), {"clicked": reset})
     browser.wait_for(
-        "document.querySelector('[aria-label=\"Browser pane size\"]')?.textContent?.trim() === '58%' && "
+        "document.querySelector('[aria-label=\"Browser pane size\"]')?.textContent?.trim() === '66%' && "
         "document.querySelector('[aria-label=\"Visual zoom level\"]')?.textContent?.trim() === '100%'",
         "live viewport controls reset state",
         5,
@@ -1077,11 +1077,18 @@ def run_viewport(
       const rect = dialog?.getBoundingClientRect();
       const canvas = [...document.querySelectorAll('.mobile-browser-content canvas')];
       const active = document.activeElement;
+      const strip = document.querySelector('[aria-label="Fullscreen browser controls"]');
       return {
         rect: rect ? rect.toJSON() : null,
         canvasCount: canvas.length,
         closeFocused: active?.getAttribute('aria-label') === 'Close fullscreen browser',
         backgroundInert: document.querySelector('.mobile-control-pane')?.hasAttribute('inert') ?? false,
+        controlsStrip: Boolean(strip),
+        controlsZoom: Boolean(strip?.querySelector('#mobile-fullscreen-browser-zoom')),
+        controlsViewport: [...(strip?.querySelectorAll('button') ?? [])]
+          .some((candidate) => candidate.textContent?.trim() === 'Viewport'),
+        controlsExit: [...(strip?.querySelectorAll('button') ?? [])]
+          .some((candidate) => candidate.textContent?.trim() === 'Exit'),
       };
     })()""")
     full_rect = fullscreen.get("rect") or {}
@@ -1094,6 +1101,15 @@ def run_viewport(
     add_check(result, "fullscreen close control focused", bool(fullscreen.get("closeFocused")), fullscreen)
     add_check(result, "fullscreen background inert", bool(fullscreen.get("backgroundInert")), fullscreen)
     if profile_id:
+        add_check(
+            result,
+            "fullscreen local controls available",
+            bool(fullscreen.get("controlsStrip"))
+            and bool(fullscreen.get("controlsZoom"))
+            and bool(fullscreen.get("controlsViewport"))
+            and bool(fullscreen.get("controlsExit")),
+            fullscreen,
+        )
         add_check(
             result,
             "fullscreen preserves one canvas",

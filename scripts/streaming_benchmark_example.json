@@ -1,0 +1,53 @@
+{
+  "metadata": {
+    "purpose": "Template for comparable streaming checks. Replace local ports and commands with the exact candidates under test.",
+    "profile": "Use identical resolution, profile data, authentication mode, and warm/cold cache state across measured candidates."
+  },
+  "candidates": [
+    {
+      "id": "manager-health-http",
+      "name": "CloakBrowser Manager HTTP health",
+      "type": "http",
+      "url": "http://127.0.0.1:8080/health",
+      "metadata": {
+        "stack": "FastAPI health endpoint",
+        "comparison_role": "availability/control"
+      }
+    },
+    {
+      "id": "manager-vnc-websocket",
+      "name": "CloakBrowser Manager VNC WebSocket",
+      "type": "websocket",
+      "url": "ws://127.0.0.1:8080/api/profiles/REPLACE_WITH_PROFILE_ID/vnc",
+      "headers": {
+        "Cookie": "auth_token=REPLACE_WITH_DISPOSABLE_TEST_TOKEN_IF_AUTH_IS_ENABLED"
+      },
+      "metadata": {
+        "stack": "KasmVNC through FastAPI WebSocket proxy",
+        "comparison_role": "live browser stream"
+      }
+    },
+    {
+      "id": "selkies-websocket-poc",
+      "name": "Selkies WebSocket POC",
+      "type": "websocket",
+      "url": "ws://127.0.0.1:8081/ws",
+      "requires_executable": "gst-launch-1.0",
+      "metadata": {
+        "stack": "Selkies WebSocket",
+        "comparison_role": "isolated transport POC"
+      }
+    },
+    {
+      "id": "sunshine-moonlight-native",
+      "name": "Sunshine + Moonlight native client path",
+      "type": "architecture",
+      "architecture_only": true,
+      "architecture_note": "Native-client architecture; no comparable embedded browser WebSocket endpoint is configured in this repository.",
+      "metadata": {
+        "stack": "Sunshine/Moonlight",
+        "comparison_role": "architecture reference"
+      }
+    }
+  ]
+}

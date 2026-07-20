@@ -15,6 +15,17 @@ Der Produktionscontainer und der echte KasmVNC/noVNC-Stream wurden mit dem repro
 
 Die Tabelle stammt aus dem finalen Wiederholungslauf gegen einen bereits laufenden Browser. In einem unmittelbar vorangehenden Lauf startete derselbe Build das gestoppte Testprofil und erreichte die erste Live-Verbindung nach 4.904,8 ms. Dieser Einzelwert ist ein E2E-Smoke-Nachweis, kein belastbarer Median.
 
+## Isolierter KasmVNC-A/B-Nachtest
+
+Die komplette Suite wurde zusätzlich gegen je einen isolierten KasmVNC-1.3.3- und KasmVNC-1.4.0-Container mit gleichem 1024-×-576-Profil ausgeführt. Beide Varianten bestanden vier Viewports, exakt einen echten VNC-Canvas, Grid, Vollbild, den lokalen Browser-Use-inspirierten Composer sowie die RFB-Keyboard-zu-CDP-Probe; pro Variante waren **88/88 Checks** und **13 Screenshots** grün.
+
+| Variante | erster Start-zu-`Connected` | weitere drei Viewports | Ergebnis |
+|---|---:|---:|---|
+| KasmVNC 1.3.3 | 1.381,3 ms | 35,7 / 34,7 / 39,4 ms | bestanden |
+| KasmVNC 1.4.0 | 3.145,7 ms | 34,2 / 35,1 / 35,5 ms | bestanden |
+
+Der erste Wert je Zeile startete aus einem gestoppten Profil und ist deshalb nur ein einzelner Interaktions-Smoke-Test. Er ersetzt keinen Median, liefert aber keinen Grund, die bewährte 1.3.3-Basis zu migrieren. Die zugehörigen lokalen Artefakte liegen außerhalb des Git-Repositories unter `outputs/kasm13-mobile-e2e-20260720` und `outputs/kasm14-mobile-e2e-20260720-r2`.
+
 ## Geprüfte Gates
 
 - Mobile Workspace statt Desktop-UI, einschließlich Landscape und 768-px-Touch-Tablet.

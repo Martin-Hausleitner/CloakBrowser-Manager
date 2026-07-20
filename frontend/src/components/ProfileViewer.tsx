@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { ClipboardCopy, Code2, Maximize2, Minimize2 } from "lucide-react";
 import { api } from "../lib/api";
 
@@ -8,14 +8,25 @@ interface ProfileViewerProps {
   clipboardSync: boolean;
   canInteract?: boolean;
   layoutMode?: "inline" | "fullscreen";
+  viewportScale?: number;
   onDisconnect: () => void;
 }
 
 // X11 keysym for V key (Ctrl is already held in VNC by the time we intercept)
 const XK_v = 0x0076;
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 5000, 10000] as const;
+const MIN_VIEWPORT_SCALE = 0.75;
+const MAX_VIEWPORT_SCALE = 1.5;
+const ORIGINAL_AUTOSCALE_KEY = "__cloakOriginalAutoscale";
+const AUTOSCALE_SCALE_REF_KEY = "__cloakAutoscaleScaleRef";
 
 type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
+type DisplayAutoscale = (width: number, height: number) => void;
+type ScaledAutoscaleDisplay = {
+  autoscale?: DisplayAutoscale;
+  [ORIGINAL_AUTOSCALE_KEY]?: DisplayAutoscale;
+  [AUTOSCALE_SCALE_REF_KEY]?: MutableRefObject<number>;
+};
 
 function supportsClipboardSync() {
   return (
@@ -41,12 +52,40 @@ function focusNoVncCanvas(container: HTMLElement) {
   canvas.focus({ preventScroll: true });
 }
 
+function clampViewportScale(scale: number) {
+  if (!Number.isFinite(scale)) return 1;
+  return Math.min(MAX_VIEWPORT_SCALE, Math.max(MIN_VIEWPORT_SCALE, scale));
+}
+
+function installScaledAutoscale(display: ScaledAutoscaleDisplay | undefined, scaleRef: MutableRefObject<number>) {
+  if (typeof display?.autoscale !== "function") return;
+
+  display[AUTOSCALE_SCALE_REF_KEY] = scaleRef;
+  if (display[ORIGINAL_AUTOSCALE_KEY]) return;
+
+  const originalAutoscale = display.autoscale;
+  display[ORIGINAL_AUTOSCALE_KEY] = originalAutoscale;
+  display.autoscale = function scaledAutoscale(width: number, height: number) {
+    const scale = clampViewportScale(display[AUTOSCALE_SCALE_REF_KEY]?.current ?? 1);
+    return originalAutoscale.call(this, width * scale, height * scale);
+  };
+}
+
+function restoreScaledAutoscale(display: ScaledAutoscaleDisplay | undefined) {
+  if (!display?.[ORIGINAL_AUTOSCALE_KEY]) return;
+
+  display.autoscale = display[ORIGINAL_AUTOSCALE_KEY];
+  delete display[ORIGINAL_AUTOSCALE_KEY];
+  delete display[AUTOSCALE_SCALE_REF_KEY];
+}
+
 export function ProfileViewer({
   profileId,
   cdpUrl,
   clipboardSync: initialClipboardSync,
   canInteract = true,
   layoutMode = "inline",
+  viewportScale = 1,
   onDisconnect,
 }: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -64,6 +103,9 @@ export function ProfileViewer({
   const [pasteText, setPasteText] = useState("");
   const [pasteError, setPasteError] = useState<string | null>(null);
   const [pasting, setPasting] = useState(false);
+  const effectiveViewportScale = clampViewportScale(viewportScale);
+  const viewportScaleRef = useRef(effectiveViewportScale);
+  viewportScaleRef.current = effectiveViewportScale;
 
   const sendRemotePasteKeystroke = useCallback(() => {
     const rfb = rfbRef.current;
@@ -187,6 +229,7 @@ export function ProfileViewer({
         });
         rfb = instance;
         rfbRef.current = instance;
+        installScaledAutoscale((instance as any)._display, viewportScaleRef);
 
         instance.scaleViewport = true;
         instance.resizeSession = false;
@@ -247,6 +290,7 @@ export function ProfileViewer({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (rfb) {
         try {
+          restoreScaledAutoscale(rfb._display);
           rfb.disconnect();
         } catch (err) {
           console.debug("[vnc] disconnect cleanup failed:", err);
@@ -434,6 +478,7 @@ export function ProfileViewer({
       // visible canvas until the next remote framebuffer update arrives.
       rfb.scaleViewport = true;
       const display = rfb._display;
+      installScaledAutoscale(display, viewportScaleRef);
       const bounds = container.getBoundingClientRect();
       if (
         bounds.width > 0 &&
@@ -467,7 +512,7 @@ export function ProfileViewer({
       observer.disconnect();
       if (refreshTimer !== null) clearTimeout(refreshTimer);
     };
-  }, [layoutMode, profileId]);
+  }, [effectiveViewportScale, layoutMode, profileId]);
 
   if (error) {
     return (

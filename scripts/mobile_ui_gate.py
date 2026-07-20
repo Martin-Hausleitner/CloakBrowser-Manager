@@ -135,6 +135,64 @@ def add_check(result: dict[str, Any], name: str, passed: bool, evidence: Any) ->
         raise GateError(f"{name} failed: {evidence}")
 
 
+class CdpSession:
+    def __init__(self, ws_url: str, timeout: float, auth_token: str | None = None):
+        try:
+            from inspect import signature
+            from websockets.sync.client import connect
+        except ImportError as exc:
+            raise GateError(
+                "the project's websockets dependency is required for the noVNC pointer hit-test CDP probe"
+            ) from exc
+
+        headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else None
+        self._timeout = timeout
+        connect_options: dict[str, Any] = {
+            "additional_headers": headers,
+            "open_timeout": timeout,
+            "close_timeout": timeout,
+        }
+        # websockets 14 (still supported by backend/requirements.txt) does
+        # not have a proxy parameter. Later versions do, and disabling it is
+        # important for the loopback-only CDP endpoint used by this gate.
+        if "proxy" in signature(connect).parameters:
+            connect_options["proxy"] = None
+        self._ws = connect(ws_url, **connect_options)
+        self._next_id = 1
+
+    def close(self) -> None:
+        self._ws.close()
+
+    def command(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        message_id = self._next_id
+        self._next_id += 1
+        self._ws.send(json.dumps({"id": message_id, "method": method, "params": params or {}}))
+        while True:
+            raw = self._ws.recv(timeout=self._timeout)
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            payload = json.loads(raw)
+            if payload.get("id") != message_id:
+                continue
+            if "error" in payload:
+                raise GateError(f"CDP {method} failed: {payload['error']}")
+            return payload.get("result")
+
+    def evaluate(self, expression: str, *, return_by_value: bool = True) -> Any:
+        result = self.command(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "awaitPromise": True,
+                "returnByValue": return_by_value,
+            },
+        )
+        remote = (result or {}).get("result") or {}
+        if "exceptionDetails" in (result or {}):
+            raise GateError(f"CDP Runtime.evaluate failed: {result['exceptionDetails']}")
+        return remote.get("value")
+
+
 STRUCTURE_SCRIPT = r"""(() => {
   const root = document.querySelector('.mobile-split-root');
   const live = document.querySelector('.mobile-live-pane');
@@ -157,7 +215,7 @@ STRUCTURE_SCRIPT = r"""(() => {
     composer: rect(composer),
     hasAttach: !!document.querySelector('button[aria-label="Attach files"]'),
     hasRunSettings: !!document.querySelector('button[aria-label="Run settings"]'),
-    hasModel: !!document.querySelector('select[aria-label="Select demo model"], select.mobile-composer-select'),
+    hasAgentRunner: !!document.querySelector('select[aria-label="Select agent runner"], select.mobile-composer-select'),
     hasRunTask: !!document.querySelector('button[aria-label="Run task"]'),
   };
 })()"""
@@ -241,6 +299,90 @@ CANVAS_SCRIPT = r"""(() => {
 })()"""
 
 
+LIVE_VIEWER_GEOMETRY_SCRIPT = r"""(() => {
+  const livePane = document.querySelector('.mobile-live-pane');
+  const frame = document.querySelector('[data-testid="mobile-browser-frame"]');
+  const content = document.querySelector('.mobile-browser-content');
+  const host = document.querySelector('[data-vnc-layout]');
+  const canvas = document.querySelector('.mobile-browser-content canvas');
+  const zoom = document.querySelector('#mobile-browser-zoom');
+  const pane = document.querySelector('#mobile-pane-size');
+  const zoomOutput = document.querySelector('[aria-label="Visual zoom level"]');
+  const paneOutput = document.querySelector('[aria-label="Browser pane size"]');
+  const rect = (node) => {
+    if (!node) return null;
+    const value = node.getBoundingClientRect();
+    return {
+      left: Math.round(value.left * 10) / 10,
+      top: Math.round(value.top * 10) / 10,
+      width: Math.round(value.width * 10) / 10,
+      height: Math.round(value.height * 10) / 10,
+    };
+  };
+  const style = (node) => {
+    if (!node) return null;
+    const computed = getComputedStyle(node);
+    return {
+      width: computed.width,
+      height: computed.height,
+      transform: computed.transform,
+      inlineWidth: node.style?.width || '',
+      inlineHeight: node.style?.height || '',
+    };
+  };
+  const transformedAncestors = [];
+  let current = canvas;
+  while (current && current !== document.body) {
+    const transform = getComputedStyle(current).transform;
+    if (transform && transform !== 'none') {
+      transformedAncestors.push({
+        tag: current.tagName,
+        className: current.className || '',
+        transform,
+      });
+    }
+    current = current.parentElement;
+  }
+  return {
+    ready: !!(livePane && frame && content && host && canvas && zoom && pane),
+    connected: document.body.innerText.includes('Connected'),
+    livePane: rect(livePane),
+    frame: rect(frame),
+    content: rect(content),
+    host: rect(host),
+    canvas: canvas ? {
+      rect: rect(canvas),
+      width: canvas.width,
+      height: canvas.height,
+      style: style(canvas),
+    } : null,
+    hostStyle: style(host),
+    contentStyle: style(content),
+    livePaneStyle: livePane ? {
+      basis: livePane.style.getPropertyValue('--mobile-live-pane-basis'),
+    } : null,
+    controls: {
+      paneValue: pane?.value || null,
+      paneOutput: paneOutput?.textContent?.trim() || null,
+      zoomValue: zoom?.value || null,
+      zoomOutput: zoomOutput?.textContent?.trim() || null,
+    },
+    transformedAncestors,
+  };
+})()"""
+
+
+def live_viewer_state_when(condition: str) -> str:
+    """Embed the reusable viewer probe without treating slider percent signs as formatting."""
+    return """(() => {
+      const state = __LIVE_VIEWER_STATE__;
+      const controls = state.controls || {};
+      return (__LIVE_VIEWER_CONDITION__) && state;
+    })()""".replace("__LIVE_VIEWER_STATE__", LIVE_VIEWER_GEOMETRY_SCRIPT).replace(
+        "__LIVE_VIEWER_CONDITION__", condition
+    )
+
+
 def take_screenshot(
     browser: AgentBrowser,
     result: dict[str, Any],
@@ -301,6 +443,146 @@ def select_and_connect(
     add_check(result, "exactly one live VNC canvas", canvas.get("count") == 1, canvas)
 
 
+def verify_live_viewport_controls(
+    browser: AgentBrowser,
+    result: dict[str, Any],
+    base_url: str,
+    profile_id: str,
+    timeout: float,
+    auth_token: str | None,
+) -> None:
+    opened = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Edit browser viewport"]');
+      if (!button) return false;
+      if (button.getAttribute('aria-pressed') !== 'true') button.click();
+      return true;
+    })()""")
+    add_check(result, "live viewport controls action available", bool(opened), {"clicked": opened})
+    browser.wait_for(
+        "!!document.querySelector('[aria-label=\"Viewport controls\"]')",
+        "live viewport controls",
+        5,
+    )
+    before = browser.eval(LIVE_VIEWER_GEOMETRY_SCRIPT)
+    add_check(result, "live viewport controls rendered", bool(before.get("ready")), before)
+
+    pane_adjusted = browser.eval(r"""(() => {
+      const setRange = (selector, value) => {
+        const input = document.querySelector(selector);
+        if (!input) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        if (!setter) return false;
+        setter.call(input, String(value));
+        input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}));
+        input.dispatchEvent(new Event('change', {bubbles: true}));
+        return true;
+      };
+      return setRange('#mobile-pane-size', 64);
+    })()""")
+    add_check(
+        result,
+        "live ratio control accepts input",
+        bool(pane_adjusted),
+        {"adjusted": pane_adjusted},
+    )
+    after_pane = browser.wait_for(
+        live_viewer_state_when("controls.paneOutput === '64%'"),
+        "live ratio control output",
+        5,
+    )
+
+    before_live = before.get("livePane") or {}
+    after_live = after_pane.get("livePane") or {}
+    pane_changed = (
+        (before.get("livePaneStyle") or {}).get("basis") != (after_pane.get("livePaneStyle") or {}).get("basis")
+        or abs((before_live.get("width") or 0) - (after_live.get("width") or 0)) >= 2
+        or abs((before_live.get("height") or 0) - (after_live.get("height") or 0)) >= 2
+    )
+    add_check(
+        result,
+        "browser pane ratio updates live",
+        pane_changed and (after_pane.get("controls") or {}).get("paneOutput") == "64%",
+        {"before": before, "after": after_pane},
+    )
+
+    zoom_adjusted = browser.eval(r"""(() => {
+      const input = document.querySelector('#mobile-browser-zoom');
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (!setter) return false;
+      setter.call(input, '135');
+      input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}));
+      input.dispatchEvent(new Event('change', {bubbles: true}));
+      return true;
+    })()""")
+    add_check(
+        result,
+        "live zoom control accepts input",
+        bool(zoom_adjusted),
+        {"adjusted": zoom_adjusted},
+    )
+    after_zoom = browser.wait_for(
+        live_viewer_state_when("controls.zoomOutput === '135%'"),
+        "live zoom control output",
+        5,
+    )
+
+    before_canvas = after_pane.get("canvas") or {}
+    after_canvas = after_zoom.get("canvas") or {}
+    before_canvas_rect = before_canvas.get("rect") or {}
+    after_canvas_rect = after_canvas.get("rect") or {}
+    canvas_geometry_changed = (
+        abs((before_canvas_rect.get("width") or 0) - (after_canvas_rect.get("width") or 0)) >= 2
+        or abs((before_canvas_rect.get("height") or 0) - (after_canvas_rect.get("height") or 0)) >= 2
+        or before_canvas.get("width") != after_canvas.get("width")
+        or before_canvas.get("height") != after_canvas.get("height")
+    )
+    before_host_rect = after_pane.get("host") or {}
+    after_host_rect = after_zoom.get("host") or {}
+    before_canvas_width = before_canvas_rect.get("width") or 0
+    before_canvas_height = before_canvas_rect.get("height") or 0
+    after_canvas_width = after_canvas_rect.get("width") or 0
+    after_canvas_height = after_canvas_rect.get("height") or 0
+    canvas_grew_for_requested_zoom = (
+        before_canvas_width > 0
+        and before_canvas_height > 0
+        and after_canvas_width >= before_canvas_width * 1.25
+        and after_canvas_height >= before_canvas_height * 1.25
+    )
+    add_check(
+        result,
+        "visual zoom changes noVNC canvas geometry without CSS transform",
+        canvas_geometry_changed
+        and canvas_grew_for_requested_zoom
+        and (after_zoom.get("controls") or {}).get("zoomOutput") == "135%"
+        and not after_zoom.get("transformedAncestors"),
+        {
+            "before": after_pane,
+            "after": after_zoom,
+            "canvasGeometryChanged": canvas_geometry_changed,
+            "canvasGrewForRequestedZoom": canvas_grew_for_requested_zoom,
+            "hostBefore": before_host_rect,
+            "hostAfter": after_host_rect,
+        },
+    )
+    remote_pointer_hit_test_at_zoom(browser, result, base_url, profile_id, timeout, auth_token)
+
+    reset = browser.eval(r"""(() => {
+      const button = [...document.querySelectorAll('button')]
+        .find((candidate) => candidate.textContent?.trim() === 'Reset view');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()""")
+    add_check(result, "live viewport controls reset", bool(reset), {"clicked": reset})
+    browser.wait_for(
+        "document.querySelector('[aria-label=\"Browser pane size\"]')?.textContent?.trim() === '58%' && "
+        "document.querySelector('[aria-label=\"Visual zoom level\"]')?.textContent?.trim() === '100%'",
+        "live viewport controls reset state",
+        5,
+    )
+
+
 def _authenticated_request(url: str, timeout: float, auth_token: str | None):
     headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
     return urlopen(Request(url, headers=headers), timeout=timeout)
@@ -354,6 +636,21 @@ def current_remote_pages(
     return [page for page in payload if page.get("type") == "page"]
 
 
+def current_remote_page_ws_url(
+    base_url: str,
+    profile_id: str,
+    timeout: float,
+    auth_token: str | None = None,
+) -> str:
+    pages = current_remote_pages(base_url, profile_id, timeout, auth_token)
+    if not pages:
+        raise GateError("CDP page list did not include a page target")
+    ws_url = pages[0].get("webSocketDebuggerUrl")
+    if not isinstance(ws_url, str) or not ws_url:
+        raise GateError("CDP page target did not include webSocketDebuggerUrl")
+    return ws_url
+
+
 def current_remote_clipboard(
     base_url: str,
     profile_id: str,
@@ -366,6 +663,171 @@ def current_remote_clipboard(
     if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
         raise GateError("Profile clipboard endpoint did not return text")
     return payload["text"]
+
+
+def remote_pointer_hit_test_at_zoom(
+    browser: AgentBrowser,
+    result: dict[str, Any],
+    base_url: str,
+    profile_id: str,
+    timeout: float,
+    auth_token: str | None,
+) -> None:
+    marker = f"mobile-pointer-probe-{int(time.time() * 1000)}"
+    html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mobile pointer probe</title>
+  <style>
+    html, body {{
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      background: #071017;
+      overflow: hidden;
+      font-family: system-ui, sans-serif;
+    }}
+    #mobile-pointer-target {{
+      position: fixed;
+      left: 12vw;
+      top: 18vh;
+      width: 76vw;
+      height: 64vh;
+      border: 0;
+      border-radius: 0;
+      background: #2dd4bf;
+      color: #04111b;
+      font: 700 32px system-ui, sans-serif;
+    }}
+  </style>
+</head>
+<body data-marker="{marker}">
+  <button id="mobile-pointer-target" type="button">Pointer target</button>
+  <script>
+    window.__mobilePointerProbe = {{clicked: false, marker: {json.dumps(marker)}}};
+    document.getElementById('mobile-pointer-target').addEventListener('click', (event) => {{
+      document.body.dataset.clicked = 'true';
+      window.__mobilePointerProbe = {{
+        clicked: true,
+        marker: {json.dumps(marker)},
+        targetId: event.target.id,
+        clientX: Math.round(event.clientX),
+        clientY: Math.round(event.clientY),
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight
+      }};
+    }});
+  </script>
+</body>
+</html>"""
+    data_url = "data:text/html;charset=utf-8," + quote(html, safe="")
+    ws_url = current_remote_page_ws_url(base_url, profile_id, min(timeout, 10), auth_token)
+    cdp = CdpSession(ws_url, min(timeout, 10), auth_token)
+    try:
+        cdp.command("Page.enable")
+        cdp.command("Runtime.enable")
+        cdp.command("Page.bringToFront")
+        cdp.command("Page.navigate", {"url": data_url})
+        deadline = time.monotonic() + min(timeout, 20)
+        ready: Any = None
+        ready_expression = f"""(() => {{
+          const target = document.getElementById('mobile-pointer-target');
+          if (document.readyState !== 'complete' || !target) return null;
+          const rect = target.getBoundingClientRect();
+          return {{
+            marker: document.body.dataset.marker,
+            readyState: document.readyState,
+            target: {{
+              left: Math.round(rect.left),
+              top: Math.round(rect.top),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height)
+            }},
+            viewport: {{width: window.innerWidth, height: window.innerHeight}}
+          }};
+        }})()"""
+        while time.monotonic() < deadline:
+            ready = cdp.evaluate(ready_expression)
+            if ready and ready.get("marker") == marker:
+                break
+            time.sleep(0.4)
+        add_check(
+            result,
+            "remote pointer probe page ready via CDP",
+            bool(ready and ready.get("marker") == marker),
+            ready,
+        )
+
+        geometry = browser.eval(LIVE_VIEWER_GEOMETRY_SCRIPT)
+        canvas = (geometry.get("canvas") or {}).get("rect") or {}
+        content = geometry.get("content") or {}
+        visible_left = max(canvas.get("left") or 0, content.get("left") or 0)
+        visible_top = max(canvas.get("top") or 0, content.get("top") or 0)
+        visible_right = min(
+            (canvas.get("left") or 0) + (canvas.get("width") or 0),
+            (content.get("left") or 0) + (content.get("width") or 0),
+        )
+        visible_bottom = min(
+            (canvas.get("top") or 0) + (canvas.get("height") or 0),
+            (content.get("top") or 0) + (content.get("height") or 0),
+        )
+        visible_width = visible_right - visible_left
+        visible_height = visible_bottom - visible_top
+        click_x = round(visible_left + visible_width / 2)
+        click_y = round(visible_top + visible_height / 2)
+        add_check(
+            result,
+            "remote pointer probe has visible canvas coordinate",
+            visible_width > 20 and visible_height > 20 and click_x > 0 and click_y > 0,
+            {
+                "geometry": geometry,
+                "click": {"x": click_x, "y": click_y},
+                "visibleCanvas": {
+                    "left": visible_left,
+                    "top": visible_top,
+                    "width": visible_width,
+                    "height": visible_height,
+                },
+            },
+        )
+
+        browser.run("mouse", "move", str(click_x), str(click_y))
+        browser.run("mouse", "down")
+        browser.run("mouse", "up")
+
+        clicked: Any = None
+        click_expression = """(() => window.__mobilePointerProbe || null)()"""
+        deadline = time.monotonic() + min(timeout, 10)
+        while time.monotonic() < deadline:
+            clicked = cdp.evaluate(click_expression)
+            if (
+                clicked
+                and clicked.get("clicked") is True
+                and clicked.get("marker") == marker
+                and clicked.get("targetId") == "mobile-pointer-target"
+            ):
+                break
+            time.sleep(0.4)
+        add_check(
+            result,
+            "zoomed visible noVNC pointer reaches remote page target",
+            bool(
+                clicked
+                and clicked.get("clicked") is True
+                and clicked.get("marker") == marker
+                and clicked.get("targetId") == "mobile-pointer-target"
+            ),
+            {
+                "clicked": clicked,
+                "click": {"x": click_x, "y": click_y},
+                "ready": ready,
+                "geometry": geometry,
+            },
+        )
+    finally:
+        cdp.close()
 
 
 def manual_remote_paste(
@@ -519,8 +981,8 @@ def run_viewport(
     add_check(result, "mobile workspace structure", bool(structure.get("ready")), structure)
     add_check(
         result,
-        "Browser-Use-style composer controls",
-        all(structure.get(key) for key in ("hasAttach", "hasRunSettings", "hasModel", "hasRunTask")),
+        "agent composer controls",
+        all(structure.get(key) for key in ("hasAttach", "hasRunSettings", "hasAgentRunner", "hasRunTask")),
         structure,
     )
     add_check(
@@ -550,6 +1012,7 @@ def run_viewport(
 
     if profile_id:
         select_and_connect(browser, result, profile_id, timeout)
+        verify_live_viewport_controls(browser, result, base_url, profile_id, timeout, auth_token)
         manual_remote_paste(browser, result, base_url, profile_id, timeout, auth_token)
         if remote_probe_url:
             remote_keyboard_navigation(
@@ -570,21 +1033,21 @@ def run_viewport(
     browser.run("fill", "#mobile-task-input", unique_message)
     browser.run("click", "button[aria-label='Run task']")
     chat = browser.wait_for(
-        f"document.body.innerText.includes({json.dumps(unique_message)}) && document.body.innerText.includes('Demo reply queued locally')",
-        "local demo chat response",
+        f"document.body.innerText.includes({json.dumps(unique_message)}) && document.body.innerText.includes('Agent reply queued locally')",
+        "local agent chat response",
         10,
     )
-    add_check(result, "local demo chat round-trip", bool(chat), {"message": unique_message})
+    add_check(result, "local agent chat round-trip", bool(chat), {"message": unique_message})
 
     browser.run("click", "button[aria-label='Run settings']")
-    settings = browser.wait_for("!!document.querySelector('[aria-label=\"Demo run settings\"]')", "run settings", 5)
-    browser.run("select", "select.mobile-composer-select", "browser-use-v4")
-    selected_model = browser.eval("document.querySelector('select.mobile-composer-select')?.value")
+    settings = browser.wait_for("!!document.querySelector('[aria-label=\"Agent run settings\"]')", "run settings", 5)
+    browser.run("select", "select.mobile-composer-select", "local-runner")
+    selected_runner = browser.eval("document.querySelector('select.mobile-composer-select')?.value")
     add_check(
         result,
-        "demo run settings and model selection",
-        bool(settings) and selected_model == "browser-use-v4",
-        {"settings": bool(settings), "model": selected_model},
+        "agent run settings and runner selection",
+        bool(settings) and selected_runner == "local-runner",
+        {"settings": bool(settings), "runner": selected_runner},
     )
     browser.run("click", "button[aria-label='Run settings']")
     take_screenshot(browser, result, output_dir, name, "workspace", width, height)

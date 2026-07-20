@@ -91,13 +91,17 @@ function setCoarsePointer(matches: boolean) {
   });
 }
 
-async function renderProfileViewer(onDisconnect = vi.fn()) {
+async function renderProfileViewer(
+  onDisconnect = vi.fn(),
+  overrides: Partial<Parameters<typeof ProfileViewer>[0]> = {},
+) {
   const view = render(
     <ProfileViewer
       profileId="profile-1"
       cdpUrl={null}
       clipboardSync={true}
       onDisconnect={onDisconnect}
+      {...overrides}
     />,
   );
 
@@ -328,7 +332,9 @@ describe("ProfileViewer", () => {
     });
 
     const instance = rfbMock.instances[0];
-    expect(instance?._display.autoscale).toHaveBeenCalledTimes(1);
+    const originalAutoscale = (instance?._display as any).__cloakOriginalAutoscale;
+    expect(originalAutoscale).toHaveBeenCalledTimes(1);
+    expect(originalAutoscale).toHaveBeenCalledWith(390, 713);
     expect(instance?._display._damage).toHaveBeenCalledWith(0, 0, 1024, 576);
     expect(instance?._display.flip).toHaveBeenCalledTimes(1);
 
@@ -338,6 +344,81 @@ describe("ProfileViewer", () => {
       configurable: true,
       value: originalResizeObserver,
     });
+  });
+
+  it("applies bounded mobile zoom through noVNC autoscale dimensions", async () => {
+    const originalResizeObserver = window.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | null = null;
+
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      value: MockResizeObserver,
+    });
+
+    const view = await renderProfileViewer(vi.fn(), { viewportScale: 2 });
+    vi.spyOn(rfbMock.instances[0]!.target, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 390,
+      height: 713,
+      top: 0,
+      right: 390,
+      bottom: 713,
+      left: 0,
+      toJSON: () => ({}),
+    });
+
+    act(() => resizeCallback?.([], {} as ResizeObserver));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    const originalAutoscale = (rfbMock.instances[0]?._display as any).__cloakOriginalAutoscale;
+    expect(originalAutoscale).toHaveBeenCalledWith(585, 1069.5);
+
+    view.unmount();
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      value: originalResizeObserver,
+    });
+  });
+
+  it("keeps noVNC internal autoscale calls bound to the current zoom", async () => {
+    const view = await renderProfileViewer(vi.fn(), { viewportScale: 1.35 });
+    const instance = rfbMock.instances[0]!;
+    const originalAutoscale = (instance._display as any).__cloakOriginalAutoscale;
+
+    act(() => {
+      instance._display.autoscale(390, 713);
+    });
+
+    expect(originalAutoscale).toHaveBeenCalledWith(526.5, 962.5500000000001);
+
+    view.rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        onDisconnect={view.onDisconnect}
+        viewportScale={0.25}
+      />,
+    );
+
+    act(() => {
+      instance._display.autoscale(390, 713);
+    });
+
+    expect(originalAutoscale).toHaveBeenLastCalledWith(292.5, 534.75);
   });
 
   it("pauses clipboard polling while hidden", async () => {

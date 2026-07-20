@@ -110,6 +110,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const [view, setView] = useState<View>("empty");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileFullscreenOpen, setMobileFullscreenOpen] = useState(false);
+  const [mobileBrowserZoom, setMobileBrowserZoom] = useState(100);
   const isMobile = useIsMobile();
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
@@ -238,6 +239,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           clipboardSync={selected.clipboard_sync}
           canInteract={canInteractSelected}
           layoutMode={mobileFullscreenOpen ? "fullscreen" : "inline"}
+          viewportScale={mobileBrowserZoom / 100}
           onDisconnect={handleVncDisconnect}
         />
       ) : null;
@@ -255,6 +257,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
         canManageAccess={canManageProfiles && accessControlEnabled}
         identityName={identity?.display_name ?? null}
         browserView={browserView}
+        browserZoom={mobileBrowserZoom}
         onSelect={handleSelect}
         onNew={handleNew}
         onEdit={() => setView("edit")}
@@ -262,6 +265,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
         onStop={handleStop}
         onViewportApply={handleViewportApply}
         onFullscreenChange={setMobileFullscreenOpen}
+        onBrowserZoomChange={setMobileBrowserZoom}
         onAccessControls={() => setView("access")}
         onLogout={onLogout}
       />

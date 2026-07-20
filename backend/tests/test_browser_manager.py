@@ -307,6 +307,31 @@ def test_init_creates_preferences(tmp_path: Path):
     assert "DuckDuckGo" in data["default_search_provider_data"]["template_url_data"]["short_name"]
 
 
+def test_init_applies_selected_search_engine_and_preserves_other_preferences(tmp_path: Path):
+    prefs_path = tmp_path / "Default" / "Preferences"
+    prefs_path.parent.mkdir(parents=True)
+    prefs_path.write_text(json.dumps({"unrelated": {"keep": True}}))
+
+    _init_profile_defaults(tmp_path, "google")
+
+    data = json.loads(prefs_path.read_text())
+    assert data["unrelated"] == {"keep": True}
+    template = data["default_search_provider_data"]["template_url_data"]
+    assert template["short_name"] == "Google"
+    assert template["url"] == "https://www.google.com/search?q={searchTerms}"
+
+
+def test_init_system_default_does_not_overwrite_existing_preferences(tmp_path: Path):
+    prefs_path = tmp_path / "Default" / "Preferences"
+    prefs_path.parent.mkdir(parents=True)
+    original = {"default_search_provider_data": {"template_url_data": {"short_name": "Custom"}}}
+    prefs_path.write_text(json.dumps(original))
+
+    _init_profile_defaults(tmp_path, None)
+
+    assert json.loads(prefs_path.read_text()) == original
+
+
 def test_init_idempotent(tmp_path: Path):
     _init_profile_defaults(tmp_path)
     bookmarks_path = tmp_path / "Default" / "Bookmarks"

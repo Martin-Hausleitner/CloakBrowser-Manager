@@ -1,0 +1,297 @@
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "../lib/api";
+import { ProfileViewer } from "./ProfileViewer";
+
+const rfbMock = vi.hoisted(() => {
+  const instances: MockRFB[] = [];
+
+  class MockRFB extends EventTarget {
+    scaleViewport = false;
+    resizeSession = true;
+    showDotCursor = false;
+    disconnectCalls = 0;
+    sendKeyCalls: unknown[][] = [];
+    _display = {
+      width: 1024,
+      height: 576,
+      autoscale: vi.fn(),
+      _damage: vi.fn(),
+      flip: vi.fn(),
+    };
+
+    constructor(
+      public target: HTMLElement,
+      public url: string,
+      public options: unknown,
+    ) {
+      super();
+      instances.push(this);
+    }
+
+    disconnect() {
+      this.disconnectCalls += 1;
+      this.dispatchEvent(new Event("disconnect"));
+    }
+
+    sendKey(...args: unknown[]) {
+      this.sendKeyCalls.push(args);
+    }
+
+    emit(type: string, detail?: unknown) {
+      this.dispatchEvent(new CustomEvent(type, { detail }));
+    }
+  }
+
+  return { instances, MockRFB };
+});
+
+const apiMock = vi.hoisted(() => ({
+  getClipboard: vi.fn(),
+  setClipboard: vi.fn(),
+}));
+
+vi.mock("@novnc/novnc/core/rfb.js", () => ({
+  default: rfbMock.MockRFB,
+}));
+
+vi.mock("../lib/api", () => ({
+  api: apiMock,
+}));
+
+const reconnectDelays = [500, 1000, 2000, 5000, 10000];
+
+async function flushAsyncWork() {
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
+function setVisibilityState(value: DocumentVisibilityState) {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value,
+  });
+}
+
+function setCoarsePointer(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn().mockReturnValue({
+      matches,
+      media: "(pointer: coarse)",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }),
+  });
+}
+
+async function renderProfileViewer(onDisconnect = vi.fn()) {
+  const view = render(
+    <ProfileViewer
+      profileId="profile-1"
+      cdpUrl={null}
+      clipboardSync={true}
+      onDisconnect={onDisconnect}
+    />,
+  );
+
+  await flushAsyncWork();
+  expect(rfbMock.instances).toHaveLength(1);
+  return { onDisconnect, ...view };
+}
+
+describe("ProfileViewer", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    rfbMock.instances.length = 0;
+    apiMock.getClipboard.mockResolvedValue({ text: "" });
+    apiMock.setClipboard.mockResolvedValue({ ok: true });
+    setVisibilityState("visible");
+    setCoarsePointer(false);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        readText: vi.fn().mockResolvedValue(""),
+        writeText: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it("keeps the viewer in reconnecting state after a transient noVNC disconnect", async () => {
+    const { onDisconnect } = await renderProfileViewer();
+
+    act(() => rfbMock.instances[0]?.emit("connect"));
+    expect(screen.getByText("Connected")).toBeTruthy();
+
+    act(() => rfbMock.instances[0]?.emit("disconnect"));
+
+    expect(onDisconnect).not.toHaveBeenCalled();
+    expect(screen.getByText("Reconnecting...")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(499);
+    });
+    expect(rfbMock.instances).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await flushAsyncWork();
+    expect(rfbMock.instances).toHaveLength(2);
+    expect(onDisconnect).not.toHaveBeenCalled();
+  });
+
+  it("uses browser lifecycle events to reconnect before the backoff timer fires", async () => {
+    const { onDisconnect } = await renderProfileViewer();
+
+    act(() => rfbMock.instances[0]?.emit("connect"));
+    act(() => rfbMock.instances[0]?.emit("disconnect"));
+    act(() => window.dispatchEvent(new Event("online")));
+
+    await flushAsyncWork();
+    expect(rfbMock.instances).toHaveLength(2);
+    expect(onDisconnect).not.toHaveBeenCalled();
+  });
+
+  it("does not notify or reconnect after component cleanup", async () => {
+    const onDisconnect = vi.fn();
+    const { unmount } = render(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        onDisconnect={onDisconnect}
+      />,
+    );
+    await flushAsyncWork();
+    expect(rfbMock.instances).toHaveLength(1);
+
+    unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20000);
+    });
+
+    expect(rfbMock.instances[0]?.disconnectCalls).toBe(1);
+    expect(rfbMock.instances).toHaveLength(1);
+    expect(onDisconnect).not.toHaveBeenCalled();
+  });
+
+  it("notifies the parent only after reconnect attempts are exhausted", async () => {
+    const { onDisconnect } = await renderProfileViewer();
+
+    act(() => rfbMock.instances[0]?.emit("connect"));
+    act(() => rfbMock.instances[0]?.emit("disconnect"));
+
+    for (const [index, delay] of reconnectDelays.entries()) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delay);
+      });
+      await flushAsyncWork();
+      expect(rfbMock.instances).toHaveLength(index + 2);
+      act(() => rfbMock.instances.at(-1)?.emit("disconnect"));
+    }
+
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Connection failed")).toBeTruthy();
+    expect(screen.getByText("Connection lost after repeated reconnect attempts.")).toBeTruthy();
+  });
+
+  it("treats security failures as terminal disconnects", async () => {
+    const { onDisconnect } = await renderProfileViewer();
+
+    act(() => rfbMock.instances[0]?.emit("securityfailure", { reason: "bad auth" }));
+
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Connection failed")).toBeTruthy();
+    expect(screen.getByText("Security failure: bad auth")).toBeTruthy();
+  });
+
+  it("repaints the noVNC canvas after its container is resized", async () => {
+    const originalResizeObserver = window.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | null = null;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+
+      observe = observe;
+      unobserve = vi.fn();
+      disconnect = disconnect;
+    }
+
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      value: MockResizeObserver,
+    });
+
+    const view = await renderProfileViewer();
+    expect(observe).toHaveBeenCalledTimes(1);
+    vi.spyOn(observe.mock.calls[0][0] as HTMLElement, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 390,
+      height: 713,
+      top: 0,
+      right: 390,
+      bottom: 713,
+      left: 0,
+      toJSON: () => ({}),
+    });
+
+    act(() => resizeCallback?.([], {} as ResizeObserver));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    const instance = rfbMock.instances[0];
+    expect(instance?._display.autoscale).toHaveBeenCalledTimes(1);
+    expect(instance?._display._damage).toHaveBeenCalledWith(0, 0, 1024, 576);
+    expect(instance?._display.flip).toHaveBeenCalledTimes(1);
+
+    view.unmount();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      value: originalResizeObserver,
+    });
+  });
+
+  it("pauses clipboard polling while hidden and disables sync on coarse pointer devices", async () => {
+    setVisibilityState("hidden");
+    const hiddenViewer = await renderProfileViewer();
+
+    act(() => rfbMock.instances[0]?.emit("connect"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(api.getClipboard).not.toHaveBeenCalled();
+
+    hiddenViewer.unmount();
+    api.getClipboard.mockClear();
+    rfbMock.instances.length = 0;
+    setVisibilityState("visible");
+    setCoarsePointer(true);
+    await renderProfileViewer();
+    act(() => rfbMock.instances[0]?.emit("connect"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(api.getClipboard).not.toHaveBeenCalled();
+    expect(
+      (screen.getByTitle("Clipboard sync is disabled on touch devices") as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+});

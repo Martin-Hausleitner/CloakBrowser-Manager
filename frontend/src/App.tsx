@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { Lock, PanelLeftClose, PanelLeft } from "lucide-react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import { api, setOnUnauthorized, type ProfileCreateData } from "./lib/api";
 import { ProfileList } from "./components/ProfileList";
@@ -8,6 +8,7 @@ import { ProfileViewer } from "./components/ProfileViewer";
 import { LaunchButton } from "./components/LaunchButton";
 import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
+import { MobileSplitScreen } from "./components/mobile/MobileSplitScreen";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "empty" | "create" | "edit" | "view";
@@ -93,14 +94,16 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>("empty");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [mobileFullscreenOpen, setMobileFullscreenOpen] = useState(false);
+  const isMobile = useIsMobile();
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
 
   const handleSelect = useCallback((id: string) => {
     setSelectedId(id);
     const profile = profiles.find((p) => p.id === id);
-    setView(profile?.status === "running" ? "view" : "edit");
-  }, [profiles]);
+    setView(isMobile ? "view" : profile?.status === "running" ? "view" : "edit");
+  }, [isMobile, profiles]);
 
   const handleNew = useCallback(() => {
     setSelectedId(null);
@@ -143,11 +146,94 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
     setView("edit");
   }, []);
 
+  const handleViewportApply = useCallback(async (width: number, height: number) => {
+    if (!selectedId) return false;
+    const profile = await update(selectedId, { screen_width: width, screen_height: height });
+    return !!profile;
+  }, [selectedId, update]);
+
   if (loading) {
     return (
       <div className="h-screen flex items-center justify-center">
         <div className="text-gray-500 text-sm">Loading...</div>
       </div>
+    );
+  }
+
+  if (isMobile) {
+    if (view === "create" || (view === "edit" && selected)) {
+      const editing = view === "edit" && selected;
+
+      return (
+        <div className="flex h-dvh flex-col overflow-hidden bg-surface-0">
+          <div className="flex items-center justify-between border-b border-border bg-surface-1 px-3 py-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setView(selected ? "view" : "empty")}
+                className="mobile-icon-button"
+                aria-label="Back to mobile browser workspace"
+              >
+                <ArrowLeft className="h-4 w-4" />
+              </button>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">
+                  {editing ? selected.name : "New browser profile"}
+                </p>
+                <p className="text-[11px] text-gray-500">
+                  {editing ? "Profile settings" : "Create a reusable profile"}
+                </p>
+              </div>
+            </div>
+            {editing ? (
+              <LaunchButton
+                status={selected.status}
+                onLaunch={handleLaunch}
+                onStop={handleStop}
+              />
+            ) : null}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            <ProfileForm
+              profile={editing ? selected : null}
+              onSave={editing ? handleUpdate : handleCreate}
+              onDelete={editing ? handleDelete : undefined}
+              onCancel={() => setView(selected ? "view" : "empty")}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    const browserView =
+      selected && selected.status === "running" ? (
+        <ProfileViewer
+          key={selected.id}
+          profileId={selected.id}
+          cdpUrl={selected.cdp_url}
+          clipboardSync={selected.clipboard_sync}
+          layoutMode={mobileFullscreenOpen ? "fullscreen" : "inline"}
+          onDisconnect={handleVncDisconnect}
+        />
+      ) : null;
+
+    return (
+      <MobileSplitScreen
+        profiles={profiles}
+        selected={selected}
+        selectedId={selectedId}
+        error={error}
+        authRequired={authRequired}
+        browserView={browserView}
+        onSelect={handleSelect}
+        onNew={handleNew}
+        onEdit={() => setView("edit")}
+        onLaunch={handleLaunch}
+        onStop={handleStop}
+        onViewportApply={handleViewportApply}
+        onFullscreenChange={setMobileFullscreenOpen}
+        onLogout={onLogout}
+      />
     );
   }
 
@@ -255,4 +341,22 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
       </div>
     </div>
   );
+}
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(max-width: 767px)").matches;
+  });
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 767px)");
+    const update = () => setIsMobile(query.matches);
+
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  return isMobile;
 }

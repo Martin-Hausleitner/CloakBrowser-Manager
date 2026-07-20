@@ -21,6 +21,30 @@ else:  # Support importing browser_manager as a top-level module.
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
 
+SEARCH_ENGINE_PREFERENCES = {
+    "google": {
+        "keyword": "google.com",
+        "short_name": "Google",
+        "url": "https://www.google.com/search?q={searchTerms}",
+        "suggestions_url": "https://www.google.com/complete/search?client=chrome&q={searchTerms}",
+        "favicon_url": "https://www.google.com/favicon.ico",
+    },
+    "bing": {
+        "keyword": "bing.com",
+        "short_name": "Bing",
+        "url": "https://www.bing.com/search?q={searchTerms}",
+        "suggestions_url": "https://www.bing.com/osjson.aspx?query={searchTerms}",
+        "favicon_url": "https://www.bing.com/favicon.ico",
+    },
+    "duckduckgo": {
+        "keyword": "duckduckgo.com",
+        "short_name": "DuckDuckGo",
+        "url": "https://duckduckgo.com/?q={searchTerms}",
+        "suggestions_url": "https://duckduckgo.com/ac/?q={searchTerms}&type=list",
+        "favicon_url": "https://duckduckgo.com/favicon.ico",
+    },
+}
+
 
 def _normalize_proxy(raw: str) -> str:
     """Convert common proxy formats to http://user:pass@host:port.
@@ -56,8 +80,8 @@ def _validate_proxy(url: str) -> None:
         raise ValueError(f"Proxy URL missing port: {url}")
 
 
-def _init_profile_defaults(user_data_dir: Path) -> None:
-    """Set up bookmarks and DuckDuckGo search on first launch."""
+def _init_profile_defaults(user_data_dir: Path, search_engine: str | None = None) -> None:
+    """Set up bookmarks and the selected search engine before launch."""
     default_dir = user_data_dir / "Default"
     default_dir.mkdir(parents=True, exist_ok=True)
 
@@ -124,25 +148,29 @@ def _init_profile_defaults(user_data_dir: Path) -> None:
         bookmarks_path.write_text(json.dumps(bookmarks, indent=2))
         logger.info("Created default bookmarks for %s", user_data_dir.name)
 
-    # --- DuckDuckGo as default search engine ---
+    # --- Default search engine ---
     prefs_path = default_dir / "Preferences"
-    if not prefs_path.exists():
-        prefs = {
-            "default_search_provider_data": {
-                "template_url_data": {
-                    "keyword": "duckduckgo.com",
-                    "short_name": "DuckDuckGo",
-                    "url": "https://duckduckgo.com/?q={searchTerms}",
-                    "suggestions_url": "https://duckduckgo.com/ac/?q={searchTerms}&type=list",
-                    "favicon_url": "https://duckduckgo.com/favicon.ico",
-                }
-            },
-            "default_search_provider": {
-                "enabled": True,
-            },
-        }
-        prefs_path.write_text(json.dumps(prefs, indent=2))
-        logger.info("Set DuckDuckGo as default search for %s", user_data_dir.name)
+    if prefs_path.exists() and search_engine is None:
+        return
+
+    prefs: dict[str, Any] = {}
+    if prefs_path.exists():
+        try:
+            prefs = json.loads(prefs_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not update search preferences for %s: %s", user_data_dir.name, exc)
+            return
+
+    selected_engine = search_engine or "duckduckgo"
+    template = SEARCH_ENGINE_PREFERENCES.get(selected_engine)
+    if template is None:
+        logger.warning("Unknown search engine %r; keeping browser default", selected_engine)
+        return
+
+    prefs["default_search_provider_data"] = {"template_url_data": template}
+    prefs.setdefault("default_search_provider", {})["enabled"] = True
+    prefs_path.write_text(json.dumps(prefs, indent=2))
+    logger.info("Set %s as default search for %s", template["short_name"], user_data_dir.name)
 
 
 BASE_CDP_PORT = 5100
@@ -193,7 +221,7 @@ class BrowserManager:
             lock_path.unlink(missing_ok=True)
 
         # Set up bookmarks and search engine on first launch
-        _init_profile_defaults(user_data_dir)
+        _init_profile_defaults(user_data_dir, profile.get("search_engine"))
 
         try:
             # Start KasmVNC on the allocated display
@@ -228,7 +256,6 @@ class BrowserManager:
                 human_preset=profile.get("human_preset", "default"),
                 geoip=bool(profile.get("geoip", False)),
                 color_scheme=profile.get("color_scheme") or None,
-                search_engine=profile.get("search_engine") or None,
                 user_agent=profile.get("user_agent") or None,
                 viewport={
                     "width": profile.get("screen_width", 1920),

@@ -13,6 +13,7 @@
       system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    background: #0a0a0a;
   }
 
   /* Scrollbar styling */
@@ -62,5 +63,137 @@
   }
   .label {
     @apply block text-xs font-medium text-gray-400 mb-1;
+  }
+
+  .mobile-split-root {
+    @apply flex h-dvh flex-col overflow-hidden;
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .mobile-live-pane {
+    @apply shrink-0 border-b border-border bg-surface-1;
+  }
+
+  .mobile-control-pane {
+    @apply flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-0;
+  }
+
+  .mobile-browser-frame {
+    @apply flex h-[36dvh] min-h-48 flex-col overflow-hidden rounded-md border border-border bg-black;
+    touch-action: manipulation;
+  }
+
+  .mobile-browser-content {
+    min-height: 0;
+    flex: 1 1 0%;
+    overflow: hidden;
+  }
+
+  .mobile-browser-content > .relative,
+  .mobile-browser-content > .relative > .flex-1 {
+    height: 100%;
+  }
+
+  .mobile-browser-content > .relative > div:first-child {
+    @apply px-2 py-1;
+  }
+
+  .mobile-browser-chrome {
+    @apply flex shrink-0 items-center gap-2 border-b border-border bg-surface-1 px-2 py-1.5;
+  }
+
+  .mobile-url-bar {
+    @apply flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 py-1 text-xs text-gray-400;
+  }
+
+  .mobile-browser-placeholder {
+    @apply flex h-full items-center justify-center gap-3 px-5 text-center;
+  }
+
+  .mobile-icon-button {
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-toolbar {
+    @apply flex items-center gap-2 border-b border-border px-3 py-3;
+  }
+
+  .mobile-select {
+    @apply h-9 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-viewport-editor {
+    @apply space-y-3 border-b border-border px-3 py-3;
+  }
+
+  .mobile-preset-button {
+    @apply shrink-0 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-xs text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-grid {
+    @apply grid grid-cols-2 gap-2 border-b border-border px-3 py-3;
+  }
+
+  .mobile-grid-tile {
+    @apply min-w-0 rounded-md border border-border bg-surface-1 p-2 text-left transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-grid-thumb {
+    @apply mb-2 block aspect-video rounded bg-surface-3;
+    background-image: linear-gradient(135deg, #1f2937, #111827 48%, #2a2a2a);
+  }
+
+  .mobile-chat-header {
+    @apply flex items-center gap-2 border-b border-border px-3 py-2;
+  }
+
+  .mobile-chat-log {
+    @apply flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-3;
+  }
+
+  .mobile-step-list {
+    @apply mb-1 flex flex-col gap-1.5;
+  }
+
+  .mobile-step-pill {
+    @apply flex min-w-0 items-center gap-2 rounded-md bg-surface-1 px-2.5 py-1.5 text-xs text-gray-300;
+  }
+
+  .mobile-message {
+    @apply max-w-[88%] rounded-md px-3 py-2 text-sm leading-5;
+  }
+
+  .mobile-message-task {
+    @apply max-w-full border border-accent/30 bg-accent/10 text-indigo-100;
+  }
+
+  .mobile-message-assistant {
+    @apply self-start bg-surface-2 text-gray-200;
+  }
+
+  .mobile-message-user {
+    @apply self-end bg-accent text-white;
+  }
+
+  .mobile-chat-form {
+    @apply flex shrink-0 items-center gap-2 border-t border-border bg-surface-1 px-3 py-3;
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+
+  .mobile-send-button {
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-accent text-white transition-colors hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-live-pane-fullscreen {
+    @apply fixed inset-0 z-50 flex min-h-0 flex-col border-0 bg-black;
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .mobile-live-pane-fullscreen .mobile-browser-wrap {
+    @apply min-h-0 flex-1 px-0 pb-0;
+  }
+
+  .mobile-live-pane-fullscreen .mobile-browser-frame {
+    @apply h-full min-h-0 rounded-none border-x-0 border-b-0;
   }
 }

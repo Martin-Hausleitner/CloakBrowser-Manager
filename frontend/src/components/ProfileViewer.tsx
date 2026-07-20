@@ -6,69 +6,163 @@ interface ProfileViewerProps {
   profileId: string;
   cdpUrl: string | null;
   clipboardSync: boolean;
+  layoutMode?: "inline" | "fullscreen";
   onDisconnect: () => void;
 }
 
 // X11 keysym for V key (Ctrl is already held in VNC by the time we intercept)
 const XK_v = 0x0076;
+const RECONNECT_DELAYS_MS = [500, 1000, 2000, 5000, 10000] as const;
 
-export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboardSync, onDisconnect }: ProfileViewerProps) {
+type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
+
+function isCoarsePointerDevice() {
+  return window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
+}
+
+function shouldPollClipboard() {
+  return document.visibilityState !== "hidden";
+}
+
+export function ProfileViewer({
+  profileId,
+  cdpUrl,
+  clipboardSync: initialClipboardSync,
+  layoutMode = "inline",
+  onDisconnect,
+}: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<any>(null);
   const [connected, setConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
-  const [clipboardSync, setClipboardSync] = useState(initialClipboardSync);
+  const [clipboardSupported] = useState(() => !isCoarsePointerDevice());
+  const [clipboardSync, setClipboardSync] = useState(initialClipboardSync && !isCoarsePointerDevice());
   const [cdpCopied, setCdpCopied] = useState(false);
 
   useEffect(() => {
     let rfb: any = null;
     let cancelled = false;
+    let connecting = false;
+    let isConnected = false;
+    let terminal = false;
+    let reconnectAttempts = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+
+    const failConnection = (message: string, notifyParent: boolean) => {
+      terminal = true;
+      clearReconnectTimer();
+      isConnected = false;
+      setConnected(false);
+      setConnectionStatus("failed");
+      setError(message);
+      if (notifyParent) onDisconnect();
+    };
+
+    const scheduleReconnect = () => {
+      if (cancelled || terminal) return;
+      clearReconnectTimer();
+      isConnected = false;
+      setConnected(false);
+      setConnectionStatus("reconnecting");
+
+      const delay = RECONNECT_DELAYS_MS[reconnectAttempts];
+      if (delay === undefined) {
+        failConnection("Connection lost after repeated reconnect attempts.", true);
+        return;
+      }
+
+      reconnectAttempts += 1;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, delay);
+    };
 
     async function connect() {
+      if (cancelled || terminal || connecting) return;
+      connecting = true;
+      clearReconnectTimer();
+      setError(null);
+      setConnectionStatus(reconnectAttempts > 0 ? "reconnecting" : "connecting");
+
       try {
         // Import noVNC dynamically
         const { default: RFB } = await import("@novnc/novnc/core/rfb.js");
 
         if (cancelled) return;
+        if (!containerRef.current) throw new Error("VNC container is unavailable");
 
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const wsUrl = `${protocol}//${window.location.host}/api/profiles/${profileId}/vnc`;
 
-        rfb = new RFB(containerRef.current!, wsUrl, {
+        const instance = new RFB(containerRef.current!, wsUrl, {
           wsProtocols: ["binary"],
         });
-        rfbRef.current = rfb;
+        rfb = instance;
+        rfbRef.current = instance;
 
-        rfb.scaleViewport = true;
-        rfb.resizeSession = false;
-        rfb.showDotCursor = true;
+        instance.scaleViewport = true;
+        instance.resizeSession = false;
+        instance.showDotCursor = true;
 
-        rfb.addEventListener("connect", () => {
-          if (!cancelled) setConnected(true);
+        instance.addEventListener("connect", () => {
+          if (cancelled || rfbRef.current !== instance) return;
+          reconnectAttempts = 0;
+          isConnected = true;
+          setConnected(true);
+          setConnectionStatus("connected");
+          setError(null);
         });
 
-        rfb.addEventListener("disconnect", () => {
-          if (!cancelled) {
-            setConnected(false);
-            onDisconnect();
-          }
+        instance.addEventListener("disconnect", () => {
+          if (cancelled || terminal || rfbRef.current !== instance) return;
+          scheduleReconnect();
         });
 
-        rfb.addEventListener("securityfailure", (e: any) => {
-          setError(`Security failure: ${e.detail.reason}`);
+        instance.addEventListener("securityfailure", (e: any) => {
+          if (cancelled || rfbRef.current !== instance) return;
+          failConnection(`Security failure: ${e.detail?.reason ?? "Unknown reason"}`, true);
         });
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to connect");
+          console.warn("[vnc] connect failed:", err);
+          scheduleReconnect();
         }
+      } finally {
+        connecting = false;
       }
     }
 
+    const reconnectNow = () => {
+      if (cancelled || terminal || isConnected || connecting) return;
+      clearReconnectTimer();
+      void connect();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") reconnectNow();
+    };
+
     connect();
+    window.addEventListener("online", reconnectNow);
+    window.addEventListener("pageshow", reconnectNow);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       cancelled = true;
+      clearReconnectTimer();
+      window.removeEventListener("online", reconnectNow);
+      window.removeEventListener("pageshow", reconnectNow);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (rfb) {
         try {
           rfb.disconnect();
@@ -87,13 +181,9 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
     if (!container || !clipboardSync || !connected) return;
 
     const handleKeyDown = async (e: KeyboardEvent) => {
-      console.log("[clipboard] keydown:", e.key, "ctrl:", e.ctrlKey, "meta:", e.metaKey, "clipboardSync:", true);
-
       const isPaste =
         e.key === "v" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey;
       if (!isPaste) return;
-
-      console.log("[clipboard] intercepted Ctrl+V");
 
       // Block noVNC from sending the keystroke before clipboard is updated
       e.stopPropagation();
@@ -101,17 +191,13 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
 
       const rfb = rfbRef.current;
       if (!rfb) {
-        console.log("[clipboard] no rfb ref, aborting");
         return;
       }
 
       try {
         const text = await navigator.clipboard.readText();
-        console.log("[clipboard] host clipboard text:", text?.substring(0, 50), "len:", text?.length);
         if (text) {
-          console.log("[clipboard] calling setClipboard API...");
           await api.setClipboard(profileId, text);
-          console.log("[clipboard] setClipboard API success");
         }
       } catch (err) {
         console.warn("[clipboard] error:", err);
@@ -121,7 +207,6 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
 
       // Send full Ctrl+V sequence to VNC. We can't rely on Ctrl still being
       // held because the user may have released it during the async API call.
-      console.log("[clipboard] sending Ctrl+V to VNC");
       rfb.sendKey(0xffe3, "ControlLeft", true);   // Ctrl press
       rfb.sendKey(XK_v, "KeyV", true);             // V press
       rfb.sendKey(XK_v, "KeyV", false);            // V release
@@ -137,25 +222,19 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
   // KasmVNC BinaryClipboard type 180 → standard ServerCutText type 3)
   useEffect(() => {
     const rfb = rfbRef.current;
-    console.log("[clipboard] VNC→Host effect: rfb=", !!rfb, "sync=", clipboardSync, "connected=", connected);
     if (!rfb || !clipboardSync || !connected) return;
 
     const handleClipboard = (e: any) => {
       const text = e.detail?.text;
-      console.log("[clipboard] VNC→Host event fired, text:", text?.substring(0, 50), "len:", text?.length);
       if (text) {
-        navigator.clipboard.writeText(text).then(() => {
-          console.log("[clipboard] writeText success");
-        }).catch((err) => {
+        navigator.clipboard.writeText(text).catch((err) => {
           console.warn("[clipboard] writeText failed:", err);
         });
       }
     };
 
-    console.log("[clipboard] registering clipboard event listener on rfb");
     rfb.addEventListener("clipboard", handleClipboard);
     return () => {
-      console.log("[clipboard] removing clipboard event listener");
       rfb.removeEventListener("clipboard", handleClipboard);
     };
   }, [clipboardSync, connected]);
@@ -166,15 +245,34 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
     if (!clipboardSync || !connected) return;
 
     let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
     let lastText = "";
+
+    const clearPollTimer = () => {
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+    };
+
+    const schedulePoll = () => {
+      clearPollTimer();
+      if (!cancelled && shouldPollClipboard()) {
+        pollTimer = setTimeout(poll, 2000);
+      }
+    };
 
     const poll = async () => {
       if (cancelled) return;
+      if (!shouldPollClipboard()) {
+        schedulePoll();
+        return;
+      }
+
       try {
         const { text } = await api.getClipboard(profileId);
         if (text && text !== lastText) {
           lastText = text;
-          console.log("[clipboard] poll: new VNC clipboard:", text.substring(0, 50), "len:", text.length);
           await navigator.clipboard.writeText(text).catch((err) =>
             console.warn("[clipboard] poll writeText failed:", err)
           );
@@ -184,16 +282,19 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
         cancelled = true;
         return;
       }
-      if (!cancelled) {
-        setTimeout(poll, 2000);
-      }
+      schedulePoll();
     };
 
-    // Start polling after a short delay
-    const timer = setTimeout(poll, 2000);
+    const handleVisibilityChange = () => schedulePoll();
+    window.addEventListener("pageshow", handleVisibilityChange);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    schedulePoll();
+
     return () => {
       cancelled = true;
-      clearTimeout(timer);
+      clearPollTimer();
+      window.removeEventListener("pageshow", handleVisibilityChange);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [profileId, clipboardSync, connected]);
 
@@ -228,6 +329,57 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
     return () => container.removeEventListener("wheel", handleWheel);
   }, []);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const refreshViewport = () => {
+      refreshTimer = null;
+      const rfb = rfbRef.current;
+      if (!rfb) return;
+
+      // noVNC 1.4 can retain the fullscreen scale when its screen returns
+      // to the original client width. Re-applying the public scale option
+      // fixes the geometry; repainting from its backbuffer prevents a blank
+      // visible canvas until the next remote framebuffer update arrives.
+      rfb.scaleViewport = true;
+      const display = rfb._display;
+      const bounds = container.getBoundingClientRect();
+      if (
+        bounds.width > 0 &&
+        bounds.height > 0 &&
+        typeof display?.autoscale === "function"
+      ) {
+        // RFB's built-in ResizeObserver can miss a CSS-only fullscreen move
+        // because noVNC caches the previous client size. Use the same pinned
+        // Display.autoscale implementation with the measured host bounds.
+        display.autoscale(bounds.width, bounds.height);
+      }
+      if (
+        display?.width > 0 &&
+        display?.height > 0 &&
+        typeof display._damage === "function" &&
+        typeof display.flip === "function"
+      ) {
+        display._damage(0, 0, display.width, display.height);
+        display.flip();
+      }
+    };
+    const queueViewportRefresh = () => {
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(refreshViewport, 0);
+    };
+    const observer = new ResizeObserver(queueViewportRefresh);
+
+    observer.observe(container);
+    queueViewportRefresh();
+    return () => {
+      observer.disconnect();
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
+    };
+  }, [layoutMode, profileId]);
+
   if (error) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -246,7 +398,11 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-yellow-400 animate-pulse"}`} />
           <span className="text-xs text-gray-400">
-            {connected ? "Connected" : "Connecting..."}
+            {connectionStatus === "reconnecting"
+              ? "Reconnecting..."
+              : connected
+                ? "Connected"
+                : "Connecting..."}
           </span>
         </div>
         <div className="flex items-center gap-1">
@@ -266,10 +422,16 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
             </button>
           )}
           <button
-            onClick={() => { console.log("[clipboard] toggle:", !clipboardSync); setClipboardSync(!clipboardSync); }}
+            onClick={() => setClipboardSync(!clipboardSync)}
             className={`p-1 ${clipboardSync ? "text-accent" : "text-gray-500 hover:text-gray-300"}`}
-            title={clipboardSync ? "Disable clipboard sync" : "Enable clipboard sync"}
-            disabled={!connected}
+            title={
+              clipboardSupported
+                ? clipboardSync
+                  ? "Disable clipboard sync"
+                  : "Enable clipboard sync"
+                : "Clipboard sync is disabled on touch devices"
+            }
+            disabled={!connected || !clipboardSupported}
           >
             <ClipboardCopy className="h-3.5 w-3.5" />
           </button>
@@ -286,6 +448,7 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
       {/* VNC canvas container */}
       <div
         ref={containerRef}
+        data-vnc-layout={layoutMode}
         className="flex-1 bg-black overflow-hidden"
         style={{ minHeight: 0 }}
       />

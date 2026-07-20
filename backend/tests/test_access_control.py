@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import struct
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from backend import access_control as access
 from backend import database as db
@@ -19,6 +21,7 @@ def client_access(tmp_db, monkeypatch):
 
     monkeypatch.setattr(main, "AUTH_TOKEN", "bootstrap-test-secret")
     monkeypatch.setattr(main, "ACCESS_CONTROL_ENABLED", True)
+    main._login_failures.clear()
     monkeypatch.setattr(main.browser_mgr, "cleanup_stale", AsyncMock())
     monkeypatch.setattr(main.browser_mgr, "cleanup_all", AsyncMock())
     monkeypatch.setattr(main.browser_mgr.vnc, "cleanup_stale", AsyncMock())
@@ -179,6 +182,212 @@ def test_paperclip_agent_key_is_scoped_and_rotation_revokes_old_key(client_acces
     assert rotated.status_code == 200
     assert rotated.json()["api_key"] != agent["api_key"]
     assert client_access.get("/api/profiles", headers=agent_headers).status_code == 401
+
+
+def test_scoped_user_cannot_reach_out_of_scope_vnc_upstream(client_access: TestClient, monkeypatch):
+    from backend import main
+
+    alpha, beta = create_scoped_profiles()
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "viewer-ws",
+            "password": "viewer-ws-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    )
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login", json={"username": "viewer-ws", "password": "viewer-ws-password-123"}
+    ).status_code == 200
+
+    main.browser_mgr.running[beta["id"]] = SimpleNamespace(ws_port=6100, cdp_port=5100, display=100)
+
+    async def fail_if_vnc_upstream_is_used(*_args, **_kwargs):
+        raise AssertionError("out-of-scope VNC request reached upstream")
+
+    monkeypatch.setattr("websockets.connect", fail_if_vnc_upstream_is_used)
+    try:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client_access.websocket_connect(f"/api/profiles/{beta['id']}/vnc"):
+                pass
+        assert exc.value.code == 4404
+    finally:
+        main.browser_mgr.running.pop(beta["id"], None)
+
+
+def test_scoped_agent_cannot_reach_out_of_scope_cdp_upstreams(client_access: TestClient, monkeypatch):
+    from backend import main
+
+    alpha, beta = create_scoped_profiles()
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Paperclip CDP agent",
+            "paperclip_agent_id": "paperclip-agent-cdp",
+            "grants": [{"sandbox_id": "alpha", "permission": "automate"}],
+        },
+    )
+    agent_headers = {"Authorization": f"Bearer {created.json()['api_key']}"}
+    main.browser_mgr.running[beta["id"]] = SimpleNamespace(ws_port=6101, cdp_port=5101, display=101)
+
+    class ForbiddenAsyncClient:
+        async def __aenter__(self):
+            raise AssertionError("out-of-scope CDP request reached HTTP upstream")
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def fail_if_cdp_upstream_is_used(*_args, **_kwargs):
+        raise AssertionError("out-of-scope CDP request reached WebSocket upstream")
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda *_args, **_kwargs: ForbiddenAsyncClient())
+    monkeypatch.setattr("websockets.connect", fail_if_cdp_upstream_is_used)
+    try:
+        for path in (
+            f"/api/profiles/{beta['id']}/cdp",
+            f"/api/profiles/{beta['id']}/cdp/devtools/page/OUT_OF_SCOPE",
+        ):
+            with pytest.raises(WebSocketDisconnect) as exc:
+                with client_access.websocket_connect(path, headers=agent_headers):
+                    pass
+            assert exc.value.code == 4404
+    finally:
+        main.browser_mgr.running.pop(beta["id"], None)
+
+
+def test_human_login_failures_are_throttled_per_username_and_client(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    client_ip = {"value": "198.51.100.10"}
+    monkeypatch.setattr(main, "_client_host", lambda _request: client_ip["value"])
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "limited-user",
+            "password": "limited-user-password-123",
+            "grants": [],
+        },
+    )
+
+    client_access.cookies.clear()
+    for _ in range(5):
+        failed = client_access.post(
+            "/api/auth/login",
+            json={"username": "limited-user", "password": "wrong-password-123"},
+        )
+        assert failed.status_code == 401
+
+    throttled = client_access.post(
+        "/api/auth/login",
+        json={"username": "limited-user", "password": "wrong-password-123"},
+    )
+    assert throttled.status_code == 429
+    assert throttled.headers["retry-after"]
+
+    client_ip["value"] = "198.51.100.11"
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "limited-user", "password": "limited-user-password-123"},
+    ).status_code == 200
+    client_access.cookies.clear()
+
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "other-limited-user",
+            "password": "other-limited-user-password-123",
+            "grants": [],
+        },
+    )
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "other-limited-user", "password": "other-limited-user-password-123"},
+    ).status_code == 200
+
+
+def test_login_failure_state_expires_old_entries(monkeypatch):
+    from backend import main
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(main.time, "monotonic", lambda: clock["now"])
+    main._login_failures.clear()
+
+    main._record_login_failure(("stale-user", "198.51.100.20"))
+    assert ("stale-user", "198.51.100.20") in main._login_failures
+
+    clock["now"] += main._LOGIN_FAILURE_TTL_SECONDS + 0.1
+    main._cleanup_login_failures()
+    assert ("stale-user", "198.51.100.20") not in main._login_failures
+
+    blocked_key = ("blocked-user", "198.51.100.21")
+    for _ in range(main._LOGIN_FAILURE_LIMIT):
+        main._record_login_failure(blocked_key)
+    assert main._login_backoff_remaining(blocked_key) > 0
+
+    clock["now"] += main._LOGIN_BACKOFF_SECONDS + 0.1
+    main._cleanup_login_failures()
+    assert blocked_key not in main._login_failures
+
+
+def test_login_failure_state_is_bounded_with_oldest_eviction(monkeypatch):
+    from backend import main
+
+    clock = {"now": 2000.0}
+    monkeypatch.setattr(main.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(main, "_LOGIN_FAILURE_MAX_KEYS", 3)
+    main._login_failures.clear()
+
+    for index in range(5):
+        main._record_login_failure((f"user-{index}", "198.51.100.30"))
+        clock["now"] += 1.0
+
+    assert set(main._login_failures) == {
+        ("user-2", "198.51.100.30"),
+        ("user-3", "198.51.100.30"),
+        ("user-4", "198.51.100.30"),
+    }
+
+
+def test_successful_human_login_resets_failed_login_backoff(client_access: TestClient):
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "reset-user",
+            "password": "reset-user-password-123",
+            "grants": [],
+        },
+    )
+
+    client_access.cookies.clear()
+    for _ in range(4):
+        assert client_access.post(
+            "/api/auth/login",
+            json={"username": "reset-user", "password": "wrong-password-123"},
+        ).status_code == 401
+
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "reset-user", "password": "reset-user-password-123"},
+    ).status_code == 200
+    client_access.cookies.clear()
+
+    for _ in range(4):
+        assert client_access.post(
+            "/api/auth/login",
+            json={"username": "reset-user", "password": "wrong-password-123"},
+        ).status_code == 401
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "reset-user", "password": "reset-user-password-123"},
+    ).status_code == 200
 
 
 def test_access_management_is_admin_only(client_access: TestClient):

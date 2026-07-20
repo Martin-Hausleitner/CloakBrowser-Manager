@@ -12,6 +12,7 @@ import logging
 import os
 import struct
 import shutil
+import time
 from contextlib import asynccontextmanager
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -91,6 +92,11 @@ if os.environ.get("ACCESS_CONTROL_ENABLED") and not AUTH_TOKEN:
 
 # Paths that bypass authentication even when AUTH_TOKEN is set
 _AUTH_EXEMPT = frozenset({"/api/auth/status", "/api/auth/login", "/api/status"})
+_LOGIN_FAILURE_LIMIT = 5
+_LOGIN_BACKOFF_SECONDS = 60.0
+_LOGIN_FAILURE_TTL_SECONDS = 10 * 60.0
+_LOGIN_FAILURE_MAX_KEYS = 1024
+_login_failures: dict[tuple[str, str], tuple[int, float, float]] = {}
 
 
 def _check_auth(scope: Scope) -> bool:
@@ -121,6 +127,68 @@ def _check_auth(scope: Scope) -> bool:
 
 def _access_identity(scope: Scope) -> access.AccessIdentity | None:
     return access.identity_from_scope(scope, AUTH_TOKEN, ACCESS_CONTROL_ENABLED)
+
+
+def _client_host(request: Request) -> str:
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _login_throttle_key(username: str, request: Request) -> tuple[str, str]:
+    return (username.casefold(), _client_host(request))
+
+
+def _cleanup_login_failures(now: float | None = None) -> None:
+    now = time.monotonic() if now is None else now
+    expired = [
+        key for key, (_count, blocked_until, last_seen) in _login_failures.items()
+        if (blocked_until > 0 and blocked_until <= now)
+        or last_seen + _LOGIN_FAILURE_TTL_SECONDS <= now
+    ]
+    for key in expired:
+        _login_failures.pop(key, None)
+
+    overflow = len(_login_failures) - _LOGIN_FAILURE_MAX_KEYS
+    if overflow <= 0:
+        return
+
+    oldest = sorted(
+        _login_failures.items(),
+        key=lambda item: (item[1][2], item[0][0], item[0][1]),
+    )
+    for key, _value in oldest[:overflow]:
+        _login_failures.pop(key, None)
+
+
+def _login_backoff_remaining(key: tuple[str, str], now: float | None = None) -> float:
+    now = time.monotonic() if now is None else now
+    _cleanup_login_failures(now)
+    count, blocked_until, _last_seen = _login_failures.get(key, (0, 0.0, 0.0))
+    if count < _LOGIN_FAILURE_LIMIT:
+        return 0.0
+    remaining = blocked_until - now
+    if remaining <= 0:
+        _login_failures.pop(key, None)
+        return 0.0
+    return remaining
+
+
+def _record_login_failure(key: tuple[str, str]) -> None:
+    now = time.monotonic()
+    _cleanup_login_failures(now)
+    count, blocked_until, _last_seen = _login_failures.get(key, (0, 0.0, 0.0))
+    if blocked_until <= now:
+        blocked_until = 0.0
+    count += 1
+    if count >= _LOGIN_FAILURE_LIMIT:
+        blocked_until = now + _LOGIN_BACKOFF_SECONDS
+    _login_failures[key] = (count, blocked_until, now)
+    _cleanup_login_failures(now)
+
+
+def _reset_login_failures(key: tuple[str, str]) -> None:
+    _login_failures.pop(key, None)
 
 
 def _is_https(request: Request) -> bool:
@@ -631,9 +699,24 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
 
     if not ACCESS_CONTROL_ENABLED or not body.username or not body.password:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    throttle_key = _login_throttle_key(body.username, request)
+    retry_after = _login_backoff_remaining(throttle_key)
+    if retry_after > 0:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts",
+            headers={"Retry-After": str(max(1, int(retry_after)))},
+        )
     user = db.get_access_user_by_username(body.username)
-    if not user or not bool(user.get("active")) or not access.verify_password(body.password, str(user["password_hash"])):
+    valid_user = (
+        user
+        and bool(user.get("active"))
+        and access.verify_password(body.password, str(user["password_hash"]))
+    )
+    if not valid_user:
+        _record_login_failure(throttle_key)
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    _reset_login_failures(throttle_key)
     session = access.create_session(str(user["id"]), AUTH_TOKEN)
     response.set_cookie(
         key="cbm_session",

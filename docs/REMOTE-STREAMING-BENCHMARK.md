@@ -26,6 +26,19 @@ Für den aktuellen CloakBrowser Manager bleibt **KasmVNC 1.3.3 + noVNC 1.4.x bei
 | Sunshine + Moonlight | Architektur und Clientmodell geprüft; kein passender allgemeiner Web-Embed-Pfad | Architekturprüfung | Kein Web-MVP-Core |
 | Browser-Use Chat UI | Interaktions- und Informationsarchitektur geprüft | UI-Referenz | Als UX-Referenz, nicht als Streamingstack |
 
+## Upstream-Snapshot
+
+Die folgende Einordnung hält den Stand der verglichenen Projekte am 20. Juli 2026 fest. Sie ist bewusst knapp und ergänzt die Messwerte oben um den aktuellen Funktionskontext der jeweiligen Upstreams:
+
+- **KasmVNC 1.4.0**: Die offizielle Doku sagt explizit, dass die Dokumentationsversion zur installierten Version passen soll, und beschreibt KasmVNC als modernen, browserbasierten Streaming-Stack mit Fokus auf Sicherheit und einfacher Bereitstellung.
+- **noVNC**: Das Upstream-README beschreibt noVNC als HTML-VNC-Client und App mit Unterstützung für moderne Browser inklusive mobiler Browser, Skalierung, Touch-Gesten und Clipboard.
+- **Selkies**: Die Projektseite beschreibt Selkies als HTML5-Remote-Desktop mit WebSockets als Standardtransport, optionalem WebRTC und einem Performance-Ziel von mindestens 60 fps bei Full-HD.
+- **Sunshine**: Das Upstream-README positioniert Sunshine als Game-Stream-Host mit Web-UI für Konfiguration und Pairing aus Browser oder mobilem Gerät.
+- **Moonlight Qt**: Das Upstream-README nennt explizit mobile Clients für Android und iOS, also ein starkes Signal für den nativen-Client-Pfad statt eines eingebetteten Web-Views.
+- **Browser Use Chat UI**: Die offizielle Tutorial-Seite beschreibt den Session-Flow mit Live-Browser-Preview, Streaming-Messages, Follow-ups und Recording-Download. Genau diese Interaktionsidee ist die UX-Referenz für unseren mobilen Composer, nicht die Streaming-Schicht selbst.
+
+Diese Snapshot-Einordnung ändert die Produktentscheidung nicht: Für den aktuellen CloakBrowser-Manager bleibt KasmVNC 1.3.3 + noVNC 1.4.x die am besten nachgewiesene Web-Basis, während Browser Use nur als Chat-/Session-UX-Referenz dient.
+
 ## KasmVNC/noVNC: lokale Messungen
 
 | Lauf | Browserstart | WebSocket-Verbindung | Erster Frame | Frame-Payload | RAM |

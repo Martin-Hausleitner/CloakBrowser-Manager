@@ -428,8 +428,8 @@ Stack-Entscheidung:
 
 - **Aktuell beibehalten:** KasmVNC 1.3.3 + kompatibles noVNC 1.4.x.
 - **noVNC 1.7 nicht blind aktualisieren:** ESM-Exports und entfernte `showDotCursor`-API erfordern Viewer-Migration.
-- **KasmVNC 1.4 getrennt evaluieren:** Upstream verspricht weniger CPU/Browser-RAM, aber erst nach einem sauberen Kompatibilitäts- und Safari-Test übernehmen.
-- **Selkies nur als isolierter POC:** WebSocket-H.264/JPEG ist interessant; der lokal getestete Serverstart beweist noch keinen funktionierenden iPhone-Browserstream.
+- **KasmVNC 1.4 nicht migrieren:** Der isolierte 1.3.3/1.4.0-E2E-Vergleich zeigte keinen Medianvorteil und einen deutlichen 1.4-Ausreißer; 1.3.3 bleibt die risikoärmere Basis.
+- **Selkies nur als isolierter POC:** JPEG und CPU-H.264 haben lokal einen echten CloakBrowser-Stream samt Eingabe geliefert. Der rohe Client ist in einer iPhone-Emulation sichtbar letterboxed, nicht in den Profil-/VNC-Pfad integriert und kein Mobile-Safari-Nachweis.
 - **Sunshine/Moonlight nicht als Web-Embed-Core:** geeignet höchstens als externer nativer Companion-Flow, nicht als eingebettete Web-Oberfläche.
 
 Optimiere zuerst:
@@ -680,9 +680,8 @@ P1 – produktiver Task-Workspace:
 
 P2 – Streaming-Evaluation:
 
-- KasmVNC 1.4 isolierter Vergleich;
 - noVNC-1.7-Migration mit ESM/API-Anpassung;
-- Selkies WebSocket-H.264/JPEG POC;
+- Selkies nur bei Bedarf mit Mobile-Safari-, Tailscale-HTTPS-, Auth- und Produktintegrations-Abnahme weiter bewerten;
 - erst nach identischem Testprofil Entscheidung über Stackwechsel.
 
 ### 32. Definition of Done

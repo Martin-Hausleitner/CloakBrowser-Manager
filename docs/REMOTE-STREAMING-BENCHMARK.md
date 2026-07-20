@@ -11,7 +11,7 @@ Für den aktuellen CloakBrowser Manager bleibt **KasmVNC 1.3.3 + noVNC 1.4.x bei
 - Der vorhandene Stack ist der einzige Kandidat, dessen vollständige Kette `Browser → X11 → KasmVNC → FastAPI-WebSocket-Proxy → noVNC → echter Canvas` lokal end-to-end nachgewiesen wurde.
 - 1024 × 576 benötigt im warmen Vergleich deutlich weniger Startzeit und RAM als 1440 × 900.
 - Der isolierte A/B-Lauf bestätigt keinen Geschwindigkeitsgewinn durch KasmVNC 1.4; 1.3.3 bleibt deshalb die risikoärmere Produktionsbasis.
-- Selkies ist ein interessanter WebRTC/WebSocket-Video-POC. Der bisherige Lauf beweist Serverbereitschaft, aber noch keinen vollständigen Browserstream.
+- Selkies liefert im isolierten WebSocket-POC einen echten CloakBrowser-Stream samt Eingabe. Der rohe Client ist aber auf einem iPhone-Viewport sichtbar letterboxed und nicht in den Produkt- und Profil-Lifecycle integriert.
 - Sunshine/Moonlight passt eher zu einem nativen Companion-Client als zu einem eingebetteten iPhone-Web-Viewer.
 - noVNC 1.7 ist kein Drop-in-Update für den aktuellen Viewer.
 
@@ -22,7 +22,7 @@ Für den aktuellen CloakBrowser Manager bleibt **KasmVNC 1.3.3 + noVNC 1.4.x bei
 | KasmVNC 1.3.3 + noVNC 1.4.x | Vollständiger echter Browserstream und Mobile-Vollbild lokal geprüft | E2E-verifiziert | Beibehalten |
 | KasmVNC 1.4 | Vollständiger isolierter Browser-, Mobile- und RFB/CDP-E2E-Lauf gegen dieselbe App-Konfiguration bestanden; kein Performancegewinn gegenüber 1.3.3 | E2E-verifiziert, lokale Stichprobe | Nicht migrieren |
 | noVNC 1.7 | Build scheitert ohne Migration an ESM-/Export-Änderungen und entfernter `showDotCursor`-API | Kompatibilitätsprüfung | Nicht direkt aktualisieren |
-| Selkies | Serverstart für H.264/JPEG/WebRTC gemessen; vollständiges Browserbild nicht bewiesen | Server-Smoke-Test | Nur isolierter POC |
+| Selkies | Echter CloakBrowser auf X11, JPEG- und H.264-Frame im Browser sowie Remote-Eingabe lokal nachgewiesen; keine Produktintegration und kein brauchbares mobiles Raw-UI | Isolierter Browser-E2E-POC | Nicht als Drop-in ersetzen |
 | Sunshine + Moonlight | Architektur und Clientmodell geprüft; kein passender allgemeiner Web-Embed-Pfad | Architekturprüfung | Kein Web-MVP-Core |
 | Browser-Use Chat UI | Interaktions- und Informationsarchitektur geprüft | UI-Referenz | Als UX-Referenz, nicht als Streamingstack |
 
@@ -57,7 +57,7 @@ Am 20. Juli 2026 wurden beide KasmVNC-Versionen in getrennten lokalen Containern
 
 Die fünf warmen Launchwerte lauten für 1.3.3 `919,8 / 834,6 / 810,5 / 831,6 / 820,9 ms` und für 1.4.0 `1.750,5 / 922,3 / 807,3 / 830,4 / 833,2 ms`. Die erste Live-Verbindung ist je Version nur einmal aus einem gestoppten Profil gemessen und daher kein statistischer Beweis. Zusammen mit dem fehlenden Medianvorteil und dem 1.4-Ausreißer reicht die Evidenz aber klar gegen ein Upgrade im Mobile-MVP.
 
-## Selkies: bisheriger POC
+## Selkies: isolierter Browserstream-POC
 
 Das arm64-Image war ungefähr 1,245 GB groß. Der erste korrigierte Build benötigte ungefähr 85 Sekunden; danach waren die relevanten Layer gecacht.
 
@@ -67,7 +67,18 @@ Das arm64-Image war ungefähr 1,245 GB groß. Der erste korrigierte Build benöt
 | JPEG | 2.141 ms | ca. 1–2,3 % | ca. 73–75 MiB |
 | WebRTC | 1.569 ms | ca. 1–2,3 % | ca. 73–75 MiB |
 
-Wichtige Grenze: Der Test erreichte den Streamingserver, lieferte aber nur ein leeres Testbild. GPU- und Audio-Unterstützung waren in dieser Umgebung nicht vollständig verfügbar. Diese Zahlen dürfen daher nicht als Browser-E2E- oder First-Interactive-Werte mit KasmVNC verglichen werden.
+Der frühere Server-Smoke-Test wurde danach zu einem echten, aber bewusst isolierten Browserstream erweitert. Dafür wurde der echte, aktuell verwendete CloakBrowser-Chromium auf einem separaten X11-Display gestartet und über den Selkies-WebSocket-Client betrachtet. Das Image enthielt die gebauten Web-Assets nicht; der Client musste deshalb aus dem vorhandenen Selkies-Web-Quellbaum gebaut werden. Dieser Aufbau ist ein lokales Testartefakt, keine vorgeschlagene Produktionsinstallation.
+
+| Modus | Frische Clients bis erster nichtschwarzer Frame | Median | Remote-Bild und Eingabe | Momentaufnahme nach Messung |
+|---|---|---:|---|---|
+| JPEG | 1.482,2 / 1.182,2 / 981,7 ms | 1.182,2 ms | echter CloakBrowser sichtbar; Tastatureingabe im Browser nachgewiesen | 1,21 % CPU, 195,9 MiB Container-RAM |
+| H.264 | 2.317,9 / 1.634,4 / 1.686,5 ms | 1.686,5 ms | echter CloakBrowser sichtbar; Klick auf den Stream, `Control+L`, danach `h` in der Remote-Adressleiste sichtbar | 19,49 % CPU, 406,7 MiB Container-RAM |
+
+Die Messung startet jeweils einen **frischen Browserclient gegen einen bereits laufenden Selkies-Server** bei 1280 × 576. Sie ist deshalb nur innerhalb dieses Selkies-POCs vergleichbar, nicht mit den KasmVNC-API-Launch- oder Profilstartzeiten. Die RAM-/CPU-Werte sind einzelne, nachgelagerte Momentaufnahmen und kein statistischer Vergleich. In dieser CPU-Umgebung fand Selkies keine GPU; H.264 fiel auf CPU-Encoding zurück. JPEG war im untersuchten Pfad schneller und leichter.
+
+Die H.264-Ausgabe wurde zusätzlich mit einer iPhone-12-Browseremulation geöffnet. Ein nichtschwarzer Frame kam an, die Rohoberfläche blieb jedoch stark letterboxed und behielt das 1280-×-576-Desktopbild. Das ist kein akzeptabler mobiler Produktzustand. Die Emulation verwendet Chromium mit iPhone-User-Agent und ersetzt weder Mobile Safari/WebKit noch ein physisches iPhone.
+
+Damit ist Selkies als Techniknachweis weiter als der ursprüngliche Server-Smoke, aber kein direkter Ersatz für den bestehenden KasmVNC/noVNC- und FastAPI-Profilpfad: Es fehlen die Produktintegration, das mobile Shell-/Grid-/Composer-Verhalten, eine authentifizierte Tailscale-HTTPS-Abnahme, Mobile-Safari-Interaktionen und ein vergleichbarer WebRTC-E2E-Lauf.
 
 ## Sunshine/Moonlight
 
@@ -106,7 +117,8 @@ Die folgenden `HEAD`-Stände wurden am 20. Juli 2026 direkt aus den öffentliche
 
 ## Offene Nachweise
 
-- Selkies: echter CloakBrowser-Desktop statt leerem Testframe, inklusive iPhone-Webclient.
+- Selkies: echter Mobile-Safari-/WebKit-Lauf auf einem physischen iPhone, Authentifizierung und Tailscale-HTTPS sowie ein bewusstes mobiles Client-Layout statt des nachgewiesenen Letterbox-POCs.
+- Selkies: WebRTC-Modus unter derselben echten Browser- und Eingabeprobe; der hier dokumentierte Browser-E2E nutzt ausschließlich den WebSocket-Modus.
 - Physisches iPhone: Safari über freigegebenes Tailscale Serve/HTTPS. Der konkrete Aktivierungsversuch wurde vom Tailnet mit `Serve is not enabled on your tailnet` abgelehnt; ein Administrator muss Serve freigeben, bevor eine ehrliche iPhone-URL und der Safari-E2E-Test möglich sind.
 - Mehrfachmessung der kompletten Interaktionskette: fünf Start-zu-erster-nichtleerer-Frame- und Eingabeantwort-Läufe je Version, nicht nur API-Launches.
 

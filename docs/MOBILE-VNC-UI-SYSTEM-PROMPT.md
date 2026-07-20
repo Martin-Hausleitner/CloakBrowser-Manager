@@ -30,7 +30,7 @@ Das MVP ist erfolgreich, wenn ein Nutzer auf einem iPhone-Viewport von 390 × 84
 ### 2. Verbindliche Produktwahrheiten
 
 - Das bestehende Desktop-UI bleibt erhalten. Mobile Anpassungen dürfen den Desktop-Flow nicht regressieren.
-- Mobile wird bei maximal 767 CSS-Pixeln aktiviert.
+- Mobile wird bei maximal 767 CSS-Pixeln aktiviert. Touch-/Coarse-Pointer-Geräte bleiben bis 1024 CSS-Pixeln im mobilen Workspace, damit iPhone-Landscape und Tablets nicht versehentlich in das Desktop-UI wechseln.
 - Der Root-Container verwendet `100dvh`, nicht nur `100vh`.
 - Safe Areas über `env(safe-area-inset-top)` und `env(safe-area-inset-bottom)` sind zwingend.
 - Der Live-Browser darf auf Mobile niemals pauschal ausgeblendet werden.
@@ -137,7 +137,8 @@ Der Browser-Frame ist im Inline-Modus ungefähr 36–42 `dvh` hoch, mindestens 1
 
 Unterstütze mindestens 667 × 375, 844 × 390 und 932 × 430.
 
-- Reduziere vertikale Chrome-Höhen, ohne Touch-Targets unter 36 px zu drücken.
+- Nutze bei höchstens 500 px Höhe einen horizontalen Split mit ungefähr 58 % Browser und 42 % Steuerbereich.
+- Reduziere vertikale Chrome-Höhen, ohne Touch-Targets unter 44 px zu drücken.
 - Der Browser bleibt sichtbar und erhält mindestens 120 px nutzbare Höhe.
 - Der Composer darf weder Browser noch Profilaktionen überdecken.
 - Wenn der vertikale Split zu eng wird, dürfen Step-Chips kompakter oder eingeklappt werden.
@@ -349,6 +350,9 @@ Composer:
 - sticky am unteren Rand der Control-Pane;
 - untere Safe Area wird addiert;
 - Textarea wächst bis maximal 120–144 px;
+- eine Dateiaktion, Run Settings und Modellauswahl sind als Browser-Use-artige Controls sichtbar;
+- Datei und Run Settings bleiben im MVP ausdrücklich lokale Demo-Controls;
+- die Modellauswahl kennzeichnet jede Option sichtbar als Demo, solange keine echte Task-API verbunden ist;
 - Enter sendet, Shift+Enter erzeugt Zeilenumbruch, sobald dieser Tastaturvertrag implementiert ist;
 - leere/Whitespace-Nachrichten werden nicht gesendet;
 - Send-Button besitzt mindestens 44 × 44 px im finalen Produkt;
@@ -522,6 +526,8 @@ Automatisierte Mindestabdeckung:
 
 - Mobile Chat sendet nicht-leere Nachricht und leert Composer.
 - Whitespace wird nicht gesendet.
+- Attach-, Run-Settings- und Modell-Controls sind programmatisch beschriftet.
+- Coarse-Pointer-Landscape bis 1024 px rendert weiterhin den Mobile Workspace.
 - Viewport-Preset ändert Werte.
 - Apply zeigt Erfolg nur bei erfolgreicher Persistenz.
 - Grid öffnet und Profilwahl funktioniert.

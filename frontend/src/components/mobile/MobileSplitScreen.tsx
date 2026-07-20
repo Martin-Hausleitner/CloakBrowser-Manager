@@ -9,10 +9,12 @@ import {
   Globe2,
   MessageSquareText,
   MonitorSmartphone,
+  Paperclip,
   Pencil,
   Play,
   Plus,
   Send,
+  SlidersHorizontal,
   Shrink,
   Square,
 } from "lucide-react";
@@ -94,7 +96,11 @@ export function MobileSplitScreen({
   const [viewportSaved, setViewportSaved] = useState(false);
   const [viewportSaveFailed, setViewportSaveFailed] = useState(false);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
+  const [runSettingsOpen, setRunSettingsOpen] = useState(false);
+  const [demoModel, setDemoModel] = useState("minimax-m3");
+  const [attachmentName, setAttachmentName] = useState<string | null>(null);
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const viewportProfileIdRef = useRef(selected?.id);
 
   const runningProfiles = useMemo(
@@ -450,6 +456,23 @@ export function MobileSplitScreen({
           ))}
         </div>
 
+        {runSettingsOpen ? (
+          <div className="mobile-run-settings" aria-label="Demo run settings">
+            <div>
+              <p className="text-xs font-medium text-gray-200">Run settings</p>
+              <p className="mt-0.5 text-[11px] text-gray-500">Local demo controls; no cloud task is started.</p>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-gray-300">
+              <input type="checkbox" defaultChecked />
+              Keep browser visible
+            </label>
+            <label className="flex items-center gap-2 text-xs text-gray-300">
+              <span>Max steps</span>
+              <input className="input ml-auto w-20" type="number" min={1} max={100} defaultValue={25} />
+            </label>
+          </div>
+        ) : null}
+
         <form className="mobile-chat-form" onSubmit={sendMessage}>
           <label className="sr-only" htmlFor="mobile-task-input">
             Message
@@ -462,9 +485,54 @@ export function MobileSplitScreen({
             rows={1}
             placeholder="Send a follow-up..."
           />
-          <button type="submit" className="mobile-send-button" aria-label="Send message">
-            <Send className="h-4 w-4" />
-          </button>
+          <div className="mobile-composer-toolbar">
+            <input
+              ref={attachmentInputRef}
+              type="file"
+              className="sr-only"
+              aria-label="Choose demo attachment"
+              onChange={(event) => setAttachmentName(event.target.files?.[0]?.name ?? null)}
+            />
+            <button
+              type="button"
+              className="mobile-composer-button"
+              aria-label="Attach files"
+              title="Attach files"
+              onClick={() => attachmentInputRef.current?.click()}
+            >
+              <Paperclip className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              className="mobile-composer-button"
+              aria-label="Run settings"
+              aria-expanded={runSettingsOpen}
+              title="Run settings"
+              onClick={() => setRunSettingsOpen((open) => !open)}
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+            </button>
+            <label className="min-w-0 flex-1">
+              <span className="sr-only">Select demo model</span>
+              <select
+                className="mobile-composer-select"
+                value={demoModel}
+                onChange={(event) => setDemoModel(event.target.value)}
+              >
+                <option value="minimax-m3">MiniMax M3 · demo</option>
+                <option value="browser-use-v4">Browser Use v4 · demo</option>
+                <option value="local-shell">Local shell · demo</option>
+              </select>
+            </label>
+            <button type="submit" className="mobile-send-button" aria-label="Run task">
+              <Send className="h-4 w-4" />
+            </button>
+          </div>
+          {attachmentName ? (
+            <p className="truncate text-[11px] text-gray-500" aria-live="polite">
+              Demo attachment: {attachmentName}
+            </p>
+          ) : null}
         </form>
 
         {authRequired ? (

@@ -77,6 +77,9 @@ describe("MobileSplitScreen", () => {
     expect(screen.getByText("https://demo.local/task")).toBeTruthy();
     expect(screen.getByLabelText("Demo task steps")).toBeTruthy();
     expect(screen.getByPlaceholderText("Send a follow-up...")).toBeTruthy();
+    expect(screen.getByLabelText("Attach files")).toBeTruthy();
+    expect(screen.getByLabelText("Run settings")).toBeTruthy();
+    expect(screen.getByLabelText("Select demo model")).toBeTruthy();
   });
 
   it("adds a local user message and demo reply when submitted", () => {
@@ -85,10 +88,34 @@ describe("MobileSplitScreen", () => {
     fireEvent.change(screen.getByPlaceholderText("Send a follow-up..."), {
       target: { value: "Open the pricing page" },
     });
-    fireEvent.click(screen.getByLabelText("Send message"));
+    fireEvent.click(screen.getByLabelText("Run task"));
 
     expect(screen.getByText("Open the pricing page")).toBeTruthy();
     expect(screen.getByText(/Demo reply queued locally/)).toBeTruthy();
+  });
+
+  it("does not submit an empty or whitespace-only demo task", () => {
+    renderMobileSplit();
+
+    fireEvent.change(screen.getByPlaceholderText("Send a follow-up..."), {
+      target: { value: "   " },
+    });
+    fireEvent.click(screen.getByLabelText("Run task"));
+
+    expect(screen.queryByText(/^\s+$/)).toBeNull();
+    expect(screen.queryByText(/Demo reply queued locally/)).toBeNull();
+    expect((screen.getByPlaceholderText("Send a follow-up...") as HTMLTextAreaElement).value).toBe("   ");
+  });
+
+  it("opens Browser Use-style demo run settings and changes the model", () => {
+    renderMobileSplit();
+
+    fireEvent.click(screen.getByLabelText("Run settings"));
+    expect(screen.getByLabelText("Demo run settings")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Select demo model"), {
+      target: { value: "browser-use-v4" },
+    });
+    expect((screen.getByLabelText("Select demo model") as HTMLSelectElement).value).toBe("browser-use-v4");
   });
 
   it("updates the editable viewport from a preset", () => {
@@ -101,6 +128,16 @@ describe("MobileSplitScreen", () => {
 
     expect(screen.getByText(/768 x 1024/)).toBeTruthy();
     expect(props.onViewportApply).toHaveBeenCalledWith(768, 1024);
+  });
+
+  it("shows a viewport save error when persistence fails", async () => {
+    renderMobileSplit({ onViewportApply: vi.fn().mockResolvedValue(false) });
+
+    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+    fireEvent.click(screen.getByText("Apply"));
+
+    expect(await screen.findByText("Could not save viewport")).toBeTruthy();
+    expect(screen.queryByText("Saved")).toBeNull();
   });
 
   it("shows the running session grid", () => {

@@ -12,6 +12,7 @@ import { MobileSplitScreen } from "./components/mobile/MobileSplitScreen";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "empty" | "create" | "edit" | "view";
+const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
@@ -346,11 +347,11 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(() => {
     if (typeof window === "undefined") return false;
-    return window.matchMedia("(max-width: 767px)").matches;
+    return window.matchMedia(MOBILE_WORKSPACE_QUERY).matches;
   });
 
   useEffect(() => {
-    const query = window.matchMedia("(max-width: 767px)");
+    const query = window.matchMedia(MOBILE_WORKSPACE_QUERY);
     const update = () => setIsMobile(query.matches);
 
     update();

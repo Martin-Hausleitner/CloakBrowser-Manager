@@ -71,7 +71,7 @@
   }
 
   .mobile-live-pane {
-    @apply shrink-0 border-b border-border bg-surface-1;
+    @apply flex shrink-0 flex-col border-b border-border bg-surface-1;
   }
 
   .mobile-control-pane {
@@ -95,7 +95,12 @@
   }
 
   .mobile-browser-content > .relative > div:first-child {
-    @apply px-2 py-1;
+    @apply min-h-11 px-1 py-0;
+  }
+
+  .mobile-browser-content > .relative > div:first-child button {
+    min-width: 44px;
+    min-height: 44px;
   }
 
   .mobile-browser-chrome {
@@ -119,7 +124,13 @@
   }
 
   .mobile-select {
-    @apply h-9 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply h-11 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-viewport-editor .input,
+  .mobile-run-settings .input,
+  .mobile-chat-form textarea {
+    min-height: 44px;
   }
 
   .mobile-viewport-editor {
@@ -127,7 +138,7 @@
   }
 
   .mobile-preset-button {
-    @apply shrink-0 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-xs text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply min-h-11 shrink-0 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-xs text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-grid {
@@ -176,12 +187,32 @@
   }
 
   .mobile-chat-form {
-    @apply flex shrink-0 items-center gap-2 border-t border-border bg-surface-1 px-3 py-3;
+    @apply flex shrink-0 flex-col gap-2 border-t border-border bg-surface-1 px-3 py-3;
     padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
   }
 
+  .mobile-composer-toolbar {
+    @apply flex w-full items-center gap-2;
+  }
+
+  .mobile-composer-button {
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-composer-select {
+    @apply h-11 w-full truncate rounded-md border border-border bg-surface-2 px-2 text-xs text-gray-200 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
   .mobile-send-button {
-    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-accent text-white transition-colors hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-accent text-white transition-colors hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-run-settings {
+    @apply grid shrink-0 gap-2 border-t border-border bg-surface-1 px-3 py-3;
+  }
+
+  .mobile-run-settings label {
+    min-height: 44px;
   }
 
   .mobile-live-pane-fullscreen {
@@ -195,5 +226,41 @@
 
   .mobile-live-pane-fullscreen .mobile-browser-frame {
     @apply h-full min-h-0 rounded-none border-x-0 border-b-0;
+  }
+}
+
+@media (max-height: 500px) and (orientation: landscape) {
+  .mobile-split-root {
+    flex-direction: row;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .mobile-live-pane:not(.mobile-live-pane-fullscreen) {
+    flex: 0 0 58%;
+    min-width: 0;
+    border-right: 1px solid #2a2a2a;
+    border-bottom: 0;
+  }
+
+  .mobile-live-pane:not(.mobile-live-pane-fullscreen) .mobile-browser-wrap {
+    min-height: 0;
+    flex: 1 1 0%;
+  }
+
+  .mobile-live-pane:not(.mobile-live-pane-fullscreen) .mobile-browser-frame {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .mobile-control-pane {
+    min-width: 0;
+    flex: 1 1 42%;
+  }
+
+  .mobile-toolbar,
+  .mobile-chat-form {
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
   }
 }

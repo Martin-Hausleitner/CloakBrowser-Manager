@@ -64,6 +64,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS profiles (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                sandbox_id TEXT NOT NULL DEFAULT 'default',
                 fingerprint_seed INTEGER NOT NULL,
                 proxy TEXT,
                 timezone TEXT,
@@ -95,6 +96,46 @@ def init_db():
                 color TEXT,
                 PRIMARY KEY (profile_id, tag)
             );
+
+            CREATE TABLE IF NOT EXISTS access_users (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                active BOOLEAN NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS access_agents (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                paperclip_agent_id TEXT,
+                key_hash TEXT NOT NULL UNIQUE,
+                active BOOLEAN NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS access_grants (
+                principal_type TEXT NOT NULL CHECK (principal_type IN ('user', 'agent')),
+                principal_id TEXT NOT NULL,
+                sandbox_id TEXT NOT NULL,
+                permission TEXT NOT NULL CHECK (permission IN ('view', 'interact', 'operate', 'automate')),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (principal_type, principal_id, sandbox_id, permission)
+            );
+
+            CREATE TABLE IF NOT EXISTS access_audit_events (
+                id TEXT PRIMARY KEY,
+                actor_type TEXT NOT NULL,
+                actor_id TEXT,
+                action TEXT NOT NULL,
+                sandbox_id TEXT,
+                profile_id TEXT,
+                outcome TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
         """)
         conn.commit()
 
@@ -114,6 +155,9 @@ def init_db():
             conn.commit()
         if "search_engine" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN search_engine TEXT")
+            conn.commit()
+        if "sandbox_id" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN sandbox_id TEXT NOT NULL DEFAULT 'default'")
             conn.commit()
 
 
@@ -135,14 +179,14 @@ def create_profile(
     with get_db() as conn:
         conn.execute(
             """INSERT INTO profiles (
-                id, name, fingerprint_seed, proxy, timezone, locale, platform,
+                id, name, sandbox_id, fingerprint_seed, proxy, timezone, locale, platform,
                 user_agent, screen_width, screen_height, gpu_vendor, gpu_renderer,
                 hardware_concurrency, humanize, human_preset, headless, geoip,
                 clipboard_sync, auto_launch, color_scheme, search_engine, launch_args, notes,
                 user_data_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                profile_id, name, seed,
+                profile_id, name, fields.get("sandbox_id", "default"), seed,
                 fields.get("proxy"),
                 fields.get("timezone"),
                 fields.get("locale"),
@@ -222,7 +266,7 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
         fields["launch_args"] = json.dumps(fields["launch_args"] or [])
 
     for col in (
-        "name", "fingerprint_seed", "proxy", "timezone", "locale", "platform",
+        "name", "sandbox_id", "fingerprint_seed", "proxy", "timezone", "locale", "platform",
         "user_agent", "screen_width", "screen_height", "gpu_vendor", "gpu_renderer",
         "hardware_concurrency", "humanize", "human_preset", "headless", "geoip",
         "clipboard_sync", "auto_launch", "color_scheme", "search_engine", "launch_args", "notes",
@@ -260,3 +304,200 @@ def delete_profile(profile_id: str) -> bool:
         cursor = conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         conn.commit()
         return cursor.rowcount > 0
+
+
+# ── Access control persistence ───────────────────────────────────────────────
+
+
+def _access_grants(conn: sqlite3.Connection, principal_type: str, principal_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT sandbox_id, permission FROM access_grants
+        WHERE principal_type = ? AND principal_id = ?
+        ORDER BY sandbox_id, permission""",
+        (principal_type, principal_id),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_access_grants(principal_type: str, principal_id: str, grants: list[dict[str, Any]]) -> None:
+    if principal_type not in {"user", "agent"}:
+        raise ValueError("Unsupported access principal type")
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM access_grants WHERE principal_type = ? AND principal_id = ?",
+            (principal_type, principal_id),
+        )
+        for grant in grants:
+            conn.execute(
+                """INSERT INTO access_grants
+                (principal_type, principal_id, sandbox_id, permission, created_at)
+                VALUES (?, ?, ?, ?, ?)""",
+                (principal_type, principal_id, grant["sandbox_id"], grant["permission"], now),
+            )
+        conn.commit()
+
+
+def create_access_user(username: str, password_hash: str, role: str = "viewer", grants: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    user_id = str(uuid.uuid4())
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO access_users
+            (id, username, password_hash, role, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?)""",
+            (user_id, username, password_hash, role, now, now),
+        )
+        conn.commit()
+    set_access_grants("user", user_id, grants or [])
+    return get_access_user(user_id)  # type: ignore[return-value]
+
+
+def get_access_user(user_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM access_users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            return None
+        user = dict(row)
+        user["grants"] = _access_grants(conn, "user", user_id)
+        return user
+
+
+def get_access_user_by_username(username: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM access_users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+        if not row:
+            return None
+        user = dict(row)
+        user["grants"] = _access_grants(conn, "user", user["id"])
+        return user
+
+
+def list_access_users() -> list[dict[str, Any]]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM access_users ORDER BY username COLLATE NOCASE").fetchall()
+        users: list[dict[str, Any]] = []
+        for row in rows:
+            user = dict(row)
+            user["grants"] = _access_grants(conn, "user", user["id"])
+            users.append(user)
+        return users
+
+
+def update_access_user(user_id: str, **fields: Any) -> dict[str, Any] | None:
+    existing = get_access_user(user_id)
+    if not existing:
+        return None
+    grants = fields.pop("grants", None)
+    update_cols: list[str] = []
+    values: list[Any] = []
+    for col in ("password_hash", "role", "active"):
+        if col in fields:
+            update_cols.append(f"{col} = ?")
+            values.append(fields[col])
+    if update_cols:
+        update_cols.append("updated_at = ?")
+        values.append(_now())
+        values.append(user_id)
+        with get_db() as conn:
+            conn.execute(f"UPDATE access_users SET {', '.join(update_cols)} WHERE id = ?", values)
+            conn.commit()
+    if grants is not None:
+        set_access_grants("user", user_id, grants)
+    return get_access_user(user_id)
+
+
+def create_access_agent(
+    display_name: str,
+    key_hash: str,
+    paperclip_agent_id: str | None = None,
+    grants: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    agent_id = str(uuid.uuid4())
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO access_agents
+            (id, display_name, paperclip_agent_id, key_hash, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?)""",
+            (agent_id, display_name, paperclip_agent_id, key_hash, now, now),
+        )
+        conn.commit()
+    set_access_grants("agent", agent_id, grants or [])
+    return get_access_agent(agent_id)  # type: ignore[return-value]
+
+
+def get_access_agent(agent_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM access_agents WHERE id = ?", (agent_id,)).fetchone()
+        if not row:
+            return None
+        agent = dict(row)
+        agent["grants"] = _access_grants(conn, "agent", agent_id)
+        return agent
+
+
+def get_access_agent_by_key_hash(key_hash: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM access_agents WHERE key_hash = ?", (key_hash,)
+        ).fetchone()
+        if not row:
+            return None
+        agent = dict(row)
+        agent["grants"] = _access_grants(conn, "agent", agent["id"])
+        return agent
+
+
+def list_access_agents() -> list[dict[str, Any]]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM access_agents ORDER BY display_name COLLATE NOCASE").fetchall()
+        agents: list[dict[str, Any]] = []
+        for row in rows:
+            agent = dict(row)
+            agent["grants"] = _access_grants(conn, "agent", agent["id"])
+            agents.append(agent)
+        return agents
+
+
+def update_access_agent(agent_id: str, **fields: Any) -> dict[str, Any] | None:
+    existing = get_access_agent(agent_id)
+    if not existing:
+        return None
+    grants = fields.pop("grants", None)
+    update_cols: list[str] = []
+    values: list[Any] = []
+    for col in ("display_name", "paperclip_agent_id", "key_hash", "active"):
+        if col in fields:
+            update_cols.append(f"{col} = ?")
+            values.append(fields[col])
+    if update_cols:
+        update_cols.append("updated_at = ?")
+        values.append(_now())
+        values.append(agent_id)
+        with get_db() as conn:
+            conn.execute(f"UPDATE access_agents SET {', '.join(update_cols)} WHERE id = ?", values)
+            conn.commit()
+    if grants is not None:
+        set_access_grants("agent", agent_id, grants)
+    return get_access_agent(agent_id)
+
+
+def record_access_audit_event(
+    actor_type: str,
+    actor_id: str | None,
+    action: str,
+    outcome: str,
+    sandbox_id: str | None = None,
+    profile_id: str | None = None,
+) -> None:
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO access_audit_events
+            (id, actor_type, actor_id, action, sandbox_id, profile_id, outcome, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid.uuid4()), actor_type, actor_id, action, sandbox_id, profile_id, outcome, _now()),
+        )
+        conn.commit()

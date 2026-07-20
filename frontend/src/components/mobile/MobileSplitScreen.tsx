@@ -14,6 +14,7 @@ import {
   Play,
   Plus,
   Send,
+  ShieldCheck,
   SlidersHorizontal,
   Shrink,
   Square,
@@ -27,6 +28,11 @@ interface MobileSplitScreenProps {
   selectedId: string | null;
   error: string | null;
   authRequired: boolean;
+  canManageProfiles: boolean;
+  canOperate: boolean;
+  canInteract: boolean;
+  canManageAccess: boolean;
+  identityName: string | null;
   browserView: ReactNode;
   onSelect: (id: string) => void;
   onNew: () => void;
@@ -35,6 +41,7 @@ interface MobileSplitScreenProps {
   onStop: () => void;
   onViewportApply: (width: number, height: number) => boolean | Promise<boolean>;
   onFullscreenChange: (open: boolean) => void;
+  onAccessControls: () => void;
   onLogout: () => void;
 }
 
@@ -75,6 +82,11 @@ export function MobileSplitScreen({
   selectedId,
   error,
   authRequired,
+  canManageProfiles,
+  canOperate,
+  canInteract,
+  canManageAccess,
+  identityName,
   browserView,
   onSelect,
   onNew,
@@ -83,6 +95,7 @@ export function MobileSplitScreen({
   onStop,
   onViewportApply,
   onFullscreenChange,
+  onAccessControls,
   onLogout,
 }: MobileSplitScreenProps) {
   const [viewport, setViewport] = useState({
@@ -212,6 +225,7 @@ export function MobileSplitScreen({
             </div>
             <p className="mt-0.5 text-[11px] uppercase tracking-wide text-gray-500">
               {liveLabel} · {viewport.width} x {viewport.height}
+              {!canInteract && selected?.status === "running" ? " · View only" : ""}
             </p>
           </div>
           <div className="flex items-center gap-1">
@@ -230,19 +244,21 @@ export function MobileSplitScreen({
                 >
                   <Grid2X2 className="h-4 w-4" />
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setViewportOpen((open) => !open);
-                    setGridOpen(false);
-                  }}
-                  className="mobile-icon-button"
-                  aria-pressed={viewportOpen}
-                  aria-label="Edit browser viewport"
-                  title="Edit browser viewport"
-                >
-                  <MonitorSmartphone className="h-4 w-4" />
-                </button>
+                {canManageProfiles && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setViewportOpen((open) => !open);
+                      setGridOpen(false);
+                    }}
+                    className="mobile-icon-button"
+                    aria-pressed={viewportOpen}
+                    aria-label="Edit browser viewport"
+                    title="Edit browser viewport"
+                  >
+                    <MonitorSmartphone className="h-4 w-4" />
+                  </button>
+                )}
               </>
             ) : null}
             <button
@@ -292,20 +308,27 @@ export function MobileSplitScreen({
               ))}
             </select>
           </label>
-          <button type="button" onClick={onNew} className="mobile-icon-button" aria-label="New profile">
-            <Plus className="h-4 w-4" />
-          </button>
-          {selected ? (
+          {canManageProfiles && (
+            <button type="button" onClick={onNew} className="mobile-icon-button" aria-label="New profile">
+              <Plus className="h-4 w-4" />
+            </button>
+          )}
+          {canManageProfiles && selected ? (
             <button type="button" onClick={onEdit} className="mobile-icon-button" aria-label="Edit selected profile">
               <Pencil className="h-4 w-4" />
             </button>
           ) : null}
-          {selected?.status === "running" ? (
+          {canManageAccess && (
+            <button type="button" onClick={onAccessControls} className="mobile-icon-button" aria-label="Browser access controls">
+              <ShieldCheck className="h-4 w-4" />
+            </button>
+          )}
+          {canOperate && selected?.status === "running" ? (
             <button type="button" onClick={onStop} className="btn-secondary h-11 shrink-0">
               <Square className="h-3.5 w-3.5" />
               <span>Stop</span>
             </button>
-          ) : (
+          ) : canOperate ? (
             <button
               type="button"
               onClick={onLaunch}
@@ -315,10 +338,10 @@ export function MobileSplitScreen({
               <Play className="h-3.5 w-3.5" />
               <span>Launch</span>
             </button>
-          )}
+          ) : null}
         </div>
 
-        {viewportOpen ? (
+        {canManageProfiles && viewportOpen ? (
         <div className="mobile-viewport-editor" aria-label="Viewport preset editor">
           <div className="flex gap-1 overflow-x-auto">
             {presets.map((preset) => (
@@ -536,9 +559,12 @@ export function MobileSplitScreen({
         </form>
 
         {authRequired ? (
-          <button type="button" onClick={onLogout} className="mx-3 mb-3 text-left text-xs text-gray-500 underline">
-            Log out
-          </button>
+          <div className="mx-3 mb-3 flex items-center justify-between gap-2">
+            {identityName ? <span className="truncate text-xs text-gray-500">Signed in as {identityName}</span> : <span />}
+            <button type="button" onClick={onLogout} className="text-xs text-gray-500 underline">
+              Log out
+            </button>
+          </div>
         ) : null}
       </section>
 

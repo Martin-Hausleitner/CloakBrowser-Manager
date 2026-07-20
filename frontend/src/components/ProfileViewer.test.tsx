@@ -10,6 +10,7 @@ const rfbMock = vi.hoisted(() => {
     scaleViewport = false;
     resizeSession = true;
     showDotCursor = false;
+    viewOnly = false;
     disconnectCalls = 0;
     sendKeyCalls: unknown[][] = [];
     _display = {
@@ -216,6 +217,24 @@ describe("ProfileViewer", () => {
     expect(onDisconnect).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Connection failed")).toBeTruthy();
     expect(screen.getByText("Security failure: bad auth")).toBeTruthy();
+  });
+
+  it("marks a scoped viewer as read-only and hides clipboard input controls", async () => {
+    render(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        canInteract={false}
+        onDisconnect={vi.fn()}
+      />,
+    );
+    await flushAsyncWork();
+
+    expect(rfbMock.instances[0]?.viewOnly).toBe(true);
+    expect(screen.getByText("View only")).toBeTruthy();
+    expect(screen.queryByLabelText("Paste text into remote browser")).toBeNull();
+    expect(screen.queryByLabelText("Enable clipboard sync")).toBeNull();
   });
 
   it("repaints the noVNC canvas after its container is resized", async () => {

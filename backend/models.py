@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ProfileCreate(BaseModel):
     name: str
+    sandbox_id: str = Field(
+        default="default",
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
     fingerprint_seed: int | None = None  # random if not set
     proxy: str | None = None  # "http://user:pass@host:port" or null
     timezone: str | None = None  # "America/New_York"
@@ -35,6 +41,12 @@ class ProfileCreate(BaseModel):
 
 class ProfileUpdate(BaseModel):
     name: str | None = None
+    sandbox_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
     fingerprint_seed: int | None = None
     proxy: str | None = Field(default=None)
     timezone: str | None = Field(default=None)
@@ -72,6 +84,7 @@ class TagResponse(BaseModel):
 class ProfileResponse(BaseModel):
     id: str
     name: str
+    sandbox_id: str = "default"
     fingerprint_seed: int
     proxy: str | None = None
     timezone: str | None = None
@@ -134,4 +147,93 @@ class ClipboardRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    token: str
+    """Bootstrap-token or named-user login request.
+
+    The token route stays backward compatible for existing private deployments.
+    When access control is enabled, an admin can additionally provision named
+    users who authenticate with ``username`` and ``password``.
+    """
+
+    token: str | None = Field(default=None, min_length=1, max_length=4096)
+    username: str | None = Field(default=None, min_length=1, max_length=80)
+    password: str | None = Field(default=None, min_length=8, max_length=4096)
+
+    @model_validator(mode="after")
+    def validate_credential_shape(self):
+        if self.token and (self.username or self.password):
+            raise ValueError("Use either token or username/password, not both")
+        if self.token:
+            return self
+        if self.username and self.password:
+            return self
+        raise ValueError("Provide a token or both username and password")
+
+
+AccessPermission = Literal["view", "interact", "operate", "automate"]
+AccessRole = Literal["admin", "operator", "viewer"]
+
+
+class AccessGrant(BaseModel):
+    sandbox_id: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    permission: AccessPermission
+
+
+class AccessUserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    password: str = Field(min_length=12, max_length=4096)
+    role: AccessRole = "viewer"
+    grants: list[AccessGrant] = Field(default_factory=list)
+
+
+class AccessUserUpdate(BaseModel):
+    password: str | None = Field(default=None, min_length=12, max_length=4096)
+    role: AccessRole | None = None
+    active: bool | None = None
+    grants: list[AccessGrant] | None = None
+
+
+class AccessUserResponse(BaseModel):
+    id: str
+    username: str
+    role: AccessRole
+    active: bool
+    created_at: str
+    grants: list[AccessGrant] = Field(default_factory=list)
+
+
+class AccessAgentCreate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    paperclip_agent_id: str | None = Field(default=None, max_length=160)
+    grants: list[AccessGrant] = Field(default_factory=list)
+
+
+class AccessAgentUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    paperclip_agent_id: str | None = Field(default=None, max_length=160)
+    active: bool | None = None
+    grants: list[AccessGrant] | None = None
+
+
+class AccessAgentResponse(BaseModel):
+    id: str
+    display_name: str
+    paperclip_agent_id: str | None = None
+    active: bool
+    created_at: str
+    grants: list[AccessGrant] = Field(default_factory=list)
+
+
+class AccessAgentCreatedResponse(AccessAgentResponse):
+    api_key: str
+
+
+class AccessIdentityResponse(BaseModel):
+    kind: Literal["bootstrap", "user", "agent", "anonymous"]
+    id: str | None = None
+    display_name: str
+    role: str
+    grants: list[AccessGrant] = Field(default_factory=list)

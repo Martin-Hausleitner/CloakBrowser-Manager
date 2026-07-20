@@ -8,9 +8,10 @@ interface ProfileListProps {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
+  canCreate?: boolean;
 }
 
-export function ProfileList({ profiles, selectedId, onSelect, onNew }: ProfileListProps) {
+export function ProfileList({ profiles, selectedId, onSelect, onNew, canCreate = true }: ProfileListProps) {
   const [search, setSearch] = useState("");
 
   const filtered = profiles.filter((p) =>
@@ -93,12 +94,14 @@ export function ProfileList({ profiles, selectedId, onSelect, onNew }: ProfileLi
       </div>
 
       {/* New profile button */}
-      <div className="p-3 border-t border-border">
-        <button onClick={onNew} className="btn-secondary w-full flex items-center justify-center gap-1.5">
-          <Plus className="h-3.5 w-3.5" />
-          <span>New Profile</span>
-        </button>
-      </div>
+      {canCreate && (
+        <div className="p-3 border-t border-border">
+          <button onClick={onNew} className="btn-secondary w-full flex items-center justify-center gap-1.5">
+            <Plus className="h-3.5 w-3.5" />
+            <span>New Profile</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

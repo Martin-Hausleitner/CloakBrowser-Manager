@@ -7,3 +7,4 @@ services:
       - ~/.cloakbrowser-manager:/data
     environment:
       - AUTH_TOKEN=${AUTH_TOKEN:-}
+      - ACCESS_CONTROL_ENABLED=${ACCESS_CONTROL_ENABLED:-0}

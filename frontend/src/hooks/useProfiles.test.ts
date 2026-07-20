@@ -28,6 +28,7 @@ const mockApi = api as {
 const fakeProfile = {
   id: "abc-123",
   name: "Test",
+  sandbox_id: "default",
   fingerprint_seed: 12345,
   proxy: null,
   timezone: null,

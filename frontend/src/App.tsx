@@ -1,7 +1,14 @@
 import { useState, useCallback, useEffect } from "react";
-import { ArrowLeft, Lock, PanelLeftClose, PanelLeft } from "lucide-react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
-import { api, setOnUnauthorized, type ProfileCreateData } from "./lib/api";
+import {
+  api,
+  setOnUnauthorized,
+  type AccessIdentity,
+  type AccessPermission,
+  type Profile,
+  type ProfileCreateData,
+} from "./lib/api";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
 import { ProfileViewer } from "./components/ProfileViewer";
@@ -9,34 +16,40 @@ import { LaunchButton } from "./components/LaunchButton";
 import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
 import { MobileSplitScreen } from "./components/mobile/MobileSplitScreen";
+import { AccessDashboard } from "./components/AccessDashboard";
 
 type AuthState = "checking" | "required" | "ok" | "error";
-type View = "empty" | "create" | "edit" | "view";
+type View = "empty" | "create" | "edit" | "view" | "access";
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [authRequired, setAuthRequired] = useState(false);
+  const [accessControlEnabled, setAccessControlEnabled] = useState(false);
+  const [identity, setIdentity] = useState<AccessIdentity | null>(null);
+
+  const refreshAuth = useCallback(async () => {
+    const status = await api.authStatus();
+    setAuthRequired(status.auth_required);
+    setAccessControlEnabled(status.access_control_enabled);
+    setIdentity(status.identity);
+    setAuthState(!status.auth_required || status.authenticated ? "ok" : "required");
+  }, []);
 
   useEffect(() => {
-    setOnUnauthorized(() => setAuthState("required"));
+    setOnUnauthorized(() => {
+      setIdentity(null);
+      setAuthState("required");
+    });
 
-    api.authStatus()
-      .then(({ auth_required, authenticated }) => {
-        setAuthRequired(auth_required);
-        if (!auth_required || authenticated) {
-          setAuthState("ok");
-        } else {
-          setAuthState("required");
-        }
-      })
+    refreshAuth()
       .catch((err) => {
         console.warn("[auth] status check failed:", err);
         setAuthState("error");
       });
 
     return () => setOnUnauthorized(null);
-  }, []);
+  }, [refreshAuth]);
 
   if (authState === "checking") {
     return (
@@ -54,11 +67,7 @@ export default function App() {
           <button
             onClick={() => {
               setAuthState("checking");
-              api.authStatus()
-                .then(({ auth_required, authenticated }) => {
-                  setAuthRequired(auth_required);
-                  setAuthState(!auth_required || authenticated ? "ok" : "required");
-                })
+              refreshAuth()
                 .catch(() => setAuthState("error"));
             }}
             className="text-xs text-gray-400 hover:text-gray-200 underline"
@@ -71,15 +80,18 @@ export default function App() {
   }
 
   if (authState === "required") {
-    return <LoginPage onSuccess={() => setAuthState("ok")} />;
+    return <LoginPage accessControlEnabled={accessControlEnabled} onSuccess={refreshAuth} />;
   }
 
   return (
     <AppContent
       authRequired={authRequired}
+      accessControlEnabled={accessControlEnabled}
+      identity={identity}
       onLogout={async () => {
         await api.logout();
-        setAuthState("required");
+        setIdentity(null);
+        setAuthState(authRequired ? "required" : "ok");
       }}
     />
   );
@@ -87,10 +99,12 @@ export default function App() {
 
 interface AppContentProps {
   authRequired: boolean;
+  accessControlEnabled: boolean;
+  identity: AccessIdentity | null;
   onLogout: () => void;
 }
 
-function AppContent({ authRequired, onLogout }: AppContentProps) {
+function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: AppContentProps) {
   const { profiles, loading, error, create, update, remove, launch, stop } = useProfiles();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>("empty");
@@ -99,59 +113,68 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
   const isMobile = useIsMobile();
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
+  const canManageProfiles = isAdministrator(identity);
+  const canOperateSelected = Boolean(selected && canAccess(identity, selected, "operate"));
+  const canInteractSelected = Boolean(selected && canAccess(identity, selected, "interact"));
 
   const handleSelect = useCallback((id: string) => {
     setSelectedId(id);
     const profile = profiles.find((p) => p.id === id);
-    setView(isMobile ? "view" : profile?.status === "running" ? "view" : "edit");
-  }, [isMobile, profiles]);
+    setView(isMobile ? "view" : profile?.status === "running" ? "view" : canManageProfiles ? "edit" : "empty");
+  }, [canManageProfiles, isMobile, profiles]);
 
   const handleNew = useCallback(() => {
+    if (!canManageProfiles) return;
     setSelectedId(null);
     setView("create");
-  }, []);
+  }, [canManageProfiles]);
 
   const handleCreate = useCallback(async (data: ProfileCreateData) => {
+    if (!canManageProfiles) return;
     const profile = await create(data);
     if (profile) {
       setSelectedId(profile.id);
       setView("edit");
     }
-  }, [create]);
+  }, [canManageProfiles, create]);
 
   const handleUpdate = useCallback(async (data: ProfileCreateData) => {
-    if (!selectedId) return;
+    if (!selectedId || !canManageProfiles) return;
     await update(selectedId, data);
-  }, [selectedId, update]);
+  }, [canManageProfiles, selectedId, update]);
 
   const handleDelete = useCallback(async () => {
-    if (!selectedId) return;
+    if (!selectedId || !canManageProfiles) return;
     await remove(selectedId);
     setSelectedId(null);
     setView("empty");
-  }, [selectedId, remove]);
+  }, [canManageProfiles, selectedId, remove]);
 
   const handleLaunch = useCallback(async () => {
-    if (!selectedId) return;
+    if (!selectedId || !canAccess(identity, profiles.find((profile) => profile.id === selectedId) ?? null, "operate")) return;
     const result = await launch(selectedId);
     if (result) setView("view");
-  }, [selectedId, launch]);
+  }, [identity, profiles, selectedId, launch]);
 
   const handleStop = useCallback(async () => {
-    if (!selectedId) return;
+    if (!selectedId || !canAccess(identity, profiles.find((profile) => profile.id === selectedId) ?? null, "operate")) return;
     await stop(selectedId);
     setView("edit");
-  }, [selectedId, stop]);
+  }, [identity, profiles, selectedId, stop]);
 
   const handleVncDisconnect = useCallback(() => {
-    setView("edit");
-  }, []);
+    setView(canManageProfiles ? "edit" : "empty");
+  }, [canManageProfiles]);
 
   const handleViewportApply = useCallback(async (width: number, height: number) => {
-    if (!selectedId) return false;
+    if (!selectedId || !canManageProfiles) return false;
     const profile = await update(selectedId, { screen_width: width, screen_height: height });
     return !!profile;
-  }, [selectedId, update]);
+  }, [canManageProfiles, selectedId, update]);
+
+  if (view === "access" && canManageProfiles && accessControlEnabled) {
+    return <AccessDashboard onClose={() => setView(selected ? "view" : "empty")} />;
+  }
 
   if (loading) {
     return (
@@ -162,7 +185,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
   }
 
   if (isMobile) {
-    if (view === "create" || (view === "edit" && selected)) {
+    if (canManageProfiles && (view === "create" || (view === "edit" && selected))) {
       const editing = view === "edit" && selected;
 
       return (
@@ -213,6 +236,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
           profileId={selected.id}
           cdpUrl={selected.cdp_url}
           clipboardSync={selected.clipboard_sync}
+          canInteract={canInteractSelected}
           layoutMode={mobileFullscreenOpen ? "fullscreen" : "inline"}
           onDisconnect={handleVncDisconnect}
         />
@@ -225,6 +249,11 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
         selectedId={selectedId}
         error={error}
         authRequired={authRequired}
+        canManageProfiles={canManageProfiles}
+        canOperate={canOperateSelected}
+        canInteract={canInteractSelected}
+        canManageAccess={canManageProfiles && accessControlEnabled}
+        identityName={identity?.display_name ?? null}
         browserView={browserView}
         onSelect={handleSelect}
         onNew={handleNew}
@@ -233,6 +262,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
         onStop={handleStop}
         onViewportApply={handleViewportApply}
         onFullscreenChange={setMobileFullscreenOpen}
+        onAccessControls={() => setView("access")}
         onLogout={onLogout}
       />
     );
@@ -248,6 +278,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             selectedId={selectedId}
             onSelect={handleSelect}
             onNew={handleNew}
+            canCreate={canManageProfiles}
           />
         </div>
       )}
@@ -274,11 +305,28 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
           </div>
           <div className="flex items-center gap-2">
             {selected && (
+              canOperateSelected && (
               <LaunchButton
                 status={selected.status}
                 onLaunch={handleLaunch}
                 onStop={handleStop}
               />
+              )
+            )}
+            {accessControlEnabled && canManageProfiles && (
+              <button
+                onClick={() => setView("access")}
+                className="text-gray-500 hover:text-gray-300 p-1"
+                title="Browser access controls"
+                aria-label="Browser access controls"
+              >
+                <ShieldCheck className="h-4 w-4" />
+              </button>
+            )}
+            {identity && (
+              <span className="hidden max-w-40 truncate text-xs text-gray-500 sm:inline">
+                {identity.display_name}
+              </span>
             )}
             {authRequired && (
               <button
@@ -309,7 +357,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             </div>
           )}
 
-          {view === "create" && (
+          {view === "create" && canManageProfiles && (
             <ProfileForm
               profile={null}
               onSave={handleCreate}
@@ -317,7 +365,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             />
           )}
 
-          {view === "edit" && selected && (
+          {view === "edit" && selected && canManageProfiles && (
             <ProfileForm
               profile={selected}
               onSave={handleUpdate}
@@ -335,6 +383,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               profileId={selected.id}
               cdpUrl={selected.cdp_url}
               clipboardSync={selected.clipboard_sync}
+              canInteract={canInteractSelected}
               onDisconnect={handleVncDisconnect}
             />
           )}
@@ -342,6 +391,21 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
       </div>
     </div>
   );
+}
+
+function isAdministrator(identity: AccessIdentity | null) {
+  return Boolean(identity && (identity.kind === "bootstrap" || identity.kind === "anonymous" || identity.role === "admin"));
+}
+
+function canAccess(identity: AccessIdentity | null, profile: Profile | null, permission: AccessPermission) {
+  if (!identity || !profile) return false;
+  if (isAdministrator(identity)) return true;
+  const grant = identity.grants.find((candidate) => candidate.sandbox_id === profile.sandbox_id);
+  if (!grant) return false;
+  if (permission === "view") return true;
+  if (permission === "interact") return grant.permission === "interact" || grant.permission === "operate";
+  if (permission === "operate") return grant.permission === "operate";
+  return grant.permission === "automate";
 }
 
 function useIsMobile() {

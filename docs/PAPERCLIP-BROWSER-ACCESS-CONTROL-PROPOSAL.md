@@ -1,6 +1,6 @@
 # Paperclip-gestützte Browser-Zugriffskontrolle
 
-Stand: 2026-07-20 · Status: Architekturvorschlag für die nächste Implementierungsphase
+Stand: 2026-07-20 · Status: lokal implementiert und Ende-zu-Ende geprüft; bereit für Fork-Review
 
 ## Kurzentscheidung
 
@@ -9,6 +9,19 @@ Der aktuelle einzelne `AUTH_TOKEN` schützt den Manager als Ganzes, trennt aber 
 Das entscheidende Prinzip lautet: **Die API erzwingt Zugriff pro Sandbox und Profil. Das Dashboard zeigt nur die bereits zulässigen Daten.** Eine versteckte UI-Schaltfläche oder ein alleiniger Frontend-Filter wäre keine Sicherheitsgrenze.
 
 Paperclip verwendet ebenfalls zentrale, explizite Berechtigungen und strukturierte Scopes für Agenten und Menschen. Dieser Vorschlag übernimmt dieses Muster für Browser-Sandboxes, statt einen weitreichenden Besitzer-Token an Agenten weiterzugeben. Siehe die offiziellen [Paperclip-Informationen zu Agent-Berechtigungen](https://docs.paperclip.ing/reference/api/agents/) und die [Paperclip-Architekturübersicht](https://github.com/paperclipai/paperclip).
+
+## Umsetzungsstand
+
+Die erste, lokale Policy-Schicht ist in diesem Fork umgesetzt. Sie bleibt absichtlich erst nach `AUTH_TOKEN` plus `ACCESS_CONTROL_ENABLED=1` aktiv, damit bestehende Einzel-Token-Installationen unverändert weiterlaufen.
+
+- Profile besitzen nun eine validierte `sandbox_id`; vorhandene Profile werden in `default` migriert.
+- Menschen erhalten lokale Passwort-Logins mit scrypt-Hash und kurzlebigem, signiertem `HttpOnly`-Cookie.
+- Paperclip-Agenten erhalten einen individuellen, hochentropischen Bearer-Key; nur dessen Hash wird persistiert. Der Klartext erscheint ausschließlich bei Anlage oder Rotation.
+- Die Policy wird serverseitig vor Profilauflistung, Einzelprofil, VNC, Clipboard, Lifecycle, CDP-REST und CDP-WebSocket geprüft. Nicht freigegebene Profile erscheinen als `404`.
+- VNC mit `view` bleibt tatsächlich lesbar: nur RFB-Displayverhandlung und Frame-Requests werden weitergereicht; Tastatur, Maus und Clipboard-Eingaben werden serverseitig verworfen.
+- Das Dashboard verwaltet Profile-Sandboxes, Personen, Paperclip-Agenten, Grants, Deaktivierung und Key-Rotation. Nichtadministratoren erhalten weder Profil-Administration noch Zugang zur Access-Verwaltung.
+
+Die Live-Abnahme lief isoliert gegen eine frische lokale Datenbank: zwei Sandboxes (`research`, `finance`), ein `view`-Nutzer und ein `automate`-Agent. Der Nutzer sah nur `research`; direkte `finance`-, Lifecycle- und Admin-Anfragen wurden mit `404` beziehungsweise `403` abgewiesen. Der Agent sah per eigenem Bearer-Key nur `research`; sein alter Key lieferte nach Rotation `401`.
 
 ## Zielbild
 

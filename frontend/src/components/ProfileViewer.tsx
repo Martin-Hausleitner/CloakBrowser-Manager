@@ -6,6 +6,7 @@ interface ProfileViewerProps {
   profileId: string;
   cdpUrl: string | null;
   clipboardSync: boolean;
+  canInteract?: boolean;
   layoutMode?: "inline" | "fullscreen";
   onDisconnect: () => void;
 }
@@ -32,6 +33,7 @@ export function ProfileViewer({
   profileId,
   cdpUrl,
   clipboardSync: initialClipboardSync,
+  canInteract = true,
   layoutMode = "inline",
   onDisconnect,
 }: ProfileViewerProps) {
@@ -43,7 +45,7 @@ export function ProfileViewer({
   const [fullscreen, setFullscreen] = useState(false);
   const [clipboardSupported] = useState(supportsClipboardSync);
   const [clipboardSync, setClipboardSync] = useState(
-    () => initialClipboardSync && supportsClipboardSync(),
+    () => canInteract && initialClipboardSync && supportsClipboardSync(),
   );
   const [cdpCopied, setCdpCopied] = useState(false);
   const [pastePanelOpen, setPastePanelOpen] = useState(false);
@@ -177,6 +179,10 @@ export function ProfileViewer({
         instance.scaleViewport = true;
         instance.resizeSession = false;
         instance.showDotCursor = true;
+        // Keep the local interaction model honest as well as server-side. The
+        // backend still filters input, so this is a UX guard rather than the
+        // authorization boundary.
+        instance.viewOnly = !canInteract;
 
         instance.addEventListener("connect", () => {
           if (cancelled || rfbRef.current !== instance) return;
@@ -236,13 +242,13 @@ export function ProfileViewer({
       }
       rfbRef.current = null;
     };
-  }, [profileId, onDisconnect]);
+  }, [profileId, canInteract, onDisconnect]);
 
   // Host→VNC: intercept Ctrl+V/Cmd+V at keydown (capture phase)
   // Must fire BEFORE noVNC's canvas listener to prevent the race condition
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || !clipboardSync || !connected) return;
+    if (!container || !canInteract || !clipboardSync || !connected) return;
 
     const handleKeyDown = async (e: KeyboardEvent) => {
       const isPaste =
@@ -271,13 +277,13 @@ export function ProfileViewer({
     // capture: true ensures we fire before noVNC's canvas listener
     container.addEventListener("keydown", handleKeyDown, true);
     return () => container.removeEventListener("keydown", handleKeyDown, true);
-  }, [clipboardSync, connected, sendRemotePasteKeystroke, sendTextToRemoteClipboard]);
+  }, [canInteract, clipboardSync, connected, sendRemotePasteKeystroke, sendTextToRemoteClipboard]);
 
   // VNC→Host: listen for noVNC "clipboard" event (fired when proxy converts
   // KasmVNC BinaryClipboard type 180 → standard ServerCutText type 3)
   useEffect(() => {
     const rfb = rfbRef.current;
-    if (!rfb || !clipboardSync || !connected) return;
+    if (!rfb || !canInteract || !clipboardSync || !connected) return;
 
     const handleClipboard = (e: any) => {
       const text = e.detail?.text;
@@ -292,12 +298,12 @@ export function ProfileViewer({
     return () => {
       rfb.removeEventListener("clipboard", handleClipboard);
     };
-  }, [clipboardSync, connected]);
+  }, [canInteract, clipboardSync, connected]);
 
   // VNC→Host polling: Chrome doesn't write to X11 clipboard under KasmVNC,
   // so type 180 events won't fire for Chrome copies. Poll via Playwright CDP.
   useEffect(() => {
-    if (!clipboardSync || !connected) return;
+    if (!canInteract || !clipboardSync || !connected) return;
 
     let cancelled = false;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -351,7 +357,7 @@ export function ProfileViewer({
       window.removeEventListener("pageshow", handleVisibilityChange);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [profileId, clipboardSync, connected]);
+  }, [profileId, canInteract, clipboardSync, connected]);
 
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
@@ -459,6 +465,11 @@ export function ProfileViewer({
                 ? "Connected"
                 : "Connecting..."}
           </span>
+          {!canInteract && (
+            <span className="rounded bg-surface-3 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-400">
+              View only
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {cdpUrl && (
@@ -477,35 +488,39 @@ export function ProfileViewer({
               <Code2 className="h-3.5 w-3.5" />
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => {
-              setPasteError(null);
-              setPastePanelOpen(true);
-            }}
-            className="rounded px-2 py-1 text-xs text-gray-300 hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-gray-600"
-            title="Paste text from this device into the remote browser"
-            aria-label="Paste text into remote browser"
-            disabled={!connected}
-          >
-            Paste
-          </button>
-          <button
-            type="button"
-            onClick={() => setClipboardSync(!clipboardSync)}
-            className={`p-1 ${clipboardSync ? "text-accent" : "text-gray-500 hover:text-gray-300"}`}
-            aria-label={clipboardSync ? "Disable clipboard sync" : "Enable clipboard sync"}
-            title={
-              clipboardSupported
-                ? clipboardSync
-                  ? "Disable clipboard sync"
-                  : "Enable clipboard sync"
-                : "Clipboard sync is unavailable in this browser"
-            }
-            disabled={!connected || !clipboardSupported}
-          >
-            <ClipboardCopy className="h-3.5 w-3.5" />
-          </button>
+          {canInteract && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setPasteError(null);
+                  setPastePanelOpen(true);
+                }}
+                className="rounded px-2 py-1 text-xs text-gray-300 hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-gray-600"
+                title="Paste text from this device into the remote browser"
+                aria-label="Paste text into remote browser"
+                disabled={!connected}
+              >
+                Paste
+              </button>
+              <button
+                type="button"
+                onClick={() => setClipboardSync(!clipboardSync)}
+                className={`p-1 ${clipboardSync ? "text-accent" : "text-gray-500 hover:text-gray-300"}`}
+                aria-label={clipboardSync ? "Disable clipboard sync" : "Enable clipboard sync"}
+                title={
+                  clipboardSupported
+                    ? clipboardSync
+                      ? "Disable clipboard sync"
+                      : "Enable clipboard sync"
+                    : "Clipboard sync is unavailable in this browser"
+                }
+                disabled={!connected || !clipboardSupported}
+              >
+                <ClipboardCopy className="h-3.5 w-3.5" />
+              </button>
+            </>
+          )}
           <button
             type="button"
             onClick={toggleFullscreen}

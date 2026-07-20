@@ -6,6 +6,7 @@ import { MobileSplitScreen } from "./MobileSplitScreen";
 const stoppedProfile: Profile = {
   id: "profile-1",
   name: "Checkout QA",
+  sandbox_id: "default",
   fingerprint_seed: 12345,
   proxy: null,
   timezone: null,
@@ -51,6 +52,11 @@ function renderMobileSplit(overrides: Partial<Parameters<typeof MobileSplitScree
     selectedId: stoppedProfile.id,
     error: null,
     authRequired: false,
+    canManageProfiles: true,
+    canOperate: true,
+    canInteract: true,
+    canManageAccess: false,
+    identityName: null,
     browserView: <div>VNC stream</div>,
     onSelect: vi.fn(),
     onNew: vi.fn(),
@@ -59,6 +65,7 @@ function renderMobileSplit(overrides: Partial<Parameters<typeof MobileSplitScree
     onStop: vi.fn(),
     onViewportApply: vi.fn().mockResolvedValue(true),
     onFullscreenChange: vi.fn(),
+    onAccessControls: vi.fn(),
     onLogout: vi.fn(),
     ...overrides,
   };

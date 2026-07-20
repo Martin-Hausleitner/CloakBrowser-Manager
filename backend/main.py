@@ -25,10 +25,19 @@ import starlette.requests
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 if __package__:
+    from . import access_control as access
     from . import database as db
     from .browser_manager import BrowserManager
     from .models import (
         ClipboardRequest,
+        AccessAgentCreate,
+        AccessAgentCreatedResponse,
+        AccessAgentResponse,
+        AccessAgentUpdate,
+        AccessIdentityResponse,
+        AccessUserCreate,
+        AccessUserResponse,
+        AccessUserUpdate,
         LaunchResponse,
         LoginRequest,
         ProfileCreate,
@@ -39,10 +48,19 @@ if __package__:
         TagResponse,
     )
 else:  # Support `uvicorn main:app` from the backend directory.
+    import access_control as access
     import database as db
     from browser_manager import BrowserManager
     from models import (
         ClipboardRequest,
+        AccessAgentCreate,
+        AccessAgentCreatedResponse,
+        AccessAgentResponse,
+        AccessAgentUpdate,
+        AccessIdentityResponse,
+        AccessUserCreate,
+        AccessUserResponse,
+        AccessUserUpdate,
         LaunchResponse,
         LoginRequest,
         ProfileCreate,
@@ -60,10 +78,16 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
-# Optional authentication via AUTH_TOKEN env var.
-# If not set, all routes are open (local dev). If set, all /api/* routes
-# (except /api/auth/* and /api/status) require Bearer token or cookie.
+# Optional authentication via AUTH_TOKEN env var. If not set, all routes are
+# open for local development. ``ACCESS_CONTROL_ENABLED=1`` adds named users and
+# scoped Paperclip-agent credentials, but intentionally requires AUTH_TOKEN as
+# a bootstrap signing secret to avoid an accidental locked-open deployment.
 AUTH_TOKEN: str | None = os.environ.get("AUTH_TOKEN") or None
+ACCESS_CONTROL_ENABLED = bool(AUTH_TOKEN) and access.access_control_enabled(
+    os.environ.get("ACCESS_CONTROL_ENABLED")
+)
+if os.environ.get("ACCESS_CONTROL_ENABLED") and not AUTH_TOKEN:
+    logger.warning("ACCESS_CONTROL_ENABLED ignored because AUTH_TOKEN is not configured")
 
 # Paths that bypass authentication even when AUTH_TOKEN is set
 _AUTH_EXEMPT = frozenset({"/api/auth/status", "/api/auth/login", "/api/status"})
@@ -93,6 +117,10 @@ def _check_auth(scope: Scope) -> bool:
             break
 
     return False
+
+
+def _access_identity(scope: Scope) -> access.AccessIdentity | None:
+    return access.identity_from_scope(scope, AUTH_TOKEN, ACCESS_CONTROL_ENABLED)
 
 
 def _is_https(request: Request) -> bool:
@@ -162,15 +190,36 @@ class AuthMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        # Pass through if auth disabled, or non-HTTP/WS scope (e.g. lifespan)
-        if not AUTH_TOKEN or scope["type"] not in ("http", "websocket"):
+        # Pass through non-HTTP/WS scope (e.g. lifespan).
+        if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
 
         path = scope["path"]
 
-        # Skip auth for exempt endpoints and non-API paths (static frontend)
-        if path in _AUTH_EXEMPT or not path.startswith("/api/"):
+        # Scoped policy mode recognizes bootstrap, signed human sessions, and
+        # individual agent bearer keys. The resolved identity is placed on the
+        # raw ASGI scope so REST and WebSocket handlers use one decision.
+        if ACCESS_CONTROL_ENABLED:
+            identity = access.resolve_identity(scope, AUTH_TOKEN)
+            if identity:
+                scope.setdefault("state", {})["access_identity"] = identity
+
+            # Auth bootstrap/static routes intentionally remain reachable.
+            if path in _AUTH_EXEMPT or not path.startswith("/api/"):
+                await self.app(scope, receive, send)
+                return
+
+            if identity:
+                await self.app(scope, receive, send)
+                return
+
+            await _reject_unauthenticated(scope, receive, send)
+            return
+
+        # Legacy mode: optional single owner token, unchanged for existing
+        # deployments that have not opted into access control.
+        if not AUTH_TOKEN or path in _AUTH_EXEMPT or not path.startswith("/api/"):
             await self.app(scope, receive, send)
             return
 
@@ -178,14 +227,18 @@ class AuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Reject — unauthenticated
-        if scope["type"] == "websocket":
-            # ASGI requires receiving websocket.connect before sending close
-            await receive()
-            await send({"type": "websocket.close", "code": 4401, "reason": "Unauthorized"})
-        else:
-            response = JSONResponse({"detail": "Unauthorized"}, status_code=401)
-            await response(scope, receive, send)
+        await _reject_unauthenticated(scope, receive, send)
+
+
+async def _reject_unauthenticated(scope: Scope, receive: Receive, send: Send) -> None:
+    """Reject both HTTP and WebSocket callers without bypassing ASGI rules."""
+    if scope["type"] == "websocket":
+        # ASGI requires receiving websocket.connect before sending close.
+        await receive()
+        await send({"type": "websocket.close", "code": 4401, "reason": "Unauthorized"})
+    else:
+        response = JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        await response(scope, receive, send)
 
 
 # Singleton browser manager
@@ -387,6 +440,34 @@ def _filter_rfb_client_messages(data: bytes) -> bytes:
     return bytes(result)
 
 
+def _filter_rfb_viewer_messages(data: bytes) -> bytes:
+    """Keep only display-negotiation RFB messages for a view-only session.
+
+    A noVNC client must still send SetPixelFormat, SetEncodings and
+    FramebufferUpdateRequest after the initial RFB handshake; otherwise it
+    never receives a framebuffer.  Key events, pointer events and clipboard
+    transfers are intentionally excluded.  This makes a ``view`` grant a real
+    live viewer rather than a connection that appears successful but stays
+    black.
+    """
+    result = bytearray()
+    offset = 0
+    while offset < len(data):
+        msg_type = data[offset]
+        msg_len = _rfb_msg_length(data, offset)
+        if msg_len is None or offset + msg_len > len(data):
+            break
+
+        if msg_type == 0:  # SetPixelFormat
+            result.extend(data[offset:offset + msg_len])
+        elif msg_type == 2:  # SetEncodings, with the same safe allow-list
+            result.extend(_rewrite_set_encodings(data, offset, msg_len))
+        elif msg_type == 3:  # FramebufferUpdateRequest
+            result.extend(data[offset:offset + msg_len])
+        offset += msg_len
+    return bytes(result)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
@@ -405,6 +486,95 @@ app = FastAPI(title="CloakBrowser Manager", lifespan=lifespan)
 app.add_middleware(AuthMiddleware)
 
 
+def _require_identity(scope: Scope) -> access.AccessIdentity:
+    identity = _access_identity(scope)
+    if identity is None:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return identity
+
+
+def _require_admin(scope: Scope) -> access.AccessIdentity:
+    identity = _require_identity(scope)
+    if not identity.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    return identity
+
+
+def _require_profile_permission(
+    scope: Scope, profile_id: str, permission: access.Permission
+) -> tuple[dict[str, object], access.AccessIdentity]:
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    identity = _require_identity(scope)
+    if not access.can_access_profile(identity, profile, permission):
+        # Keep a profile outside the caller's scope indistinguishable from a
+        # missing one. This applies equally to direct REST and WebSocket URLs.
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile, identity
+
+
+async def _require_websocket_profile_permission(
+    websocket: WebSocket, profile_id: str, permission: access.Permission
+) -> tuple[dict[str, object], access.AccessIdentity] | None:
+    profile = db.get_profile(profile_id)
+    identity = _access_identity(websocket.scope)
+    if not profile or not identity or not access.can_access_profile(identity, profile, permission):
+        await websocket.close(code=4404, reason="Profile not found")
+        return None
+    return profile, identity
+
+
+def _profile_response(profile: dict[str, object], identity: access.AccessIdentity) -> ProfileResponse:
+    """Build a minimally disclosed profile response for scoped callers."""
+    response = dict(profile)
+    status = browser_mgr.get_status(str(response["id"]))
+    response["status"] = status["status"]
+    response["vnc_ws_port"] = status["vnc_ws_port"]
+    response["cdp_url"] = status["cdp_url"]
+    response["tags"] = [TagResponse(**tag) for tag in response.get("tags", [])]
+
+    if ACCESS_CONTROL_ENABLED and not identity.is_admin:
+        # Viewer/operator cards do not reveal proxy credentials, fingerprint
+        # implementation details, local data paths, notes, or CDP endpoints.
+        response["proxy"] = None
+        response["user_agent"] = None
+        response["gpu_vendor"] = None
+        response["gpu_renderer"] = None
+        response["hardware_concurrency"] = None
+        response["fingerprint_seed"] = 0
+        response["launch_args"] = []
+        response["notes"] = None
+        response["user_data_dir"] = ""
+        response["vnc_ws_port"] = None
+        if not access.can_access_profile(identity, response, "automate"):
+            response["cdp_url"] = None
+
+    return ProfileResponse(**response)
+
+
+def _access_user_response(user: dict[str, object]) -> AccessUserResponse:
+    return AccessUserResponse(
+        id=str(user["id"]),
+        username=str(user["username"]),
+        role=str(user["role"]),
+        active=bool(user["active"]),
+        created_at=str(user["created_at"]),
+        grants=user.get("grants", []),
+    )
+
+
+def _access_agent_response(agent: dict[str, object]) -> AccessAgentResponse:
+    return AccessAgentResponse(
+        id=str(agent["id"]),
+        display_name=str(agent["display_name"]),
+        paperclip_agent_id=agent.get("paperclip_agent_id") or None,
+        active=bool(agent["active"]),
+        created_at=str(agent["created_at"]),
+        grants=agent.get("grants", []),
+    )
+
+
 # ── Authentication ────────────────────────────────────────────────────────────
 
 
@@ -414,28 +584,81 @@ async def auth_status(request: starlette.requests.Request):
 
     Exempt from auth middleware so the frontend can always call it.
     """
-    authenticated = False
-    if AUTH_TOKEN:
-        authenticated = _check_auth(request.scope)
-    return {"auth_required": AUTH_TOKEN is not None, "authenticated": authenticated}
+    if ACCESS_CONTROL_ENABLED:
+        identity = _access_identity(request.scope)
+    elif AUTH_TOKEN and _check_auth(request.scope):
+        identity = access.bootstrap_identity()
+    elif not AUTH_TOKEN:
+        identity = _access_identity(request.scope)
+    else:
+        identity = None
+    authenticated = (
+        bool(identity)
+        if ACCESS_CONTROL_ENABLED
+        else _check_auth(request.scope)
+        if AUTH_TOKEN
+        else False
+    )
+    return {
+        "auth_required": AUTH_TOKEN is not None,
+        "access_control_enabled": ACCESS_CONTROL_ENABLED,
+        "authenticated": authenticated,
+        "identity": identity.public() if identity else None,
+    }
 
 
 @app.post("/api/auth/login")
 async def auth_login(body: LoginRequest, request: Request, response: Response):
     if not AUTH_TOKEN:
         return {"ok": True}
-    if not body.token or not hmac.compare_digest(body.token, AUTH_TOKEN):
-        raise HTTPException(status_code=401, detail="Invalid token")
+
     is_https = _is_https(request)
+    if body.token:
+        if not hmac.compare_digest(body.token, AUTH_TOKEN):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        response.delete_cookie(
+            key="cbm_session", path="/", secure=is_https, samesite="strict",
+        )
+        response.set_cookie(
+            key="auth_token",
+            value=AUTH_TOKEN,
+            httponly=True,
+            samesite="strict",
+            secure=is_https,
+            path="/",
+        )
+        return {"ok": True, "identity": access.bootstrap_identity().public()}
+
+    if not ACCESS_CONTROL_ENABLED or not body.username or not body.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    user = db.get_access_user_by_username(body.username)
+    if not user or not bool(user.get("active")) or not access.verify_password(body.password, str(user["password_hash"])):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    session = access.create_session(str(user["id"]), AUTH_TOKEN)
     response.set_cookie(
-        key="auth_token",
-        value=AUTH_TOKEN,
+        key="cbm_session",
+        value=session,
+        max_age=8 * 60 * 60,
         httponly=True,
         samesite="strict",
         secure=is_https,
         path="/",
     )
-    return {"ok": True}
+    response.delete_cookie(
+        key="auth_token", path="/", secure=is_https, samesite="strict",
+    )
+    # The new cookie is attached to the response, so build the identity from
+    # the verified database record rather than asking the old request cookie.
+    return {
+        "ok": True,
+        "identity": access.AccessIdentity(
+            kind="user",
+            id=str(user["id"]),
+            display_name=str(user["username"]),
+            role=str(user["role"]),
+            grants=tuple(user.get("grants", [])),
+        ).public(),
+    }
 
 
 @app.post("/api/auth/logout")
@@ -444,28 +667,129 @@ async def auth_logout(request: Request, response: Response):
     response.delete_cookie(
         key="auth_token", path="/", secure=is_https, samesite="strict",
     )
+    response.delete_cookie(
+        key="cbm_session", path="/", secure=is_https, samesite="strict",
+    )
     return {"ok": True}
+
+
+# ── Scoped identity administration ───────────────────────────────────────────
+
+
+@app.get("/api/access/me", response_model=AccessIdentityResponse)
+async def access_me(request: Request):
+    return AccessIdentityResponse(**_require_identity(request.scope).public())
+
+
+@app.get("/api/access/users", response_model=list[AccessUserResponse])
+async def list_access_users(request: Request):
+    _require_admin(request.scope)
+    return [_access_user_response(user) for user in db.list_access_users()]
+
+
+@app.post("/api/access/users", response_model=AccessUserResponse, status_code=201)
+async def create_access_user(body: AccessUserCreate, request: Request):
+    actor = _require_admin(request.scope)
+    try:
+        user = db.create_access_user(
+            body.username,
+            access.hash_password(body.password),
+            body.role,
+            [grant.model_dump() for grant in body.grants],
+        )
+    except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(status_code=409, detail="Username already exists") from exc
+        raise
+    db.record_access_audit_event(actor.kind, actor.id, "access_user.create", "allowed")
+    return _access_user_response(user)
+
+
+@app.put("/api/access/users/{user_id}", response_model=AccessUserResponse)
+async def update_access_user(user_id: str, body: AccessUserUpdate, request: Request):
+    actor = _require_admin(request.scope)
+    data = body.model_dump(exclude_unset=True)
+    if "password" in data:
+        data["password_hash"] = access.hash_password(data.pop("password"))
+    if "grants" in data and data["grants"] is not None:
+        data["grants"] = [grant.model_dump() for grant in data["grants"]]
+    user = db.update_access_user(user_id, **data)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    db.record_access_audit_event(actor.kind, actor.id, "access_user.update", "allowed")
+    return _access_user_response(user)
+
+
+@app.get("/api/access/agents", response_model=list[AccessAgentResponse])
+async def list_access_agents(request: Request):
+    _require_admin(request.scope)
+    return [_access_agent_response(agent) for agent in db.list_access_agents()]
+
+
+@app.post("/api/access/agents", response_model=AccessAgentCreatedResponse, status_code=201)
+async def create_access_agent(body: AccessAgentCreate, request: Request):
+    actor = _require_admin(request.scope)
+    key = access.generate_agent_key()
+    agent = db.create_access_agent(
+        body.display_name,
+        access.hash_agent_key(key),
+        body.paperclip_agent_id,
+        [grant.model_dump() for grant in body.grants],
+    )
+    db.record_access_audit_event(actor.kind, actor.id, "access_agent.create", "allowed")
+    return AccessAgentCreatedResponse(**_access_agent_response(agent).model_dump(), api_key=key)
+
+
+@app.put("/api/access/agents/{agent_id}", response_model=AccessAgentResponse)
+async def update_access_agent(agent_id: str, body: AccessAgentUpdate, request: Request):
+    actor = _require_admin(request.scope)
+    data = body.model_dump(exclude_unset=True)
+    if "grants" in data and data["grants"] is not None:
+        data["grants"] = [grant.model_dump() for grant in data["grants"]]
+    agent = db.update_access_agent(agent_id, **data)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    db.record_access_audit_event(actor.kind, actor.id, "access_agent.update", "allowed")
+    return _access_agent_response(agent)
+
+
+@app.post("/api/access/agents/{agent_id}/rotate-key", response_model=AccessAgentCreatedResponse)
+async def rotate_access_agent_key(agent_id: str, request: Request):
+    actor = _require_admin(request.scope)
+    key = access.generate_agent_key()
+    agent = db.update_access_agent(agent_id, key_hash=access.hash_agent_key(key))
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    db.record_access_audit_event(actor.kind, actor.id, "access_agent.rotate_key", "allowed")
+    return AccessAgentCreatedResponse(**_access_agent_response(agent).model_dump(), api_key=key)
+
+
+@app.get("/api/access/sandboxes")
+async def list_access_sandboxes(request: Request):
+    _require_admin(request.scope)
+    counts: dict[str, int] = {}
+    for profile in db.list_profiles():
+        sandbox_id = str(profile.get("sandbox_id") or "default")
+        counts[sandbox_id] = counts.get(sandbox_id, 0) + 1
+    return [{"sandbox_id": key, "profile_count": counts[key]} for key in sorted(counts)]
 
 
 # ── Profile CRUD ──────────────────────────────────────────────────────────────
 
 
 @app.get("/api/profiles", response_model=list[ProfileResponse])
-async def list_profiles():
-    profiles = db.list_profiles()
-    result = []
-    for p in profiles:
-        status = browser_mgr.get_status(p["id"])
-        p["status"] = status["status"]
-        p["vnc_ws_port"] = status["vnc_ws_port"]
-        p["cdp_url"] = status["cdp_url"]
-        p["tags"] = [TagResponse(**t) for t in p.get("tags", [])]
-        result.append(ProfileResponse(**p))
-    return result
+async def list_profiles(request: Request):
+    identity = _require_identity(request.scope)
+    return [
+        _profile_response(profile, identity)
+        for profile in db.list_profiles()
+        if access.can_access_profile(identity, profile, "view")
+    ]
 
 
 @app.post("/api/profiles", response_model=ProfileResponse, status_code=201)
-async def create_profile(req: ProfileCreate):
+async def create_profile(req: ProfileCreate, request: Request):
+    identity = _require_admin(request.scope)
     data = req.model_dump()
     tags = data.pop("tags", None)
     if tags:
@@ -473,29 +797,21 @@ async def create_profile(req: ProfileCreate):
     else:
         data["tags"] = []
     profile = db.create_profile(**data)
-    status = browser_mgr.get_status(profile["id"])
-    profile["status"] = status["status"]
-    profile["vnc_ws_port"] = status["vnc_ws_port"]
-    profile["cdp_url"] = status["cdp_url"]
-    profile["tags"] = [TagResponse(**t) for t in profile.get("tags", [])]
-    return ProfileResponse(**profile)
+    db.record_access_audit_event(
+        identity.kind, identity.id, "profile.create", "allowed", str(profile.get("sandbox_id") or "default"), profile["id"]
+    )
+    return _profile_response(profile, identity)
 
 
 @app.get("/api/profiles/{profile_id}", response_model=ProfileResponse)
-async def get_profile(profile_id: str):
-    profile = db.get_profile(profile_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    status = browser_mgr.get_status(profile_id)
-    profile["status"] = status["status"]
-    profile["vnc_ws_port"] = status["vnc_ws_port"]
-    profile["cdp_url"] = status["cdp_url"]
-    profile["tags"] = [TagResponse(**t) for t in profile.get("tags", [])]
-    return ProfileResponse(**profile)
+async def get_profile(profile_id: str, request: Request):
+    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
+    return _profile_response(profile, identity)
 
 
 @app.put("/api/profiles/{profile_id}", response_model=ProfileResponse)
-async def update_profile(profile_id: str, req: ProfileUpdate):
+async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
+    identity = _require_admin(request.scope)
     # Only pass fields that were explicitly set
     data = req.model_dump(exclude_unset=True)
     tags = data.pop("tags", None)
@@ -504,16 +820,15 @@ async def update_profile(profile_id: str, req: ProfileUpdate):
     profile = db.update_profile(profile_id, **data)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
-    status = browser_mgr.get_status(profile_id)
-    profile["status"] = status["status"]
-    profile["vnc_ws_port"] = status["vnc_ws_port"]
-    profile["cdp_url"] = status["cdp_url"]
-    profile["tags"] = [TagResponse(**t) for t in profile.get("tags", [])]
-    return ProfileResponse(**profile)
+    db.record_access_audit_event(
+        identity.kind, identity.id, "profile.update", "allowed", str(profile.get("sandbox_id") or "default"), profile_id
+    )
+    return _profile_response(profile, identity)
 
 
 @app.delete("/api/profiles/{profile_id}")
-async def delete_profile(profile_id: str):
+async def delete_profile(profile_id: str, request: Request):
+    identity = _require_admin(request.scope)
     # Stop browser if running
     if profile_id in browser_mgr.running:
         await browser_mgr.stop(profile_id)
@@ -531,6 +846,9 @@ async def delete_profile(profile_id: str):
     if user_data_dir.exists():
         shutil.rmtree(user_data_dir, ignore_errors=True)
 
+    db.record_access_audit_event(
+        identity.kind, identity.id, "profile.delete", "allowed", str(profile.get("sandbox_id") or "default"), profile_id
+    )
     return {"ok": True}
 
 
@@ -538,10 +856,8 @@ async def delete_profile(profile_id: str):
 
 
 @app.post("/api/profiles/{profile_id}/launch", response_model=LaunchResponse)
-async def launch_profile(profile_id: str):
-    profile = db.get_profile(profile_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
+async def launch_profile(profile_id: str, request: Request):
+    profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
     if profile_id in browser_mgr.running:
         raise HTTPException(status_code=409, detail="Profile is already running")
 
@@ -553,29 +869,45 @@ async def launch_profile(profile_id: str):
         logger.error("Failed to launch profile %s: %s", profile_id, exc)
         raise HTTPException(status_code=500, detail="Failed to launch browser")
 
+    db.record_access_audit_event(
+        identity.kind, identity.id, "profile.launch", "allowed", str(profile.get("sandbox_id") or "default"), profile_id
+    )
     return LaunchResponse(
         profile_id=profile_id,
         status="running",
         vnc_ws_port=running.ws_port,
         display=f":{running.display}",
-        cdp_url=f"/api/profiles/{profile_id}/cdp",
+        cdp_url=(
+            f"/api/profiles/{profile_id}/cdp"
+            if access.can_access_profile(identity, profile, "automate")
+            else None
+        ),
     )
 
 
 @app.post("/api/profiles/{profile_id}/stop")
-async def stop_profile(profile_id: str):
+async def stop_profile(profile_id: str, request: Request):
+    profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
     if profile_id not in browser_mgr.running:
         raise HTTPException(status_code=404, detail="Profile is not running")
     await browser_mgr.stop(profile_id)
+    db.record_access_audit_event(
+        identity.kind, identity.id, "profile.stop", "allowed", str(profile.get("sandbox_id") or "default"), profile_id
+    )
     return {"ok": True}
 
 
 @app.get("/api/profiles/{profile_id}/status", response_model=ProfileStatusResponse)
-async def get_profile_status(profile_id: str):
-    profile = db.get_profile(profile_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
+async def get_profile_status(profile_id: str, request: Request):
+    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
     status = browser_mgr.get_status(profile_id)
+    if ACCESS_CONTROL_ENABLED and not identity.is_admin:
+        # Scoped callers connect through stable, authenticated proxy routes;
+        # exposing ephemeral local listener ports or an automation endpoint is
+        # unnecessary and leaks more than a view grant needs.
+        status["vnc_ws_port"] = None
+        if not access.can_access_profile(identity, profile, "automate"):
+            status["cdp_url"] = None
     return ProfileStatusResponse(**status)
 
 
@@ -603,8 +935,9 @@ _xclip_procs: dict[int, asyncio.subprocess.Process] = {}
 
 
 @app.post("/api/profiles/{profile_id}/clipboard")
-async def set_clipboard(profile_id: str, body: ClipboardRequest):
+async def set_clipboard(profile_id: str, body: ClipboardRequest, request: Request):
     """Push text into the VNC session's X clipboard via xclip."""
+    _profile, _identity = _require_profile_permission(request.scope, profile_id, "interact")
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -634,13 +967,14 @@ async def set_clipboard(profile_id: str, body: ClipboardRequest):
 
 
 @app.get("/api/profiles/{profile_id}/clipboard")
-async def get_clipboard(profile_id: str):
+async def get_clipboard(profile_id: str, request: Request):
     """Read the VNC session's clipboard.
 
     Chrome doesn't write to X11 clipboard under KasmVNC, so xclip can't read it.
     Instead, read via Playwright's CDP connection to Chrome (navigator.clipboard.readText).
     Falls back to xclip for non-Chrome clipboard owners.
     """
+    _profile, _identity = _require_profile_permission(request.scope, profile_id, "interact")
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -694,6 +1028,12 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
     """Proxy WebSocket frames between the frontend and a profile's KasmVNC."""
     if not await _check_websocket_origin(websocket):
         return
+
+    access_result = await _require_websocket_profile_permission(websocket, profile_id, "view")
+    if not access_result:
+        return
+    _profile, identity = access_result
+    can_interact = access.can_access_profile(identity, _profile, "interact")
 
     running = browser_mgr.running.get(profile_id)
     if not running:
@@ -757,6 +1097,17 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
                                 await vnc_ws.send(data)
                                 continue
 
+                            if not can_interact:
+                                # Viewers may negotiate display settings and
+                                # request frames, but never emit keyboard,
+                                # pointer or clipboard input to the browser.
+                                viewer_messages = _filter_rfb_viewer_messages(data)
+                                if viewer_messages:
+                                    await vnc_ws.send(viewer_messages)
+                                else:
+                                    dropped += 1
+                                continue
+
                             # Parse RFB messages and strip unsupported types
                             filtered = _filter_rfb_client_messages(data)
                             if filtered:
@@ -772,6 +1123,9 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
                                 dropped += 1
 
                         elif "text" in msg and msg["text"]:
+                            if not can_interact:
+                                dropped += 1
+                                continue
                             # noVNC only sends binary frames — text frames are unexpected
                             # and would bypass the RFB filter, so drop them.
                             count += 1
@@ -858,8 +1212,9 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
 
 
 @app.get("/api/profiles/{profile_id}/cdp")
-async def cdp_info(profile_id: str):
+async def cdp_info(profile_id: str, request: Request):
     """Return CDP connection info. Prevents SPA catch-all from serving index.html."""
+    _profile, _identity = _require_profile_permission(request.scope, profile_id, "automate")
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -874,6 +1229,7 @@ async def cdp_info(profile_id: str):
 @app.get("/api/profiles/{profile_id}/cdp/json/version")
 async def cdp_json_version(profile_id: str, request: Request):
     """Proxy Chrome's /json/version, rewriting WS URLs to go through our proxy."""
+    _profile, _identity = _require_profile_permission(request.scope, profile_id, "automate")
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -901,6 +1257,7 @@ async def cdp_json_version(profile_id: str, request: Request):
 @app.get("/api/profiles/{profile_id}/cdp/json")
 async def cdp_json_list(profile_id: str, request: Request):
     """Proxy Chrome's /json/list, rewriting WS URLs."""
+    _profile, _identity = _require_profile_permission(request.scope, profile_id, "automate")
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -992,6 +1349,10 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
     if not await _check_websocket_origin(websocket):
         return
 
+    access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
+    if not access_result:
+        return
+
     running = browser_mgr.running.get(profile_id)
     if not running:
         await websocket.close(code=4004, reason="Profile not running")
@@ -1018,6 +1379,10 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
 async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     """Proxy page-specific CDP WebSocket connections (e.g. /devtools/page/GUID)."""
     if not await _check_websocket_origin(websocket):
+        return
+
+    access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
+    if not access_result:
         return
 
     running = browser_mgr.running.get(profile_id)

@@ -5,6 +5,7 @@
 export interface Profile {
   id: string;
   name: string;
+  sandbox_id: string;
   fingerprint_seed: number;
   proxy: string | null;
   timezone: string | null;
@@ -37,6 +38,7 @@ export interface Profile {
 
 export interface ProfileCreateData {
   name: string;
+  sandbox_id?: string;
   fingerprint_seed?: number | null;
   proxy?: string | null;
   timezone?: string | null;
@@ -75,6 +77,61 @@ export interface SystemStatus {
   profiles_total: number;
 }
 
+export type AccessPermission = "view" | "interact" | "operate" | "automate";
+export type AccessRole = "admin" | "operator" | "viewer";
+export type AccessIdentityKind = "bootstrap" | "user" | "agent" | "anonymous";
+
+export interface AccessGrant {
+  sandbox_id: string;
+  permission: AccessPermission;
+}
+
+export interface AccessIdentity {
+  kind: AccessIdentityKind;
+  id: string | null;
+  display_name: string;
+  role: string;
+  grants: AccessGrant[];
+}
+
+export interface AuthStatus {
+  auth_required: boolean;
+  access_control_enabled: boolean;
+  authenticated: boolean;
+  identity: AccessIdentity | null;
+}
+
+export interface AccessUser {
+  id: string;
+  username: string;
+  role: AccessRole;
+  active: boolean;
+  created_at: string;
+  grants: AccessGrant[];
+}
+
+export interface AccessAgent {
+  id: string;
+  display_name: string;
+  paperclip_agent_id: string | null;
+  active: boolean;
+  created_at: string;
+  grants: AccessGrant[];
+}
+
+export interface AccessAgentCreated extends AccessAgent {
+  api_key: string;
+}
+
+export interface AccessSandbox {
+  sandbox_id: string;
+  profile_count: number;
+}
+
+export type LoginCredentials =
+  | { token: string }
+  | { username: string; password: string };
+
 class ApiError extends Error {
   constructor(
     public status: number,
@@ -110,13 +167,12 @@ async function request<T>(
 }
 
 export const api = {
-  authStatus: () =>
-    request<{ auth_required: boolean; authenticated: boolean }>("/api/auth/status"),
+  authStatus: () => request<AuthStatus>("/api/auth/status"),
 
-  login: (token: string) =>
+  login: (credentials: LoginCredentials | string) =>
     request<{ ok: boolean }>("/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ token }),
+      body: JSON.stringify(typeof credentials === "string" ? { token: credentials } : credentials),
     }),
 
   logout: () =>
@@ -157,4 +213,60 @@ export const api = {
 
   getClipboard: (id: string) =>
     request<{ text: string }>(`/api/profiles/${id}/clipboard`),
+
+  getAccessMe: () => request<AccessIdentity>("/api/access/me"),
+
+  listAccessUsers: () => request<AccessUser[]>("/api/access/users"),
+
+  createAccessUser: (data: {
+    username: string;
+    password: string;
+    role: AccessRole;
+    grants: AccessGrant[];
+  }) =>
+    request<AccessUser>("/api/access/users", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateAccessUser: (id: string, data: Partial<{
+    password: string;
+    role: AccessRole;
+    active: boolean;
+    grants: AccessGrant[];
+  }>) =>
+    request<AccessUser>(`/api/access/users/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  listAccessAgents: () => request<AccessAgent[]>("/api/access/agents"),
+
+  createAccessAgent: (data: {
+    display_name: string;
+    paperclip_agent_id?: string | null;
+    grants: AccessGrant[];
+  }) =>
+    request<AccessAgentCreated>("/api/access/agents", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateAccessAgent: (id: string, data: Partial<{
+    display_name: string;
+    paperclip_agent_id: string | null;
+    active: boolean;
+    grants: AccessGrant[];
+  }>) =>
+    request<AccessAgent>(`/api/access/agents/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  rotateAccessAgentKey: (id: string) =>
+    request<AccessAgentCreated>(`/api/access/agents/${id}/rotate-key`, {
+      method: "POST",
+    }),
+
+  listAccessSandboxes: () => request<AccessSandbox[]>("/api/access/sandboxes"),
 };

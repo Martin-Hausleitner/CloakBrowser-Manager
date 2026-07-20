@@ -57,6 +57,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
 
   const [form, setForm] = useState<ProfileCreateData>({
     name: "",
+    sandbox_id: "default",
     platform: "windows",
     screen_width: 1920,
     screen_height: 1080,
@@ -80,6 +81,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
     if (profile) {
       setForm({
         name: profile.name,
+        sandbox_id: profile.sandbox_id,
         fingerprint_seed: profile.fingerprint_seed,
         proxy: profile.proxy,
         timezone: profile.timezone,
@@ -216,6 +218,21 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 placeholder="e.g. Amazon Seller #1"
                 required
               />
+            </div>
+            <div>
+              <label className="label">Access sandbox</label>
+              <input
+                className="input"
+                value={form.sandbox_id ?? "default"}
+                onChange={(e) => set("sandbox_id", e.target.value || "default")}
+                placeholder="e.g. research-team"
+                pattern="[A-Za-z0-9][A-Za-z0-9._-]*"
+                maxLength={80}
+                required
+              />
+              <p className="mt-1 text-[11px] text-gray-500">
+                People and Paperclip agents are granted access per sandbox.
+              </p>
             </div>
             <div>
               <label className="label">Platform</label>

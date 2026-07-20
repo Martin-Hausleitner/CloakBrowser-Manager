@@ -62,7 +62,7 @@ Each CloakBrowser profile generates a completely different device identity. To t
 - **Session persistence** — cookies, localStorage, and cache survive browser restarts
 - **In-browser viewing** — interact with launched browsers via noVNC, directly in the web GUI
 - **Playwright/Puppeteer API** — connect to any running profile programmatically via CDP, while still watching it live in the browser
-- **Optional authentication** — protect the web UI and API with a single token, or run wide open locally
+- **Optional scoped access** — protect the web UI with a bootstrap token, then give people and Paperclip agents only the browser sandboxes they need
 - **Powered by CloakBrowser** — 32 source-level C++ patches, passes Cloudflare Turnstile, 0.9 reCAPTCHA v3 score
 
 ## Stack
@@ -178,6 +178,36 @@ When `AUTH_TOKEN` is set:
 - The `/api/status` endpoint remains unauthenticated (for Docker healthcheck).
 
 > **Note**: The auth token is transmitted in cleartext over HTTP. If you expose the Manager to the internet, put it behind a reverse proxy with HTTPS (Caddy, nginx, Traefik).
+
+### Scoped people and Paperclip-agent access
+
+For a shared private deployment, opt into server-enforced sandbox policies in addition to the bootstrap token:
+
+```yaml
+environment:
+  - AUTH_TOKEN=use-a-long-random-bootstrap-secret
+  - ACCESS_CONTROL_ENABLED=1
+```
+
+`AUTH_TOKEN` remains the emergency administrator credential and signing secret. Do not give it to normal users or Paperclip agents. With `ACCESS_CONTROL_ENABLED=1`, sign in with that token and open **Browser access controls** in the dashboard to:
+
+1. Assign every profile an `Access sandbox` (for example `research` or `finance`).
+2. Create named people with a password and per-sandbox grants.
+3. Create a Paperclip agent identity and copy its generated bearer key once into the agent's secret store.
+4. Rotate or deactivate a person or agent immediately when access changes.
+
+The server enforces every grant for profile discovery, VNC, clipboard, launch/stop, CDP HTTP and CDP WebSockets. A profile outside a caller's scope returns the same `404` response as a missing profile. The dashboard is a convenience layer; it is not the security boundary.
+
+| Grant | What it allows |
+| --- | --- |
+| `view` | Discover the assigned profile and see its VNC stream in read-only mode. |
+| `interact` | `view` plus VNC keyboard/mouse and clipboard input. |
+| `operate` | `interact` plus launch and stop. |
+| `automate` | `view` plus scoped CDP automation. It does not imply manual VNC input or lifecycle control. |
+
+An administrator is unrestricted. A Paperclip agent uses its own opaque key with `Authorization: Bearer <agent-key>`; clients that connect directly to a CDP WebSocket must attach the same header to the WebSocket upgrade. Agent keys are stored only as hashes and are shown in the dashboard once at creation or rotation.
+
+Existing installations stay on the previous single-token behavior until `ACCESS_CONTROL_ENABLED=1` is explicitly set. The local SQLite migration runs automatically, and existing profiles start in the `default` sandbox.
 
 ## License
 

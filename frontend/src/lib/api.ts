@@ -101,6 +101,33 @@ export interface AuthStatus {
   identity: AccessIdentity | null;
 }
 
+function normalizeAuthStatus(status: Partial<AuthStatus>): AuthStatus {
+  const authRequired = Boolean(status.auth_required);
+
+  // Older manager backends reported only `auth_required` and
+  // `authenticated`. Keep a freshly deployed frontend usable against that
+  // open, legacy contract instead of accidentally rendering every local
+  // owner as a read-only scoped viewer until the backend is restarted.
+  const identity = status.identity ?? (
+    !authRequired
+      ? {
+          kind: "anonymous" as const,
+          id: null,
+          display_name: "Local legacy access",
+          role: "admin",
+          grants: [],
+        }
+      : null
+  );
+
+  return {
+    auth_required: authRequired,
+    access_control_enabled: Boolean(status.access_control_enabled),
+    authenticated: Boolean(status.authenticated),
+    identity,
+  };
+}
+
 export interface AccessUser {
   id: string;
   username: string;
@@ -167,7 +194,7 @@ async function request<T>(
 }
 
 export const api = {
-  authStatus: () => request<AuthStatus>("/api/auth/status"),
+  authStatus: async () => normalizeAuthStatus(await request<Partial<AuthStatus>>("/api/auth/status")),
 
   login: (credentials: LoginCredentials | string) =>
     request<{ ok: boolean }>("/api/auth/login", {

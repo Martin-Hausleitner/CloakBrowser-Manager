@@ -18,6 +18,48 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
+describe("api.authStatus", () => {
+  it("treats a legacy open backend as the local administrator", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ auth_required: false, authenticated: false }));
+
+    await expect(api.authStatus()).resolves.toEqual({
+      auth_required: false,
+      access_control_enabled: false,
+      authenticated: false,
+      identity: {
+        kind: "anonymous",
+        id: null,
+        display_name: "Local legacy access",
+        role: "admin",
+        grants: [],
+      },
+    });
+  });
+
+  it("preserves an explicit scoped identity from a current backend", async () => {
+    const identity = {
+      kind: "user" as const,
+      id: "user-1",
+      display_name: "Viewer",
+      role: "viewer",
+      grants: [{ sandbox_id: "research", permission: "view" as const }],
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      auth_required: true,
+      access_control_enabled: true,
+      authenticated: true,
+      identity,
+    }));
+
+    await expect(api.authStatus()).resolves.toEqual({
+      auth_required: true,
+      access_control_enabled: true,
+      authenticated: true,
+      identity,
+    });
+  });
+});
+
 // ── listProfiles ────────────────────────────────────────────────────────────
 
 describe("api.listProfiles", () => {

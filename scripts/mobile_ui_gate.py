@@ -502,6 +502,17 @@ def run_viewport(
     take_screenshot(browser, result, output_dir, name, "grid", width, height)
     browser.run("click", "button[aria-label='Toggle grid view']")
 
+    # Navigating between mobile viewport sizes closes the previous noVNC
+    # websocket. The viewer deliberately reconnects in the background, so
+    # wait for that public, visible ready state before asserting fullscreen
+    # behaviour. A persistent disconnect still fails the gate at this point.
+    if profile_id:
+        browser.wait_for(
+            "document.body.innerText.includes('Connected') && "
+            "document.querySelectorAll('.mobile-browser-content canvas').length === 1",
+            "live VNC connection before fullscreen",
+            timeout,
+        )
     pre_fullscreen_canvas = browser.eval(CANVAS_SCRIPT)
     browser.run("click", "button[aria-label='Open fullscreen browser']")
     browser.wait_for("!!document.querySelector('[role=\"dialog\"][aria-label=\"Fullscreen browser viewer\"]')", "fullscreen dialog", 5)

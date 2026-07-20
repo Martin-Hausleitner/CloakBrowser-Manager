@@ -99,20 +99,20 @@ function GrantEditor({
   }, [grants, sandboxes]);
 
   return (
-    <fieldset className="rounded-md border border-border bg-surface-1 p-3">
+    <fieldset className="min-w-0 rounded-md border border-border bg-surface-1 p-3">
       <legend className="px-1 text-xs font-medium text-gray-300">Sandbox access</legend>
       {allSandboxes.length ? (
         <div className="space-y-2">
           {allSandboxes.map((sandbox) => {
             const permission = grants.find((grant) => grant.sandbox_id === sandbox.sandbox_id)?.permission ?? "";
             return (
-              <label key={sandbox.sandbox_id} className="flex items-center gap-3 text-sm">
+              <label key={sandbox.sandbox_id} className="flex min-w-0 items-center gap-3 text-sm">
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-300">
                   {sandbox.sandbox_id}
                   <span className="ml-1 font-sans text-gray-500">({sandbox.profile_count} browser{sandbox.profile_count === 1 ? "" : "s"})</span>
                 </span>
                 <select
-                  className="input h-11 w-32 py-2 text-xs"
+                  className="input h-11 w-32 shrink-0 py-2 text-xs"
                   value={permission}
                   aria-label={`Permission for ${sandbox.sandbox_id}`}
                   onChange={(event) => onChange(updateGrant(
@@ -268,7 +268,7 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
   };
 
   return (
-    <main className="mx-auto w-full max-w-6xl p-4 sm:p-6" aria-label="Browser access controls">
+    <main className="mx-auto min-w-0 w-full max-w-6xl p-4 sm:p-6" aria-label="Browser access controls">
       <header className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
           <div className="mt-0.5 rounded-lg bg-accent/10 p-2 text-accent">
@@ -311,9 +311,9 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
               Hide key
             </button>
           </div>
-          <div className="mt-3 flex gap-2">
-            <input className="input min-h-11 font-mono text-xs" value={revealedKey.key} readOnly aria-label="New Paperclip agent key" />
-            <button type="button" className={`${primaryActionButtonClass} shrink-0`} onClick={() => void copyKey()}>
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+            <input className="input min-w-0 min-h-11 font-mono text-xs" value={revealedKey.key} readOnly aria-label="New Paperclip agent key" />
+            <button type="button" className={`${primaryActionButtonClass} self-start sm:shrink-0`} onClick={() => void copyKey()}>
               <Copy className="h-3.5 w-3.5" />
               {copied ? "Copied" : "Copy"}
             </button>
@@ -321,8 +321,8 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
         </section>
       )}
 
-      <div className="grid gap-5 xl:grid-cols-2">
-        <section className="rounded-lg border border-border bg-surface-0 p-4">
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+        <section className="min-w-0 rounded-lg border border-border bg-surface-0 p-4">
           <div className="mb-4 flex items-center gap-2">
             <UserRound className="h-4 w-4 text-accent" />
             <div>
@@ -411,7 +411,7 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
           </form>
         </section>
 
-        <section className="rounded-lg border border-border bg-surface-0 p-4">
+        <section className="min-w-0 rounded-lg border border-border bg-surface-0 p-4">
           <div className="mb-4 flex items-center gap-2">
             <KeyRound className="h-4 w-4 text-accent" />
             <div>

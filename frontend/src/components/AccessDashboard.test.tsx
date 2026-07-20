@@ -107,4 +107,24 @@ describe("AccessDashboard", () => {
     expect(screen.getByRole("button", { name: "Rotate key for Research helper" }).className).toBe("mobile-icon-button");
     expect(screen.getByRole("button", { name: "Edit Research helper" }).className).toBe("mobile-icon-button");
   });
+
+  it("allows long sandbox identifiers to shrink instead of widening a mobile form", async () => {
+    apiMock.listAccessSandboxes.mockResolvedValue([
+      { sandbox_id: "paperclip-automation-sandbox-with-a-long-name", profile_count: 1 },
+    ]);
+
+    render(<AccessDashboard onClose={vi.fn()} />);
+
+    const longSandbox = "paperclip-automation-sandbox-with-a-long-name";
+    const permission = await screen.findAllByLabelText(`Permission for ${longSandbox}`);
+    const grantFieldset = permission[0].closest("fieldset");
+    const peopleSection = screen.getByRole("heading", { name: "People" }).closest("section");
+    const dashboardGrid = peopleSection?.parentElement;
+
+    expect(grantFieldset?.className).toContain("min-w-0");
+    expect(permission[0].parentElement?.className).toContain("min-w-0");
+    expect(permission[0].className).toContain("shrink-0");
+    expect(peopleSection?.className).toContain("min-w-0");
+    expect(dashboardGrid?.className).toContain("grid-cols-1");
+  });
 });

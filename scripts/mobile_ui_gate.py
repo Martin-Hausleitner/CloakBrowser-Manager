@@ -1147,6 +1147,7 @@ def run_viewport(
 def run_access_dashboard_gate(
     browser: AgentBrowser,
     base_url: str,
+    output_dir: Path,
     auth_token: str,
     timeout: float,
 ) -> dict[str, Any]:
@@ -1156,6 +1157,7 @@ def run_access_dashboard_gate(
         "height": 844,
         "checks": [],
         "errors": [],
+        "screenshots": [],
     }
     browser.run("set", "viewport", "390", "844")
     browser.run("open", base_url)
@@ -1189,6 +1191,15 @@ def run_access_dashboard_gate(
     )
     touch = dashboard.get("touchTargets") or {}
     add_check(result, "access dashboard 44px visible touch targets", not touch.get("offenders"), touch)
+    take_screenshot(
+        browser,
+        result,
+        output_dir,
+        result["name"],
+        "dashboard",
+        result["width"],
+        result["height"],
+    )
     result["passed"] = all(check["passed"] for check in result["checks"])
     return result
 
@@ -1313,6 +1324,7 @@ def main() -> int:
                 report["access_dashboard"] = run_access_dashboard_gate(
                     browser,
                     args.base_url,
+                    args.output_dir,
                     auth_token or "",
                     args.timeout,
                 )

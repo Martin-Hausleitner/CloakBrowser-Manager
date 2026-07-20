@@ -237,6 +237,56 @@ describe("ProfileViewer", () => {
     expect(screen.queryByLabelText("Enable clipboard sync")).toBeNull();
   });
 
+  it("focuses the dynamically created noVNC canvas on pointer interaction", async () => {
+    await renderProfileViewer();
+    act(() => rfbMock.instances[0]?.emit("connect"));
+
+    const container = rfbMock.instances[0]!.target;
+    const canvas = document.createElement("canvas");
+    container.appendChild(canvas);
+
+    fireEvent.pointerDown(canvas);
+
+    expect(canvas.getAttribute("tabindex")).toBe("-1");
+    expect(document.activeElement).toBe(canvas);
+  });
+
+  it("focuses the dynamically created noVNC canvas on touch interaction", async () => {
+    await renderProfileViewer();
+    act(() => rfbMock.instances[0]?.emit("connect"));
+
+    const container = rfbMock.instances[0]!.target;
+    const canvas = document.createElement("canvas");
+    container.appendChild(canvas);
+
+    fireEvent.touchStart(canvas);
+
+    expect(canvas.getAttribute("tabindex")).toBe("-1");
+    expect(document.activeElement).toBe(canvas);
+  });
+
+  it("does not focus noVNC canvas interactions in view-only mode", async () => {
+    render(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        canInteract={false}
+        onDisconnect={vi.fn()}
+      />,
+    );
+    await flushAsyncWork();
+
+    const container = rfbMock.instances[0]!.target;
+    const canvas = document.createElement("canvas");
+    container.appendChild(canvas);
+
+    fireEvent.pointerDown(canvas);
+
+    expect(canvas.hasAttribute("tabindex")).toBe(false);
+    expect(document.activeElement).not.toBe(canvas);
+  });
+
   it("repaints the noVNC canvas after its container is resized", async () => {
     const originalResizeObserver = window.ResizeObserver;
     let resizeCallback: ResizeObserverCallback | null = null;

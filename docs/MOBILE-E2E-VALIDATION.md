@@ -23,14 +23,16 @@ Zusätzlich bestanden im identischen Arbeitsstand der Produktionsbuild, **40 Fro
 
 ## Abgesicherter Policy- und Dashboard-Nachtest
 
-Der aktuelle Source-Build wurde anschließend in einem frischen, isolierten Container mit ausschließlich `127.0.0.1:18081`-Bindung, aktivem `AUTH_TOKEN` und `ACCESS_CONTROL_ENABLED=1` ausgeführt. Der Lauf meldete sich über die echte Policy-Anmeldung an, wählte ein laufendes 1024-×-576-KasmVNC-Profil und bestand **99/99 Assertions**: **95** für die vier Workspace-/VNC-Viewports sowie **4** für den iPhone-14-großen Access-Dashboard-Gate.
+Der aktuelle Source-Build wurde in einem frischen, isolierten Container mit ausschließlich `127.0.0.1:18081`-Bindung, aktivem `AUTH_TOKEN` und `ACCESS_CONTROL_ENABLED=1` ausgeführt. Ein erster vollständig frischer Lauf deckte auf dem iPhone-14-Viewport einen echten First-Connect-Fokusfehler auf: Nach einem Touch erhielt der noVNC-Canvas nicht zuverlässig sofort den Tastaturfokus. Der Viewer fokussiert deshalb jetzt bei Pointer- und Touch-Interaktion den dynamisch erzeugten Canvas; View-only bleibt davon ausgenommen.
+
+Der daraufhin neu gebaute und erneut isoliert gestartete Nachtest bestand **100/100 Assertions**: **96** für die vier Workspace-/VNC-Viewports sowie **4** für den iPhone-14-großen Access-Dashboard-Gate. Die eine zusätzliche Workspace-Assertion ist der explizite Fokusnachweis im ersten iPhone-14-Lauf.
 
 | Bereich | Nachweis | Ergebnis |
 |---|---|---|
-| iPhone 14, Pro Max, Landscape und Touch-Tablet | echter Canvas, VNC-Verbindung, Paste, kontrollierter CDP-Keyboard-Pfad, Grid, Vollbild, Composer und 44-px-Touch-Ziele | 95/95 bestanden |
+| iPhone 14, Pro Max, Landscape und Touch-Tablet | echter Canvas, VNC-Verbindung, Touch-/Pointer-Fokus, Paste, kontrollierter CDP-Keyboard-Pfad, Grid, Vollbild, Composer und 44-px-Touch-Ziele | 96/96 bestanden |
 | Access Dashboard auf 390 × 844 | Dashboard-Aktion, Rendering, kein horizontaler Overflow und alle sichtbaren Buttons, Selects sowie Textinputs mindestens 44 × 44 px | 4/4 bestanden |
 
-Der Dashboard-Gate ist Teil von `scripts/mobile_ui_gate.py` und wird mit `--access-dashboard` nur zusammen mit einem lokal referenzierten Token-Environment aktiviert. Tokenwerte erscheinen weder im Report noch in Screenshots. Ein repräsentativer iPhone-Workspace-Screenshot mit verbundenem Live-Canvas wurde visuell kontrolliert. Der isolierte Testcontainer und seine Testdaten sind nicht die laufende Alltagsinstanz.
+Der Dashboard-Gate ist Teil von `scripts/mobile_ui_gate.py` und wird mit `--access-dashboard` nur zusammen mit einem lokal referenzierten Token-Environment aktiviert. Tokenwerte erscheinen weder im Report noch in Screenshots. Ein repräsentativer iPhone-Workspace-Screenshot mit verbundenem Live-Canvas und ein iPhone-14-Screenshot des Access Dashboards wurden visuell kontrolliert. Der isolierte Testcontainer und seine Testdaten sind nicht die laufende Alltagsinstanz.
 
 Diese Prüfung beweist die geschützte Browser-/VNC- und Dashboard-Oberfläche im Browser. Sie ersetzt nicht den noch offenen physischen iPhone-Safari-Test über private Tailscale-HTTPS, weil Tailscale Serve in diesem Tailnet derzeit administrativ deaktiviert ist.
 
@@ -65,7 +67,7 @@ Der erste Wert je Zeile startete aus einem gestoppten Profil und ist deshalb nur
 - Grid öffnet und rendert den aktuellen Profilzustand.
 - Der echte VNC-Status erreicht `Connected`.
 - Vor, während und nach CSS-Vollbild existiert exakt ein Canvas.
-- Der noVNC-Canvas erhielt Fokus; `Ctrl+L`, URL-Zeichen und Enter wurden als deterministische Keyboard-Events durch RFB gesendet. Der CDP-Proxy meldete anschließend exakt `http://127.0.0.1:8080/api/status`, und der VNC-Screenshot zeigte die JSON-Antwort.
+- Der noVNC-Canvas erhält bei Pointer-/Touch-Interaktion Fokus; `Ctrl+L`, URL-Zeichen und Enter werden als deterministische Keyboard-Events durch RFB gesendet. Der CDP-Proxy bestätigt anschließend die harmlose eindeutige HTTP(S)-Probe, und der VNC-Screenshot zeigt die geladene Zielseite.
 - Vollbild deckt den Viewport ab, setzt den Hintergrund `inert` und fokussiert die Schließen-Aktion.
 - Escape schließt Vollbild, gibt den Fokus zurück und erzeugt keinen Overflow.
 - Dreizehn PNG-Artefakte besitzen die erwartete Viewportgröße und eine nichttriviale Dateigröße.
@@ -74,12 +76,12 @@ Der erste Wert je Zeile startete aus einem gestoppten Profil und ist deshalb nur
 
 | Gate | Ergebnis |
 |---|---|
-| Frontend | 4 Dateien, 31 Tests bestanden |
-| Backend | 187 Tests bestanden; eine Starlette-Deprecation-Warnung |
+| Frontend | 5 Dateien, 43 Tests bestanden |
+| Backend | 200 Tests bestanden; eine Starlette-Deprecation-Warnung |
 | Produktionsbuild | bestanden |
-| App-JS | 75,92 kB gzip bei Budget 85 kB |
+| App-JS | 81,13 kB gzip bei Budget 85 kB |
 | lazy noVNC | 50,50 kB gzip bei Budget 60 kB |
-| CSS | 5,20 kB gzip bei Budget 6 kB |
+| CSS | 5,58 kB gzip bei Budget 6 kB |
 | Container | gesund |
 | Serverlog-Smoke | keine Treffer für Error, Traceback, Exception, Securityfailure oder Reconnect-Loop im geprüften Zeitfenster |
 

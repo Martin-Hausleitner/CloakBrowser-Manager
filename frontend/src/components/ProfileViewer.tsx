@@ -29,6 +29,18 @@ function shouldPollClipboard() {
   return document.visibilityState !== "hidden";
 }
 
+function focusNoVncCanvas(container: HTMLElement) {
+  const canvas = container.querySelector("canvas");
+  if (!(canvas instanceof HTMLCanvasElement)) return;
+
+  if (!canvas.hasAttribute("tabindex")) {
+    canvas.tabIndex = -1;
+  }
+  if (document.activeElement === canvas) return;
+
+  canvas.focus({ preventScroll: true });
+}
+
 export function ProfileViewer({
   profileId,
   cdpUrl,
@@ -389,6 +401,22 @@ export function ProfileViewer({
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
   }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !canInteract) return;
+
+    const handlePointerIntent = () => {
+      focusNoVncCanvas(container);
+    };
+
+    container.addEventListener("pointerdown", handlePointerIntent, true);
+    container.addEventListener("touchstart", handlePointerIntent, true);
+    return () => {
+      container.removeEventListener("pointerdown", handlePointerIntent, true);
+      container.removeEventListener("touchstart", handlePointerIntent, true);
+    };
+  }, [canInteract]);
 
   useEffect(() => {
     const container = containerRef.current;

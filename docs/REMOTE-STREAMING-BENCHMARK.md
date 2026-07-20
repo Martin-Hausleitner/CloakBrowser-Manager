@@ -13,6 +13,7 @@ Für den aktuellen CloakBrowser Manager bleibt **KasmVNC 1.3.3 + noVNC 1.4.x bei
 - Der isolierte A/B-Lauf bestätigt keinen Geschwindigkeitsgewinn durch KasmVNC 1.4; 1.3.3 bleibt deshalb die risikoärmere Produktionsbasis.
 - Selkies liefert im isolierten WebSocket-POC einen echten CloakBrowser-Stream samt Eingabe. Der rohe Client ist aber auf einem iPhone-Viewport sichtbar letterboxed und nicht in den Produkt- und Profil-Lifecycle integriert.
 - Sunshine/Moonlight passt eher zu einem nativen Companion-Client als zu einem eingebetteten iPhone-Web-Viewer.
+- Apache Guacamole ist ein clientloses Remote-Desktop-Gateway, aber kein Drop-in-Ersatz: Es benötigt eine eigene Web-App- plus `guacd`-Ebene und passt nicht direkt auf den bestehenden WebSocket-only-KasmVNC-Pfad.
 - noVNC 1.7 ist kein Drop-in-Update für den aktuellen Viewer.
 
 ## Vergleichsmatrix
@@ -24,6 +25,7 @@ Für den aktuellen CloakBrowser Manager bleibt **KasmVNC 1.3.3 + noVNC 1.4.x bei
 | noVNC 1.7 | Build scheitert ohne Migration an ESM-/Export-Änderungen und entfernter `showDotCursor`-API | Kompatibilitätsprüfung | Nicht direkt aktualisieren |
 | Selkies | Echter CloakBrowser auf X11, JPEG- und H.264-Frame im Browser sowie Remote-Eingabe lokal nachgewiesen; keine Produktintegration und kein brauchbares mobiles Raw-UI | Isolierter Browser-E2E-POC | Nicht als Drop-in ersetzen |
 | Sunshine + Moonlight | Architektur und Clientmodell geprüft; kein passender allgemeiner Web-Embed-Pfad | Architekturprüfung | Kein Web-MVP-Core |
+| Apache Guacamole | Browser-/Touch-Unterstützung und Gateway-Architektur geprüft; bestehender KasmVNC-Server hat bewusst keinen Raw-VNC-TCP-Port | Architektur-/Integrationsprüfung | Kein Web-MVP-Core |
 | Browser-Use Chat UI | Interaktions- und Informationsarchitektur geprüft | UI-Referenz | Als UX-Referenz, nicht als Streamingstack |
 
 ## Upstream-Snapshot
@@ -35,6 +37,7 @@ Die folgende Einordnung hält den Stand der verglichenen Projekte am 20. Juli 20
 - **Selkies**: Die Projektseite beschreibt Selkies als HTML5-Remote-Desktop mit WebSockets als Standardtransport, optionalem WebRTC und einem Performance-Ziel von mindestens 60 fps bei Full-HD.
 - **Sunshine**: Das Upstream-README positioniert Sunshine als Game-Stream-Host mit Web-UI für Konfiguration und Pairing aus Browser oder mobilem Gerät.
 - **Moonlight Qt**: Das Upstream-README nennt explizit mobile Clients für Android und iOS, also ein starkes Signal für den nativen-Client-Pfad statt eines eingebetteten Web-Views.
+- **Apache Guacamole 1.6.0**: Die offizielle Architektur trennt Web-App und `guacd`; `guacd` übersetzt erst vom Guacamole-Protokoll zu VNC, RDP oder SSH. Die Nutzungsdokumentation beschreibt Touch-Emulation, Bildschirm-Skalierung und Bildschirmtastatur für mobile Geräte.
 - **Browser Use Chat UI**: Die offizielle Tutorial-Seite beschreibt den Session-Flow mit Live-Browser-Preview, Streaming-Messages, Follow-ups und Recording-Download. Genau diese Interaktionsidee ist die UX-Referenz für unseren mobilen Composer, nicht die Streaming-Schicht selbst.
 
 Diese Snapshot-Einordnung ändert die Produktentscheidung nicht: Für den aktuellen CloakBrowser-Manager bleibt KasmVNC 1.3.3 + noVNC 1.4.x die am besten nachgewiesene Web-Basis, während Browser Use nur als Chat-/Session-UX-Referenz dient.
@@ -99,6 +102,14 @@ Sunshine ist auf macOS weiterhin ein experimenteller Hostpfad; Moonlight ist pri
 
 Deshalb ist der Stack für dieses Produkt derzeit ein **Conditional No-Go**: nur erneut prüfen, wenn ein nativer iOS-Companion ausdrücklich Teil des Produkts wird.
 
+## Apache Guacamole
+
+Apache Guacamole ist ein browserbasiertes Remote-Desktop-Gateway für VNC, RDP und SSH. Seine offizielle Architektur trennt die Web-Anwendung von `guacd`, das den Guacamole-Datenstrom in das jeweilige Remote-Desktop-Protokoll übersetzt. Die Touch-Dokumentation deckt Touch-Emulation, Skalierung und Bildschirmtastatur ab. Damit ist Guacamole für Mobile Safari grundsätzlich verwendbar, liefert aber keinen belegten UX- oder Leistungs-Vorteil gegenüber dem bereits mobilfähigen noVNC-Pfad.
+
+Für den aktuellen Manager wäre Guacamole keine direkte Migration: Der bestehende KasmVNC-Start konfiguriert `-websocketPort` und deaktiviert den Raw-VNC-TCP-Port mit `-rfbport -1`; außerdem kapseln FastAPI-Profilverwaltung, berechtigter VNC-WebSocket-Proxy und CDP-Automation jeweils produkt-spezifische Verantwortlichkeiten. Eine Guacamole-Einführung bräuchte deshalb mindestens einen VNC-Bridge-/Raw-Port-Pfad sowie ein separates Verbindungs- und Berechtigungsmodell. Die zusätzliche Kette `Browser → Guacamole-Web-App → guacd → VNC` ist eine Architektur-Inferenz aus der offiziellen Aufteilung, keine gemessene Latenzbehauptung.
+
+Ein lokaler Vergleich wäre als enger Transporttest gegen denselben Browser, dieselbe Auflösung und identische Touch-/Keyboard-Proben möglich. Er wäre jedoch kein fairer Drop-in-Produktbenchmark, solange die zusätzliche Guacamole-Authentifizierung, das Provisioning und die bestehende CDP-/Profilsteuerung nicht gleichwertig integriert sind. Deshalb bleibt Guacamole ein **Conditional No-Go**: nur erneut messen, falls ein eigenständiges Gateway-Produktziel die zusätzliche Infrastruktur rechtfertigt.
+
 ## noVNC 1.7 und KasmVNC 1.4
 
 Der direkte noVNC-1.7-Versuch traf auf geänderte ESM-Exports und die entfernte `showDotCursor`-Oberfläche. Eine Aktualisierung benötigt daher eine kleine Viewer-Migration und einen eigenen Reconnect-, Touch-, Fullscreen- und Safari-Test. Sie darf nicht gemeinsam mit einem KasmVNC-Upgrade als untrennbares Paket bewertet werden.
@@ -126,6 +137,7 @@ Die folgenden `HEAD`-Stände wurden am 20. Juli 2026 direkt aus den öffentliche
 - [Selkies GStreamer @ `44fb739`](https://github.com/selkies-project/selkies-gstreamer/tree/44fb7391901757605e0e617875fdfd4c9dda5906)
 - [Sunshine @ `9d2409f`](https://github.com/LizardByte/Sunshine/tree/9d2409f71b60f1812f482e6dd807dc52e2f72fe7)
 - [Moonlight Qt @ `2328713`](https://github.com/moonlight-stream/moonlight-qt/tree/2328713f4e7b8442e6bd49238b4eba27031a4d9f)
+- [Apache Guacamole: Architektur](https://guacamole.apache.org/doc/gug/guacamole-architecture.html), [Mobile-/Touch-Bedienung](https://guacamole.apache.org/doc/gug/using-guacamole.html) und [Release 1.6.0](https://guacamole.apache.org/releases/1.6.0/)
 - [Browser-Use Chat UI @ `0a0e855`](https://github.com/browser-use/chat-ui-example/tree/0a0e855205bd90fb782c60e7dabe8149b8476acf)
 
 ## Offene Nachweise

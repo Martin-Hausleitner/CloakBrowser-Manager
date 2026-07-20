@@ -4,21 +4,32 @@
 
 ## Context
 
-We are adding a mobile VNC workspace to CloakBrowser Manager. The next security milestone is to let a Paperclip-managed agent access only explicitly assigned browser sandboxes, while human administrators can decide which users can view, interact with, or automate each sandbox.
+The implementation is available for review in a fork of CloakBrowser Manager. It gives a Paperclip-managed agent access only to explicitly assigned browser sandboxes, while human administrators decide which users can view, interact with, operate, or automate each sandbox.
 
-## Proposal
+This is Paperclip-inspired control-plane behavior, not a dependency on a Paperclip server and not a copy of Paperclip's UI or branding.
 
-- Add an explicit `sandbox_id` to each browser profile.
-- Add local human identities and scoped agent credentials.
-- Store only password/API-key hashes; show a generated agent key only once.
-- Enforce scopes in the backend for profile discovery, VNC, clipboard, CDP REST, and CDP WebSockets.
-- Separate `view`, `interact`, `operate`, and `automate`; CDP is never implied by view access.
-- Use a compact admin dashboard to manage people, agent identities, sandbox grants, rotation, and deactivation.
-- Keep a bootstrap admin path for safe migration and make enforcement opt-in until tested.
+## Implementation under review
+
+- Each browser profile has an explicit `sandbox_id`.
+- Local people use signed sessions; agents use individual opaque credentials whose hashes alone are persisted. A generated agent key is shown only once.
+- The backend enforces scopes for profile discovery, VNC, clipboard, CDP REST, and CDP WebSockets.
+- `view`, `interact`, `operate`, and `automate` are distinct. CDP is never implied by a view grant.
+- The compact admin dashboard manages people, agent identities, sandbox grants, deactivation, and agent-key rotation.
+- The bootstrap-admin path and `ACCESS_CONTROL_ENABLED=1` make migration explicit and reversible.
 
 ## Why not rely on the UI alone?
 
 VNC and CDP are direct API/WebSocket surfaces. A frontend-only filter would still allow a user or agent to try a known profile URL. The backend therefore needs to decide every resource access before it connects to KasmVNC or Chrome.
+
+## Validation completed in an isolated local deployment
+
+- A viewer saw only its assigned sandbox; a direct request for another profile and a lifecycle request both returned the same not-found response.
+- A Paperclip-style agent credential saw only its assigned sandbox; it could not launch a browser without an `operate` grant.
+- Rotating an agent key invalidated the old key immediately.
+- A viewer-only noVNC connection displayed live frames. A real click sent through that viewer canvas did not reach a controlled remote button; keyboard, pointer, and clipboard input are filtered server-side after a validated RFB handshake.
+- The public container check is a metadata-free `/health` endpoint. Runtime/profile counts in `/api/status` require authentication.
+
+No production deployment, upstream merge, public URL, live credential, or browser content is included in this draft.
 
 ## Questions for maintainers and Paperclip users
 
@@ -26,7 +37,7 @@ VNC and CDP are direct API/WebSocket surfaces. A frontend-only filter would stil
 2. Should a Paperclip agent receive a long-lived rotating opaque key, or should the integration exchange short-lived credentials with a Paperclip instance?
 3. Is a viewer-only VNC stream useful enough to ship in the first release, given that input must be strictly discarded server-side?
 4. Which audit event fields are most useful without collecting browser contents, clipboard data, prompts, or credentials?
-5. Are there Paperclip adapter hooks or credential-rotation conventions that should be matched before implementing the bridge?
+5. Are there Paperclip adapter hooks or credential-rotation conventions that should be matched before an optional bridge is added?
 
 ## Non-goals for the first release
 
@@ -35,6 +46,6 @@ VNC and CDP are direct API/WebSocket surfaces. A frontend-only filter would stil
 - No public network exposure; deployment remains private/authenticated.
 - No policy decision based solely on an agent prompt or a frontend assertion.
 
-## Validation plan
+## Follow-up validation
 
-Automated tests will prove that unauthorized profile, VNC, clipboard, and CDP requests fail; authorized scope-matched requests succeed; rotating an agent credential invalidates the old key; and the mobile dashboard never displays a profile that its signed-in identity cannot access.
+Before an upstream merge, repeat the API/WebSocket matrix against the proposed target branch and confirm the mobile dashboard never displays a profile that its signed-in identity cannot access. For a physical iPhone acceptance test, private Tailnet HTTPS must first be enabled by the Tailnet administrator.

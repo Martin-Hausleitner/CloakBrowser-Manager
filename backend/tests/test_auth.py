@@ -128,9 +128,13 @@ def test_logout_clears_cookie(client_auth: TestClient):
 
 
 def test_healthcheck_always_accessible(client_auth: TestClient):
-    """GET /api/status must work without auth (Docker healthcheck)."""
-    resp = client_auth.get("/api/status")
+    """GET /health remains available without profile/runtime metadata."""
+    resp = client_auth.get("/health")
     assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+    # Status includes browser counts and is intentionally authenticated.
+    assert client_auth.get("/api/status").status_code == 401
 
 
 def test_auth_status_always_accessible(client_auth: TestClient):

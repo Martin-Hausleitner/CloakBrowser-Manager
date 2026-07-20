@@ -90,8 +90,10 @@ ACCESS_CONTROL_ENABLED = bool(AUTH_TOKEN) and access.access_control_enabled(
 if os.environ.get("ACCESS_CONTROL_ENABLED") and not AUTH_TOKEN:
     logger.warning("ACCESS_CONTROL_ENABLED ignored because AUTH_TOKEN is not configured")
 
-# Paths that bypass authentication even when AUTH_TOKEN is set
-_AUTH_EXEMPT = frozenset({"/api/auth/status", "/api/auth/login", "/api/status"})
+# Paths that bypass authentication even when AUTH_TOKEN is set.  ``/health``
+# deliberately contains no profile or runtime metadata so Docker can probe the
+# service without turning ``/api/status`` into an information leak.
+_AUTH_EXEMPT = frozenset({"/api/auth/status", "/api/auth/login", "/health"})
 _LOGIN_FAILURE_LIMIT = 5
 _LOGIN_BACKOFF_SECONDS = 60.0
 _LOGIN_FAILURE_TTL_SECONDS = 10 * 60.0
@@ -534,6 +536,74 @@ def _filter_rfb_viewer_messages(data: bytes) -> bytes:
             result.extend(data[offset:offset + msg_len])
         offset += msg_len
     return bytes(result)
+
+
+_RFB_CLIENT_PROTOCOL_VERSION = b"RFB 003.008\n"
+_RFB_SECURITY_TYPE_NONE = 1
+_RFB_CLIENT_INIT_SHARED_FLAGS = {0, 1}
+
+
+class _RfbClientStreamFilter:
+    """Filter client->server bytes after consuming exact RFB handshake bytes.
+
+    KasmVNC is launched with SecurityTypes=None, so the noVNC client sends
+    exactly three handshake messages: ProtocolVersion, SecurityType, ClientInit.
+    Multiple handshake messages may be coalesced in one WebSocket frame.  Each
+    byte must still match the next expected handshake state before it is
+    forwarded; the first non-handshake byte is handled only after the handshake
+    has completed and normal RFB filtering is active.
+    """
+
+    def __init__(self, *, can_interact: bool):
+        self.can_interact = can_interact
+        self._handshake_state = "protocol_version"
+        self._protocol_version = bytearray()
+        self.last_forwarded_handshake = False
+
+    def _consume_handshake_byte(self, value: int) -> bool:
+        if self._handshake_state == "protocol_version":
+            expected = _RFB_CLIENT_PROTOCOL_VERSION[len(self._protocol_version)]
+            if value != expected:
+                return False
+            self._protocol_version.append(value)
+            if len(self._protocol_version) == len(_RFB_CLIENT_PROTOCOL_VERSION):
+                self._handshake_state = "security_type"
+            return True
+
+        if self._handshake_state == "security_type":
+            if value != _RFB_SECURITY_TYPE_NONE:
+                return False
+            self._handshake_state = "client_init"
+            return True
+
+        if self._handshake_state == "client_init":
+            if value not in _RFB_CLIENT_INIT_SHARED_FLAGS:
+                return False
+            self._handshake_state = "done"
+            return True
+
+        return False
+
+    def filter(self, data: bytes) -> bytes:
+        result = bytearray()
+        offset = 0
+        self.last_forwarded_handshake = False
+
+        while offset < len(data) and self._handshake_state != "done":
+            if not self._consume_handshake_byte(data[offset]):
+                return bytes(result)
+            result.append(data[offset])
+            self.last_forwarded_handshake = True
+            offset += 1
+
+        if offset < len(data):
+            remaining = data[offset:]
+            if self.can_interact:
+                result.extend(_filter_rfb_client_messages(remaining))
+            else:
+                result.extend(_filter_rfb_viewer_messages(remaining))
+
+        return bytes(result)
 
 
 @asynccontextmanager
@@ -997,8 +1067,15 @@ async def get_profile_status(profile_id: str, request: Request):
 # ── System Status ─────────────────────────────────────────────────────────────
 
 
+@app.get("/health")
+async def get_health():
+    """Minimal unauthenticated liveness endpoint for container health checks."""
+    return {"ok": True}
+
+
 @app.get("/api/status", response_model=StatusResponse)
-async def get_system_status():
+async def get_system_status(request: Request):
+    _require_identity(request.scope)
     from cloakbrowser.config import CHROMIUM_VERSION
 
     profiles = db.list_profiles()
@@ -1160,8 +1237,8 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
 
             async def client_to_vnc():
                 count = 0
-                handshake = 0  # first 3 messages are RFB handshake
                 dropped = 0
+                rfb_filter = _RfbClientStreamFilter(can_interact=can_interact)
                 try:
                     while True:
                         msg = await websocket.receive()
@@ -1172,30 +1249,13 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
                         if "bytes" in msg and msg["bytes"]:
                             count += 1
                             data = msg["bytes"]
-                            handshake += 1
-
-                            # First 3 messages are RFB handshake — forward as-is
-                            if handshake <= 3:
-                                logger.debug("VNC handshake #%d: %d bytes hex=%s", handshake, len(data), data[:20].hex())
-                                await vnc_ws.send(data)
-                                continue
-
-                            if not can_interact:
-                                # Viewers may negotiate display settings and
-                                # request frames, but never emit keyboard,
-                                # pointer or clipboard input to the browser.
-                                viewer_messages = _filter_rfb_viewer_messages(data)
-                                if viewer_messages:
-                                    await vnc_ws.send(viewer_messages)
-                                else:
-                                    dropped += 1
-                                continue
-
-                            # Parse RFB messages and strip unsupported types
-                            filtered = _filter_rfb_client_messages(data)
+                            filtered = rfb_filter.filter(data)
                             if filtered:
                                 # Safety: verify first byte is a valid RFB client type
-                                if filtered[0] not in _RFB_MSG_SIZE:
+                                if (
+                                    not rfb_filter.last_forwarded_handshake
+                                    and filtered[0] not in _RFB_MSG_SIZE
+                                ):
                                     logger.error("RFB SAFETY: refusing to send data with invalid first byte=%d hex=%s",
                                                  filtered[0], filtered[:20].hex())
                                     dropped += 1

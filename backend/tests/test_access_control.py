@@ -12,7 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from backend import access_control as access
 from backend import database as db
-from backend.main import _filter_rfb_viewer_messages
+from backend.main import _RfbClientStreamFilter, _filter_rfb_viewer_messages
 
 
 @pytest.fixture()
@@ -74,6 +74,70 @@ def test_viewer_rfb_filter_keeps_safe_encoding_negotiation():
     filtered = _filter_rfb_viewer_messages(set_encodings + frame_request + key_event)
 
     assert filtered == set_encodings + frame_request
+
+
+def test_viewer_rfb_stream_filter_drops_appended_input_in_early_frames():
+    rfb_filter = _RfbClientStreamFilter(can_interact=False)
+    version = b"RFB 003.008\n"
+    security_none = b"\x01"
+    client_init = b"\x01"
+    key_event = bytes([4]) + b"\0" * 7
+    pointer_event = bytes([5]) + b"\0" * 5
+    clipboard = bytes([6]) + b"\0" * 7
+
+    assert rfb_filter.filter(version + key_event) == version
+    assert rfb_filter.filter(security_none + pointer_event) == security_none
+    assert rfb_filter.filter(client_init + clipboard) == client_init
+
+
+def test_viewer_rfb_stream_filter_allows_coalesced_handshake_segments():
+    version = b"RFB 003.008\n"
+    security_none = b"\x01"
+    client_init = b"\x01"
+
+    version_security_filter = _RfbClientStreamFilter(can_interact=False)
+    assert version_security_filter.filter(version + security_none) == (
+        version + security_none
+    )
+    assert version_security_filter.filter(client_init) == client_init
+
+    security_client_init_filter = _RfbClientStreamFilter(can_interact=False)
+    assert security_client_init_filter.filter(version) == version
+    assert security_client_init_filter.filter(security_none + client_init) == (
+        security_none + client_init
+    )
+
+
+def test_viewer_rfb_stream_filter_drops_input_after_full_coalesced_handshake():
+    version = b"RFB 003.008\n"
+    security_none = b"\x01"
+    client_init = b"\x01"
+    handshake = version + security_none + client_init
+    key_event = bytes([4]) + b"\0" * 7
+    pointer_event = bytes([5]) + b"\0" * 5
+    clipboard = bytes([6]) + b"\0" * 7
+
+    for input_event in (key_event, pointer_event, clipboard):
+        rfb_filter = _RfbClientStreamFilter(can_interact=False)
+        assert rfb_filter.filter(handshake + input_event) == handshake
+
+
+def test_viewer_rfb_stream_filter_preserves_handshake_and_display_negotiation():
+    rfb_filter = _RfbClientStreamFilter(can_interact=False)
+    version = b"RFB 003.008\n"
+    security_none = b"\x01"
+    client_init = b"\x01"
+    set_encodings = struct.pack(">BBHii", 2, 0, 2, 7, -239)
+    frame_request = bytes([3]) + b"\0" * 9
+    key_event = bytes([4]) + b"\0" * 7
+
+    assert rfb_filter.filter(version[:5]) == version[:5]
+    assert rfb_filter.filter(version[5:]) == version[5:]
+    assert rfb_filter.filter(security_none) == security_none
+    assert rfb_filter.filter(client_init) == client_init
+    assert rfb_filter.filter(set_encodings + frame_request + key_event) == (
+        set_encodings + frame_request
+    )
 
 
 def test_scoped_viewer_only_sees_granted_sandbox_and_no_sensitive_config(client_access: TestClient):

@@ -184,6 +184,17 @@ def test_scoped_viewer_only_sees_granted_sandbox_and_no_sensitive_config(client_
     assert status.json()["vnc_ws_port"] is None
     assert status.json()["cdp_url"] is None
 
+    with db.get_db() as conn:
+        denied_events = {
+            (row["action"], row["sandbox_id"], row["profile_id"], row["outcome"])
+            for row in conn.execute(
+                "SELECT action, sandbox_id, profile_id, outcome FROM access_audit_events WHERE outcome = 'denied'"
+            ).fetchall()
+        }
+    assert ("profile.permission.view", "beta", beta["id"], "denied") in denied_events
+    assert ("profile.permission.operate", "alpha", alpha["id"], "denied") in denied_events
+    assert ("profile.permission.interact", "alpha", alpha["id"], "denied") in denied_events
+
 
 def test_operator_can_operate_only_its_scoped_profile(client_access: TestClient):
     alpha, beta = create_scoped_profiles()
@@ -335,6 +346,17 @@ def test_scoped_user_cannot_reach_out_of_scope_vnc_upstream(client_access: TestC
         assert exc.value.code == 4404
     finally:
         main.browser_mgr.running.pop(beta["id"], None)
+
+    with db.get_db() as conn:
+        denied_vnc = conn.execute(
+            """SELECT action, sandbox_id, profile_id, outcome
+            FROM access_audit_events
+            WHERE action = 'profile.permission.view' AND profile_id = ?""",
+            (beta["id"],),
+        ).fetchone()
+    assert denied_vnc is not None
+    assert denied_vnc["sandbox_id"] == "beta"
+    assert denied_vnc["outcome"] == "denied"
 
 
 def test_scoped_agent_cannot_reach_out_of_scope_cdp_upstreams(client_access: TestClient, monkeypatch):

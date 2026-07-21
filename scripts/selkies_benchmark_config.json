@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "purpose": "Loopback-only Selkies Chromium benchmark candidate. Start it with scripts/run_selkies_benchmark.sh so ports, image digest, health checks, and shutdown are reproducible.",
+    "profile": "Measures only HTTP readiness and WebSocket upgrade milestones. It does not report FPS or touch-to-pixel latency."
+  },
+  "candidates": [
+    {
+      "id": "selkies-chromium-http",
+      "name": "Selkies Chromium HTTP shell",
+      "type": "http",
+      "url": "http://127.0.0.1:18122/",
+      "metadata": {
+        "technology": "LinuxServer Chromium on Selkies",
+        "version": "lscr.io/linuxserver/chromium@sha256:9c02377ec07e76c02fe95cb3857981775a94428cfb79d110513815ca46ea0c79",
+        "comparison_role": "isolated Selkies browser shell HTTP"
+      }
+    },
+    {
+      "id": "selkies-chromium-websocket",
+      "name": "Selkies Chromium WebSocket",
+      "type": "websocket",
+      "url": "ws://127.0.0.1:18122/websockets",
+      "metadata": {
+        "technology": "LinuxServer Chromium on Selkies",
+        "version": "lscr.io/linuxserver/chromium@sha256:9c02377ec07e76c02fe95cb3857981775a94428cfb79d110513815ca46ea0c79",
+        "comparison_role": "isolated Selkies transport handshake"
+      }
+    }
+  ]
+}

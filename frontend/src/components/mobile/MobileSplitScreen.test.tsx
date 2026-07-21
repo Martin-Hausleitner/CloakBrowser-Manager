@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import type { Profile } from "../../lib/api";
-import { taskHarnessReadyEvent } from "../../lib/taskHarness";
+import { codexComputerUseProvider, taskHarnessReadyEvent } from "../../lib/taskHarness";
 import { MobileSplitScreen } from "./MobileSplitScreen";
 
 const stoppedProfile: Profile = {
@@ -67,7 +67,7 @@ function installTaskHarness() {
       streaming: true,
       clipboard: true,
       browser_actions: ["copy", "paste", "fullscreen"],
-      metadata: { mode: "codex-test" },
+      metadata: { mode: "codex-test", provider: codexComputerUseProvider },
     },
     send,
   };
@@ -180,7 +180,7 @@ describe("MobileSplitScreen", () => {
 
     openBrowserTools();
     expect(screen.getByText("Codex Computer Use Bridge · unavailable")).toBeTruthy();
-    expect(screen.getByText("Codex Computer Use Bridge is required and must be injected by the host before tasks can run.")).toBeTruthy();
+    expect(screen.getByText("A verified Codex Computer Use Bridge must be injected by the host before tasks can run.")).toBeTruthy();
 
     fireEvent.submit(input.closest("form") as HTMLFormElement);
 

@@ -30,6 +30,7 @@ export interface TaskHarnessCapabilities {
 export type TaskHarnessListener = (message: TaskHarnessMessage) => void;
 
 export const taskHarnessReadyEvent = "cloakbrowserharnessready";
+export const codexComputerUseProvider = "codex-computer-use";
 
 export interface TaskHarness {
   capabilities: () => Promise<TaskHarnessCapabilities>;
@@ -126,21 +127,40 @@ function createInjectedHarnessAdapter(injected: InjectedTaskHarness): TaskHarnes
     return null;
   }
 
-  return {
-    capabilities: async () => {
-      const raw = typeof injected.capabilities === "function"
-        ? await injected.capabilities()
-        : injected.capabilities;
-      return cloneCapabilities(raw ?? {
-        chat: true,
-        streaming: false,
-        clipboard: false,
-        browser_actions: [],
-        metadata: { mode: "injected" },
+  let capabilitiesPromise: Promise<TaskHarnessCapabilities> | null = null;
+  const readCapabilities = () => {
+    if (!capabilitiesPromise) {
+      capabilitiesPromise = Promise.resolve(
+        typeof injected.capabilities === "function"
+          ? injected.capabilities()
+          : injected.capabilities,
+      ).then((raw) => {
+        const capabilities = cloneCapabilities(raw ?? unavailableCapabilities);
+        if (capabilities.metadata?.provider !== codexComputerUseProvider) {
+          return {
+            ...cloneCapabilities(unavailableCapabilities),
+            metadata: {
+              mode: "unavailable",
+              reason: "host bridge is not verified as Codex Computer Use",
+            },
+          };
+        }
+        return capabilities;
       });
-    },
+    }
+    return capabilitiesPromise;
+  };
+
+  return {
+    capabilities: readCapabilities,
     send: async (request, options) => {
       ensureNotAborted(options?.signal);
+      const capabilities = await readCapabilities();
+      if (!capabilities.chat || capabilities.metadata?.provider !== codexComputerUseProvider) {
+        throw new Error(
+          "Codex Computer Use Bridge is unavailable: host bridge is not verified as Codex Computer Use",
+        );
+      }
       const message = await injected.send?.(request, options);
       ensureNotAborted(options?.signal);
       if (!message) {

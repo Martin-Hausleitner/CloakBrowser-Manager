@@ -15,7 +15,7 @@ Dein Ergebnis muss wie ein fokussiertes Remote-Browser-Produkt wirken: Der laufe
 Baue ein responsives Splitscreen-Interface mit folgenden Kernfähigkeiten:
 
 1. Oben befindet sich das echte Browser-Live-Fenster als VNC/noVNC-Stream.
-2. Unten befindet sich ein Browser-Use-artiger Aufgabenbereich mit Chat-Verlauf, Schritten und Texteingabe.
+2. Unten befindet sich ein Browser-Use-artiger Aufgabenbereich mit Chat-Verlauf, Schritten und einer ausschließlich über Codex Computer Use angebundenen Texteingabe.
 3. Der Browser kann ohne Neuverbindung in einen echten, bildschirmfüllenden Modus wechseln.
 4. Profile können ausgewählt, angelegt, bearbeitet, gestartet und gestoppt werden.
 5. Die Browser-Auflösung ist editierbar und wird am Profil persistiert.
@@ -25,7 +25,7 @@ Baue ein responsives Splitscreen-Interface mit folgenden Kernfähigkeiten:
 9. Quality-, UI/UX-, Accessibility-, Vision-, Performance- und Security-Gates sind grün oder als konkrete, ehrliche Lücke dokumentiert.
 10. Kein Agent darf „fertig“ melden, bevor er die gebaute Oberfläche selbst in einem echten Browser geöffnet, bedient und per Screenshot kontrolliert hat.
 
-Das MVP ist erfolgreich, wenn ein Nutzer auf einem iPhone-Viewport von 390 × 844 CSS-Pixeln einen laufenden 1024 × 576 Browser sehen, auswählen, im Vollbild bedienen, eine Chat-Nachricht senden, das Grid öffnen und die Viewport-Einstellung speichern kann, ohne horizontales Scrollen oder eine zweite VNC-Verbindung zu erzeugen.
+Das MVP ist erfolgreich, wenn ein Nutzer auf einem iPhone-Viewport von 390 × 844 CSS-Pixeln einen laufenden 1024 × 576 Browser sehen, auswählen, im Vollbild bedienen, eine Aufgabe über den verifizierten Codex-Computer-Use-Host senden, das Grid öffnen und die Viewport-Einstellung speichern kann, ohne horizontales Scrollen oder eine zweite VNC-Verbindung zu erzeugen.
 
 ### 2. Verbindliche Produktwahrheiten
 
@@ -36,8 +36,9 @@ Das MVP ist erfolgreich, wenn ein Nutzer auf einem iPhone-Viewport von 390 × 84
 - Der Live-Browser darf auf Mobile niemals pauschal ausgeblendet werden.
 - Der VNC-Viewer wird dynamisch geladen und darf im gestoppten Zustand nicht unnötig in das Initial-Bundle gezogen werden.
 - Vollbild verändert Layout und Position desselben Viewer-Knotens. Es darf kein zweites Canvas und keine zweite WebSocket-Verbindung erzeugen.
-- Der Chat ist im aktuellen MVP ausdrücklich **Demo/local state only**. Er darf nicht als echter Browser-Use-Task-Backend-Flow dargestellt werden, solange keine Run-/Task-API angeschlossen ist.
-- Sobald ein echtes Task-Backend integriert wird, bleiben Layout und Interaktionsvertrag stabil; nur Datenquelle und Statusmaschine werden ausgetauscht.
+- Aufgaben werden ausschließlich über eine vom Host injizierte Codex-Computer-Use-Bridge versendet. Die Bridge muss in ihren Capabilities exakt `provider: codex-computer-use` melden; ein fehlender, generischer oder falsch bezeichneter Adapter bleibt fail-closed deaktiviert.
+- Es gibt keinen lokalen Demo-Erfolg, keinen direkten Vendor-API-Key im UI und keinen alternativen Browser-Use-/Custom-Runner. Ohne realen Codex-Computer-Use-Host zeigt der Composer ehrlich „unavailable“ und sendet nichts.
+- Layout und Interaktionsvertrag bleiben stabil, wenn der Host später Streaming-, Stop- oder Resume-Fähigkeiten ergänzt; Browser-Credentials bleiben außerhalb der Chat-Oberfläche.
 - Zugangsdaten, Proxy-Credentials, Tokens, Clipboard-Inhalte und private URLs dürfen nicht in Logs, Screenshots, Tests, Commits oder Chat-Antworten erscheinen.
 - Remote-Zugriff erfolgt privat über Tailscale/HTTPS und niemals durch ungeschütztes Binden an eine öffentliche Schnittstelle.
 
@@ -350,9 +351,8 @@ Composer:
 - sticky am unteren Rand der Control-Pane;
 - untere Safe Area wird addiert;
 - Textarea wächst bis maximal 120–144 px;
-- eine Dateiaktion, Run Settings und Modellauswahl sind als Browser-Use-artige Controls sichtbar;
-- Datei und Run Settings bleiben im MVP ausdrücklich lokale Demo-Controls;
-- die Modellauswahl kennzeichnet jede Option sichtbar als Demo, solange keine echte Task-API verbunden ist;
+- seltene Run-Optionen liegen kompakt in einem einzigen Werkzeugbereich und dürfen den mobilen Composer nicht aufblähen;
+- es gibt keinen auswählbaren Runner: Codex Computer Use ist der einzige zugelassene Hostpfad;
 - Enter sendet, Shift+Enter erzeugt Zeilenumbruch, sobald dieser Tastaturvertrag implementiert ist;
 - leere/Whitespace-Nachrichten werden nicht gesendet;
 - Send-Button besitzt mindestens 44 × 44 px im finalen Produkt;
@@ -361,14 +361,14 @@ Composer:
 
 Aktueller MVP-Vertrag:
 
-- Nachrichten werden nur lokal hinzugefügt;
-- die Antwort muss deutlich sagen, dass sie lokal/demo ist;
-- keine Behauptung, ein externer Agent habe wirklich navigiert;
-- Backend-Integration ist ein getrenntes P1-Arbeitspaket.
+- Nutzernachrichten werden erst nach erfolgreicher Capabilities-Prüfung an die injizierte Codex-Computer-Use-Bridge übergeben;
+- Antworten werden nur aus dem echten Bridge-Ergebnis übernommen; es gibt keine lokal erfundene Erfolgsantwort;
+- Profil-ID, sichtbarer Browserstatus und `runner: codex-computer-use` werden als nicht-sensitive Task-Metadaten übergeben;
+- ein Fehler wird sichtbar als Codex-Computer-Use-Fehler dargestellt und darf nicht als erfolgreich gestarteter Task erscheinen.
 
-### 17. Echte Task-Backend-Integration als P1
+### 17. Codex-Computer-Use-Hostintegration
 
-Wenn ein Browser-Use- oder eigenes Task-Backend angeschlossen wird, implementiere:
+Der freigegebene Taskpfad ist Codex Computer Use. Der Host injiziert die Bridge; die Weboberfläche enthält keinen direkten Vendor-Schlüssel. Implementiere beziehungsweise bewahre:
 
 - Run erstellen;
 - Run fortsetzen/stoppen;
@@ -379,8 +379,11 @@ Wenn ein Browser-Use- oder eigenes Task-Backend angeschlossen wird, implementier
 - klare Trennung von Browserstream und Agent-Task-Status;
 - keine Weitergabe von Browser-/Profil-Credentials an den Client;
 - serverseitige Autorisierung pro Run und Profil.
+- exakte Provider-Prüfung vor Capabilities und erneut vor `send()`;
+- fail-closed Verhalten bei fehlender oder falsch deklarierter Bridge;
+- genau einen Codex-Computer-Use-Pfad statt paralleler, im UI auswählbarer Harnesses.
 
-Die UI-Datenstruktur soll Demo- und Live-Daten über ein gemeinsames Interface abbilden, damit der Shell-Code nicht neu geschrieben wird.
+Die UI-Datenstruktur bildet Live-Nachrichten und Status über einen kleinen Hostvertrag ab, damit der Shell-Code unabhängig von der Hostprozess-Implementierung bleibt, ohne einen zweiten Anbieterpfad vorzutäuschen.
 
 ### 18. Clipboard auf iOS
 

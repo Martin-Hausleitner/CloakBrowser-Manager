@@ -2,45 +2,50 @@
 
 Stand: 21. Juli 2026
 
-Dieser Audit bewertet den final geprüften r50-Stand des CloakBrowser Managers und ordnet die ältere r49-Basis ein. Er trennt nachgewiesene Funktion, lokale Messung, Tailnet-Transport und noch offene Produktbehauptung. Browser-Use diente nur als Interaktionsreferenz; fremde Marken-, Cloud- oder UI-Assets wurden nicht übernommen.
+Dieser Audit bewertet den final geprüften r51-Stand des CloakBrowser Managers und ordnet die älteren r49-/r50-Basen ein. Er trennt nachgewiesene Funktion, lokale Messung, Tailnet-Transport und noch offene Produktbehauptung. Browser-Use diente nur als Interaktionsreferenz; fremde Marken-, Cloud- oder UI-Assets wurden nicht übernommen.
 
 ## Ergebnis in einem Satz
 
-Für das mobile Web-MVP bleibt **KasmVNC 1.3.3 + noVNC 1.4.x** die am besten nachgewiesene Basis: Der finale r50-Gate bestand fünf mobile Viewpoints mit **272/272 Checks** und **22 Screenshots**, während die ältere r49-Auth-Suite vier Authentifizierungswege bis zu einem echten verbundenen Canvas belegte. Der warme lokale WebSocket-Upgrade lag in 20/20 Läufen bei **3,457 ms Median / 8,931 ms p95**. Ein zusätzlicher Codex-Computer-Use-Lauf bediente die finale iPhone-Ansicht real und bestätigte Canvas, vier persistente Aktionen, Chat, Grid, Viewport und Live-View-Regler. Das beweist weiterhin keine physische iPhone-, WAN- oder Touch-to-Pixel-Latenz.
+Für das mobile Web-MVP bleibt **KasmVNC 1.3.3 + noVNC 1.4.x** die am besten nachgewiesene Basis: Der authentifizierte r51-Gate bestand fünf mobile Viewpoints plus Access-Dashboard mit **276/276 Checks** und **23 Screenshots**, während die ältere r49-Auth-Suite vier Authentifizierungswege bis zu einem echten verbundenen Canvas belegte. Der warme lokale KasmVNC-WebSocket-Upgrade lag in 20/20 Läufen bei **3,457 ms Median / 8,931 ms p95**. Ein neuer, reproduzierbarer Selkies-Lauf erreichte **2,190 ms Median / 3,722 ms p95** für den isolierten WebSocket-Handshake, aber noch keinen gleichwertigen Produkt-, Frame- oder Eingabe-E2E. Ein zusätzlicher Codex-Computer-Use-Lauf bediente die finale iPhone-Ansicht real und bestätigte Canvas, vier persistente Aktionen, Rechte-Dashboard und den strikt verifizierten Hostvertrag. Das beweist weiterhin keine physische iPhone-, WAN- oder Touch-to-Pixel-Latenz.
 
-## r50-Endstand: UI-Architektur und Codex Computer Use
+## r51-Endstand: UI-Architektur und Codex Computer Use
 
-Der belegte r50-Stand ist eine Umstrukturierung und vollständige lokale Abnahme der mobilen Oberfläche, nicht ein neuer Performance-Sieg:
+Der belegte r51-Stand ist eine Umstrukturierung und vollständige lokale Abnahme der mobilen Oberfläche, nicht ein neuer Performance-Sieg:
 
 - **Browser-first:** Der Live-Browser ist die primäre Fläche. Chat startet bei laufendem Browser collapsed, damit VNC nicht von Steuerleisten verdrängt wird.
 - **Zentrale Tools:** Browser-Werkzeuge, Viewport, Zoom, Fullscreen und Grid sind in einem zentralen Bedienbereich zusammengeführt. Benchmarks werden nicht in der mobilen UI angezeigt.
 - **Shortcuts:** Chat-Collapse und Fullscreen-Preview sind als schnelle Bedienwege vorgesehen, ohne Touch-only Bedienung zu erzwingen.
 - **Grid:** Grid bleibt ein kompakter Session-/Profilumschalter und soll nicht still mehrere Streams starten, weil das iPhone-FPS und Akku verfälschen würde.
-- **Harness:** Der Composer nutzt eine injizierte Host-Schnittstelle. **Codex Computer Use ist im r50-Release der konfigurierte und end-to-end validierte Host.** Ohne gültige Host-Bridge bleibt die Eingabe ausdrücklich deaktiviert; es wird weder ein lokaler Erfolg simuliert noch ein direkter Vendor-API-Key in der UI benötigt.
-- **Chat-Anbindung:** Der technische Adaptervertrag bleibt austauschbar, aber der freigegebene UI- und Testpfad verwendet Codex Computer Use. Der r50-Stand behauptet noch keine produktive externe Agent-Task-API.
+- **Codex-only Hostvertrag:** Der Composer akzeptiert nur eine injizierte Bridge, deren Capabilities explizit `provider: codex-computer-use` melden. Fehlende, generische oder nur umbenannte Harnesses bleiben deaktiviert; auch `send()` kann die Prüfung nicht umgehen.
+- **Chat-Anbindung:** Der freigegebene UI- und Testpfad verwendet Codex Computer Use, hält Browser-Credentials außerhalb des Chats und simuliert keinen lokalen Erfolg. Der r51-Stand behauptet noch keine produktive externe Agent-Task-API ohne einen realen Host-Bridge-Prozess.
+- **Rechte-Dashboard:** Browsersteuerung (`view`/`interact`/`operate`) und CDP-Automation sind getrennte Controls. Dadurch ist `operate + automate` auf derselben Sandbox möglich; eine einklappbare Vorschau zeigt die tatsächlich erreichbaren Profile und effektiven Fähigkeiten.
 
-Der finale r50-Mobile-Gate ist abgeschlossen: fünf Viewports, **272/272 Checks**, **22 Screenshots**, keine Fehler. Er prüft Touch-Ziele, Fullscreen, Grid, Viewport/Zoom, Chat-Collapse, Clipboard/Paste und eine echte VNC-Verbindung. Ein separater Codex-Computer-Use-Lauf bestätigte den finalen Release-Container zusätzlich über echte UI-Interaktionen.
+Der finale r51-Mobile-Gate ist abgeschlossen: fünf Viewports plus Access-Dashboard, **276/276 Checks**, **23 Screenshots**, keine Fehler. Er prüft Touch-Ziele, Fullscreen, Grid, Viewport/Zoom, Chat-Collapse, Clipboard/Paste, eine echte VNC-Verbindung und die authentifizierte Access-Oberfläche. Ein separater Codex-Computer-Use-Lauf bestätigte den finalen Release-Container zusätzlich über echte UI-Interaktionen und vergab einem Paperclip-Agenten kombiniert `operate + automate`.
 
 ## Was jetzt nachgewiesen ist
 
 | Bereich | Nachweis | Ergebnis |
 |---|---|---|
-| iPhone 14 Portrait | 390 × 844, echter VNC-Canvas, Split, Grid, Fullscreen, Viewport-Editor und Codex-Computer-Use-Composer | 56/56 |
+| iPhone 14 Portrait | 390 × 844, echter VNC-Canvas, Split, Grid, Fullscreen, Viewport-Editor und Codex-Computer-Use-Composer | 55/55 |
 | iPhone SE Portrait | 375 × 667, kurzer Viewport mit kompaktem Live-Anteil und vollständig erreichbarem Composer | 54/54 |
 | iPhone Pro Max Portrait | 430 × 932, inklusive sichtbarem Inline-Viewport-Editor | 56/56 |
 | iPhone 14 Landscape | 844 × 390, horizontaler Split und Fullscreen | 53/53 |
 | Touch-Tablet | 768 × 1024, coarse pointer, Grid und Fullscreen | 53/53 |
-| Vision-Artefakte | Empty, Workspace, Grid, Fullscreen und Fullscreen-Viewport; Pro Max zusätzlich Inline-Editor | 22 Screenshots |
+| Access-Dashboard | authentifizierter Adminpfad, kompakte Grants und mobile Overflow-Prüfung | 5/5 |
+| Vision-Artefakte | Empty, Workspace, Grid, Fullscreen, Fullscreen-Viewport und Access-Dashboard | 23 Screenshots |
 | Legacy-Token | Login, Profilwahl und verbundener Canvas bei 390 × 844 | bestanden |
 | Bootstrap-Token | Admin-Login, Profilwahl, verbundener Canvas und Viewport-Administration | bestanden |
 | Operator-Konto | Nur zugewiesene Sandbox; Stream und sichtbare Remote-Werkzeuge; keine Profil-Viewport-Administration | bestanden |
 | Viewer-Konto | Nur zugewiesene Sandbox; Stream und Fullscreen; Paste/Remote-Werkzeuge ausgeblendet, Start und Clipboard per API verweigert | bestanden |
 
-Der Gate prüfte unter anderem genau einen Canvas, `Connected`, keinen horizontalen Overflow, mindestens 44 × 44 CSS-Pixel große sichtbare Controls, Live-Pane und visuellen noVNC-Zoom, Pointer-/Touch-Zielkoordinaten über eine CDP-beobachtete Probe, manuellen iOS-Paste-Fallback, Fullscreen-Fokus, `inert`-Hintergrund, Escape-Rückkehr, Grid, Chat-Verlauf und den Codex-Computer-Use-Composer. Eine echte WAN-Touch-to-Pixel-Messung wurde in diesem lokalen Artefakt nicht aufgezeichnet.
+Der Gate prüfte unter anderem einen echten Canvas, `Connected`, keinen horizontalen Overflow, mindestens 44 × 44 CSS-Pixel große sichtbare Controls, Live-Pane und visuellen noVNC-Zoom, Pointer-/Touch-Zielkoordinaten über eine CDP-beobachtete Probe, manuellen iOS-Paste-Fallback, Fullscreen-Fokus, `inert`-Hintergrund, Escape-Rückkehr, Grid, Chat-Verlauf und den Codex-Computer-Use-Composer. Eine echte WAN-Touch-to-Pixel-Messung wurde in diesem lokalen Artefakt nicht aufgezeichnet.
 
 Lokale Belege:
 
-- `artifacts/mobile-ui-gate-r50-final-release/report.json`
+- `artifacts/mobile-ui-gate-r51-codex-access-acceptance-r2/report.json`
+- `artifacts/ui-redesign-r51/codex-computer-use-viewer-iphone14.png`
+- `artifacts/ui-redesign-r51/codex-computer-use-access-dashboard.png`
+- `artifacts/selkies-benchmark/local-r4-independent/streaming-benchmark-report.json`
 - `artifacts/streaming-login-audit-r49/auth-api-summary.json`
 - `artifacts/streaming-login-audit-r49/auth-ui-summary.json`
 - `artifacts/streaming-benchmark-r49/streaming-benchmark-report.json`
@@ -52,6 +57,8 @@ Lokale Belege:
 `PUT /api/access/users/{id}` erhielt verschachtelte Grants nach der Pydantic-Serialisierung als Dictionaries, behandelte sie aber erneut wie Modelle. Das führte beim realen Dashboard-Payload zu `500 AttributeError`. Der Endpoint akzeptiert jetzt beide gültigen Formen; ein Regressionstest deckt den Browser-Payload ab. Der frische API-Lauf aktualisierte Operator und Viewer jeweils mit HTTP 200.
 
 Der r50-Nachtrag behebt denselben Payload-Fehler auch für `PUT /api/access/agents/{id}`. Paperclip-Agent-Grants können jetzt mit Dashboard-Payloads aktualisiert werden; ein Regressionstest deckt die Aktualisierung von `view` auf `automate` ab.
+
+Der r51-Nachtrag behebt außerdem zwei Mehrfachgrant-Fehler: Das Dashboard löscht beim Setzen der Steuerstufe nicht mehr ein vorhandenes `automate`, und die App prüft nicht mehr nur den ersten Grant einer Sandbox. Die gemeinsame Frontend-Policy spiegelt jetzt die serverseitige Vererbung. Abgelehnte REST- und WebSocket-Policyentscheidungen werden als redigierte Audit-Metadaten protokolliert.
 
 ### 2. Login-Controls waren auf Mobilgeräten zu klein
 
@@ -101,16 +108,16 @@ Zusätzlich wurde ein bereits laufender Neko/Chrome-Stack auf der VCVM über Tai
 
 Codex Computer Use führte den geschützten Login erfolgreich aus und sah `/ws`. WebRTC ICE blieb jedoch `checking` und wechselte danach zu `failed`; das Video blieb bei `readyState 0`. Deshalb gibt es aus diesem Lauf **keinen ehrlichen FPS-Wert**. Die wichtigste Performance-Empfehlung ist nicht weiteres UI-Tuning auf Basis erfundener FPS, sondern zuerst direkte Tailscale-Konnektivität und UDP/ICE zu reparieren und danach Frame- sowie Touch-to-Pixel-Messung erneut auszuführen.
 
-### Einordnung der im r49-Lauf gelisteten Stacks
+### Einordnung der Streaming-Stapel nach dem r51-Nachtest
 
 | Stack | r49-Status | Entscheidung |
 |---|---|---|
 | KasmVNC 1.3.3 + noVNC 1.4.x | vollständiger aktueller Produktpfad, 249 Mobile-Checks, vier Loginpfade | beibehalten |
-| Selkies | `not_installed`, keine aktuelle Messung | erst nach gleichwertiger Provisionierung vergleichen |
+| Selkies | reproduzierbare HTTP-/WebSocket-Bereitschaft, 5/5 + 5/5; kein gleichwertiger Produkt-E2E | weiter messen, noch nicht migrieren |
 | Sunshine/Moonlight | `architecture_only`, keine aktuelle Messung | nicht als Latenzvergleich werten |
 | Apache Guacamole | `architecture_only`, keine aktuelle Messung | nicht als Latenzvergleich werten |
 
-Frühere isolierte KasmVNC-1.4- und Selkies-POCs sind in `docs/REMOTE-STREAMING-BENCHMARK.md` als historische, methodisch nicht gleichwertige Experimente dokumentiert; sie sind kein Bestandteil des r49-Vergleichs. Einen technologieübergreifenden „Latenz-Sieger“ zu behaupten wäre deshalb falsch. KasmVNC ist die aktuelle Produktempfehlung, weil nur dieser Pfad vollständig integriert und aktuell end-to-end geprüft ist.
+Frühere isolierte KasmVNC-1.4- und Selkies-POCs sowie der neue Selkies-Readiness-Lauf sind in `docs/REMOTE-STREAMING-BENCHMARK.md` methodisch getrennt dokumentiert. Einen technologieübergreifenden „Latenz-Sieger“ zu behaupten wäre weiterhin falsch. KasmVNC ist die aktuelle Produktempfehlung, weil nur dieser Pfad vollständig integriert und aktuell end-to-end geprüft ist.
 
 ## Empfohlene Chrome-/Profilbasis für Mobile
 
@@ -146,9 +153,9 @@ Frühere isolierte KasmVNC-1.4- und Selkies-POCs sind in `docs/REMOTE-STREAMING-
 - Der r50-VCVM/Neko-Lauf belegt Tailnet-HTTP und geschützten Login über Codex Computer Use, aber wegen fehlgeschlagenem WebRTC-ICE keine Framerate.
 - Kein echter Mobilfunk- und kein Touch-to-Pixel-p50/p95-Bericht.
 - Der Grid-View ist ein schneller Session-/Profilumschalter, kein gleichzeitiges Multi-Canvas-Monitoring.
-- Der Chat-Composer nutzt in r50 Codex Computer Use als konfigurierten und validierten Host, ist aber noch nicht als produktive externe Agent-Task-API freigegeben.
-- Selkies, Sunshine/Moonlight und Guacamole sind im aktuellen r49-Lauf nicht als gleichwertige Produktdeployments provisioniert; fehlende Zeiten bleiben bewusst leer.
+- Der Chat-Composer akzeptiert in r51 ausschließlich den verifizierten Codex-Computer-Use-Providervertrag, benötigt aber weiterhin einen realen Host-Bridge-Prozess und ist keine eigenständige Vendor-API.
+- Selkies ist reproduzierbar provisioniert, aber noch kein gleichwertiges authentifiziertes Produktdeployment; Sunshine/Moonlight und Guacamole bleiben Architekturpfade.
 
 ## Freigabeempfehlung
 
-Der r50-Stand ist als **lokales, rollenbasiertes Mobile-Web-MVP** freigabefähig. Für eine externe oder iPhone-spezifische Freigabe fehlen noch Tailscale Serve/HTTPS, ein physisches Safari-Gerät sowie echte Touch-to-Pixel- und Reconnect-Messungen. Die höchste nächste Produktpriorität ist die iOS-IME-Bridge, gefolgt von Keyboard-Zubehörleiste und echter Eingabelatenztelemetrie.
+Der r51-Stand ist als **lokales, rollenbasiertes Mobile-Web-MVP** freigabefähig. Für eine externe oder iPhone-spezifische Freigabe fehlen noch Tailscale Serve/HTTPS, ein physisches Safari-Gerät sowie echte Touch-to-Pixel- und Reconnect-Messungen. Die höchste nächste Produktpriorität ist die iOS-IME-Bridge, gefolgt von Keyboard-Zubehörleiste und echter Eingabelatenztelemetrie.

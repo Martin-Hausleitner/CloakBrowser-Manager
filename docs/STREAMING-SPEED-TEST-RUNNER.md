@@ -30,6 +30,16 @@ python3 scripts/streaming_benchmark_runner.py \
 
 The stdout stream is JSONL. Automation or a log tailer can consume it incrementally and react to `run_started`, `candidate_started`, `iteration_started`, `iteration_finished`, `candidate_finished`, and `run_finished` events.
 
+## Reproducible Selkies lane
+
+The repository includes a pinned LinuxServer Chromium/Selkies image, a loopback-only Compose service and a strict runner wrapper:
+
+```bash
+./scripts/run_selkies_benchmark.sh artifacts/selkies-benchmark/local
+```
+
+The wrapper waits for both the HTTP shell and a valid `101 Switching Protocols` response from `/websockets`, runs the normal benchmark adapter, and removes only its own Compose stack unless `SELKIES_BENCHMARK_KEEP_RUNNING=1` is set. It measures HTTP and WebSocket readiness. It does not claim first-frame latency, FPS, touch-to-pixel response, mobile Safari support or product integration.
+
 ## Report contract
 
 Each result has:
@@ -48,3 +58,5 @@ The manager can read the latest report from `BENCHMARK_REPORT_PATH` (default `/d
 ## Pairing with the mobile UI gate
 
 Use this runner for comparable transport and startup milestones. Use `scripts/mobile_ui_gate.py` afterwards to prove that the chosen stack still renders the actual product UI and live canvas across the mobile viewports. The two reports answer different questions and should both be attached to a release decision.
+
+For a fail-closed release decision, `scripts/release_acceptance_gate.py` can combine fresh quality commands, a passing Mobile UI/UX report, a machine-readable Vision verdict and an optional measured streaming report. Its public JSON and Markdown outputs redact local endpoints, credential-like values and local paths.

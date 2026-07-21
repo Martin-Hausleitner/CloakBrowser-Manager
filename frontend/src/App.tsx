@@ -9,6 +9,7 @@ import {
   type Profile,
   type ProfileCreateData,
 } from "./lib/api";
+import { hasAccessPermission } from "./lib/accessPermissions";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
 import { ProfileViewer } from "./components/ProfileViewer";
@@ -417,12 +418,7 @@ function isAdministrator(identity: AccessIdentity | null) {
 function canAccess(identity: AccessIdentity | null, profile: Profile | null, permission: AccessPermission) {
   if (!identity || !profile) return false;
   if (isAdministrator(identity)) return true;
-  const grant = identity.grants.find((candidate) => candidate.sandbox_id === profile.sandbox_id);
-  if (!grant) return false;
-  if (permission === "view") return true;
-  if (permission === "interact") return grant.permission === "interact" || grant.permission === "operate";
-  if (permission === "operate") return grant.permission === "operate";
-  return grant.permission === "automate";
+  return hasAccessPermission(identity.grants, profile.sandbox_id, permission);
 }
 
 function useIsMobile() {

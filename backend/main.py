@@ -950,6 +950,14 @@ def _require_profile_permission(
         raise HTTPException(status_code=404, detail="Profile not found")
     identity = _require_identity(scope)
     if not access.can_access_profile(identity, profile, permission):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            f"profile.permission.{permission}",
+            "denied",
+            str(profile.get("sandbox_id") or "default"),
+            profile_id,
+        )
         # Keep a profile outside the caller's scope indistinguishable from a
         # missing one. This applies equally to direct REST and WebSocket URLs.
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -962,6 +970,15 @@ async def _require_websocket_profile_permission(
     profile = db.get_profile(profile_id)
     identity = _access_identity(websocket.scope)
     if not profile or not identity or not access.can_access_profile(identity, profile, permission):
+        if profile and identity:
+            db.record_access_audit_event(
+                identity.kind,
+                identity.id,
+                f"profile.permission.{permission}",
+                "denied",
+                str(profile.get("sandbox_id") or "default"),
+                profile_id,
+            )
         await websocket.close(code=4404, reason="Profile not found")
         return None
     return profile, identity

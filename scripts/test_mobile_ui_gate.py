@@ -58,7 +58,7 @@ class MobileUiGateTest(unittest.TestCase):
 
         self.assertIn("window.cloakBrowserHarness", script)
         self.assertIn("codex-computer-use-mobile-gate", script)
-        self.assertIn("codex-computer-use-test-host", script)
+        self.assertIn("provider: 'codex-computer-use'", script)
         self.assertIn("chat: true", script)
         self.assertIn("send: async", script)
         self.assertIn(mobile_ui_gate.CODEX_COMPUTER_USE_TEST_REPLY_PREFIX, script)

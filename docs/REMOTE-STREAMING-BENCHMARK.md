@@ -88,6 +88,23 @@ Der finale r49-Preview verwendet einen persistenten Workspace-Mount statt eines 
 
 Der vollständige mobile Browser-Gate desselben Builds bestand anschließend **249/249 Checks** über fünf Viewpoints und erzeugte 22 Screenshot-Artefakte. Vier Authentifizierungswege – Legacy-Token, Bootstrap-Token, benannter Operator und benannter Viewer – erreichten einen verbundenen Canvas; Viewer-Eingabe blieb server- und UI-seitig gesperrt. Die Details und zehn priorisierten Eingabeverbesserungen stehen im [kritischen Mobile-/Auth-/Latenz-Audit](MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md).
 
+### Reproduzierbarer r51-Selkies-Readiness-Lauf
+
+Selkies ist im aktuellen Fork nicht mehr nur ein `not_installed`-Eintrag. Ein digest-gepinntes, Apple-Silicon-kompatibles LinuxServer-Chromium/Selkies-Image wird isoliert auf Loopback gestartet, auf HTTP und einen echten WebSocket-`101` geprüft, fünfmal gemessen und danach wieder entfernt:
+
+```bash
+./scripts/run_selkies_benchmark.sh artifacts/selkies-benchmark/local
+```
+
+Der unabhängig wiederholte Lauf vom 21. Juli 2026 ergab:
+
+| Kandidat | Erfolg | Median | p95 | Aussagegrenze |
+|---|---:|---:|---:|---|
+| Selkies HTTP shell | 5/5 | total **2,672 ms** | **3,515 ms** | HTTP-Bereitschaft, kein Frame |
+| Selkies `/websockets` | 5/5 | handshake **2,190 ms** | **3,722 ms** | Upgrade, kein Touch-to-Pixel |
+
+Damit ist die lokale Transport-Provisionierung reproduzierbar. Der Lauf misst jedoch weder Profilstart noch ersten nichtschwarzen Frame, Bildrate, Remote-Eingabe, Rechteintegration, Tailnet noch Mobile Safari. Er ist daher kein Beweis, dass Selkies den vollständigen KasmVNC/noVNC-Produktpfad überholt. Die Produktionsentscheidung bleibt unverändert, bis Selkies dieselben authentifizierten Profil-, Policy-, Canvas-, Mobile- und Eingabe-Gates besteht.
+
 ### r50 VCVM/Neko über Tailscale
 
 Am 21. Juli 2026 wurde zusätzlich ein bereits laufender Neko/Chrome-Stack auf der VCVM über Tailscale geprüft. Dieser Lauf ist ein Transport- und Login-Beleg, kein fairer Ersatzbenchmark gegen den CloakBrowser-KasmVNC-Pfad.
@@ -182,9 +199,9 @@ python3 scripts/streaming_benchmark_runner.py \
   --latest-markdown docs/streaming-benchmark-latest.md
 ```
 
-Der Runner unterscheidet absichtlich zwischen `measured`, `not_installed` und `architecture_only`. Eine fehlende lokale Installation oder ein reiner Architekturpfad erhält keine erfundenen Zeiten; ein erreichbarer HTTP-/WebSocket-/Command-Kandidat erhält dagegen rohe Messungen und Median-Min-Max-P95-Zusammenfassungen. Der Report ist als Headless-/Offline-Diagnostik gedacht; r50 zeigt Benchmarks nicht in der mobilen UI. Die öffentliche Projektion enthält bewusst keine lokalen Pfade, Endpunkte, Commands, Header oder Prozessausgaben.
+Der Runner unterscheidet absichtlich zwischen `measured`, `not_installed` und `architecture_only`. Eine fehlende lokale Installation oder ein reiner Architekturpfad erhält keine erfundenen Zeiten; ein erreichbarer HTTP-/WebSocket-/Command-Kandidat erhält dagegen rohe Messungen und Median-Min-Max-P95-Zusammenfassungen. Der Report ist als Headless-/Offline-Diagnostik gedacht; r51 zeigt Benchmarks nicht in der mobilen UI. Die öffentliche Projektion enthält bewusst keine lokalen Pfade, Endpunkte, Commands, Header oder Prozessausgaben.
 
-Der Browser-/UI-Gate-Runner liegt unter `scripts/mobile_ui_gate.py`. Er prüft fünf Viewports (iPhone 14, iPhone SE, iPhone Pro Max, iPhone 14 Landscape und Touch-Tablet), Touch-Ziele, Overflow, Split-Geometrie, den injizierten Codex-Computer-Use-Composer, Grid, Fullscreen-Fokus und – mit einer Profil-ID – genau einen echten VNC-Canvas. Der finale r50-Lauf bestand **272/272 Checks** und erzeugte **22 Screenshots**. Mit Profil-ID öffnet der Runner außerdem den manuellen iOS-Paste-Fallback, prüft dessen Touch-Ziele und bestätigt den kontrollierten Clipboard-Bridge-Rundlauf, ohne Clipboard-Text im Report zu speichern. Optional tippt `--remote-probe-url` eine harmlose, eindeutige URL per Keyboard-Events durch noVNC/RFB und verifiziert die Zielseite danach über den CDP-Proxy. Seine Screenshotprüfung validiert Abmessungen und Mindestdateigröße; die abschließende semantische Sichtprüfung bleibt bewusst ein separater menschlicher oder Vision-Agent-Gate.
+Der Browser-/UI-Gate-Runner liegt unter `scripts/mobile_ui_gate.py`. Er prüft fünf Viewports (iPhone 14, iPhone SE, iPhone Pro Max, iPhone 14 Landscape und Touch-Tablet), Touch-Ziele, Overflow, Split-Geometrie, den verifizierten Codex-Computer-Use-Composer, Grid, Fullscreen-Fokus und – mit einer Profil-ID – einen echten VNC-Canvas. Der authentifizierte r51-Lauf bestand **276/276 Checks** und erzeugte **23 Screenshots**, einschließlich Access-Dashboard. Mit Profil-ID öffnet der Runner außerdem den manuellen iOS-Paste-Fallback, prüft dessen Touch-Ziele und bestätigt den kontrollierten Clipboard-Bridge-Rundlauf, ohne Clipboard-Text im Report zu speichern. Optional tippt `--remote-probe-url` eine harmlose, eindeutige URL per Keyboard-Events durch noVNC/RFB und verifiziert die Zielseite danach über den CDP-Proxy. Seine Screenshotprüfung validiert Abmessungen und Mindestdateigröße; die abschließende semantische Sichtprüfung bleibt bewusst ein separater menschlicher oder Vision-Agent-Gate.
 
 ## Gepinnte Referenzstände
 
@@ -201,7 +218,7 @@ Die folgenden `HEAD`-Stände wurden am 20. Juli 2026 direkt aus den öffentliche
 ## Offene Nachweise
 
 - Selkies: echter Mobile-Safari-/WebKit-Lauf auf einem physischen iPhone, Authentifizierung und Tailscale-HTTPS sowie ein bewusstes mobiles Client-Layout statt des nachgewiesenen Letterbox-POCs.
-- Selkies: WebRTC-Modus unter derselben echten Browser- und Eingabeprobe; der hier dokumentierte Browser-E2E nutzt ausschließlich den WebSocket-Modus.
+- Selkies: WebRTC-Modus unter derselben echten Browser- und Eingabeprobe; der reproduzierbare r51-Lauf misst ausschließlich HTTP-/WebSocket-Bereitschaft.
 - Physisches iPhone: Safari über freigegebenes Tailscale Serve/HTTPS. Der konkrete Aktivierungsversuch wurde vom Tailnet mit `Serve is not enabled on your tailnet` abgelehnt; ein Administrator muss Serve freigeben, bevor eine ehrliche iPhone-URL und der Safari-E2E-Test möglich sind.
 - Mehrfachmessung der kompletten Interaktionskette: fünf Start-zu-erster-nichtleerer-Frame- und Eingabeantwort-Läufe je Version, nicht nur API-Launches.
 

@@ -17,7 +17,9 @@ import {
   type AccessRole,
   type AccessSandbox,
   type AccessUser,
+  type Profile,
 } from "../lib/api";
+import { hasAccessPermission } from "../lib/accessPermissions";
 
 interface AccessDashboardProps {
   onClose: () => void;
@@ -60,23 +62,117 @@ const permissionLabel: Record<AccessPermission, string> = {
   automate: "Automate",
 };
 
+type ControlPermission = Exclude<AccessPermission, "automate">;
+const controlPermissions: readonly ControlPermission[] = ["view", "interact", "operate"];
+const permissionOrder: Record<AccessPermission, number> = {
+  view: 0,
+  interact: 1,
+  operate: 2,
+  automate: 3,
+};
+
 const actionButtonClass = "btn-secondary inline-flex min-h-11 items-center gap-1.5";
 const primaryActionButtonClass = "btn-primary inline-flex min-h-11 items-center gap-1.5";
 const compactActionButtonClass = "min-h-11 rounded-md px-3 text-xs text-gray-500 underline focus:outline-none focus:ring-2 focus:ring-accent/50";
 
 function summarizeGrants(grants: AccessGrant[]) {
-  return grants.length
-    ? grants.map((grant) => `${grant.sandbox_id}: ${permissionLabel[grant.permission]}`).join(" · ")
-    : "No sandbox access";
+  if (!grants.length) return "No sandbox access";
+  const grouped = new Map<string, AccessPermission[]>();
+  for (const grant of grants) {
+    const permissions = grouped.get(grant.sandbox_id) ?? [];
+    if (!permissions.includes(grant.permission)) permissions.push(grant.permission);
+    grouped.set(grant.sandbox_id, permissions);
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([sandboxId, permissions]) => (
+      `${sandboxId}: ${permissions
+        .sort((left, right) => permissionOrder[left] - permissionOrder[right])
+        .map((permission) => permissionLabel[permission])
+        .join(" + ")}`
+    ))
+    .join(" · ");
 }
 
-function updateGrant(
+function sortGrants(grants: AccessGrant[]) {
+  return [...grants].sort((left, right) => (
+    left.sandbox_id.localeCompare(right.sandbox_id)
+      || permissionOrder[left.permission] - permissionOrder[right.permission]
+  ));
+}
+
+function updateControlGrant(
   grants: AccessGrant[],
   sandboxId: string,
-  permission: "" | AccessPermission,
+  permission: "" | ControlPermission,
 ) {
-  const withoutSandbox = grants.filter((grant) => grant.sandbox_id !== sandboxId);
-  return permission ? [...withoutSandbox, { sandbox_id: sandboxId, permission }] : withoutSandbox;
+  const preserved = grants.filter((grant) => (
+    grant.sandbox_id !== sandboxId || grant.permission === "automate"
+  ));
+  return sortGrants(permission
+    ? [...preserved, { sandbox_id: sandboxId, permission }]
+    : preserved);
+}
+
+function updateAutomationGrant(grants: AccessGrant[], sandboxId: string, enabled: boolean) {
+  const preserved = grants.filter((grant) => (
+    grant.sandbox_id !== sandboxId || grant.permission !== "automate"
+  ));
+  return sortGrants(enabled
+    ? [...preserved, { sandbox_id: sandboxId, permission: "automate" }]
+    : preserved);
+}
+
+function effectiveCapabilityLabel(grants: AccessGrant[], sandboxId: string) {
+  const labels: string[] = [];
+  if (hasAccessPermission(grants, sandboxId, "operate")) labels.push("Operate");
+  else if (hasAccessPermission(grants, sandboxId, "interact")) labels.push("Interact");
+  else if (hasAccessPermission(grants, sandboxId, "view")) labels.push("View");
+  if (hasAccessPermission(grants, sandboxId, "automate")) labels.push("CDP automation");
+  return labels.join(" + ");
+}
+
+function EffectiveAccessPreview({
+  label,
+  profiles,
+  grants,
+  administrator = false,
+}: {
+  label: string;
+  profiles: Profile[];
+  grants: AccessGrant[];
+  administrator?: boolean;
+}) {
+  const visibleProfiles = profiles.filter((profile) => (
+    administrator || hasAccessPermission(grants, profile.sandbox_id, "view")
+  ));
+
+  return (
+    <details className="mt-2 text-xs text-gray-500">
+      <summary className="min-h-11 cursor-pointer py-3 text-gray-400">
+        Effective access · {visibleProfiles.length} browser{visibleProfiles.length === 1 ? "" : "s"}
+      </summary>
+      <div className="rounded-md border border-border bg-surface-0 p-2" aria-label={`Effective browser access for ${label}`}>
+        {visibleProfiles.length ? (
+          <ul className="space-y-1.5">
+            {visibleProfiles.map((profile) => (
+              <li key={profile.id} className="flex min-w-0 items-start justify-between gap-2">
+                <span className="min-w-0">
+                  <span className="block truncate text-gray-300">{profile.name}</span>
+                  <span className="block truncate font-mono text-[10px] text-gray-600">{profile.sandbox_id}</span>
+                </span>
+                <span className="shrink-0 text-right text-[10px] text-gray-500">
+                  {administrator ? "Administrator" : effectiveCapabilityLabel(grants, profile.sandbox_id)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>No browser profiles are visible with these grants.</p>
+        )}
+      </div>
+    </details>
+  );
 }
 
 function GrantEditor({
@@ -104,29 +200,50 @@ function GrantEditor({
       {allSandboxes.length ? (
         <div className="space-y-2">
           {allSandboxes.map((sandbox) => {
-            const permission = grants.find((grant) => grant.sandbox_id === sandbox.sandbox_id)?.permission ?? "";
+            const controlPermission = controlPermissions
+              .slice()
+              .reverse()
+              .find((permission) => grants.some((grant) => (
+                grant.sandbox_id === sandbox.sandbox_id && grant.permission === permission
+              ))) ?? "";
+            const automationEnabled = grants.some((grant) => (
+              grant.sandbox_id === sandbox.sandbox_id && grant.permission === "automate"
+            ));
             return (
-              <label key={sandbox.sandbox_id} className="flex min-w-0 items-center gap-3 text-sm">
+              <div key={sandbox.sandbox_id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] items-center gap-x-3 gap-y-1 text-sm sm:grid-cols-[minmax(0,1fr)_8rem_8rem]">
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-300">
                   {sandbox.sandbox_id}
                   <span className="ml-1 font-sans text-gray-500">({sandbox.profile_count} browser{sandbox.profile_count === 1 ? "" : "s"})</span>
                 </span>
                 <select
                   className="input h-11 w-32 shrink-0 py-2 text-xs"
-                  value={permission}
-                  aria-label={`Permission for ${sandbox.sandbox_id}`}
-                  onChange={(event) => onChange(updateGrant(
+                  value={controlPermission}
+                  aria-label={`Browser control for ${sandbox.sandbox_id}`}
+                  onChange={(event) => onChange(updateControlGrant(
                     grants,
                     sandbox.sandbox_id,
-                    event.target.value as "" | AccessPermission,
+                    event.target.value as "" | ControlPermission,
                   ))}
                 >
                   <option value="">No access</option>
-                  {(Object.keys(permissionLabel) as AccessPermission[]).map((value) => (
+                  {controlPermissions.map((value) => (
                     <option key={value} value={value}>{permissionLabel[value]}</option>
                   ))}
                 </select>
-              </label>
+                <label className="col-start-2 flex min-h-11 items-center gap-2 text-xs text-gray-400 sm:col-start-3">
+                  <input
+                    type="checkbox"
+                    checked={automationEnabled}
+                    aria-label={`CDP automation for ${sandbox.sandbox_id}`}
+                    onChange={(event) => onChange(updateAutomationGrant(
+                      grants,
+                      sandbox.sandbox_id,
+                      event.target.checked,
+                    ))}
+                  />
+                  Automate
+                </label>
+              </div>
             );
           })}
         </div>
@@ -134,7 +251,7 @@ function GrantEditor({
         <p className="text-xs text-gray-500">Create a browser profile and assign it a sandbox first.</p>
       )}
       <p className="mt-2 text-[11px] leading-4 text-gray-500">
-        View shows the live browser. Interact permits VNC and clipboard input. Operate can launch or stop it. Automate permits CDP.
+        Control tiers are inherited: Interact includes View, and Operate includes Interact. CDP automation is independent and can be combined with Operate.
       </p>
     </fieldset>
   );
@@ -144,6 +261,7 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
   const [users, setUsers] = useState<AccessUser[]>([]);
   const [agents, setAgents] = useState<AccessAgent[]>([]);
   const [sandboxes, setSandboxes] = useState<AccessSandbox[]>([]);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -157,14 +275,16 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextUsers, nextAgents, nextSandboxes] = await Promise.all([
+      const [nextUsers, nextAgents, nextSandboxes, nextProfiles] = await Promise.all([
         api.listAccessUsers(),
         api.listAccessAgents(),
         api.listAccessSandboxes(),
+        api.listProfiles(),
       ]);
       setUsers(nextUsers);
       setAgents(nextAgents);
       setSandboxes(nextSandboxes);
+      setProfiles(nextProfiles);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load access controls");
@@ -344,6 +464,12 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
                       {!user.active && <span className="text-[10px] text-amber-300">disabled</span>}
                     </div>
                     <p className="mt-1 truncate text-xs text-gray-500">{user.role === "admin" ? "All sandboxes (administrator)" : summarizeGrants(user.grants)}</p>
+                    <EffectiveAccessPreview
+                      label={user.username}
+                      profiles={profiles}
+                      grants={user.grants}
+                      administrator={user.role === "admin"}
+                    />
                   </div>
                   <button
                     type="button"
@@ -433,6 +559,11 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
                     </div>
                     {agent.paperclip_agent_id && <p className="mt-0.5 truncate font-mono text-[11px] text-gray-500">{agent.paperclip_agent_id}</p>}
                     <p className="mt-1 truncate text-xs text-gray-500">{summarizeGrants(agent.grants)}</p>
+                    <EffectiveAccessPreview
+                      label={agent.display_name}
+                      profiles={profiles}
+                      grants={agent.grants}
+                    />
                   </div>
                   <div className="flex gap-1">
                     <button type="button" className="mobile-icon-button" aria-label={`Rotate key for ${agent.display_name}`} title="Rotate key" disabled={saving} onClick={() => void rotateAgentKey(agent)}>

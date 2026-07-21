@@ -196,7 +196,11 @@ INSTALL_HARNESS_SCRIPT = r"""window.cloakBrowserHarness = {
     streaming: true,
     clipboard: true,
     browser_actions: ['click', 'type', 'copy', 'paste', 'screenshot'],
-    metadata: { mode: 'webkit-gate', label: 'Codex Computer Use Bridge · connected' }
+    metadata: {
+      mode: 'webkit-gate',
+      provider: 'codex-computer-use',
+      label: 'Codex Computer Use Bridge · connected'
+    }
   },
   send: (request) => ({
     id: 'webkit-gate-reply',

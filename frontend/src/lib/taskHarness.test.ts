@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTaskHarness,
+  codexComputerUseProvider,
   type InjectedTaskHarness,
   type TaskHarnessListener,
   type TaskHarnessMessage,
@@ -39,7 +40,7 @@ describe("createTaskHarness", () => {
     unsubscribe();
   });
 
-  it("adapts an injected host harness without depending on a vendor API", async () => {
+  it("adapts a verified Codex Computer Use host without exposing a vendor API", async () => {
     const sentMessage: TaskHarnessMessage = {
       id: "host-1",
       role: "assistant",
@@ -54,6 +55,7 @@ describe("createTaskHarness", () => {
         streaming: true,
         clipboard: true,
         browser_actions: ["paste", "copy", "fullscreen"],
+        metadata: { provider: codexComputerUseProvider, mode: "test" },
       }),
       send,
     };
@@ -64,7 +66,7 @@ describe("createTaskHarness", () => {
       streaming: true,
       clipboard: true,
       browser_actions: ["paste", "copy", "fullscreen"],
-      metadata: undefined,
+      metadata: { provider: codexComputerUseProvider, mode: "test" },
     });
 
     await expect(harness.send({ text: "go", conversation_id: "c1" })).resolves.toEqual(sentMessage);
@@ -118,6 +120,32 @@ describe("createTaskHarness", () => {
     await expect(harness.send({ text: "" })).rejects.toThrow(
       "Codex Computer Use Bridge is unavailable: injected host harness is missing send()",
     );
+  });
+
+  it("rejects a generic or mislabeled harness instead of presenting it as Codex Computer Use", async () => {
+    const send = vi.fn();
+    const harness = createTaskHarness(windowWithHarness({
+      capabilities: {
+        chat: true,
+        streaming: true,
+        clipboard: true,
+        browser_actions: ["click"],
+        metadata: { provider: "generic-test-harness" },
+      },
+      send,
+    }));
+
+    await expect(harness.capabilities()).resolves.toMatchObject({
+      chat: false,
+      metadata: {
+        mode: "unavailable",
+        reason: "host bridge is not verified as Codex Computer Use",
+      },
+    });
+    await expect(harness.send({ text: "go" })).rejects.toThrow(
+      "host bridge is not verified as Codex Computer Use",
+    );
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("rejects aborted unavailable requests and does not notify subscribers", async () => {

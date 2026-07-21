@@ -6,6 +6,7 @@ const apiMock = vi.hoisted(() => ({
   listAccessUsers: vi.fn(),
   listAccessAgents: vi.fn(),
   listAccessSandboxes: vi.fn(),
+  listProfiles: vi.fn(),
   createAccessUser: vi.fn(),
   updateAccessUser: vi.fn(),
   createAccessAgent: vi.fn(),
@@ -20,6 +21,7 @@ describe("AccessDashboard", () => {
     apiMock.listAccessUsers.mockReset();
     apiMock.listAccessAgents.mockReset();
     apiMock.listAccessSandboxes.mockReset();
+    apiMock.listProfiles.mockReset();
     apiMock.createAccessUser.mockReset();
     apiMock.updateAccessUser.mockReset();
     apiMock.createAccessAgent.mockReset();
@@ -39,6 +41,20 @@ describe("AccessDashboard", () => {
     apiMock.listAccessAgents.mockResolvedValue([]);
     apiMock.listAccessSandboxes.mockResolvedValue([
       { sandbox_id: "research", profile_count: 2 },
+    ]);
+    apiMock.listProfiles.mockResolvedValue([
+      {
+        id: "profile-1",
+        name: "Research browser",
+        sandbox_id: "research",
+        status: "running",
+      },
+      {
+        id: "profile-2",
+        name: "Private browser",
+        sandbox_id: "private",
+        status: "stopped",
+      },
     ]);
   });
 
@@ -61,15 +77,19 @@ describe("AccessDashboard", () => {
     fireEvent.change(screen.getByLabelText("Display name"), {
       target: { value: "Research helper" },
     });
-    fireEvent.change(screen.getAllByLabelText("Permission for research")[1], {
-      target: { value: "automate" },
+    fireEvent.change(screen.getAllByLabelText("Browser control for research")[1], {
+      target: { value: "operate" },
     });
+    fireEvent.click(screen.getAllByLabelText("CDP automation for research")[1]);
     fireEvent.click(screen.getByRole("button", { name: "Create agent key" }));
 
     await waitFor(() => expect(apiMock.createAccessAgent).toHaveBeenCalledWith({
       display_name: "Research helper",
       paperclip_agent_id: null,
-      grants: [{ sandbox_id: "research", permission: "automate" }],
+      grants: [
+        { sandbox_id: "research", permission: "operate" },
+        { sandbox_id: "research", permission: "automate" },
+      ],
     }));
     expect((await screen.findByLabelText("New Paperclip agent key") as HTMLInputElement).value)
       .toBe("test-agent-key-only");
@@ -95,8 +115,11 @@ describe("AccessDashboard", () => {
       expect(screen.getByRole("button", { name: buttonName }).className).toContain("min-h-11");
     }
 
-    for (const permissionSelect of screen.getAllByLabelText("Permission for research")) {
+    for (const permissionSelect of screen.getAllByLabelText("Browser control for research")) {
       expect(permissionSelect.className).toContain("h-11");
+    }
+    for (const automationToggle of screen.getAllByLabelText("CDP automation for research")) {
+      expect(automationToggle.closest("label")?.className).toContain("min-h-11");
     }
     expect(screen.getByLabelText("Username").className).toContain("min-h-11");
     expect(screen.getByLabelText("Password").className).toContain("min-h-11");
@@ -116,7 +139,7 @@ describe("AccessDashboard", () => {
     render(<AccessDashboard onClose={vi.fn()} />);
 
     const longSandbox = "paperclip-automation-sandbox-with-a-long-name";
-    const permission = await screen.findAllByLabelText(`Permission for ${longSandbox}`);
+    const permission = await screen.findAllByLabelText(`Browser control for ${longSandbox}`);
     const grantFieldset = permission[0].closest("fieldset");
     const peopleSection = screen.getByRole("heading", { name: "People" }).closest("section");
     const dashboardGrid = peopleSection?.parentElement;
@@ -126,5 +149,16 @@ describe("AccessDashboard", () => {
     expect(permission[0].className).toContain("shrink-0");
     expect(peopleSection?.className).toContain("min-w-0");
     expect(dashboardGrid?.className).toContain("grid-cols-1");
+  });
+
+  it("shows the effective profile scope and keeps unrelated sandboxes hidden", async () => {
+    render(<AccessDashboard onClose={vi.fn()} />);
+
+    expect(await screen.findByText("alice")).toBeTruthy();
+    expect(screen.getByText("Effective access · 1 browser")).toBeTruthy();
+    const preview = screen.getByLabelText("Effective browser access for alice");
+    expect(preview.textContent).toContain("Research browser");
+    expect(preview.textContent).toContain("View");
+    expect(preview.textContent).not.toContain("Private browser");
   });
 });

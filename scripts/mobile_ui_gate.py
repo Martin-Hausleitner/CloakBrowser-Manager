@@ -96,7 +96,7 @@ def mobile_gate_init_script() -> str:
       browser_actions: ['copy', 'paste', 'fullscreen'],
       metadata: {{
         mode: 'codex-computer-use-mobile-gate',
-        provider: 'codex-computer-use-test-host',
+        provider: 'codex-computer-use',
       }},
     }},
     send: async (request) => {{
@@ -107,7 +107,7 @@ def mobile_gate_init_script() -> str:
         content: `${{replyPrefix}} ${{text}}`,
         created_at: new Date().toISOString(),
         metadata: {{
-          provider: 'codex-computer-use-test-host',
+          provider: 'codex-computer-use',
           profile_id: request?.profile_id ?? null,
           request_metadata: request?.metadata ?? null,
         }},

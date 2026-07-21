@@ -970,7 +970,7 @@ export function MobileSplitScreen({
                 <span>Grid</span>
               </button>
               <label className="mobile-tool-select">
-                <span>Harness</span>
+                <span>Computer Use</span>
                 <span className="truncate text-right text-xs font-medium text-gray-100">{harnessLabel}</span>
               </label>
             </div>
@@ -1010,8 +1010,8 @@ export function MobileSplitScreen({
 
             <p className="mobile-tools-meta">
               {harnessUnavailable
-                ? "Codex Computer Use Bridge is required and must be injected by the host before tasks can run."
-                : "Harness adapter is vendor-neutral and keeps browser credentials out of the chat UI."}
+                ? "A verified Codex Computer Use Bridge must be injected by the host before tasks can run."
+                : "Tasks run only through the verified Codex Computer Use host; browser credentials stay outside the chat UI."}
             </p>
           </div>
         ) : null}

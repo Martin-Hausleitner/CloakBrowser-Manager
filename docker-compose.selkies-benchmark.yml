@@ -1,0 +1,15 @@
+services:
+  selkies-chromium:
+    image: lscr.io/linuxserver/chromium@sha256:9c02377ec07e76c02fe95cb3857981775a94428cfb79d110513815ca46ea0c79
+    container_name: cloak-selkies-benchmark-chromium
+    shm_size: "1gb"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Etc/UTC"
+      TITLE: "Cloak Selkies Benchmark"
+      CUSTOM_PORT: "3000"
+      NO_FULL: "true"
+      CHROME_CLI: "about:blank"
+    ports:
+      - "127.0.0.1:18122:3000"

@@ -73,6 +73,10 @@ Ein zusätzlicher, frischer Runner-Lauf vom 20. Juli 2026 (UTC) prüfte den bere
 
 Der daraus erzeugte, serverseitig redigierte Report wurde außerdem in einer frischen Manager-Instanz in einer iPhone-14-Ansicht geladen und aktualisiert. Die mobile Seite zeigte alle fünf Kandidaten bei exakt 390 px Inhaltsbreite ohne horizontalen Overflow; „2 measured / 5 listed“ bleibt sichtbar und verhindert, dass die drei nicht gemessenen Kandidaten als Leistungswerte gelesen werden. Lokale Endpunkte, Profilkennungen und Header erscheinen weder im Browserreport noch in dieser Dokumentation.
 
+### Frischer isolierter Preview-Nachtest (21. Juli 2026)
+
+Ein weiterer fünfmaliger Warm-Nachtest gegen die isolierte, bereits verbundene Mobile-Vorschau bestätigte den lokalen KasmVNC/noVNC-Pfad: Der Health-Endpunkt erreichte einen Median First Byte von **2,233 ms** (p95 15,891 ms), der echte VNC-WebSocket-Upgrade einen Median Handshake von **4,541 ms** (p95 17,442 ms). Wie im vorherigen Lauf blieben Selkies `not_installed` sowie Sunshine/Moonlight und Guacamole `architecture_only`; sie erhalten keine erfundenen Vergleichswerte. Der redigierte, README-verlinkte Einzelreport steht in [streaming-benchmark-latest.md](streaming-benchmark-latest.md). Der Nachtest misst nur den warmen Loopback-Pfad und ist ausdrücklich kein Vergleich mit dem älteren Container, Startzeiten oder anderen Technologien.
+
 ## KasmVNC 1.3.3 gegen 1.4.0: isolierter A/B-Lauf
 
 Am 20. Juli 2026 wurden beide KasmVNC-Versionen in getrennten lokalen Containern mit identischem 1024-×-576-Profil, deaktiviertem Clipboard-Sync, derselben aktuellen Frontend-Ausgabe und demselben aktuellen `browser_manager.py` geprüft. Die App war jeweils nur auf `127.0.0.1` gebunden; der normale Produktionscontainer blieb unverändert. Für KasmVNC 1.4 war das aktuelle Backend notwendig: Das zuvor gebaute Image enthielt noch den bereits behobenen Fehler, `search_engine` als nicht unterstütztes Chromium-Launch-Argument weiterzugeben.

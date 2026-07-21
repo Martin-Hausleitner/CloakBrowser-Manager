@@ -66,7 +66,7 @@ function installTaskHarness() {
       chat: true,
       streaming: true,
       clipboard: true,
-      browser_actions: ["copy", "paste", "fullscreen"],
+      browser_actions: ["copy", "paste", "screenshot", "fullscreen"],
       metadata: { mode: "codex-test", provider: codexComputerUseProvider },
     },
     send,
@@ -179,7 +179,7 @@ describe("MobileSplitScreen", () => {
     expect((screen.getByLabelText("Run task") as HTMLButtonElement).disabled).toBe(true);
 
     openBrowserTools();
-    expect(screen.getByText("Codex Computer Use Bridge · unavailable")).toBeTruthy();
+    expect(screen.getByText("Codex unavailable")).toBeTruthy();
     expect(screen.getByText("A verified Codex Computer Use Bridge must be injected by the host before tasks can run.")).toBeTruthy();
 
     fireEvent.submit(input.closest("form") as HTMLFormElement);
@@ -300,6 +300,22 @@ describe("MobileSplitScreen", () => {
     expect(screen.queryByLabelText("Streaming benchmark results")).toBeNull();
   });
 
+  it("lets the browser consume unused workspace until chat or tools are opened", () => {
+    const { container } = runningSplit();
+    const workspace = container.querySelector(".mobile-split-root") as HTMLElement;
+
+    expect(workspace.classList.contains("mobile-workspace-collapsed")).toBe(true);
+
+    openBrowserTools();
+    expect(workspace.classList.contains("mobile-workspace-collapsed")).toBe(false);
+
+    fireEvent.click(screen.getByLabelText("Close browser tools"));
+    expect(workspace.classList.contains("mobile-workspace-collapsed")).toBe(true);
+
+    fireEvent.click(screen.getByLabelText("Expand task chat"));
+    expect(workspace.classList.contains("mobile-workspace-collapsed")).toBe(false);
+  });
+
   it("keeps profile and browser actions inside the central tools sheet without a harness picker", () => {
     runningSplit({ canManageAccess: true });
 
@@ -312,10 +328,49 @@ describe("MobileSplitScreen", () => {
 
     const tools = screen.getByLabelText("Browser tools");
     expect(within(tools).getByRole("button", { name: /Stop/i })).toBeTruthy();
+    expect(within(tools).queryByLabelText("New profile")).toBeNull();
+    fireEvent.click(within(tools).getByLabelText("Toggle browser administration"));
     expect(within(tools).getByLabelText("New profile")).toBeTruthy();
     expect(within(tools).getByLabelText("Edit selected profile")).toBeTruthy();
     expect(within(tools).getByLabelText("Browser access controls")).toBeTruthy();
     expect(within(tools).queryByLabelText("Select harness runner")).toBeNull();
+  });
+
+  it("runs compact pinned browser actions only through the verified Codex host", async () => {
+    const { send } = installTaskHarness();
+    runningSplit();
+    openBrowserTools();
+
+    const capture = await screen.findByLabelText("Run Capture with Codex Computer Use");
+    await waitFor(() => expect((capture as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(capture);
+
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        {
+          text: "Capture the current browser view.",
+          commands: [
+            {
+              id: "capture-browser",
+              label: "Capture",
+              kind: "screenshot",
+              scope: "host",
+            },
+          ],
+          profile_id: runningProfile.id,
+          metadata: {
+            runner: "codex-computer-use",
+            preferred_surface: "codex-computer-use",
+            browser_visible: true,
+            source: "pinned-action",
+          },
+        },
+        undefined,
+      ),
+    );
+    expect(await screen.findByText("Harness accepted the task.")).toBeTruthy();
+    expect(screen.queryByLabelText("Browser tools")).toBeNull();
+    expect(screen.getByLabelText("Chat history")).toBeTruthy();
   });
 
   it("keeps viewport and grid panels mutually exclusive inside browser tools", async () => {
@@ -329,6 +384,7 @@ describe("MobileSplitScreen", () => {
     fireEvent.click(screen.getByLabelText("Edit browser viewport"));
     expect(screen.getByLabelText("Viewport controls")).toBeTruthy();
     expect(screen.queryByLabelText("Running browser grid")).toBeNull();
+    expect(screen.queryByLabelText("Pinned browser actions")).toBeNull();
 
     fireEvent.click(screen.getByText("Tablet"));
     fireEvent.click(screen.getByText("Apply"));
@@ -363,6 +419,7 @@ describe("MobileSplitScreen", () => {
 
     openBrowserTools();
     expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("68%");
+    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
     fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
     fireEvent.change(screen.getByLabelText("Visual zoom"), { target: { value: "135" } });
 
@@ -377,14 +434,17 @@ describe("MobileSplitScreen", () => {
     expect(screen.getAllByText("VNC stream")).toHaveLength(1);
   });
 
-  it("keeps local view controls but hides viewport editing without profile management access", () => {
+  it("keeps local view controls but hides persistent viewport fields without profile management access", () => {
     runningSplit({ canManageProfiles: false });
 
     openBrowserTools();
 
+    expect(screen.getByLabelText("Edit browser viewport")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
     expect(screen.getByLabelText("Browser pane")).toBeTruthy();
     expect(screen.getByLabelText("Visual zoom")).toBeTruthy();
-    expect(screen.queryByLabelText("Edit browser viewport")).toBeNull();
+    expect(screen.queryByLabelText("Viewport width")).toBeNull();
+    expect(screen.getByText("Viewport changes require profile management access.")).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
     expect(screen.getByLabelText("Toggle fullscreen view controls")).toBeTruthy();
@@ -432,6 +492,18 @@ describe("MobileSplitScreen", () => {
     fireEvent.click(screen.getByLabelText("Close fullscreen browser"));
     expect(screen.queryByRole("dialog", { name: "Fullscreen browser viewer" })).toBeNull();
     expect(document.activeElement).toBe(screen.getByLabelText("Open fullscreen browser"));
+  });
+
+  it("keeps a visible fullscreen exit control when no browser is live", () => {
+    renderMobileSplit();
+
+    fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
+
+    expect(screen.getByRole("dialog", { name: "Fullscreen browser viewer" })).toBeTruthy();
+    expect(screen.getByLabelText("Close fullscreen browser")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Close fullscreen browser"));
+    expect(screen.queryByRole("dialog", { name: "Fullscreen browser viewer" })).toBeNull();
   });
 
   it("uses Ctrl or Cmd shortcuts for fullscreen chat and browser tools", () => {

@@ -93,13 +93,14 @@ def mobile_gate_init_script() -> str:
       chat: true,
       streaming: true,
       clipboard: true,
-      browser_actions: ['copy', 'paste', 'fullscreen'],
+      browser_actions: ['copy', 'paste', 'screenshot', 'fullscreen'],
       metadata: {{
         mode: 'codex-computer-use-mobile-gate',
         provider: 'codex-computer-use',
       }},
     }},
     send: async (request) => {{
+      window.__codexComputerUseLastRequest = request;
       const text = String(request?.text ?? '');
       return {{
         id: `mobile-ui-gate-${{Date.now()}}`,
@@ -333,6 +334,7 @@ STRUCTURE_SCRIPT = r"""(() => {
   const commandDock = document.querySelector('.mobile-command-dock');
   const composerForm = document.querySelector('.mobile-chat-form');
   const composer = document.querySelector('#mobile-task-input');
+  const pinnedActions = document.querySelector('[aria-label="Pinned browser actions"]');
   const required = [root, live, controls, frame, commandDock, composerForm, composer];
   const rect = (node) => node ? node.getBoundingClientRect().toJSON() : null;
   const visible = (node) => {
@@ -365,6 +367,7 @@ STRUCTURE_SCRIPT = r"""(() => {
     chat: rect(chat),
     chatHeader: rect(chatHeader),
     chatCollapsed: !chat && !visible(chatHeader),
+    compactWorkspace: root?.classList.contains('mobile-workspace-collapsed') ?? false,
     chatVisibleHeight: Math.round(visibleHeight(chat) * 10) / 10,
     chatHeaderVisible: fullyVisible(chatHeader),
     toolsVisible: visible(tools),
@@ -378,6 +381,7 @@ STRUCTURE_SCRIPT = r"""(() => {
     hasBrowserTools: !!document.querySelector('[aria-label="Browser tools"]'),
     hasAgentRunner: !!document.querySelector('select[aria-label="Select harness runner"]'),
     hasRunTask: !!document.querySelector('button[aria-label="Run task"]'),
+    pinnedActionCount: pinnedActions?.querySelectorAll('button')?.length ?? 0,
     benchmarkNavAbsent: !document.body.innerText.includes('Benchmarks') &&
       !document.querySelector('button[aria-label="Streaming benchmark results"]'),
   };
@@ -726,14 +730,6 @@ def verify_live_viewport_controls(
         bool(editor.get("visible")) and editor.get("inputCount") == 2 and bool(editor.get("apply")),
         editor,
     )
-    click_visible(browser, "button[aria-label='Edit browser viewport']", "live viewport editor toggle")
-    browser.wait_for(
-        "!document.querySelector('[aria-label=\"Viewport controls\"]')",
-        "compact workspace after live profile viewport settings",
-        5,
-    )
-
-    ensure_browser_tools_open(browser)
     live_controls_opened = browser.eval(
         "!!document.querySelector('#mobile-pane-size') && !!document.querySelector('#mobile-browser-zoom')"
     )
@@ -1341,6 +1337,7 @@ def run_viewport(
         and bool(structure.get("hasRunTask"))
         and (structure.get("primaryActionCount") or 0) <= 4
         and bool(structure.get("chatCollapsed"))
+        and bool(structure.get("compactWorkspace"))
         and bool(structure.get("benchmarkNavAbsent"))
         and not bool(structure.get("hasAgentRunner")),
         structure,
@@ -1360,8 +1357,10 @@ def run_viewport(
     tools_structure = browser.eval(STRUCTURE_SCRIPT)
     add_check(
         result,
-        "browser tools omit visible harness picker",
-        bool(tools_structure.get("toolsVisible")) and not bool(tools_structure.get("hasAgentRunner")),
+        "browser tools use three pinned Codex actions without a harness picker",
+        bool(tools_structure.get("toolsVisible"))
+        and tools_structure.get("pinnedActionCount") == 3
+        and not bool(tools_structure.get("hasAgentRunner")),
         tools_structure,
     )
     browser.eval(r"""(() => {
@@ -1554,16 +1553,17 @@ def run_viewport(
           const input = document.querySelector('#mobile-task-input');
           const host = window.cloakBrowserHarness;
           const hasHost = !!host && typeof host.send === 'function';
-          const label = [...document.querySelectorAll('.mobile-chat-form, .mobile-tools-sheet, .mobile-control-pane')]
-            .map((node) => node.innerText || '')
-            .join('\n');
-          const connected = label.includes('Codex Computer Use Bridge · connected');
-          if (!hasHost || !input || input.disabled || !connected || label.includes('unavailable')) return false;
+          const capture = document.querySelector(
+            'button[aria-label="Run Capture with Codex Computer Use"]'
+          );
+          const connected = !!capture && !capture.disabled;
+          if (!hasHost || !input || input.disabled || !connected) return false;
           return {
             hasHost,
             inputDisabled: input.disabled,
             placeholder: input.getAttribute('placeholder'),
             connected,
+            captureDisabled: capture.disabled,
           };
         })()""",
         "Codex Computer Use test host harness",
@@ -1574,6 +1574,24 @@ def run_viewport(
         "Codex Computer Use test host harness is injected and available",
         bool(harness_ready),
         harness_ready,
+    )
+    pinned_action = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Run Capture with Codex Computer Use"]');
+      if (!button || button.disabled) return false;
+      button.click();
+      return true;
+    })()""")
+    pinned_request = browser.wait_for(
+        "window.__codexComputerUseLastRequest?.commands?.[0]?.kind === 'screenshot' && "
+        "window.__codexComputerUseLastRequest?.metadata?.source === 'pinned-action'",
+        "structured Codex pinned action",
+        10,
+    )
+    add_check(
+        result,
+        "pinned screenshot action uses structured Codex Computer Use command",
+        bool(pinned_action) and bool(pinned_request),
+        {"clicked": pinned_action, "requestObserved": bool(pinned_request)},
     )
     unique_message = f"Mobile gate {name} {int(time.time() * 1000)}"
     expected_reply = codex_computer_use_test_reply(unique_message)
@@ -1831,6 +1849,11 @@ def run_access_dashboard_gate(
     authenticate_workspace(browser, auth_token)
     browser.wait_for("!!document.querySelector('.mobile-split-root')", "mobile workspace", 20)
     ensure_browser_tools_open(browser)
+    browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Toggle browser administration"]');
+      if (button?.getAttribute('aria-expanded') !== 'true') button?.click();
+      return Boolean(button);
+    })()""")
     clicked = browser.eval(r"""(() => {
       const button = document.querySelector('button[aria-label="Browser access controls"]');
       if (!button) return false;

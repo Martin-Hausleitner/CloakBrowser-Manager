@@ -8,8 +8,39 @@ export interface TaskHarnessMessage {
   metadata?: Record<string, unknown>;
 }
 
+export const taskHarnessActionKinds = [
+  "navigate",
+  "click",
+  "double_click",
+  "scroll",
+  "type_text",
+  "keypress",
+  "drag",
+  "move",
+  "wait",
+  "copy",
+  "paste",
+  "screenshot",
+  "viewport",
+  "fullscreen",
+  "focus_remote",
+  "focus_chat",
+] as const;
+
+export type TaskHarnessActionKind = (typeof taskHarnessActionKinds)[number];
+export type TaskHarnessActionScope = "ui" | "host";
+
+export interface TaskHarnessAction {
+  id: string;
+  label: string;
+  kind: TaskHarnessActionKind;
+  scope: TaskHarnessActionScope;
+  args?: Record<string, string | number | boolean | null>;
+}
+
 export interface TaskHarnessRequest {
   text: string;
+  commands?: readonly TaskHarnessAction[];
   profile_id?: string | null;
   conversation_id?: string | null;
   metadata?: Record<string, unknown>;
@@ -23,7 +54,7 @@ export interface TaskHarnessCapabilities {
   chat: boolean;
   streaming: boolean;
   clipboard: boolean;
-  browser_actions: string[];
+  browser_actions: TaskHarnessActionKind[];
   metadata?: Record<string, unknown>;
 }
 
@@ -68,13 +99,19 @@ const unavailableCapabilities: TaskHarnessCapabilities = {
   metadata: { mode: "unavailable" },
 };
 
+const taskHarnessActionKindSet = new Set<string>(taskHarnessActionKinds);
+
+function isTaskHarnessActionKind(value: unknown): value is TaskHarnessActionKind {
+  return typeof value === "string" && taskHarnessActionKindSet.has(value);
+}
+
 function cloneCapabilities(capabilities: TaskHarnessCapabilities): TaskHarnessCapabilities {
   return {
     chat: Boolean(capabilities.chat),
     streaming: Boolean(capabilities.streaming),
     clipboard: Boolean(capabilities.clipboard),
     browser_actions: Array.isArray(capabilities.browser_actions)
-      ? [...capabilities.browser_actions]
+      ? capabilities.browser_actions.filter(isTaskHarnessActionKind)
       : [],
     metadata: capabilities.metadata ? { ...capabilities.metadata } : undefined,
   };

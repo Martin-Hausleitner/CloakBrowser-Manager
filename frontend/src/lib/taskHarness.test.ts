@@ -3,6 +3,7 @@ import {
   createTaskHarness,
   codexComputerUseProvider,
   type InjectedTaskHarness,
+  type TaskHarnessCapabilities,
   type TaskHarnessListener,
   type TaskHarnessMessage,
 } from "./taskHarness";
@@ -102,6 +103,24 @@ describe("createTaskHarness", () => {
       created_at: "2026-07-21T10:01:00.000Z",
     });
     expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("drops unknown browser actions at the injected host boundary", async () => {
+    const capabilities = {
+      chat: true,
+      streaming: false,
+      clipboard: false,
+      browser_actions: ["screenshot", "delete_everything"],
+      metadata: { provider: codexComputerUseProvider },
+    } as unknown as TaskHarnessCapabilities;
+    const harness = createTaskHarness(windowWithHarness({
+      capabilities,
+      send: vi.fn(),
+    }));
+
+    await expect(harness.capabilities()).resolves.toMatchObject({
+      browser_actions: ["screenshot"],
+    });
   });
 
   it("marks the bridge unavailable when an injected object cannot send", async () => {

@@ -3,7 +3,10 @@ import type { CSSProperties, ChangeEvent, FormEvent, ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowRight,
+  Camera,
   ChevronUp,
+  ClipboardCopy,
+  ClipboardPaste,
   Expand,
   Grid2X2,
   Globe2,
@@ -23,6 +26,7 @@ import type { Profile } from "../../lib/api";
 import {
   createTaskHarness,
   taskHarnessReadyEvent,
+  type TaskHarnessAction,
   type TaskHarnessCapabilities,
 } from "../../lib/taskHarness";
 import { StatusIndicator } from "../StatusIndicator";
@@ -67,7 +71,7 @@ const presets = [
   { label: "Desktop", width: 1440, height: 900 },
 ] as const;
 
-const defaultPreviewPanePercent = 42;
+const defaultPreviewPanePercent = 68;
 // The running browser is the primary control surface; chat and settings are
 // now collapsed into a compact dock by default.
 const defaultLivePanePercent = 68;
@@ -78,6 +82,37 @@ const collapsedLivePanePercent = 82;
 const collapsedLandscapeLivePanePercent = 74;
 const minimumPhoneFitWidth = 320;
 const minimumPhoneFitHeight = 480;
+
+type PinnedHarnessAction = Omit<TaskHarnessAction, "kind"> & {
+  kind: "screenshot" | "copy" | "paste";
+};
+
+const pinnedHarnessActions = [
+  {
+    id: "capture-browser",
+    label: "Capture",
+    kind: "screenshot",
+    scope: "host",
+  },
+  {
+    id: "copy-browser-selection",
+    label: "Copy",
+    kind: "copy",
+    scope: "host",
+  },
+  {
+    id: "paste-into-browser",
+    label: "Paste",
+    kind: "paste",
+    scope: "host",
+  },
+] satisfies readonly PinnedHarnessAction[];
+
+const pinnedHarnessPrompts: Record<PinnedHarnessAction["kind"], string> = {
+  screenshot: "Capture the current browser view.",
+  copy: "Copy the current browser selection.",
+  paste: "Paste the clipboard into the focused browser field.",
+};
 
 function usesCompactLivePane() {
   return (
@@ -148,6 +183,7 @@ export function MobileSplitScreen({
   const [draft, setDraft] = useState("");
   const [gridOpen, setGridOpen] = useState(false);
   const [viewportOpen, setViewportOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
   const [viewportSaved, setViewportSaved] = useState(false);
   const [viewportSaveFailed, setViewportSaveFailed] = useState(false);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
@@ -216,11 +252,14 @@ export function MobileSplitScreen({
     : harnessUnavailable
     ? "Codex Computer Use Bridge unavailable"
     : "Ask Codex Computer Use...";
+  const compactWorkspace = chatCollapsed && !remoteToolsOpen && !fullscreenOpen;
+  const toolPanelOpen = viewportOpen || gridOpen || adminOpen;
 
   const closeTools = () => {
     onRemoteToolsOpenChange(false);
     setViewportOpen(false);
     setGridOpen(false);
+    setAdminOpen(false);
   };
 
   const openTools = () => {
@@ -347,6 +386,7 @@ export function MobileSplitScreen({
         openTools();
         setGridOpen((open) => !open);
         setViewportOpen(false);
+        setAdminOpen(false);
         return;
       }
       if (key === "k") {
@@ -379,9 +419,7 @@ export function MobileSplitScreen({
     setFullscreenViewportOpen(false);
   };
 
-  const sendMessage = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const text = draft.trim();
+  const runHarnessTask = async (text: string, commands?: readonly TaskHarnessAction[]) => {
     if (!text || harnessPending || !harnessReady) return;
     const userMessage: ChatMessage = { id: Date.now(), role: "user", text };
     chatAdjustedRef.current = true;
@@ -397,11 +435,13 @@ export function MobileSplitScreen({
     try {
       const reply = await (taskHarnessRef.current ?? createTaskHarness(window)).send({
         text,
+        ...(commands ? { commands } : {}),
         profile_id: selected?.id ?? null,
         metadata: {
           runner: "codex-computer-use",
           preferred_surface: "codex-computer-use",
           browser_visible: true,
+          ...(commands ? { source: "pinned-action" } : {}),
         },
       });
       setMessages((current) => [
@@ -426,6 +466,19 @@ export function MobileSplitScreen({
     } finally {
       setHarnessPending(false);
     }
+  };
+
+  const sendMessage = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text || harnessPending || !harnessReady) return;
+    setDraft("");
+    await runHarnessTask(text);
+  };
+
+  const runPinnedHarnessAction = async (action: PinnedHarnessAction) => {
+    if (!harnessCapabilities?.browser_actions.includes(action.kind)) return;
+    await runHarnessTask(pinnedHarnessPrompts[action.kind], [action]);
   };
 
   const updateDraft = (event: ChangeEvent<HTMLTextAreaElement>) => {
@@ -491,15 +544,10 @@ export function MobileSplitScreen({
             Save the next browser viewport without leaving the live viewer.
           </p>
         ) : null}
-        {!fullscreen && !isLiveBrowser ? (
+        {!fullscreen ? (
           <>
             {renderLiveViewControls()}
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-[11px] text-gray-500">Preview controls update this viewer immediately.</p>
-              <button type="button" className="btn-secondary min-h-11 shrink-0" onClick={resetLiveViewport}>
-                Reset view
-              </button>
-            </div>
+            <p className="mobile-viewport-editor-note">Pane and zoom update this viewer immediately.</p>
           </>
         ) : null}
         {canManageProfiles ? (
@@ -786,7 +834,7 @@ export function MobileSplitScreen({
   );
 
   return (
-    <main className="mobile-split-root bg-surface-0 text-gray-100">
+    <main className={`mobile-split-root ${compactWorkspace ? "mobile-workspace-collapsed" : ""} bg-surface-0 text-gray-100`}>
       <section
         className={`mobile-live-pane ${isLiveBrowser ? "mobile-live-pane-running" : ""} ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
         style={livePaneStyle}
@@ -831,7 +879,7 @@ export function MobileSplitScreen({
         ) : null}
 
         <div className={`mobile-browser-wrap ${isLiveBrowser ? "mobile-browser-wrap-live" : "px-3 pb-2"}`}>
-          {isLiveBrowser && fullscreenOpen ? renderFullscreenControls() : null}
+          {fullscreenOpen ? renderFullscreenControls() : null}
           {renderBrowserSurface()}
         </div>
       </section>
@@ -897,85 +945,135 @@ export function MobileSplitScreen({
 
         {remoteToolsOpen ? (
           <div id="mobile-tools-sheet" className="mobile-tools-sheet" aria-label="Browser tools">
+            {!toolPanelOpen && canOperate ? (
+              <div className="mobile-tools-row mobile-tools-row-primary">
+                {selected?.status === "running" ? (
+                  <button type="button" onClick={onStop} className="mobile-tool-action mobile-tool-action-danger">
+                    <Square className="h-4 w-4" />
+                    <span>Stop</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={onLaunch}
+                    className="mobile-tool-action mobile-tool-action-primary"
+                    disabled={!selected}
+                  >
+                    <Play className="h-4 w-4" />
+                    <span>Launch</span>
+                  </button>
+                )}
+              </div>
+            ) : null}
+
+            {!toolPanelOpen ? (
+              <section className="mobile-tool-section" aria-label="Pinned browser actions">
+              <div className="mobile-tool-section-header">
+                <span>Actions</span>
+                <span>{harnessReady ? "Codex ready" : "Codex unavailable"}</span>
+              </div>
+              <div className="mobile-tools-row mobile-pinned-actions">
+                {pinnedHarnessActions.map((action) => {
+                  const available = Boolean(
+                    harnessReady && harnessCapabilities?.browser_actions.includes(action.kind),
+                  );
+                  return (
+                    <button
+                      key={action.id}
+                      type="button"
+                      className="mobile-tool-action"
+                      aria-label={`Run ${action.label} with Codex Computer Use`}
+                      disabled={!available || harnessPending}
+                      title={available ? `${action.label} with Codex Computer Use` : `${action.label} is unavailable in this host`}
+                      onClick={() => void runPinnedHarnessAction(action)}
+                    >
+                      {action.kind === "screenshot" ? <Camera className="h-4 w-4" aria-hidden="true" /> : null}
+                      {action.kind === "copy" ? <ClipboardCopy className="h-4 w-4" aria-hidden="true" /> : null}
+                      {action.kind === "paste" ? <ClipboardPaste className="h-4 w-4" aria-hidden="true" /> : null}
+                      <span>{action.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              </section>
+            ) : null}
+
+            <div id="mobile-remote-browser-tools-portal" className={toolPanelOpen ? "hidden" : undefined} />
+
             <div className="mobile-tools-row">
-              {canOperate && selected?.status === "running" ? (
-                <button type="button" onClick={onStop} className="mobile-tool-action mobile-tool-action-danger">
-                  <Square className="h-4 w-4" />
-                  <span>Stop</span>
-                </button>
-              ) : canOperate ? (
-                <button
-                  type="button"
-                  onClick={onLaunch}
-                  className="mobile-tool-action mobile-tool-action-primary"
-                  disabled={!selected}
-                >
-                  <Play className="h-4 w-4" />
-                  <span>Launch</span>
-                </button>
-              ) : null}
-              {canManageProfiles ? (
-                <button type="button" onClick={onNew} className="mobile-tool-action" aria-label="New profile">
-                  <Plus className="h-4 w-4" />
-                  <span>New</span>
-                </button>
-              ) : null}
-              {canManageProfiles && selected ? (
-                <button type="button" onClick={onEdit} className="mobile-tool-action" aria-label="Edit selected profile">
-                  <Pencil className="h-4 w-4" />
-                  <span>Edit</span>
-                </button>
-              ) : null}
-              {canManageAccess ? (
-                <button type="button" onClick={onAccessControls} className="mobile-tool-action" aria-label="Browser access controls">
-                  <ShieldCheck className="h-4 w-4" />
-                  <span>Access</span>
-                </button>
-              ) : null}
-            </div>
-
-            <div id="mobile-remote-browser-tools-portal" />
-
-            {isLiveBrowser ? renderLiveViewControls() : null}
-
-            <div className="mobile-tools-row">
-              {canManageProfiles ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setViewportOpen((open) => !open);
-                    setGridOpen(false);
-                  }}
-                  className={`mobile-tool-action ${viewportOpen ? "mobile-command-button-active" : ""}`}
-                  aria-label="Edit browser viewport"
-                  aria-expanded={viewportOpen}
-                  aria-controls="mobile-viewport-settings"
-                >
-                  <MonitorSmartphone className="h-4 w-4" />
-                  <span>Viewport</span>
-                </button>
-              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  setViewportOpen((open) => !open);
+                  setGridOpen(false);
+                  setAdminOpen(false);
+                }}
+                className={`mobile-tool-action ${viewportOpen ? "mobile-command-button-active" : ""}`}
+                aria-label="Edit browser viewport"
+                aria-expanded={viewportOpen}
+                aria-controls="mobile-viewport-settings"
+              >
+                <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+                <span>View</span>
+              </button>
               <button
                 type="button"
                 onClick={() => {
                   setGridOpen((open) => !open);
                   setViewportOpen(false);
+                  setAdminOpen(false);
                 }}
                 className={`mobile-tool-action ${gridOpen ? "mobile-command-button-active" : ""}`}
                 aria-expanded={gridOpen}
                 aria-controls="mobile-running-grid"
                 aria-label="Toggle grid view"
               >
-                <Grid2X2 className="h-4 w-4" />
-                <span>Grid</span>
+                <Grid2X2 className="h-4 w-4" aria-hidden="true" />
+                <span>Sessions</span>
               </button>
-              <label className="mobile-tool-select">
-                <span>Computer Use</span>
-                <span className="truncate text-right text-xs font-medium text-gray-100">{harnessLabel}</span>
-              </label>
+              {canManageProfiles || canManageAccess ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdminOpen((open) => !open);
+                    setViewportOpen(false);
+                    setGridOpen(false);
+                  }}
+                  className={`mobile-tool-action ${adminOpen ? "mobile-command-button-active" : ""}`}
+                  aria-label="Toggle browser administration"
+                  aria-expanded={adminOpen}
+                  aria-controls="mobile-admin-tools"
+                >
+                  <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                  <span>Admin</span>
+                </button>
+              ) : null}
             </div>
 
-            {canManageProfiles && viewportOpen ? renderViewportEditor("inline") : null}
+            {viewportOpen ? renderViewportEditor("inline") : null}
+
+            {adminOpen ? (
+              <div id="mobile-admin-tools" className="mobile-tools-row mobile-admin-tools" aria-label="Browser administration">
+                {canManageProfiles ? (
+                  <button type="button" onClick={onNew} className="mobile-tool-action" aria-label="New profile">
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    <span>New</span>
+                  </button>
+                ) : null}
+                {canManageProfiles && selected ? (
+                  <button type="button" onClick={onEdit} className="mobile-tool-action" aria-label="Edit selected profile">
+                    <Pencil className="h-4 w-4" aria-hidden="true" />
+                    <span>Edit</span>
+                  </button>
+                ) : null}
+                {canManageAccess ? (
+                  <button type="button" onClick={onAccessControls} className="mobile-tool-action" aria-label="Browser access controls">
+                    <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                    <span>Access</span>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
 
             {gridOpen ? (
               <div id="mobile-running-grid" className="mobile-grid" aria-label="Running browser grid">

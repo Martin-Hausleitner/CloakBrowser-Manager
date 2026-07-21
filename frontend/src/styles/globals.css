@@ -74,7 +74,7 @@
 
   .mobile-live-pane {
     @apply flex w-full min-w-0 shrink-0 flex-col border-b border-border bg-surface-1;
-    flex-basis: var(--mobile-live-pane-basis, 42%);
+    flex-basis: var(--mobile-live-pane-basis, 68%);
     min-height: 16rem;
     max-height: 82dvh;
   }
@@ -119,6 +119,16 @@
   .mobile-control-pane {
     @apply flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden bg-surface-0;
     overscroll-behavior: contain;
+  }
+
+  .mobile-workspace-collapsed .mobile-live-pane:not(.mobile-live-pane-fullscreen) {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+  }
+
+  .mobile-workspace-collapsed .mobile-control-pane {
+    flex: 0 0 auto;
   }
 
   .mobile-browser-frame {
@@ -493,6 +503,26 @@
     grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr));
   }
 
+  .mobile-tools-row-primary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mobile-tool-section {
+    @apply grid gap-1;
+  }
+
+  .mobile-tool-section-header {
+    @apply flex items-center justify-between gap-2 px-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500;
+  }
+
+  .mobile-pinned-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .mobile-admin-tools {
+    @apply border-t border-border pt-2;
+  }
+
   .mobile-tool-action {
     @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-gray-600 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
@@ -569,6 +599,16 @@
   .mobile-control-pane {
     min-width: 0;
     flex: 1 1 42%;
+  }
+
+  .mobile-workspace-collapsed .mobile-live-pane:not(.mobile-live-pane-fullscreen) {
+    flex: 1 1 auto;
+    max-width: none;
+  }
+
+  .mobile-workspace-collapsed .mobile-control-pane {
+    width: clamp(15rem, 32vw, 18rem);
+    flex: 0 0 clamp(15rem, 32vw, 18rem);
   }
 
   .mobile-toolbar,

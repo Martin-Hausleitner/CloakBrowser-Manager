@@ -245,6 +245,30 @@ describe("MobileSplitScreen", () => {
     expect(screen.getAllByText("VNC stream")).toHaveLength(1);
   });
 
+  it("starts a short live mobile viewport compact while keeping the ratio directly adjustable", () => {
+    const originalInnerHeight = window.innerHeight;
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 667 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+
+    try {
+      renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
+
+      const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
+      expect(screen.getByLabelText("Browser pane size").textContent).toBe("44%");
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("44%");
+
+      fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
+
+      expect(screen.getByLabelText("Browser pane size").textContent).toBe("64%");
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("64%");
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
+      fireEvent(window, new Event("resize"));
+    }
+  });
+
   it("uses compact preview sizing until a live browser is running", () => {
     const { rerender, props } = renderMobileSplit();
 

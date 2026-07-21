@@ -68,9 +68,24 @@ const defaultPreviewPanePercent = 42;
 // Keep enough room for the visible task chat on an iPhone-sized viewport.
 // Operators can still expand the live pane at any time with the ratio control.
 const defaultLivePanePercent = 50;
+const compactLivePanePercent = 44;
+const compactLivePaneMaximumHeight = 700;
 const defaultBrowserZoom = 100;
 const minimumPhoneFitWidth = 320;
 const minimumPhoneFitHeight = 480;
+
+function usesCompactLivePane() {
+  return (
+    typeof window !== "undefined" &&
+    window.innerHeight <= compactLivePaneMaximumHeight &&
+    window.innerHeight >= window.innerWidth
+  );
+}
+
+function defaultPanePercent(isLiveBrowser: boolean, compactLivePane: boolean) {
+  if (!isLiveBrowser) return defaultPreviewPanePercent;
+  return compactLivePane ? compactLivePanePercent : defaultLivePanePercent;
+}
 
 const initialMessages: ChatMessage[] = [
   {
@@ -128,8 +143,9 @@ export function MobileSplitScreen({
   const [viewportSaved, setViewportSaved] = useState(false);
   const [viewportSaveFailed, setViewportSaveFailed] = useState(false);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
-  const [panePercent, setPanePercent] = useState(
-    selected?.status === "running" ? defaultLivePanePercent : defaultPreviewPanePercent,
+  const [compactLivePane, setCompactLivePane] = useState(usesCompactLivePane);
+  const [panePercent, setPanePercent] = useState(() =>
+    defaultPanePercent(selected?.status === "running", usesCompactLivePane()),
   );
   const [runSettingsOpen, setRunSettingsOpen] = useState(false);
   const [agentRunner, setAgentRunner] = useState("browser-agent");
@@ -146,6 +162,7 @@ export function MobileSplitScreen({
   const liveLabel = selected?.status === "running" ? "Live browser" : "Preview";
   const browserUrl = selected?.cdp_url ?? "Browser preview";
   const isLiveBrowser = selected?.status === "running";
+  const preferredPanePercent = defaultPanePercent(isLiveBrowser, compactLivePane);
   const latestTaskStep = taskSteps[taskSteps.length - 1] ?? { label: "Current", detail: "Ready" };
   const livePaneStyle = {
     "--mobile-live-pane-basis": `${panePercent}%`,
@@ -164,9 +181,16 @@ export function MobileSplitScreen({
   }, [selected?.id, selected?.screen_height, selected?.screen_width]);
 
   useEffect(() => {
+    const updateCompactLivePane = () => setCompactLivePane(usesCompactLivePane());
+    updateCompactLivePane();
+    window.addEventListener("resize", updateCompactLivePane);
+    return () => window.removeEventListener("resize", updateCompactLivePane);
+  }, []);
+
+  useEffect(() => {
     if (paneAdjustedRef.current) return;
-    setPanePercent(selected?.status === "running" ? defaultLivePanePercent : defaultPreviewPanePercent);
-  }, [selected?.id, selected?.status]);
+    setPanePercent(preferredPanePercent);
+  }, [preferredPanePercent, selected?.id, selected?.status]);
 
   useEffect(() => {
     if (!fullscreenOpen) return;
@@ -212,7 +236,7 @@ export function MobileSplitScreen({
 
   const resetLiveViewport = () => {
     paneAdjustedRef.current = false;
-    setPanePercent(isLiveBrowser ? defaultLivePanePercent : defaultPreviewPanePercent);
+    setPanePercent(preferredPanePercent);
     onBrowserZoomChange(defaultBrowserZoom);
   };
 

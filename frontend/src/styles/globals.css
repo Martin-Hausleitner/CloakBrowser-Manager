@@ -419,3 +419,27 @@
     padding-bottom: 0.5rem;
   }
 }
+
+@media (max-height: 700px) and (orientation: portrait) {
+  /*
+   * A short iPhone still needs the visible VNC controls, task history, and
+   * composer in one screen. Keep every tap target at 44px, but reclaim only
+   * surplus padding and the remote frame's desktop-sized minimum height.
+   */
+  .mobile-live-pane-running {
+    min-height: 0;
+  }
+
+  .mobile-live-pane-running .mobile-browser-frame {
+    min-height: 10.25rem;
+  }
+
+  .mobile-live-header,
+  .mobile-live-control-rail,
+  .mobile-session-bar-live,
+  .mobile-viewport-disclosure,
+  .mobile-chat-header {
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+  }
+}

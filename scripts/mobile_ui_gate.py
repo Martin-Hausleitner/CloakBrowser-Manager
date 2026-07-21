@@ -25,6 +25,7 @@ from urllib.request import Request, urlopen
 
 VIEWPORTS = (
     ("iphone-14-portrait", 390, 844, "vertical"),
+    ("iphone-se-portrait", 375, 667, "vertical"),
     ("iphone-pro-max-portrait", 430, 932, "vertical"),
     ("iphone-14-landscape", 844, 390, "horizontal"),
     ("touch-tablet-portrait", 768, 1024, "vertical"),
@@ -423,6 +424,83 @@ def take_screenshot(
     result["screenshots"].append(metadata)
 
 
+def capture_empty_mobile_state(
+    browser: AgentBrowser,
+    result: dict[str, Any],
+    output_dir: Path,
+    viewport_name: str,
+    width: int,
+    height: int,
+) -> None:
+    """Preserve the unselected mobile workspace before a live profile is chosen."""
+    empty_state = browser.eval(r"""(() => {
+      const select = document.querySelector('select.mobile-select');
+      const liveCanvas = document.querySelectorAll('.mobile-browser-content canvas');
+      const root = document.querySelector('.mobile-split-root');
+      return {
+        selectedValue: select?.value ?? null,
+        canvasCount: liveCanvas.length,
+        rootVisible: Boolean(root && root.getBoundingClientRect().width > 1),
+      };
+    })()""")
+    add_check(
+        result,
+        "empty mobile workspace has no selected browser canvas",
+        empty_state.get("selectedValue") == "" and empty_state.get("canvasCount") == 0 and bool(empty_state.get("rootVisible")),
+        empty_state,
+    )
+    take_screenshot(browser, result, output_dir, viewport_name, "empty", width, height)
+
+
+def capture_viewport_editor(
+    browser: AgentBrowser,
+    result: dict[str, Any],
+    output_dir: Path,
+    viewport_name: str,
+    width: int,
+    height: int,
+) -> None:
+    """Capture the editable profile viewport without mutating the live profile."""
+    opened = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Edit browser viewport"]');
+      if (!button) return false;
+      if (button.getAttribute('aria-expanded') !== 'true') button.click();
+      return true;
+    })()""")
+    add_check(result, "viewport editor action available", bool(opened), {"opened": bool(opened)})
+    browser.wait_for(
+        "!!document.querySelector('[aria-label=\"Viewport controls\"]')",
+        "viewport editor",
+        5,
+    )
+    editor = browser.eval(r"""(() => {
+      const root = document.querySelector('[aria-label="Viewport controls"]');
+      const rect = root?.getBoundingClientRect();
+      const inputs = [...(root?.querySelectorAll('input[type="number"]') ?? [])];
+      const apply = [...(root?.querySelectorAll('button') ?? [])]
+        .some((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+      return {
+        visible: Boolean(rect && rect.width > 1 && rect.height > 1),
+        inputCount: inputs.length,
+        apply,
+        rect: rect ? rect.toJSON() : null,
+      };
+    })()""")
+    add_check(
+        result,
+        "editable viewport editor renders width height and apply controls",
+        bool(editor.get("visible")) and editor.get("inputCount") == 2 and bool(editor.get("apply")),
+        editor,
+    )
+    take_screenshot(browser, result, output_dir, viewport_name, "viewport-editor", width, height)
+    browser.run("click", "button[aria-label='Edit browser viewport']")
+    browser.wait_for(
+        "!document.querySelector('[aria-label=\"Viewport controls\"]')",
+        "compact workspace after viewport editor",
+        5,
+    )
+
+
 def select_and_connect(
     browser: AgentBrowser,
     result: dict[str, Any],
@@ -592,8 +670,18 @@ def verify_live_viewport_controls(
       return true;
     })()""")
     add_check(result, "live viewport controls reset", bool(reset), {"clicked": reset})
+    expected_default_pane = browser.eval(
+        "window.innerHeight <= 700 && window.innerHeight >= window.innerWidth ? '44%' : '50%'"
+    )
+    add_check(
+        result,
+        "live viewport reset picks the device-appropriate default pane",
+        expected_default_pane in {"44%", "50%"},
+        {"expectedPane": expected_default_pane},
+    )
     browser.wait_for(
-        "document.querySelector('[aria-label=\"Browser pane size\"]')?.textContent?.trim() === '50%' && "
+        "document.querySelector('[aria-label=\"Browser pane size\"]')?.textContent?.trim() === "
+        f"{json.dumps(expected_default_pane)} && "
         "document.querySelector('[aria-label=\"Visual zoom level\"]')?.textContent?.trim() === '100%'",
         "live viewport controls reset state",
         5,
@@ -1020,6 +1108,9 @@ def run_viewport(
     browser.wait_for("!!document.querySelector('.mobile-split-root')", "mobile workspace", 20)
     result["workspace_ready_ms"] = round((time.monotonic() - navigation_started) * 1000, 1)
 
+    if name == "iphone-14-portrait":
+        capture_empty_mobile_state(browser, result, output_dir, name, width, height)
+
     structure = browser.eval(STRUCTURE_SCRIPT)
     add_check(result, "mobile workspace structure", bool(structure.get("ready")), structure)
     add_check(
@@ -1056,6 +1147,8 @@ def run_viewport(
     if profile_id:
         select_and_connect(browser, result, profile_id, timeout)
         verify_live_viewport_controls(browser, result, base_url, profile_id, timeout, auth_token)
+        if name == "iphone-pro-max-portrait":
+            capture_viewport_editor(browser, result, output_dir, name, width, height)
         compact_structure = browser.eval(STRUCTURE_SCRIPT)
         if expected_layout == "vertical":
             add_check(

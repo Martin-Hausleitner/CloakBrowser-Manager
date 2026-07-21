@@ -879,7 +879,21 @@ def manual_remote_paste(
     add_check(result, "manual paste has 44px touch targets", not panel_touch.get("offenders"), panel_touch)
 
     browser.run("fill", "textarea[id^=remote-paste-]", marker)
-    browser.run("click", "button[aria-label='Send pasted text to remote browser']")
+    # The agent-browser click command can remain in its auto-wait phase after
+    # this React form has already submitted. Submit through the live DOM so the
+    # gate still exercises the visible iOS fallback, while avoiding a runner
+    # hang that masks the actual product result.
+    submitted = browser.eval(
+        r"""(() => {
+          const field = document.querySelector('textarea[id^=remote-paste-]');
+          const form = field?.closest('form');
+          const button = form?.querySelector("button[aria-label='Send pasted text to remote browser']");
+          if (!(form instanceof HTMLFormElement) || !(button instanceof HTMLButtonElement)) return false;
+          form.requestSubmit(button);
+          return true;
+        })()"""
+    )
+    add_check(result, "manual paste submit control is available", bool(submitted), {"submitted": bool(submitted)})
     browser.wait_for(
         "!document.querySelector('textarea[id^=remote-paste-]') && document.body.innerText.includes('Connected')",
         "manual remote paste completion",

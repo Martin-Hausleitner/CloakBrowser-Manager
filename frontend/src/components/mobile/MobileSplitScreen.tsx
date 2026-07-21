@@ -24,10 +24,13 @@ import {
 } from "lucide-react";
 import type { Profile } from "../../lib/api";
 import {
+  cloakServerProvider,
+  codexComputerUseProvider,
   createTaskHarness,
   taskHarnessReadyEvent,
   type TaskHarnessAction,
   type TaskHarnessCapabilities,
+  type TaskHarnessMessage,
 } from "../../lib/taskHarness";
 import { StatusIndicator } from "../StatusIndicator";
 
@@ -60,7 +63,7 @@ interface MobileSplitScreenProps {
 }
 
 interface ChatMessage {
-  id: number;
+  id: string;
   role: "task" | "assistant" | "user" | "tool";
   text: string;
 }
@@ -127,14 +130,6 @@ function defaultPanePercent(isLiveBrowser: boolean, compactLivePane: boolean) {
   return compactLivePane ? compactLivePanePercent : defaultLivePanePercent;
 }
 
-const initialMessages: ChatMessage[] = [
-  {
-    id: 1,
-    role: "assistant",
-    text: "Codex Computer Use Bridge status appears here while browser control stays visible.",
-  },
-];
-
 function isInteractiveShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
   if (
@@ -146,6 +141,18 @@ function isInteractiveShortcutTarget(target: EventTarget | null) {
     return true;
   }
   return Boolean(target.closest("canvas, .mobile-browser-frame, .profile-viewer"));
+}
+
+function toChatMessage(message: TaskHarnessMessage): ChatMessage {
+  return {
+    id: message.id,
+    role: message.role === "assistant"
+      ? "assistant"
+      : message.role === "user"
+        ? "user"
+        : "tool",
+    text: message.content,
+  };
 }
 
 export function MobileSplitScreen({
@@ -179,7 +186,10 @@ export function MobileSplitScreen({
     width: selected?.screen_width ?? presets[0].width,
     height: selected?.screen_height ?? presets[0].height,
   });
-  const [messages, setMessages] = useState(initialMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [historyPending, setHistoryPending] = useState(false);
+  const [harnessNotice, setHarnessNotice] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [gridOpen, setGridOpen] = useState(false);
   const [viewportOpen, setViewportOpen] = useState(false);
@@ -240,18 +250,33 @@ export function MobileSplitScreen({
       : browserConnectionStatus === "failed"
         ? "mobile-connection-failed"
         : "mobile-connection-pending";
-  const harnessReady = harnessCapabilities?.chat === true;
+  const harnessProvider = harnessCapabilities?.metadata?.provider;
+  const codexHostReady = Boolean(
+    harnessCapabilities?.chat && harnessProvider === codexComputerUseProvider,
+  );
+  const serverHistoryReady = Boolean(
+    harnessCapabilities?.chat && harnessProvider === cloakServerProvider,
+  );
+  const harnessReady = codexHostReady || serverHistoryReady;
+  const composerReady = Boolean(harnessReady && canInteract && selected);
   const harnessLabel = harnessCapabilities === null
-    ? "Codex Computer Use Bridge · checking"
-    : harnessCapabilities.chat === false
-      ? "Codex Computer Use Bridge · unavailable"
-      : "Codex Computer Use Bridge · connected";
-  const harnessUnavailable = harnessCapabilities?.chat === false;
+    ? "Task connection · checking"
+    : codexHostReady
+      ? "Codex Computer Use · connected"
+      : serverHistoryReady
+        ? "Server history · save only"
+        : "Task connection · unavailable";
   const harnessPlaceholder = harnessCapabilities === null
-    ? "Checking Codex Computer Use Bridge..."
-    : harnessUnavailable
-    ? "Codex Computer Use Bridge unavailable"
-    : "Ask Codex Computer Use...";
+    ? "Checking task connection..."
+    : !selected
+      ? "Select a browser profile"
+      : !canInteract
+        ? "View-only access"
+        : codexHostReady
+          ? "Ask Codex Computer Use..."
+          : serverHistoryReady
+            ? "Save task to server history..."
+            : "Task connection unavailable";
   const compactWorkspace = chatCollapsed && !remoteToolsOpen && !fullscreenOpen;
   const toolPanelOpen = viewportOpen || gridOpen || adminOpen;
 
@@ -275,6 +300,7 @@ export function MobileSplitScreen({
       const currentRequestId = ++requestId;
       const harness = createTaskHarness(window);
       taskHarnessRef.current = harness;
+      setHarnessCapabilities(null);
       harness.capabilities()
         .then((capabilities) => {
           if (!cancelled && currentRequestId === requestId) {
@@ -304,6 +330,49 @@ export function MobileSplitScreen({
   }, []);
 
   useEffect(() => {
+    const profileId = selected?.id;
+    const harness = taskHarnessRef.current;
+    const controller = new AbortController();
+    let cancelled = false;
+
+    setMessages([]);
+    setConversationId(null);
+    setHarnessNotice(null);
+    setHarnessError(null);
+
+    if (!profileId || !harness || !harnessCapabilities?.chat) {
+      setHistoryPending(false);
+      return () => controller.abort();
+    }
+
+    setHistoryPending(true);
+    void harness.listConversations(profileId, { signal: controller.signal })
+      .then(async (conversations) => {
+        if (cancelled) return;
+        const latest = conversations.find((conversation) => conversation.status === "active")
+          ?? conversations[0];
+        if (!latest) return;
+        const history = await harness.listMessages(latest.id, { signal: controller.signal });
+        if (cancelled) return;
+        setConversationId(latest.id);
+        setMessages(history.map(toChatMessage));
+      })
+      .catch((err) => {
+        if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
+        console.warn("[task-harness] history failed:", err);
+        setHarnessNotice("History is temporarily unavailable.");
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryPending(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [harnessCapabilities, selected?.id]);
+
+  useEffect(() => {
     if (viewportProfileIdRef.current !== selected?.id) {
       setViewportSaved(false);
       setViewportSaveFailed(false);
@@ -328,7 +397,7 @@ export function MobileSplitScreen({
   }, [paneAdjusted, preferredPanePercent, selected?.id, selected?.status]);
 
   useEffect(() => {
-    if (chatAdjustedRef.current) return;
+    chatAdjustedRef.current = false;
     setChatCollapsed(true);
   }, [selected?.id]);
 
@@ -404,6 +473,7 @@ export function MobileSplitScreen({
   });
 
   const openFullscreen = () => {
+    if (!isLiveBrowser) return;
     restoreFullscreenFocusRef.current = true;
     setGridOpen(false);
     setViewportOpen(false);
@@ -420,8 +490,9 @@ export function MobileSplitScreen({
   };
 
   const runHarnessTask = async (text: string, commands?: readonly TaskHarnessAction[]) => {
-    if (!text || harnessPending || !harnessReady) return;
-    const userMessage: ChatMessage = { id: Date.now(), role: "user", text };
+    if (!text || harnessPending || !composerReady) return;
+    const localMessageId = `local-${Date.now()}`;
+    const userMessage: ChatMessage = { id: localMessageId, role: "user", text };
     chatAdjustedRef.current = true;
     closeTools();
     setChatCollapsed(false);
@@ -432,37 +503,35 @@ export function MobileSplitScreen({
     setDraft("");
     setHarnessPending(true);
     setHarnessError(null);
+    setHarnessNotice(null);
     try {
       const reply = await (taskHarnessRef.current ?? createTaskHarness(window)).send({
         text,
         ...(commands ? { commands } : {}),
         profile_id: selected?.id ?? null,
+        ...(conversationId ? { conversation_id: conversationId } : {}),
         metadata: {
-          runner: "codex-computer-use",
-          preferred_surface: "codex-computer-use",
+          runner: codexHostReady ? codexComputerUseProvider : cloakServerProvider,
+          execution: codexHostReady ? "host" : "persist-only",
           browser_visible: true,
           ...(commands ? { source: "pinned-action" } : {}),
         },
       });
-      setMessages((current) => [
-        ...current,
-        {
-          id: Date.now() + 1,
-          role: reply.role === "tool" ? "tool" : "assistant",
-          text: reply.content,
-        },
-      ]);
+      if (reply.role === "user") {
+        setMessages((current) => current.map((message) => (
+          message.id === localMessageId ? toChatMessage(reply) : message
+        )));
+        setHarnessNotice(
+          serverHistoryReady
+            ? "Saved to server history · not executed."
+            : "Task recorded · no execution result received.",
+        );
+      } else {
+        setMessages((current) => [...current, toChatMessage(reply)]);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Task harness request failed";
       setHarnessError(message);
-      setMessages((current) => [
-        ...current,
-        {
-          id: Date.now() + 1,
-          role: "assistant",
-          text: `Codex Computer Use could not queue that task: ${message}`,
-        },
-      ]);
     } finally {
       setHarnessPending(false);
     }
@@ -471,13 +540,13 @@ export function MobileSplitScreen({
   const sendMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = draft.trim();
-    if (!text || harnessPending || !harnessReady) return;
+    if (!text || harnessPending || !composerReady) return;
     setDraft("");
     await runHarnessTask(text);
   };
 
   const runPinnedHarnessAction = async (action: PinnedHarnessAction) => {
-    if (!harnessCapabilities?.browser_actions.includes(action.kind)) return;
+    if (!codexHostReady || !harnessCapabilities?.browser_actions.includes(action.kind)) return;
     await runHarnessTask(pinnedHarnessPrompts[action.kind], [action]);
   };
 
@@ -505,7 +574,7 @@ export function MobileSplitScreen({
       height: Math.round(
         Math.max(
           minimumPhoneFitHeight,
-          (visualViewport?.height ?? window.innerHeight ?? presets[0].height) - (isLiveBrowser ? 96 : 0),
+          visualViewport?.height ?? window.innerHeight ?? presets[0].height,
         ),
       ),
     };
@@ -896,17 +965,19 @@ export function MobileSplitScreen({
         ) : null}
 
         <div className="mobile-command-dock" aria-label="Browser command dock">
-          <button
-            ref={fullscreenOpenButtonRef}
-            type="button"
-            onClick={openFullscreen}
-            className="mobile-command-button"
-            aria-label="Open fullscreen browser"
-            title="Fullscreen browser (Ctrl+B)"
-          >
-            <Expand className="h-4 w-4" aria-hidden="true" />
-            <span>Full</span>
-          </button>
+          {isLiveBrowser ? (
+            <button
+              ref={fullscreenOpenButtonRef}
+              type="button"
+              onClick={openFullscreen}
+              className="mobile-command-button"
+              aria-label="Open fullscreen browser"
+              title="Fullscreen browser (Ctrl+B)"
+            >
+              <Expand className="h-4 w-4" aria-hidden="true" />
+              <span>Full</span>
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => {
@@ -970,12 +1041,18 @@ export function MobileSplitScreen({
               <section className="mobile-tool-section" aria-label="Pinned browser actions">
                 <div className="mobile-tool-section-header">
                   <span>Quick actions</span>
-                  <span>{harnessReady ? "Codex ready" : "Codex unavailable"}</span>
+                  <span>
+                    {codexHostReady
+                      ? "Codex ready"
+                      : serverHistoryReady
+                        ? "Save only"
+                        : "Unavailable"}
+                  </span>
                 </div>
                 <div className="mobile-tools-row mobile-pinned-actions">
                   {pinnedHarnessActions.map((action) => {
                     const available = Boolean(
-                      harnessReady && harnessCapabilities?.browser_actions.includes(action.kind),
+                      codexHostReady && harnessCapabilities?.browser_actions.includes(action.kind),
                     );
                     return (
                       <button
@@ -1107,9 +1184,11 @@ export function MobileSplitScreen({
             ) : null}
 
             <p className="mobile-tools-meta">
-              {harnessUnavailable
-                ? "A verified Codex Computer Use Bridge must be injected by the host before tasks can run."
-                : "Tasks run only through the verified Codex Computer Use host; browser credentials stay outside the chat UI."}
+              {codexHostReady
+                ? "Tasks run through the verified Codex Computer Use host; browser credentials stay outside the chat UI."
+                : serverHistoryReady
+                  ? "Tasks are saved to scoped server history only. Nothing executes until a verified Codex host attaches."
+                  : "A verified Codex Computer Use host or the scoped server history is required."}
             </p>
 
             {authRequired ? (
@@ -1137,7 +1216,7 @@ export function MobileSplitScreen({
             <div className="mobile-chat-header">
               <MessageSquareText className="h-4 w-4 text-accent" aria-hidden="true" />
               <span className="text-sm font-semibold">Task chat</span>
-              <span className="ml-auto truncate text-[11px] text-gray-500">
+              <span className="ml-auto truncate text-[11px] text-gray-500" aria-live="polite">
                 {harnessLabel}
               </span>
               <button
@@ -1154,6 +1233,11 @@ export function MobileSplitScreen({
               </button>
             </div>
             <div className="mobile-chat-log" aria-label="Chat history">
+              {!historyPending && messages.length === 0 ? (
+                <div className="mobile-message mobile-message-tool">
+                  No saved tasks for this browser yet.
+                </div>
+              ) : null}
               {messages.map((message) => (
                 <div
                   key={message.id}
@@ -1167,13 +1251,18 @@ export function MobileSplitScreen({
                   {harnessError}
                 </div>
               ) : null}
+              {harnessNotice ? (
+                <div className="mobile-message mobile-message-tool" aria-live="polite">
+                  {harnessNotice}
+                </div>
+              ) : null}
             </div>
           </section>
         ) : null}
 
         <form className={`mobile-chat-form ${chatCollapsed ? "mobile-chat-form-collapsed" : ""}`} onSubmit={sendMessage}>
           <label className="sr-only" htmlFor="mobile-task-input">
-            Message
+            Browser task
           </label>
           <textarea
             id="mobile-task-input"
@@ -1182,11 +1271,13 @@ export function MobileSplitScreen({
             className="input min-h-9 resize-none overflow-y-auto"
             rows={1}
             placeholder={harnessPlaceholder}
-            disabled={harnessPending || !harnessReady}
+            disabled={harnessPending || !composerReady}
           />
           <div className="mobile-composer-toolbar">
-            <span className="sr-only">Codex Computer Use</span>
-            <button type="submit" className="mobile-send-button" aria-label="Run task" disabled={harnessPending || !harnessReady || !draft.trim()}>
+            <span className="sr-only" aria-live="polite">
+              {codexHostReady ? "Codex Computer Use" : harnessLabel}
+            </span>
+            <button type="submit" className="mobile-send-button" aria-label="Run task" disabled={harnessPending || !composerReady || !draft.trim()}>
               <Send className="h-4 w-4" />
             </button>
           </div>

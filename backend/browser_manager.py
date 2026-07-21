@@ -192,6 +192,7 @@ class BrowserManager:
         self._launching: set[str] = set()  # profile IDs currently being launched
         self.vnc = VNCManager()
         self._lock = asyncio.Lock()
+        self._process_env_lock = asyncio.Lock()
         self._next_cdp_port = BASE_CDP_PORT
         self._auto_launch_task: asyncio.Task | None = None
 
@@ -243,26 +244,36 @@ class BrowserManager:
             if proxy:
                 _validate_proxy(proxy)
 
-            # Launch CloakBrowser on that display
-            # DISPLAY is passed via env kwarg to avoid process-wide os.environ mutation
-            context = await launch_persistent_context_async(
-                user_data_dir=profile["user_data_dir"],
-                headless=bool(profile.get("headless", False)),
-                proxy=proxy,
-                args=extra_args,
-                timezone=profile.get("timezone") or None,
-                locale=profile.get("locale") or None,
-                humanize=bool(profile.get("humanize", False)),
-                human_preset=profile.get("human_preset", "default"),
-                geoip=bool(profile.get("geoip", False)),
-                color_scheme=profile.get("color_scheme") or None,
-                user_agent=profile.get("user_agent") or None,
-                viewport={
-                    "width": profile.get("screen_width", 1920),
-                    "height": profile.get("screen_height", 1080) - 133,
-                },
-                env={**os.environ, "DISPLAY": f":{display}"},
-            )
+            # Some CloakBrowser builds do not forward Playwright's env kwarg to
+            # Chromium, so set DISPLAY around the launch and restore it after.
+            display_value = f":{display}"
+            async with self._process_env_lock:
+                previous_display = os.environ.get("DISPLAY")
+                os.environ["DISPLAY"] = display_value
+                try:
+                    context = await launch_persistent_context_async(
+                        user_data_dir=profile["user_data_dir"],
+                        headless=bool(profile.get("headless", False)),
+                        proxy=proxy,
+                        args=extra_args,
+                        timezone=profile.get("timezone") or None,
+                        locale=profile.get("locale") or None,
+                        humanize=bool(profile.get("humanize", False)),
+                        human_preset=profile.get("human_preset", "default"),
+                        geoip=bool(profile.get("geoip", False)),
+                        color_scheme=profile.get("color_scheme") or None,
+                        user_agent=profile.get("user_agent") or None,
+                        viewport={
+                            "width": profile.get("screen_width", 1920),
+                            "height": profile.get("screen_height", 1080) - 133,
+                        },
+                        env={**os.environ, "DISPLAY": display_value},
+                    )
+                finally:
+                    if previous_display is None:
+                        os.environ.pop("DISPLAY", None)
+                    else:
+                        os.environ["DISPLAY"] = previous_display
 
             await self._fit_window_to_vnc(
                 context,

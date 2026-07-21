@@ -222,6 +222,149 @@ def test_operator_can_operate_only_its_scoped_profile(client_access: TestClient)
     assert denied.status_code == 404
 
 
+def test_interact_user_can_create_task_session_with_redacted_metadata(client_access: TestClient):
+    alpha, _beta = create_scoped_profiles()
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "interact-task",
+            "password": "interact-task-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "interact"}],
+        },
+    )
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "interact-task", "password": "interact-task-password-123"},
+    ).status_code == 200
+
+    created = client_access.post(
+        "/api/task-sessions",
+        json={
+            "profile_id": alpha["id"],
+            "title": "Scoped harness task",
+            "metadata": {
+                "source": "vcvm-e2e",
+                "authorization": "Bearer should-not-persist",
+                "nested": {"password": "should-not-persist"},
+            },
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["metadata"] == {
+        "source": "vcvm-e2e",
+        "authorization": "[redacted]",
+        "nested": {"password": "[redacted]"},
+    }
+
+
+def test_interact_user_cannot_create_task_session_outside_granted_sandbox(
+    client_access: TestClient,
+):
+    _alpha, beta = create_scoped_profiles()
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "interact-task-denied",
+            "password": "interact-task-denied-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "interact"}],
+        },
+    )
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "interact-task-denied",
+            "password": "interact-task-denied-password-123",
+        },
+    ).status_code == 200
+
+    denied = client_access.post(
+        "/api/task-sessions",
+        json={"profile_id": beta["id"], "title": "Out of scope"},
+    )
+
+    assert denied.status_code == 404
+    assert denied.json()["detail"] == "Profile not found"
+
+
+def test_interact_user_cannot_operate_or_automate_profile(client_access: TestClient):
+    alpha, _beta = create_scoped_profiles()
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "interact-no-lifecycle",
+            "password": "interact-no-lifecycle-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "interact"}],
+        },
+    )
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "interact-no-lifecycle",
+            "password": "interact-no-lifecycle-password-123",
+        },
+    ).status_code == 200
+
+    launch_denied = client_access.post(f"/api/profiles/{alpha['id']}/launch")
+    cdp_denied = client_access.get(f"/api/profiles/{alpha['id']}/cdp")
+
+    assert launch_denied.status_code == 404
+    assert cdp_denied.status_code == 404
+
+
+def test_paperclip_agent_command_metadata_is_redacted(client_access: TestClient):
+    alpha, _beta = create_scoped_profiles()
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Paperclip task agent",
+            "paperclip_agent_id": "paperclip-agent-task",
+            "grants": [
+                {"sandbox_id": "alpha", "permission": "interact"},
+                {"sandbox_id": "alpha", "permission": "automate"},
+            ],
+        },
+    )
+    agent_headers = {"Authorization": f"Bearer {created.json()['api_key']}"}
+    identity = client_access.get("/api/access/me", headers=agent_headers)
+    assert identity.status_code == 200, identity.text
+    assert identity.json()["kind"] == "agent"
+    visible = client_access.get("/api/profiles", headers=agent_headers)
+    assert visible.status_code == 200, visible.text
+    assert [profile["id"] for profile in visible.json()] == [alpha["id"]]
+    session = client_access.post(
+        "/api/task-sessions",
+        headers=agent_headers,
+        json={"profile_id": alpha["id"], "title": "Agent task"},
+    )
+    assert session.status_code == 201, session.text
+
+    command = client_access.post(
+        f"/api/task-sessions/{session.json()['id']}/commands",
+        headers=agent_headers,
+        json={
+            "content": "type into browser",
+            "metadata": {
+                "harness": "paperclip",
+                "cookie": "should-not-persist",
+                "api_key": "should-not-persist",
+            },
+        },
+    )
+
+    assert command.status_code == 201
+    assert command.json()["metadata"]["harness"] == "paperclip"
+    assert command.json()["metadata"]["cookie"] == "[redacted]"
+    assert command.json()["metadata"]["api_key"] == "[redacted]"
+
+
 def test_admin_can_update_a_user_grants_from_the_access_dashboard_payload(client_access: TestClient):
     """Pydantic serializes nested grants before main.py receives the update.
 

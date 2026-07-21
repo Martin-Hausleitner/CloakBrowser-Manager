@@ -136,6 +136,52 @@ def init_db():
                 outcome TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS task_sessions (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                sandbox_id TEXT NOT NULL,
+                title TEXT,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+                created_by_kind TEXT NOT NULL,
+                created_by_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_sessions_profile
+                ON task_sessions(profile_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_task_sessions_sandbox
+                ON task_sessions(sandbox_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS task_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES task_sessions(id) ON DELETE CASCADE,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
+                content TEXT NOT NULL,
+                created_by_kind TEXT NOT NULL,
+                created_by_id TEXT,
+                created_at TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_messages_session
+                ON task_messages(session_id, created_at ASC);
+
+            CREATE TABLE IF NOT EXISTS task_events (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES task_sessions(id) ON DELETE CASCADE,
+                type TEXT NOT NULL,
+                payload TEXT NOT NULL DEFAULT '{}',
+                created_by_kind TEXT NOT NULL,
+                created_by_id TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_events_session
+                ON task_events(session_id, created_at ASC);
         """)
         conn.commit()
 
@@ -277,13 +323,19 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
 
     if update_cols:
         update_cols.append("updated_at = ?")
-        update_vals.append(_now())
+        now = _now()
+        update_vals.append(now)
         update_vals.append(profile_id)
         with get_db() as conn:
             conn.execute(
                 f"UPDATE profiles SET {', '.join(update_cols)} WHERE id = ?",
                 update_vals,
             )
+            if "sandbox_id" in fields:
+                conn.execute(
+                    "UPDATE task_sessions SET sandbox_id = ?, updated_at = ? WHERE profile_id = ?",
+                    (fields["sandbox_id"], now, profile_id),
+                )
             conn.commit()
 
     if tags is not None:
@@ -304,6 +356,185 @@ def delete_profile(profile_id: str) -> bool:
         cursor = conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         conn.commit()
         return cursor.rowcount > 0
+
+
+# ── Task session persistence ────────────────────────────────────────────────
+
+
+def _json_object(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _task_session_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    session = dict(row)
+    session["metadata"] = _json_object(session.get("metadata"))
+    return session
+
+
+def _task_message_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    message = dict(row)
+    message["metadata"] = _json_object(message.get("metadata"))
+    return message
+
+
+def _task_event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    event = dict(row)
+    event["payload"] = _json_object(event.get("payload"))
+    return event
+
+
+def create_task_session(
+    profile_id: str,
+    sandbox_id: str,
+    created_by_kind: str,
+    created_by_id: str | None = None,
+    title: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    session_id = str(uuid.uuid4())
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO task_sessions
+            (id, profile_id, sandbox_id, title, status, created_by_kind, created_by_id,
+             created_at, updated_at, metadata)
+            VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                profile_id,
+                sandbox_id,
+                title,
+                created_by_kind,
+                created_by_id,
+                now,
+                now,
+                json.dumps(metadata or {}, separators=(",", ":")),
+            ),
+        )
+        conn.commit()
+    return get_task_session(session_id)  # type: ignore[return-value]
+
+
+def get_task_session(session_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM task_sessions WHERE id = ?", (session_id,)).fetchone()
+        return _task_session_from_row(row) if row else None
+
+
+def list_task_sessions(profile_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(limit, 200))
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM task_sessions
+            WHERE profile_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?""",
+            (profile_id, safe_limit),
+        ).fetchall()
+        return [_task_session_from_row(row) for row in rows]
+
+
+def append_task_message(
+    session_id: str,
+    role: str,
+    content: str,
+    created_by_kind: str,
+    created_by_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    message_id = str(uuid.uuid4())
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO task_messages
+            (id, session_id, role, content, created_by_kind, created_by_id, created_at, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                message_id,
+                session_id,
+                role,
+                content,
+                created_by_kind,
+                created_by_id,
+                now,
+                json.dumps(metadata or {}, separators=(",", ":")),
+            ),
+        )
+        conn.execute("UPDATE task_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+        conn.commit()
+    return get_task_message(message_id)  # type: ignore[return-value]
+
+
+def get_task_message(message_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM task_messages WHERE id = ?", (message_id,)).fetchone()
+        return _task_message_from_row(row) if row else None
+
+
+def list_task_messages(session_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(limit, 200))
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM task_messages
+            WHERE session_id = ?
+            ORDER BY created_at ASC
+            LIMIT ?""",
+            (session_id, safe_limit),
+        ).fetchall()
+        return [_task_message_from_row(row) for row in rows]
+
+
+def record_task_event(
+    session_id: str,
+    event_type: str,
+    created_by_kind: str,
+    created_by_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event_id = str(uuid.uuid4())
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO task_events
+            (id, session_id, type, payload, created_by_kind, created_by_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_id,
+                session_id,
+                event_type,
+                json.dumps(payload or {}, separators=(",", ":")),
+                created_by_kind,
+                created_by_id,
+                now,
+            ),
+        )
+        conn.commit()
+    return get_task_event(event_id)  # type: ignore[return-value]
+
+
+def get_task_event(event_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM task_events WHERE id = ?", (event_id,)).fetchone()
+        return _task_event_from_row(row) if row else None
+
+
+def list_task_events(session_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(limit, 200))
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM task_events
+            WHERE session_id = ?
+            ORDER BY created_at ASC
+            LIMIT ?""",
+            (session_id, safe_limit),
+        ).fetchall()
+        return [_task_event_from_row(row) for row in rows]
 
 
 # ── Access control persistence ───────────────────────────────────────────────

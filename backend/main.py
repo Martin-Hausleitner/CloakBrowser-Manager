@@ -22,7 +22,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import starlette.requests
@@ -50,6 +50,12 @@ if __package__:
         ProfileUpdate,
         StatusResponse,
         TagResponse,
+        TaskCommandRequest,
+        TaskEventResponse,
+        TaskMessageCreate,
+        TaskMessageResponse,
+        TaskSessionCreate,
+        TaskSessionResponse,
     )
 else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
@@ -73,6 +79,12 @@ else:  # Support `uvicorn main:app` from the backend directory.
         ProfileUpdate,
         StatusResponse,
         TagResponse,
+        TaskCommandRequest,
+        TaskEventResponse,
+        TaskMessageCreate,
+        TaskMessageResponse,
+        TaskSessionCreate,
+        TaskSessionResponse,
     )
 
 logger = logging.getLogger("cloakbrowser.manager")
@@ -102,6 +114,19 @@ _LOGIN_BACKOFF_SECONDS = 60.0
 _LOGIN_FAILURE_TTL_SECONDS = 10 * 60.0
 _LOGIN_FAILURE_MAX_KEYS = 1024
 _login_failures: dict[tuple[str, str], tuple[int, float, float]] = {}
+_TASK_METADATA_MAX_BYTES = 8_192
+_TASK_METADATA_MAX_DEPTH = 4
+_TASK_METADATA_MAX_LIST_ITEMS = 20
+_TASK_SENSITIVE_KEY_PARTS = (
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+)
 
 _BENCHMARK_REPORT_ENV = "BENCHMARK_REPORT_PATH"
 _DEFAULT_BENCHMARK_REPORT_PATH = Path("/data/benchmark-report.json")
@@ -964,6 +989,107 @@ def _require_profile_permission(
     return profile, identity
 
 
+def _can_read_task_sessions(identity: access.AccessIdentity, profile: dict[str, object]) -> bool:
+    sandbox_id = str(profile.get("sandbox_id") or "default")
+    return identity.is_admin or access.has_permission(identity, sandbox_id, "view")
+
+
+def _can_write_task_sessions(identity: access.AccessIdentity, profile: dict[str, object]) -> bool:
+    sandbox_id = str(profile.get("sandbox_id") or "default")
+    return (
+        identity.is_admin
+        or access.has_permission(identity, sandbox_id, "interact")
+        or access.has_permission(identity, sandbox_id, "automate")
+    )
+
+
+def _require_task_profile(
+    scope: Scope, profile_id: str, permission: access.Permission = "interact"
+) -> tuple[dict[str, object], access.AccessIdentity]:
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    identity = _require_identity(scope)
+    allowed = (
+        _can_write_task_sessions(identity, profile)
+        if permission == "interact"
+        else _can_read_task_sessions(identity, profile)
+    )
+    if not allowed:
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            f"task_session.permission.{permission}",
+            "denied",
+            str(profile.get("sandbox_id") or "default"),
+            profile_id,
+        )
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile, identity
+
+
+def _require_task_session(
+    scope: Scope, session_id: str, permission: access.Permission = "view"
+) -> tuple[dict[str, object], dict[str, object], access.AccessIdentity]:
+    session = db.get_task_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Task session not found")
+    profile = db.get_profile(str(session["profile_id"]))
+    identity = _require_identity(scope)
+    allowed = False
+    if profile:
+        allowed = (
+            _can_write_task_sessions(identity, profile)
+            if permission == "interact"
+            else _can_read_task_sessions(identity, profile)
+        )
+    if not profile or not allowed:
+        if profile:
+            db.record_access_audit_event(
+                identity.kind,
+                identity.id,
+                f"task_session.permission.{permission}",
+                "denied",
+                str(profile.get("sandbox_id") or "default"),
+                str(profile.get("id") or session["profile_id"]),
+            )
+        raise HTTPException(status_code=404, detail="Task session not found")
+    return session, profile, identity
+
+
+def _sanitize_task_value(value: object, depth: int = 0) -> object:
+    if depth >= _TASK_METADATA_MAX_DEPTH:
+        return "[truncated]"
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, list):
+        return [
+            _sanitize_task_value(item, depth + 1)
+            for item in value[:_TASK_METADATA_MAX_LIST_ITEMS]
+        ]
+    if isinstance(value, dict):
+        sanitized: dict[str, object] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)[:120]
+            key_lower = key.lower()
+            if any(part in key_lower for part in _TASK_SENSITIVE_KEY_PARTS):
+                sanitized[key] = "[redacted]"
+            else:
+                sanitized[key] = _sanitize_task_value(raw_value, depth + 1)
+        return sanitized
+    return str(value)[:500]
+
+
+def _sanitize_task_metadata(metadata: dict[str, object] | None) -> dict[str, object]:
+    sanitized = _sanitize_task_value(metadata or {})
+    if not isinstance(sanitized, dict):
+        return {}
+    encoded = json.dumps(sanitized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) <= _TASK_METADATA_MAX_BYTES:
+        return sanitized
+    return {"truncated": True}
+
+
 async def _require_websocket_profile_permission(
     websocket: WebSocket, profile_id: str, permission: access.Permission
 ) -> tuple[dict[str, object], access.AccessIdentity] | None:
@@ -1256,6 +1382,181 @@ async def list_access_sandboxes(request: Request):
         sandbox_id = str(profile.get("sandbox_id") or "default")
         counts[sandbox_id] = counts.get(sandbox_id, 0) + 1
     return [{"sandbox_id": key, "profile_count": counts[key]} for key in sorted(counts)]
+
+
+# ── Task sessions ───────────────────────────────────────────────────────────
+
+
+@app.post("/api/task-sessions", response_model=TaskSessionResponse, status_code=201)
+async def create_task_session(body: TaskSessionCreate, request: Request):
+    profile, identity = _require_task_profile(request.scope, body.profile_id, "interact")
+    session = db.create_task_session(
+        str(profile["id"]),
+        str(profile.get("sandbox_id") or "default"),
+        identity.kind,
+        identity.id,
+        body.title,
+        _sanitize_task_metadata(body.metadata),
+    )
+    db.record_task_event(
+        str(session["id"]),
+        "task_session.created",
+        identity.kind,
+        identity.id,
+        {"profile_id": str(profile["id"]), "sandbox_id": str(profile.get("sandbox_id") or "default")},
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_session.create",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        str(profile["id"]),
+    )
+    return TaskSessionResponse(**session)
+
+
+@app.get("/api/task-sessions", response_model=list[TaskSessionResponse])
+async def list_task_sessions(
+    request: Request,
+    profile_id: str = Query(..., min_length=1, max_length=120),
+    limit: int = Query(100, ge=1, le=200),
+):
+    profile, _identity = _require_task_profile(request.scope, profile_id, "view")
+    return [
+        TaskSessionResponse(**session)
+        for session in db.list_task_sessions(str(profile["id"]), limit=limit)
+    ]
+
+
+@app.get("/api/task-sessions/{session_id}", response_model=TaskSessionResponse)
+async def get_task_session(session_id: str, request: Request):
+    session, _profile, _identity = _require_task_session(request.scope, session_id, "view")
+    return TaskSessionResponse(**session)
+
+
+def _append_task_user_message(
+    scope: Scope,
+    session_id: str,
+    text: str,
+    profile_id: str | None,
+    commands: list[object],
+    metadata: dict[str, object],
+) -> TaskMessageResponse:
+    session, profile, identity = _require_task_session(scope, session_id, "interact")
+    if profile_id and profile_id != str(session["profile_id"]):
+        requested_profile = db.get_profile(profile_id)
+        if requested_profile:
+            db.record_access_audit_event(
+                identity.kind,
+                identity.id,
+                "task_session.profile_mismatch",
+                "denied",
+                str(requested_profile.get("sandbox_id") or "default"),
+                profile_id,
+            )
+        raise HTTPException(status_code=404, detail="Task session not found")
+
+    command_payload = [
+        command.model_dump() if hasattr(command, "model_dump") else command
+        for command in commands
+    ]
+    stored_metadata_input = dict(metadata)
+    if command_payload:
+        stored_metadata_input["commands"] = command_payload
+    stored_metadata = _sanitize_task_metadata(stored_metadata_input)
+    message = db.append_task_message(
+        str(session["id"]),
+        "user",
+        text,
+        identity.kind,
+        identity.id,
+        stored_metadata,
+    )
+    host_command_count = sum(
+        1 for command in command_payload
+        if isinstance(command, dict) and command.get("scope") == "host"
+    )
+    db.record_task_event(
+        str(session["id"]),
+        "task_message.appended",
+        identity.kind,
+        identity.id,
+        {
+            "message_id": str(message["id"]),
+            "role": "user",
+            "command_count": len(command_payload),
+            "host_command_count": host_command_count,
+            "server_executed": False,
+        },
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_message.append",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        str(profile["id"]),
+    )
+    return TaskMessageResponse(**message)
+
+
+@app.post(
+    "/api/task-sessions/{session_id}/messages",
+    response_model=TaskMessageResponse,
+    status_code=201,
+)
+async def append_task_message(session_id: str, body: TaskMessageCreate, request: Request):
+    return _append_task_user_message(
+        request.scope,
+        session_id,
+        body.text,
+        body.profile_id,
+        body.commands,
+        body.metadata,
+    )
+
+
+@app.post(
+    "/api/task-sessions/{session_id}/commands",
+    response_model=TaskMessageResponse,
+    status_code=201,
+)
+async def append_task_command(session_id: str, body: TaskCommandRequest, request: Request):
+    return _append_task_user_message(
+        request.scope,
+        session_id,
+        body.content,
+        body.profile_id,
+        body.commands,
+        body.metadata,
+    )
+
+
+@app.get("/api/task-sessions/{session_id}/messages", response_model=list[TaskMessageResponse])
+async def list_task_messages(
+    session_id: str,
+    request: Request,
+    limit: int = Query(100, ge=1, le=200),
+):
+    session, _profile, _identity = _require_task_session(request.scope, session_id, "view")
+    return [
+        TaskMessageResponse(**message)
+        for message in db.list_task_messages(str(session["id"]), limit=limit)
+    ]
+
+
+@app.get("/api/task-sessions/{session_id}/events", response_model=list[TaskEventResponse])
+async def list_task_events(
+    session_id: str,
+    request: Request,
+    limit: int = Query(100, ge=1, le=200),
+):
+    session, _profile, _identity = _require_task_session(request.scope, session_id, "view")
+    return [
+        TaskEventResponse(**event)
+        for event in db.list_task_events(str(session["id"]), limit=limit)
+    ]
 
 
 # ── Profile CRUD ──────────────────────────────────────────────────────────────

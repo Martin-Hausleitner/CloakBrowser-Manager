@@ -122,6 +122,21 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const canOperateSelected = Boolean(selected && canAccess(identity, selected, "operate"));
   const canInteractSelected = Boolean(selected && canAccess(identity, selected, "interact"));
 
+  useEffect(() => {
+    if (!isMobile || loading || profiles.length === 0) return;
+
+    const selectedStillExists = selectedId
+      ? profiles.some((profile) => profile.id === selectedId)
+      : false;
+    if (selectedStillExists) return;
+
+    const nextProfile = profiles.find((profile) => profile.status === "running") ?? profiles[0];
+    if (!nextProfile) return;
+
+    setSelectedId(nextProfile.id);
+    setView("view");
+  }, [isMobile, loading, profiles, selectedId]);
+
   const handleSelect = useCallback((id: string) => {
     setSelectedId(id);
     const profile = profiles.find((p) => p.id === id);
@@ -168,8 +183,8 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   }, [identity, profiles, selectedId, stop]);
 
   const handleVncDisconnect = useCallback(() => {
-    setView(canManageProfiles ? "edit" : "empty");
-  }, [canManageProfiles]);
+    setView(isMobile ? "view" : canManageProfiles ? "edit" : "empty");
+  }, [canManageProfiles, isMobile]);
 
   const handleViewportApply = useCallback(async (width: number, height: number) => {
     if (!selectedId || !canManageProfiles) return false;

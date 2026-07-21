@@ -278,7 +278,7 @@
 
   .mobile-command-dock {
     @apply grid shrink-0 gap-1 border-b border-border bg-surface-0 px-2 py-1;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr));
   }
 
   .mobile-command-button {
@@ -326,20 +326,21 @@
   }
 
   .mobile-fullscreen-strip {
-    @apply absolute left-2 right-2 z-[60] grid items-stretch gap-1 rounded-md border border-border bg-surface-0/95 p-1 shadow-lg backdrop-blur;
-    grid-template-columns: repeat(auto-fit, minmax(4rem, 1fr));
-    top: max(0.5rem, env(safe-area-inset-top));
+    @apply absolute right-2 z-[60] grid w-auto items-stretch gap-1 rounded-md border border-border bg-surface-0/90 p-1 shadow-lg backdrop-blur;
+    grid-auto-flow: column;
+    grid-auto-columns: 2.75rem;
+    bottom: max(0.5rem, env(safe-area-inset-bottom));
   }
 
   .mobile-fullscreen-tools-panel {
     @apply absolute left-2 right-2 z-[60] grid items-stretch gap-2 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
-    top: max(4rem, calc(env(safe-area-inset-top) + 3.5rem));
+    bottom: max(4rem, calc(env(safe-area-inset-bottom) + 3.5rem));
   }
 
   .mobile-fullscreen-viewport-editor {
     @apply absolute left-2 right-2 z-[60] overflow-y-auto rounded-md border border-border bg-surface-0/95 shadow-lg backdrop-blur;
-    top: max(4rem, calc(env(safe-area-inset-top) + 3.5rem));
-    max-height: calc(100dvh - 5rem);
+    bottom: max(4rem, calc(env(safe-area-inset-bottom) + 3.5rem));
+    max-height: calc(100dvh - 5.5rem);
   }
 
   .mobile-fullscreen-zoom {
@@ -355,7 +356,11 @@
   }
 
   .mobile-fullscreen-action {
-    @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-2 px-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-11 w-11 min-w-0 items-center justify-center rounded-md border border-border bg-surface-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-fullscreen-action > span {
+    @apply sr-only;
   }
 
   .mobile-header-tools {
@@ -488,7 +493,7 @@
 
   .mobile-tools-sheet {
     @apply grid shrink-0 gap-2 border-b border-border bg-surface-0 px-2 py-2;
-    max-height: min(44dvh, 24rem);
+    max-height: min(38dvh, 20rem);
     overflow-y: auto;
     overscroll-behavior: contain;
   }

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
-import type { Profile } from "../../lib/api";
+import { api, type Profile } from "../../lib/api";
 import { codexComputerUseProvider, taskHarnessReadyEvent } from "../../lib/taskHarness";
 import { MobileSplitScreen } from "./MobileSplitScreen";
 
@@ -142,6 +142,9 @@ function runningSplit(overrides: Partial<Parameters<typeof MobileSplitScreen>[0]
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  vi.spyOn(api, "listTaskSessions").mockResolvedValue([]);
+  vi.spyOn(api, "listTaskSessionMessages").mockResolvedValue([]);
+  vi.spyOn(api, "listTaskSessionEvents").mockResolvedValue([]);
   installTaskHarness();
 });
 
@@ -154,7 +157,7 @@ describe("MobileSplitScreen", () => {
   it("renders the default Codex Computer Use composer with browser tools and chat collapsed", async () => {
     renderMobileSplit();
 
-    expect(screen.getByText("Codex Computer Use")).toBeTruthy();
+    expect(await screen.findByText("Codex Computer Use")).toBeTruthy();
     expect(await screen.findByPlaceholderText("Ask Codex Computer Use...")).toBeTruthy();
     expect(screen.getByLabelText("Open browser tools")).toBeTruthy();
     expect(screen.queryByLabelText("Browser tools")).toBeNull();
@@ -163,7 +166,7 @@ describe("MobileSplitScreen", () => {
     await waitFor(() => expect(window.cloakBrowserHarness?.send).toBeTruthy());
   });
 
-  it("disables the composer when the injected Codex Computer Use Bridge is invalid", async () => {
+  it("labels the server fallback as save-only and never fabricates an assistant reply", async () => {
     window.cloakBrowserHarness = {
       capabilities: {
         chat: true,
@@ -172,28 +175,109 @@ describe("MobileSplitScreen", () => {
         browser_actions: ["paste"],
       },
     };
-    renderMobileSplit();
+    vi.spyOn(api, "createTaskSession").mockResolvedValue({
+      id: "server-session-1",
+      profile_id: stoppedProfile.id,
+      sandbox_id: stoppedProfile.sandbox_id,
+      title: null,
+      status: "active",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-21T10:00:00.000Z",
+      updated_at: "2026-07-21T10:00:00.000Z",
+      metadata: {},
+    });
+    const append = vi.spyOn(api, "appendTaskMessage").mockResolvedValue({
+      id: "server-message-1",
+      session_id: "server-session-1",
+      role: "user",
+      content: "Save this task",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-21T10:00:01.000Z",
+      metadata: {},
+    });
+    const { container } = renderMobileSplit();
 
-    const input = await screen.findByPlaceholderText("Codex Computer Use Bridge unavailable");
-    expect((input as HTMLTextAreaElement).disabled).toBe(true);
-    expect((screen.getByLabelText("Run task") as HTMLButtonElement).disabled).toBe(true);
+    const input = await screen.findByPlaceholderText("Save task to server history...");
+    expect((input as HTMLTextAreaElement).disabled).toBe(false);
 
     openBrowserTools();
-    expect(screen.getByText("Codex unavailable")).toBeTruthy();
-    expect(screen.getByText("A verified Codex Computer Use Bridge must be injected by the host before tasks can run.")).toBeTruthy();
+    expect(screen.getByText("Save only")).toBeTruthy();
+    expect(screen.getByText("Tasks are saved to scoped server history only. Nothing executes until a verified Codex host attaches.")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Close browser tools"));
 
-    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    fireEvent.change(input, { target: { value: "Save this task" } });
+    fireEvent.click(screen.getByLabelText("Run task"));
 
-    expect(screen.queryByText(/Queued locally/)).toBeNull();
-    expect(screen.queryByText(/could not queue/)).toBeNull();
+    await waitFor(() => expect(append).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("Saved to server history · not executed.")).toBeTruthy();
+    expect(screen.getAllByText("Save this task")).toHaveLength(1);
+    expect(container.querySelector(".mobile-message-assistant")).toBeNull();
+  });
+
+  it("loads the latest scoped server conversation and continues it after reload", async () => {
+    delete window.cloakBrowserHarness;
+    vi.mocked(api.listTaskSessions).mockResolvedValue([
+      {
+        id: "server-session-existing",
+        profile_id: stoppedProfile.id,
+        sandbox_id: stoppedProfile.sandbox_id,
+        title: "Checkout follow-up",
+        status: "active",
+        created_by_kind: "user",
+        created_by_id: "user-1",
+        created_at: "2026-07-21T09:00:00.000Z",
+        updated_at: "2026-07-21T09:05:00.000Z",
+        metadata: {},
+      },
+    ]);
+    vi.mocked(api.listTaskSessionMessages).mockResolvedValue([
+      {
+        id: "history-message-1",
+        session_id: "server-session-existing",
+        role: "user",
+        content: "Open checkout",
+        created_by_kind: "user",
+        created_by_id: "user-1",
+        created_at: "2026-07-21T09:01:00.000Z",
+        metadata: {},
+      },
+    ]);
+    const create = vi.spyOn(api, "createTaskSession");
+    const append = vi.spyOn(api, "appendTaskMessage").mockResolvedValue({
+      id: "history-message-2",
+      session_id: "server-session-existing",
+      role: "user",
+      content: "Continue checkout",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-21T09:06:00.000Z",
+      metadata: {},
+    });
+
+    renderMobileSplit();
+    fireEvent.click(screen.getByLabelText("Expand task chat"));
+    expect(await screen.findByText("Open checkout")).toBeTruthy();
+
+    const input = await screen.findByPlaceholderText("Save task to server history...");
+    fireEvent.change(input, { target: { value: "Continue checkout" } });
+    fireEvent.click(screen.getByLabelText("Run task"));
+
+    await waitFor(() => expect(append).toHaveBeenCalledWith(
+      "server-session-existing",
+      expect.objectContaining({ text: "Continue checkout" }),
+      { signal: undefined },
+    ));
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("enables the composer when a valid host bridge is injected after mount", async () => {
     delete window.cloakBrowserHarness;
     renderMobileSplit();
 
-    const unavailableInput = await screen.findByPlaceholderText("Codex Computer Use Bridge unavailable");
-    expect((unavailableInput as HTMLTextAreaElement).disabled).toBe(true);
+    const serverInput = await screen.findByPlaceholderText("Save task to server history...");
+    expect((serverInput as HTMLTextAreaElement).disabled).toBe(false);
 
     const { send } = installTaskHarness();
     window.dispatchEvent(new Event(taskHarnessReadyEvent));
@@ -213,7 +297,7 @@ describe("MobileSplitScreen", () => {
           profile_id: stoppedProfile.id,
           metadata: {
             runner: "codex-computer-use",
-            preferred_surface: "codex-computer-use",
+            execution: "host",
             browser_visible: true,
           },
         },
@@ -239,7 +323,7 @@ describe("MobileSplitScreen", () => {
           profile_id: stoppedProfile.id,
           metadata: {
             runner: "codex-computer-use",
-            preferred_surface: "codex-computer-use",
+            execution: "host",
             browser_visible: true,
           },
         },
@@ -360,7 +444,7 @@ describe("MobileSplitScreen", () => {
           profile_id: runningProfile.id,
           metadata: {
             runner: "codex-computer-use",
-            preferred_surface: "codex-computer-use",
+            execution: "host",
             browser_visible: true,
             source: "pinned-action",
           },
@@ -463,6 +547,17 @@ describe("MobileSplitScreen", () => {
     expect(screen.getAllByText(/412 x 892/).length).toBeGreaterThan(0);
   });
 
+  it("keeps the complete device viewport when phone-fit is applied to a live browser", async () => {
+    const { props } = runningSplit();
+    vi.stubGlobal("visualViewport", { width: 390, height: 844 });
+
+    openBrowserTools();
+    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+    fireEvent.click(screen.getByText("Phone fit"));
+
+    await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(390, 844));
+  });
+
   it("keeps editable viewport settings and zoom available in fullscreen while background controls are inert", async () => {
     const { props } = runningSplit();
 
@@ -494,15 +589,11 @@ describe("MobileSplitScreen", () => {
     expect(document.activeElement).toBe(screen.getByLabelText("Open fullscreen browser"));
   });
 
-  it("keeps a visible fullscreen exit control when no browser is live", () => {
+  it("does not offer fullscreen when no browser is live", () => {
     renderMobileSplit();
 
-    fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
-
-    expect(screen.getByRole("dialog", { name: "Fullscreen browser viewer" })).toBeTruthy();
-    expect(screen.getByLabelText("Close fullscreen browser")).toBeTruthy();
-
-    fireEvent.click(screen.getByLabelText("Close fullscreen browser"));
+    expect(screen.queryByLabelText("Open fullscreen browser")).toBeNull();
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
     expect(screen.queryByRole("dialog", { name: "Fullscreen browser viewer" })).toBeNull();
   });
 

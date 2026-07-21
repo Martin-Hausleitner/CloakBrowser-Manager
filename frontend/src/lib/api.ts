@@ -219,6 +219,40 @@ export interface AccessAgentCreated extends AccessAgent {
   api_key: string;
 }
 
+export interface TaskHarnessSession {
+  id: string;
+  profile_id: string;
+  sandbox_id: string;
+  title: string | null;
+  status: "active" | "archived";
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface TaskHarnessMessage {
+  id: string;
+  session_id: string;
+  role: "user" | "assistant" | "tool" | "system";
+  content: string;
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface TaskHarnessEvent {
+  id: string;
+  session_id: string;
+  type: string;
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  payload: Record<string, unknown>;
+}
+
 export interface AccessSandbox {
   sandbox_id: string;
   profile_count: number;
@@ -373,6 +407,74 @@ export const api = {
     request<AccessAgentCreated>(`/api/access/agents/${id}/rotate-key`, {
       method: "POST",
     }),
+
+  createTaskSession: (data: {
+    profile_id: string;
+    title?: string | null;
+    metadata?: Record<string, unknown>;
+  }, options?: { signal?: AbortSignal }) => request<TaskHarnessSession>("/api/task-sessions", {
+    method: "POST",
+    signal: options?.signal,
+    body: JSON.stringify(data),
+  }),
+
+  listTaskSessions: (
+    profileId: string,
+    options?: { limit?: number; signal?: AbortSignal },
+  ) => request<TaskHarnessSession[]>(
+    `/api/task-sessions?profile_id=${encodeURIComponent(profileId)}${
+      options?.limit ? `&limit=${encodeURIComponent(String(options.limit))}` : ""
+    }`,
+    { signal: options?.signal },
+  ),
+
+  getTaskSession: (sessionId: string, options?: { signal?: AbortSignal }) =>
+    request<TaskHarnessSession>(
+      `/api/task-sessions/${encodeURIComponent(sessionId)}`,
+      { signal: options?.signal },
+    ),
+
+  appendTaskMessage: (sessionId: string, data: {
+    text: string;
+    profile_id?: string | null;
+    commands?: ReadonlyArray<
+      {
+        id: string;
+        label: string;
+        kind: string;
+        scope: string;
+        args?: Record<string, string | number | boolean | null>;
+      }
+    >;
+    metadata?: Record<string, unknown>;
+  }, options?: { signal?: AbortSignal }) => request<TaskHarnessMessage>(
+    `/api/task-sessions/${encodeURIComponent(sessionId)}/messages`,
+    {
+      method: "POST",
+      signal: options?.signal,
+      body: JSON.stringify(data),
+    },
+  ),
+
+  listTaskSessionMessages: (
+    sessionId: string,
+    options?: { limit?: number; signal?: AbortSignal },
+  ) => request<TaskHarnessMessage[]>(
+    `/api/task-sessions/${encodeURIComponent(sessionId)}/messages${
+      options?.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : ""
+    }`,
+    { signal: options?.signal },
+  ),
+
+  listTaskSessionEvents: (
+    sessionId: string,
+    options?: { limit?: number; signal?: AbortSignal },
+  ) => request<TaskHarnessEvent[]>(
+    `/api/task-sessions/${encodeURIComponent(sessionId)}/events${
+      options?.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : ""
+    }`,
+    { signal: options?.signal },
+  ),
 
   listAccessSandboxes: () => request<AccessSandbox[]>("/api/access/sandboxes"),
 };

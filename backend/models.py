@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -144,6 +145,114 @@ class ProfileStatusResponse(BaseModel):
 
 class ClipboardRequest(BaseModel):
     text: str = Field(max_length=1_048_576)  # 1MB max
+
+
+class TaskSessionCreate(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=120)
+    title: str | None = Field(default=None, max_length=120)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class TaskSessionResponse(BaseModel):
+    id: str
+    profile_id: str
+    sandbox_id: str
+    title: str | None = None
+    status: Literal["active", "archived"] = "active"
+    created_by_kind: str
+    created_by_id: str | None = None
+    created_at: str
+    updated_at: str
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+TaskCommandKind = Literal[
+    "navigate",
+    "click",
+    "double_click",
+    "scroll",
+    "type_text",
+    "keypress",
+    "drag",
+    "move",
+    "wait",
+    "copy",
+    "paste",
+    "screenshot",
+    "viewport",
+    "fullscreen",
+    "focus_remote",
+    "focus_chat",
+]
+
+
+class TaskCommand(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=1, max_length=120)
+    kind: TaskCommandKind
+    scope: Literal["ui", "host"]
+    args: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+    @field_validator("args")
+    @classmethod
+    def validate_args(cls, value: dict[str, object]) -> dict[str, object]:
+        if len(value) > 20:
+            raise ValueError("Command args may contain at most 20 keys")
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > 2_048:
+            raise ValueError("Command args are too large")
+        return value
+
+
+class TaskMessageCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=8_000)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=120)
+    commands: list[TaskCommand] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+    @field_validator("commands")
+    @classmethod
+    def validate_commands(cls, value: list[TaskCommand]) -> list[TaskCommand]:
+        return _validate_task_commands(value)
+
+
+class TaskCommandRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=8_000)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=120)
+    commands: list[TaskCommand] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+    @field_validator("commands")
+    @classmethod
+    def validate_commands(cls, value: list[TaskCommand]) -> list[TaskCommand]:
+        return _validate_task_commands(value)
+
+
+def _validate_task_commands(value: list[TaskCommand]) -> list[TaskCommand]:
+    if len(value) > 20:
+        raise ValueError("A task message may contain at most 20 commands")
+    return value
+
+
+class TaskMessageResponse(BaseModel):
+    id: str
+    session_id: str
+    role: Literal["user", "assistant", "system", "tool"]
+    content: str
+    created_by_kind: str
+    created_by_id: str | None = None
+    created_at: str
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class TaskEventResponse(BaseModel):
+    id: str
+    session_id: str
+    type: str
+    created_by_kind: str
+    created_by_id: str | None = None
+    created_at: str
+    payload: dict[str, object] = Field(default_factory=dict)
 
 
 class LoginRequest(BaseModel):

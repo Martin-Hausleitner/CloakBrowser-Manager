@@ -200,6 +200,60 @@ def test_list_profiles_includes_tags(tmp_db: Path):
     assert len(profiles[0]["tags"]) == 1
 
 
+# ── task sessions ────────────────────────────────────────────────────────────
+
+
+def test_task_session_message_and_event_roundtrip(tmp_db: Path):
+    profile = db.create_profile("Task Browser", sandbox_id="tasks")
+    session = db.create_task_session(
+        profile["id"],
+        profile["sandbox_id"],
+        "user",
+        "user-1",
+        "Research",
+        {"source": "test"},
+    )
+
+    message = db.append_task_message(
+        session["id"],
+        "user",
+        "Open the dashboard",
+        "user",
+        "user-1",
+        {"intent": "navigate"},
+    )
+    event = db.record_task_event(
+        session["id"],
+        "task_command.appended",
+        "user",
+        "user-1",
+        {"message_id": message["id"]},
+    )
+
+    assert db.get_task_session(session["id"])["metadata"] == {"source": "test"}
+    assert db.list_task_sessions(profile["id"])[0]["id"] == session["id"]
+    assert db.list_task_messages(session["id"]) == [message]
+    assert db.list_task_events(session["id"]) == [event]
+
+
+def test_task_sessions_are_deleted_with_profile(tmp_db: Path):
+    profile = db.create_profile("Task Browser")
+    session = db.create_task_session(
+        profile["id"],
+        profile["sandbox_id"],
+        "bootstrap",
+        None,
+    )
+    db.append_task_message(session["id"], "user", "hello", "bootstrap")
+    db.record_task_event(session["id"], "task_session.created", "bootstrap")
+
+    assert db.delete_profile(profile["id"]) is True
+
+    assert db.get_task_session(session["id"]) is None
+    assert db.list_task_messages(session["id"]) == []
+    assert db.list_task_events(session["id"]) == []
+
+
 # ── update_profile ───────────────────────────────────────────────────────────
 
 

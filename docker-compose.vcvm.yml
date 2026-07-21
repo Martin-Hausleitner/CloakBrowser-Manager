@@ -1,0 +1,41 @@
+name: cloakbrowser-manager-vcvm
+
+services:
+  manager:
+    container_name: cloakbrowser-manager-vcvm
+    image: cloakbrowser-manager:vcvm
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    network_mode: bridge
+    ports:
+      - "127.0.0.1:${MANAGER_PORT:-18115}:8080"
+    environment:
+      AUTH_TOKEN: ${AUTH_TOKEN:?AUTH_TOKEN is required for VCVM deployments}
+      ACCESS_CONTROL_ENABLED: "1"
+    volumes:
+      - cloakbrowser-manager-vcvm-data:/data
+    shm_size: "${VCVM_SHM_SIZE:-2gb}"
+    cpus: "${VCVM_CPUS:-16.0}"
+    mem_limit: "${VCVM_MEMORY_LIMIT:-32g}"
+    pids_limit: 4096
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  cloakbrowser-manager-vcvm-data:
+    name: cloakbrowser-manager-vcvm-data

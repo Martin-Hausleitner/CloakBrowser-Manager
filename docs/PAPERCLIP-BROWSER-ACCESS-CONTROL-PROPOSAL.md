@@ -31,6 +31,7 @@ Die Policy wurde zusätzlich in einem neuen, nur auf `127.0.0.1` gebundenen Cont
 - Das Dashboard zeigte die zwei Grants getrennt an; der Agent-Key wurde nur einmal angezeigt und danach wieder ausgeblendet.
 - Ein frischer Browser-Login als `view`-Nutzer zeigte genau das zugewiesene Profil. Weder Profilanlage, Launch/Stop, Benchmark-Ansicht noch Access-Verwaltung waren in dessen Oberfläche verfügbar.
 - Ein direkter Lifecycle-Aufruf desselben Nutzers lieferte absichtlich `404 Profile not found`, obwohl das Profil sichtbar war: Dadurch bleiben nicht erlaubte Lifecycle- und fremde Profil-URLs nicht von unbekannten IDs unterscheidbar.
+- Bei 390 px Mobile-Breite blieb die Access-Verwaltung ohne horizontalen Overflow; alle sichtbaren Buttons, Eingabefelder und Selects hielten mindestens 44 px Höhe ein.
 - Die vollständige Backend-Suite lief mit **221 bestanden**; die Frontend-Suite mit **65 bestanden**, gefolgt von einem erfolgreichen Produktions-Build.
 
 Diese Abnahme belegt die lokale Produktoberfläche und die serverseitige Entscheidung gemeinsam. Sie ersetzt keine externe Production-Abnahme, veröffentlicht keine Test- oder Produktions-Credentials und enthält keine Browserinhalte.

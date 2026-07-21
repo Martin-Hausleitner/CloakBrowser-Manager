@@ -58,7 +58,7 @@ export function LoginPage({ accessControlEnabled = false, onSuccess }: LoginPage
               <input
                 id="login-username"
                 type="text"
-                className="input mb-3"
+                className="input mb-3 min-h-11"
                 placeholder="your-name"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -69,7 +69,7 @@ export function LoginPage({ accessControlEnabled = false, onSuccess }: LoginPage
               <input
                 id="login-password"
                 type="password"
-                className="input mb-3"
+                className="input mb-3 min-h-11"
                 placeholder="Your password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -79,7 +79,7 @@ export function LoginPage({ accessControlEnabled = false, onSuccess }: LoginPage
           ) : (
             <input
               type="password"
-              className="input mb-3"
+              className="input mb-3 min-h-11"
               placeholder="Access token"
               value={token}
               onChange={(e) => setToken(e.target.value)}
@@ -91,7 +91,7 @@ export function LoginPage({ accessControlEnabled = false, onSuccess }: LoginPage
           <button
             type="submit"
             disabled={loading || (mode === "token" ? !token : !username.trim() || !password)}
-            className="btn-primary w-full disabled:opacity-50"
+            className="btn-primary min-h-11 w-full disabled:opacity-50"
           >
             {loading ? "Authenticating..." : mode === "account" ? "Sign in" : "Unlock"}
           </button>
@@ -103,7 +103,7 @@ export function LoginPage({ accessControlEnabled = false, onSuccess }: LoginPage
               setError(null);
               setMode((current) => current === "account" ? "token" : "account");
             }}
-            className="mt-3 w-full text-xs text-gray-500 underline hover:text-gray-300"
+            className="mt-3 flex min-h-11 w-full items-center justify-center text-xs text-gray-500 underline hover:text-gray-300"
           >
             {mode === "account" ? "Use an administrator token" : "Sign in with a user account"}
           </button>

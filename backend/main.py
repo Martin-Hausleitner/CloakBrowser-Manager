@@ -1169,7 +1169,14 @@ async def update_access_user(user_id: str, body: AccessUserUpdate, request: Requ
     if "password" in data:
         data["password_hash"] = access.hash_password(data.pop("password"))
     if "grants" in data and data["grants"] is not None:
-        data["grants"] = [grant.model_dump() for grant in data["grants"]]
+        # Pydantic's model_dump() has already converted nested AccessGrant
+        # models to dictionaries.  Keep the endpoint compatible with both
+        # shapes so editing a person's sandbox permissions never turns into a
+        # 500 response in the access dashboard.
+        data["grants"] = [
+            grant.model_dump() if hasattr(grant, "model_dump") else grant
+            for grant in data["grants"]
+        ]
     user = db.update_access_user(user_id, **data)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

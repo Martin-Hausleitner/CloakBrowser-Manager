@@ -357,7 +357,7 @@ describe("MobileSplitScreen", () => {
     expect(screen.getByLabelText("Visual zoom level").textContent).toBe("100%");
   });
 
-  it("keeps live viewport controls available without profile management access", () => {
+  it("keeps local view controls but hides remote viewport editing without profile management access", () => {
     renderMobileSplit({
       selected: runningProfile,
       selectedId: runningProfile.id,
@@ -368,8 +368,11 @@ describe("MobileSplitScreen", () => {
     expect(screen.getByLabelText("Live view controls")).toBeTruthy();
     expect(screen.getByLabelText("Browser pane")).toBeTruthy();
     expect(screen.getByLabelText("Visual zoom")).toBeTruthy();
-    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
-    expect(screen.queryByText("Apply")).toBeNull();
+    expect(screen.queryByLabelText("Edit browser viewport")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
+    expect(screen.getByLabelText("Toggle fullscreen view controls")).toBeTruthy();
+    expect(screen.queryByLabelText("Edit fullscreen browser viewport")).toBeNull();
   });
 
   it("collapses profile administration actions while a browser is live", () => {

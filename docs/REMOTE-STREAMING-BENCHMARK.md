@@ -77,6 +77,17 @@ Der daraus erzeugte, serverseitig redigierte Report wurde außerdem in einer fri
 
 Ein weiterer fünfmaliger Warm-Nachtest gegen die isolierte, bereits verbundene Mobile-Vorschau bestätigte den lokalen KasmVNC/noVNC-Pfad: Der Health-Endpunkt erreichte einen Median First Byte von **2,233 ms** (p95 15,891 ms), der echte VNC-WebSocket-Upgrade einen Median Handshake von **4,541 ms** (p95 17,442 ms). Wie im vorherigen Lauf blieben Selkies `not_installed` sowie Sunshine/Moonlight und Guacamole `architecture_only`; sie erhalten keine erfundenen Vergleichswerte. Der redigierte, README-verlinkte Einzelreport steht in [streaming-benchmark-latest.md](streaming-benchmark-latest.md). Der Nachtest misst nur den warmen Loopback-Pfad und ist ausdrücklich kein Vergleich mit dem älteren Container, Startzeiten oder anderen Technologien.
 
+### Finaler r49-Warm-Nachtest (20 Läufe)
+
+Der finale r49-Preview verwendet einen persistenten Workspace-Mount statt eines temporären Datenpfads. Gegen seine bereits laufende 1024-×-576-Session bestanden Health und VNC-WebSocket jeweils **20/20** lokale Läufe.
+
+| Kandidat | Median | p95 | Maximum | Aussagegrenze |
+|---|---:|---:|---:|---|
+| Manager HTTP First Byte | 1,438 ms | 4,005 ms | 14,794 ms | Control Plane, kein Frame |
+| KasmVNC/noVNC WebSocket-Upgrade | 3,457 ms | 8,931 ms | 49,980 ms | Upgrade, kein Touch-to-Pixel |
+
+Der vollständige mobile Browser-Gate desselben Builds bestand anschließend **249/249 Checks** über fünf Viewpoints und erzeugte 22 Screenshot-Artefakte. Vier Authentifizierungswege – Legacy-Token, Bootstrap-Token, benannter Operator und benannter Viewer – erreichten einen verbundenen Canvas; Viewer-Eingabe blieb server- und UI-seitig gesperrt. Die Details und zehn priorisierten Eingabeverbesserungen stehen im [kritischen Mobile-/Auth-/Latenz-Audit](MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md).
+
 ## KasmVNC 1.3.3 gegen 1.4.0: isolierter A/B-Lauf
 
 Am 20. Juli 2026 wurden beide KasmVNC-Versionen in getrennten lokalen Containern mit identischem 1024-×-576-Profil, deaktiviertem Clipboard-Sync, derselben aktuellen Frontend-Ausgabe und demselben aktuellen `browser_manager.py` geprüft. Die App war jeweils nur auf `127.0.0.1` gebunden; der normale Produktionscontainer blieb unverändert. Für KasmVNC 1.4 war das aktuelle Backend notwendig: Das zuvor gebaute Image enthielt noch den bereits behobenen Fehler, `search_engine` als nicht unterstütztes Chromium-Launch-Argument weiterzugeben.

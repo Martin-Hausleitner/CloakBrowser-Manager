@@ -501,20 +501,22 @@ export function MobileSplitScreen({
           <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
           <span>View {browserZoom}%</span>
         </button>
-        <button
-          type="button"
-          className="mobile-fullscreen-action"
-          aria-label="Edit fullscreen browser viewport"
-          aria-expanded={fullscreenViewportOpen}
-          aria-controls="mobile-fullscreen-viewport-settings"
-          onClick={() => {
-            setFullscreenViewportOpen((open) => !open);
-            setFullscreenToolsOpen(false);
-          }}
-        >
-          <MonitorSmartphone className="h-4 w-4" aria-hidden="true" />
-          <span>Viewport</span>
-        </button>
+        {canManageProfiles ? (
+          <button
+            type="button"
+            className="mobile-fullscreen-action"
+            aria-label="Edit fullscreen browser viewport"
+            aria-expanded={fullscreenViewportOpen}
+            aria-controls="mobile-fullscreen-viewport-settings"
+            onClick={() => {
+              setFullscreenViewportOpen((open) => !open);
+              setFullscreenToolsOpen(false);
+            }}
+          >
+            <MonitorSmartphone className="h-4 w-4" aria-hidden="true" />
+            <span>Viewport</span>
+          </button>
+        ) : null}
         <button
           ref={fullscreenCloseButtonRef}
           type="button"
@@ -553,7 +555,7 @@ export function MobileSplitScreen({
         </div>
       ) : null}
 
-      {fullscreenViewportOpen ? renderViewportEditor("fullscreen") : null}
+      {canManageProfiles && fullscreenViewportOpen ? renderViewportEditor("fullscreen") : null}
     </>
   );
 
@@ -775,28 +777,30 @@ export function MobileSplitScreen({
           </div>
         </div>
 
-        <div className="mobile-viewport-disclosure">
-          <button
-            type="button"
-            onClick={() => {
-              setViewportOpen((open) => !open);
-              setGridOpen(false);
-              setHeaderToolsOpen(false);
-              setLiveControlsOpen(false);
-            }}
-            className="mobile-disclosure-button"
-            aria-label="Edit browser viewport"
-            aria-pressed={viewportOpen}
-            aria-expanded={viewportOpen}
-            aria-controls="mobile-viewport-settings"
-          >
-            <MonitorSmartphone className="h-4 w-4" aria-hidden="true" />
-            <span>Viewport settings</span>
-            <span className="ml-auto text-[11px] text-gray-500">{viewport.width} x {viewport.height}</span>
-          </button>
-        </div>
+        {canManageProfiles ? (
+          <div className="mobile-viewport-disclosure">
+            <button
+              type="button"
+              onClick={() => {
+                setViewportOpen((open) => !open);
+                setGridOpen(false);
+                setHeaderToolsOpen(false);
+                setLiveControlsOpen(false);
+              }}
+              className="mobile-disclosure-button"
+              aria-label="Edit browser viewport"
+              aria-pressed={viewportOpen}
+              aria-expanded={viewportOpen}
+              aria-controls="mobile-viewport-settings"
+            >
+              <MonitorSmartphone className="h-4 w-4" aria-hidden="true" />
+              <span>Viewport settings</span>
+              <span className="ml-auto text-[11px] text-gray-500">{viewport.width} x {viewport.height}</span>
+            </button>
+          </div>
+        ) : null}
 
-        {viewportOpen ? renderViewportEditor("inline") : null}
+        {canManageProfiles && viewportOpen ? renderViewportEditor("inline") : null}
 
         {gridOpen ? (
           <div id="mobile-running-grid" className="mobile-grid" aria-label="Running browser grid">

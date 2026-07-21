@@ -211,6 +211,36 @@ def test_operator_can_operate_only_its_scoped_profile(client_access: TestClient)
     assert denied.status_code == 404
 
 
+def test_admin_can_update_a_user_grants_from_the_access_dashboard_payload(client_access: TestClient):
+    """Pydantic serializes nested grants before main.py receives the update.
+
+    Keep the browser-facing access dashboard able to move a person between
+    sandboxes instead of raising an AttributeError while normalizing its JSON
+    payload.
+    """
+    created = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "grant-editor",
+            "password": "grant-editor-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    )
+    assert created.status_code == 201
+
+    updated = client_access.put(
+        f"/api/access/users/{created.json()['id']}",
+        headers=bootstrap_headers(),
+        json={
+            "grants": [{"sandbox_id": "beta", "permission": "operate"}],
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["grants"] == [{"sandbox_id": "beta", "permission": "operate"}]
+
+
 def test_paperclip_agent_key_is_scoped_and_rotation_revokes_old_key(client_access: TestClient):
     alpha, beta = create_scoped_profiles()
     created = client_access.post(

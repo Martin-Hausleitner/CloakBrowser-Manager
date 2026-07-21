@@ -142,7 +142,7 @@ fi
 REMOTE_PREFLIGHT
 
 rsync -az --delete \
-  --exclude '.git/' \
+  --exclude '.git' \
   --exclude "$MANAGED_MARKER" \
   --exclude '.env.vcvm' \
   --exclude '.env' \

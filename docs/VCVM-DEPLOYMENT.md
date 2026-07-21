@@ -4,6 +4,9 @@ This deployment path runs the whole CloakBrowser Manager product on the VCVM:
 FastAPI, the built React UI, SQLite data, KasmVNC and launched browser profiles
 stay inside one Docker service with one persistent Docker volume.
 
+The Mac or iPhone is only a presentation and input client. Do not run a second
+Manager, browser profile, database or VNC server on the Mac for this deployment.
+
 ## Safety model
 
 - Host: `vcvm`
@@ -18,6 +21,10 @@ stay inside one Docker service with one persistent Docker volume.
 
 The compose file does not publish any raw VNC port. Browser viewing remains
 behind the authenticated Manager proxy.
+
+The current acceptance deployment uses custom loopback port `18116` to avoid a
+legacy preview on `18115`; the documented default remains `18115`. Use the same
+port consistently for deploy, smoke checks and an SSH tunnel.
 
 ## Deploy
 
@@ -74,3 +81,14 @@ ssh vcvm 'curl -fsS http://127.0.0.1:18115/api/auth/status'
 
 The second command must report `auth_required: true` and
 `access_control_enabled: true`; do not publish a URL if it does not.
+
+For Mac-only validation of a loopback Manager, keep the runtime on the VCVM and
+forward only the UI connection:
+
+```bash
+ssh -N -L 18118:127.0.0.1:18116 vcvm
+```
+
+Then open `http://127.0.0.1:18118/`. This URL is a client tunnel, not a local
+Manager. For iPhone access, use private Tailscale Serve HTTPS once the tailnet
+administrator has enabled Serve; never replace it with a raw Tailnet HTTP bind.

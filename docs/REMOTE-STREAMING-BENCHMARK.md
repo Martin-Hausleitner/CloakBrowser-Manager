@@ -141,6 +141,17 @@ Am 21. Juli 2026 wurde zusätzlich ein bereits laufender Neko/Chrome-Stack auf d
 
 Codex Computer Use absolvierte den geschützten Login und beobachtete `/ws`. WebRTC ICE blieb aber bei `checking` und wechselte danach zu `failed`; das Video blieb bei `readyState 0`. Deshalb wurde **kein FPS-Wert** berichtet. Die nächste sinnvolle Performance-Arbeit ist direkte Tailnet-Konnektivität beziehungsweise UDP/ICE zu reparieren und erst danach Frame- und Touch-to-Pixel-Messungen zu wiederholen.
 
+### Aktueller CloakBrowser-Manager auf der VCVM
+
+Der vollständige KasmVNC/noVNC-Produktpfad wurde anschließend selbst auf der VCVM betrieben und getrennt VCVM-lokal sowie vom Mac über den authentifizierten SSH-/Tailscale-Tunnel gemessen.
+
+| Pfad | Health median/p95 | VNC open median/p95 | erstes RFB-Frame median/p95 |
+|---|---:|---:|---:|
+| VCVM Loopback | 0,514 / 1,179 ms | 6,689 / 9,989 ms | 19,558 / 26,837 ms |
+| Mac über SSH + Tailscale DERP(nue) | 61,8 / 125,6 ms | 195,2 / 266,8 ms | 204,6 / 328,6 ms |
+
+Eine synthetische Bewegungsseite erzeugte **6,96 sichtbare Canvas-Änderungen/s** VCVM-lokal und **4,18/s** über den Relay-Pfad. Diese Beobachtung misst veränderte gerenderte Canvas-Zustände, nicht Encoder-FPS, nicht jedes RFB-Update und keine Touch-to-Pixel-Antwort. Sie zeigt dennoch, dass der Relay-Pfad die sichtbare Aktualisierung weiter reduziert. `tailscale ping` stellte keine Direktverbindung her; der Mac hatte öffentliches IPv4 ohne IPv6, die VCVM öffentliches IPv6 ohne gefundenes IPv4. Die höchste Performance-Priorität ist daher ein gemeinsamer direkter Tailnet-Adresspfad.
+
 ## KasmVNC 1.3.3 gegen 1.4.0: isolierter A/B-Lauf
 
 Am 20. Juli 2026 wurden beide KasmVNC-Versionen in getrennten lokalen Containern mit identischem 1024-×-576-Profil, deaktiviertem Clipboard-Sync, derselben aktuellen Frontend-Ausgabe und demselben aktuellen `browser_manager.py` geprüft. Die App war jeweils nur auf `127.0.0.1` gebunden; der normale Produktionscontainer blieb unverändert. Für KasmVNC 1.4 war das aktuelle Backend notwendig: Das zuvor gebaute Image enthielt noch den bereits behobenen Fehler, `search_engine` als nicht unterstütztes Chromium-Launch-Argument weiterzugeben.

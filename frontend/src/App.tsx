@@ -24,6 +24,41 @@ type View = "empty" | "create" | "edit" | "view" | "access";
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 type MobileConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
 
+interface ApplyProfileViewportOptions {
+  profile: Profile | null;
+  width: number;
+  height: number;
+  canManageProfiles: boolean;
+  canOperateProfile: boolean;
+  update: (id: string, data: Partial<ProfileCreateData>) => Promise<Profile | undefined>;
+  stop: (id: string) => Promise<boolean>;
+  launch: (id: string) => Promise<unknown>;
+}
+
+export async function applyProfileViewport({
+  profile,
+  width,
+  height,
+  canManageProfiles,
+  canOperateProfile,
+  update,
+  stop,
+  launch,
+}: ApplyProfileViewportOptions) {
+  if (!profile || !canManageProfiles) return false;
+  if (profile.status === "running" && !canOperateProfile) return false;
+
+  const updatedProfile = await update(profile.id, { screen_width: width, screen_height: height });
+  if (!updatedProfile) return false;
+  if (profile.status !== "running") return true;
+
+  const stopped = await stop(profile.id);
+  if (!stopped) return false;
+
+  const result = await launch(updatedProfile.id);
+  return !!result;
+}
+
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [authRequired, setAuthRequired] = useState(false);
@@ -187,10 +222,17 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   }, [canManageProfiles, isMobile]);
 
   const handleViewportApply = useCallback(async (width: number, height: number) => {
-    if (!selectedId || !canManageProfiles) return false;
-    const profile = await update(selectedId, { screen_width: width, screen_height: height });
-    return !!profile;
-  }, [canManageProfiles, selectedId, update]);
+    return applyProfileViewport({
+      profile: selected,
+      width,
+      height,
+      canManageProfiles,
+      canOperateProfile: canOperateSelected,
+      update,
+      stop,
+      launch,
+    });
+  }, [canManageProfiles, canOperateSelected, launch, selected, stop, update]);
 
   if (view === "access" && canManageProfiles && accessControlEnabled) {
     return <AccessDashboard onClose={() => setView(selected ? "view" : "empty")} />;

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { api, type Profile } from "../../lib/api";
@@ -138,6 +138,14 @@ function runningSplit(overrides: Partial<Parameters<typeof MobileSplitScreen>[0]
     browserConnectionStatus: "connected",
     ...overrides,
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 beforeEach(() => {
@@ -348,28 +356,127 @@ describe("MobileSplitScreen", () => {
     expect((input as HTMLTextAreaElement).value).toBe("   ");
   });
 
-  it("starts a short portrait live browser with a larger collapsed browser pane", () => {
+  it("fits a collapsed portrait live browser to the stream aspect height", () => {
     const originalInnerHeight = window.innerHeight;
     const originalInnerWidth = window.innerWidth;
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 667 });
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
 
     try {
-      runningSplit();
+      runningSplit({
+        selected: { ...runningProfile, screen_width: 1024, screen_height: 576 },
+      });
 
       const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-      const pane = Number.parseInt(livePane.style.getPropertyValue("--mobile-live-pane-basis"), 10);
-      expect(pane).toBe(82);
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("263px");
+      expect(livePane.classList.contains("mobile-live-pane-fit")).toBe(true);
       expect(screen.queryByLabelText("Chat history")).toBeNull();
       expect(screen.getByLabelText("Expand task chat").getAttribute("aria-expanded")).toBe("false");
 
       openBrowserTools();
-      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("65%");
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("68%");
+      expect(livePane.classList.contains("mobile-live-pane-fit")).toBe(false);
     } finally {
       Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
       Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
       fireEvent(window, new Event("resize"));
     }
+  });
+
+  it("keeps the aspect-fit live browser height when task chat is expanded", () => {
+    const originalInnerHeight = window.innerHeight;
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+
+    try {
+      const { container } = runningSplit({
+        selected: { ...runningProfile, screen_width: 1024, screen_height: 576 },
+      });
+      const workspace = container.querySelector(".mobile-split-root") as HTMLElement;
+      const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
+
+      fireEvent.click(screen.getByLabelText("Expand task chat"));
+
+      expect(workspace.classList.contains("mobile-workspace-collapsed")).toBe(false);
+      expect(screen.getByLabelText("Chat history")).toBeTruthy();
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("263px");
+      expect(livePane.classList.contains("mobile-live-pane-fit")).toBe(true);
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
+      fireEvent(window, new Event("resize"));
+    }
+  });
+
+  it("caps a portrait remote browser fit so lower mobile controls remain visible", () => {
+    const originalInnerHeight = window.innerHeight;
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+
+    try {
+      runningSplit({
+        selected: { ...runningProfile, screen_width: 390, screen_height: 844 },
+      });
+
+      const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("688px");
+      expect(livePane.classList.contains("mobile-live-pane-fit")).toBe(true);
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
+      fireEvent(window, new Event("resize"));
+    }
+  });
+
+  it("recomputes the aspect-fit live browser height on viewport resize events", async () => {
+    const originalInnerHeight = window.innerHeight;
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+
+    try {
+      runningSplit({
+        selected: { ...runningProfile, screen_width: 1024, screen_height: 576 },
+      });
+      const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("263px");
+
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 430 });
+      fireEvent(window, new Event("resize"));
+      await waitFor(() => expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("286px"));
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
+      fireEvent(window, new Event("resize"));
+    }
+  });
+
+  it("recomputes the aspect-fit live browser height on visual viewport resize events", async () => {
+    let resizeHandler: (() => void) | null = null;
+    vi.stubGlobal("visualViewport", {
+      width: 390,
+      height: 844,
+      addEventListener: vi.fn((event: string, handler: () => void) => {
+        if (event === "resize") resizeHandler = handler;
+      }),
+      removeEventListener: vi.fn(),
+    });
+
+    runningSplit({
+      selected: { ...runningProfile, screen_width: 1024, screen_height: 576 },
+    });
+
+    const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("263px");
+
+    Object.assign(window.visualViewport!, { width: 420, height: 844 });
+    await act(async () => {
+      resizeHandler?.();
+    });
+
+    await waitFor(() => expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("280px"));
   });
 
   it("keeps only Full Tools Chat and Send visible as persistent primary actions", () => {
@@ -498,7 +605,7 @@ describe("MobileSplitScreen", () => {
     const { props } = runningSplit();
     const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
 
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("82%");
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toMatch(/px$/);
     expect(screen.queryByLabelText("Browser pane")).toBeNull();
 
     openBrowserTools();
@@ -556,6 +663,40 @@ describe("MobileSplitScreen", () => {
     fireEvent.click(screen.getByText("Phone fit"));
 
     await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(390, 844));
+  });
+
+  it("shows live viewport restart state and prevents duplicate apply submissions", async () => {
+    const apply = deferred<boolean>();
+    const onViewportApply = vi.fn().mockReturnValue(apply.promise);
+    runningSplit({ onViewportApply });
+
+    openBrowserTools();
+    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+    expect(screen.getByText("Restarts live browser to apply")).toBeTruthy();
+    expect(screen.queryByText(/next launch/i)).toBeNull();
+
+    const applyButton = screen.getByRole("button", { name: "Apply" });
+    fireEvent.click(applyButton);
+
+    expect(await screen.findByText("Restarting live browser...")).toBeTruthy();
+    const applyingButton = screen.getByRole("button", { name: "Applying..." }) as HTMLButtonElement;
+    expect(applyingButton.disabled).toBe(true);
+    fireEvent.click(applyingButton);
+    expect(onViewportApply).toHaveBeenCalledTimes(1);
+
+    apply.resolve(true);
+    expect(await screen.findByText("Saved")).toBeTruthy();
+  });
+
+  it("shows an apply error when a running viewport restart fails", async () => {
+    runningSplit({ onViewportApply: vi.fn().mockResolvedValue(false) });
+
+    openBrowserTools();
+    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+    fireEvent.click(screen.getByText("Apply"));
+
+    expect(await screen.findByText("Could not apply viewport")).toBeTruthy();
+    expect(screen.queryByText("Could not save viewport")).toBeNull();
   });
 
   it("keeps editable viewport settings and zoom available in fullscreen while background controls are inert", async () => {

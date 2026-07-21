@@ -81,8 +81,10 @@ const defaultLivePanePercent = 68;
 const compactLivePanePercent = 65;
 const compactLivePaneMaximumHeight = 700;
 const defaultBrowserZoom = 100;
-const collapsedLivePanePercent = 82;
 const collapsedLandscapeLivePanePercent = 74;
+const collapsedLivePaneHeaderHeight = 44;
+const livePaneLowerControlsReserveHeight = 156;
+const minimumAspectFitPaneHeight = 220;
 const minimumPhoneFitWidth = 320;
 const minimumPhoneFitHeight = 480;
 
@@ -128,6 +130,45 @@ function usesCompactLivePane() {
 function defaultPanePercent(isLiveBrowser: boolean, compactLivePane: boolean) {
   if (!isLiveBrowser) return defaultPreviewPanePercent;
   return compactLivePane ? compactLivePanePercent : defaultLivePanePercent;
+}
+
+function currentLiveViewportSize() {
+  if (typeof window === "undefined") {
+    return { width: presets[0].width, height: presets[0].height };
+  }
+
+  const visualViewport = window.visualViewport;
+  return {
+    width: Math.round(visualViewport?.width ?? window.innerWidth ?? presets[0].width),
+    height: Math.round(visualViewport?.height ?? window.innerHeight ?? presets[0].height),
+  };
+}
+
+function collapsedLivePaneBasis(
+  width: number | null | undefined,
+  height: number | null | undefined,
+  liveViewportSize: { width: number; height: number },
+) {
+  if (
+    !width ||
+    !height ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return `${defaultLivePanePercent}%`;
+  }
+
+  const fittedBrowserHeight = Math.round(liveViewportSize.width * (height / width));
+  const paneHeight = fittedBrowserHeight + collapsedLivePaneHeaderHeight;
+  if (liveViewportSize.height >= liveViewportSize.width) {
+    const maximumPaneHeight = Math.max(
+      minimumAspectFitPaneHeight,
+      liveViewportSize.height - livePaneLowerControlsReserveHeight,
+    );
+    return `${Math.min(paneHeight, maximumPaneHeight)}px`;
+  }
+
+  return `${paneHeight}px`;
 }
 
 function isInteractiveShortcutTarget(target: EventTarget | null) {
@@ -194,11 +235,13 @@ export function MobileSplitScreen({
   const [gridOpen, setGridOpen] = useState(false);
   const [viewportOpen, setViewportOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
+  const [viewportApplying, setViewportApplying] = useState(false);
   const [viewportSaved, setViewportSaved] = useState(false);
   const [viewportSaveFailed, setViewportSaveFailed] = useState(false);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [fullscreenViewOpen, setFullscreenViewOpen] = useState(false);
   const [fullscreenViewportOpen, setFullscreenViewportOpen] = useState(false);
+  const [liveViewportSize, setLiveViewportSize] = useState(currentLiveViewportSize);
   const [compactLivePane, setCompactLivePane] = useState(usesCompactLivePane);
   const [panePercent, setPanePercent] = useState(() =>
     defaultPanePercent(selected?.status === "running", usesCompactLivePane()),
@@ -223,16 +266,17 @@ export function MobileSplitScreen({
   const browserUrl = selected?.cdp_url ?? "Browser preview";
   const isLiveBrowser = selected?.status === "running";
   const preferredPanePercent = defaultPanePercent(isLiveBrowser, compactLivePane);
-  const collapsedPanePercent =
-    typeof window !== "undefined" && window.innerHeight <= 500 && window.innerWidth > window.innerHeight
-      ? collapsedLandscapeLivePanePercent
-      : collapsedLivePanePercent;
+  const collapsedPaneBasis =
+    liveViewportSize.height <= 500 && liveViewportSize.width > liveViewportSize.height
+      ? `${collapsedLandscapeLivePanePercent}%`
+      : collapsedLivePaneBasis(selected?.screen_width, selected?.screen_height, liveViewportSize);
+  const fitLivePaneToBrowser = isLiveBrowser && !remoteToolsOpen && !paneAdjusted;
   const effectivePanePercent =
-    isLiveBrowser && chatCollapsed && !remoteToolsOpen && !paneAdjusted
-      ? collapsedPanePercent
-      : panePercent;
+    fitLivePaneToBrowser
+      ? collapsedPaneBasis
+      : `${panePercent}%`;
   const livePaneStyle = {
-    "--mobile-live-pane-basis": `${effectivePanePercent}%`,
+    "--mobile-live-pane-basis": effectivePanePercent,
   } as CSSProperties;
   const connectionLabel =
     browserConnectionStatus === "connected"
@@ -385,10 +429,20 @@ export function MobileSplitScreen({
   }, [selected?.id, selected?.screen_height, selected?.screen_width]);
 
   useEffect(() => {
-    const updateCompactLivePane = () => setCompactLivePane(usesCompactLivePane());
-    updateCompactLivePane();
-    window.addEventListener("resize", updateCompactLivePane);
-    return () => window.removeEventListener("resize", updateCompactLivePane);
+    const updateLiveViewport = () => {
+      const nextSize = currentLiveViewportSize();
+      setLiveViewportSize((current) =>
+        current.width === nextSize.width && current.height === nextSize.height ? current : nextSize,
+      );
+      setCompactLivePane(usesCompactLivePane());
+    };
+    updateLiveViewport();
+    window.addEventListener("resize", updateLiveViewport);
+    window.visualViewport?.addEventListener("resize", updateLiveViewport);
+    return () => {
+      window.removeEventListener("resize", updateLiveViewport);
+      window.visualViewport?.removeEventListener("resize", updateLiveViewport);
+    };
   }, []);
 
   useEffect(() => {
@@ -567,6 +621,23 @@ export function MobileSplitScreen({
     setPanePercent(value);
   };
 
+  const applyViewportSize = async (nextViewport: { width: number; height: number }) => {
+    if (viewportApplying) return;
+
+    setViewportSaved(false);
+    setViewportSaveFailed(false);
+    if (!selected || !canManageProfiles) return;
+
+    setViewportApplying(true);
+    try {
+      const saved = await onViewportApply(nextViewport.width, nextViewport.height);
+      setViewportSaved(saved);
+      setViewportSaveFailed(!saved);
+    } finally {
+      setViewportApplying(false);
+    }
+  };
+
   const applyPhoneFitViewport = async () => {
     const visualViewport = typeof window !== "undefined" ? window.visualViewport : null;
     const nextViewport = {
@@ -579,21 +650,11 @@ export function MobileSplitScreen({
       ),
     };
     setViewport(nextViewport);
-    setViewportSaved(false);
-    setViewportSaveFailed(false);
-    if (!selected || !canManageProfiles) return;
-
-    const saved = await onViewportApply(nextViewport.width, nextViewport.height);
-    setViewportSaved(saved);
-    setViewportSaveFailed(!saved);
+    await applyViewportSize(nextViewport);
   };
 
   const applyViewport = async () => {
-    if (!selected || !canManageProfiles) return;
-
-    const saved = await onViewportApply(viewport.width, viewport.height);
-    setViewportSaved(saved);
-    setViewportSaveFailed(!saved);
+    await applyViewportSize(viewport);
   };
 
   const renderViewportEditor = (surface: "inline" | "fullscreen") => {
@@ -610,7 +671,9 @@ export function MobileSplitScreen({
       >
         {fullscreen ? (
           <p className="mobile-viewport-editor-note">
-            Save the next browser viewport without leaving the live viewer.
+            {selected?.status === "running"
+              ? "Restarts live browser to apply this viewport."
+              : "Save the viewport for the next launch."}
           </p>
         ) : null}
         {!fullscreen ? (
@@ -626,6 +689,7 @@ export function MobileSplitScreen({
                 type="button"
                 onClick={applyPhoneFitViewport}
                 className="mobile-preset-button mobile-phone-fit-button"
+                disabled={viewportApplying}
               >
                 Phone fit
               </button>
@@ -639,6 +703,7 @@ export function MobileSplitScreen({
                     setViewportSaveFailed(false);
                   }}
                   className="mobile-preset-button"
+                  disabled={viewportApplying}
                 >
                   {preset.label}
                 </button>
@@ -663,6 +728,7 @@ export function MobileSplitScreen({
                     setViewportSaved(false);
                     setViewportSaveFailed(false);
                   }}
+                  disabled={viewportApplying}
                 />
               </label>
               <label htmlFor={heightInputId}>
@@ -683,26 +749,33 @@ export function MobileSplitScreen({
                     setViewportSaved(false);
                     setViewportSaveFailed(false);
                   }}
+                  disabled={viewportApplying}
                 />
               </label>
             </div>
             <div className="flex items-center justify-between gap-3">
               <p className="text-[11px] text-gray-500">
-                {viewportSaveFailed
-                  ? "Could not save viewport"
+                {viewportApplying
+                  ? selected?.status === "running"
+                    ? "Restarting live browser..."
+                    : "Saving viewport..."
+                  : viewportSaveFailed
+                  ? selected?.status === "running"
+                    ? "Could not apply viewport"
+                    : "Could not save viewport"
                   : viewportSaved
                     ? "Saved"
                     : selected?.status === "running"
-                      ? "Saves for the next launch; visual zoom changes now"
+                      ? "Restarts live browser to apply"
                       : "Applied when this profile launches"}
               </p>
               <button
                 type="button"
                 className="btn-primary min-h-11 shrink-0"
-                disabled={!selected}
+                disabled={!selected || viewportApplying}
                 onClick={applyViewport}
               >
-                Apply
+                {viewportApplying ? "Applying..." : "Apply"}
               </button>
             </div>
           </>
@@ -905,7 +978,7 @@ export function MobileSplitScreen({
   return (
     <main className={`mobile-split-root ${compactWorkspace ? "mobile-workspace-collapsed" : ""} bg-surface-0 text-gray-100`}>
       <section
-        className={`mobile-live-pane ${isLiveBrowser ? "mobile-live-pane-running" : ""} ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
+        className={`mobile-live-pane ${isLiveBrowser ? "mobile-live-pane-running" : ""} ${fitLivePaneToBrowser ? "mobile-live-pane-fit" : ""} ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
         style={livePaneStyle}
         role={fullscreenOpen ? "dialog" : undefined}
         aria-modal={fullscreenOpen ? true : undefined}

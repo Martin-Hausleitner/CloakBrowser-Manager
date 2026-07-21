@@ -81,8 +81,10 @@ export function useProfiles() {
       try {
         await api.stopProfile(id);
         await refresh();
+        return true;
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to stop profile");
+        return false;
       }
     },
     [refresh],

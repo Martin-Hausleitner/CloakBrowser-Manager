@@ -76,10 +76,10 @@ Pane-Ratio und visueller Zoom sind lokale Live-Funktionen und bleiben für alle 
 | Visueller noVNC-Zoom | verändert sichtbare Canvas-Geometrie sofort, ohne CSS-Transform | live, 75–150 % |
 | View-Reset | setzt Pane und Zoom geräteabhängig zurück | live |
 | Fullscreen View/Zoom | bleibt im Fullscreen erreichbar | live |
-| Profil-Viewport Breite/Höhe | speichert die Xvnc-/Browserauflösung | wirkt beim nächsten Profilstart |
-| Phone-fit-Preset | übernimmt den aktuellen Visual Viewport als Profilwert | speichert für den nächsten Start |
+| Profil-Viewport Breite/Höhe | speichert die Xvnc-/Browserauflösung | laufendes Profil wird kontrolliert neu gestartet |
+| Phone-fit-Preset | übernimmt den aktuellen Visual Viewport als Profilwert | laufendes Profil wird kontrolliert neu gestartet |
 
-Die Oberfläche sagt bei einem laufenden Profil ausdrücklich: **„Saves for the next launch; visual zoom changes now“**. Ein echter Live-Resize des laufenden Xvnc-Framebuffers ist nicht implementiert und wird nicht als erledigt behauptet.
+Pane und Zoom reagieren ohne Server-Neustart. Eine neue echte Xvnc-/Browserauflösung kann KasmVNC in diesem Produktpfad nicht sicher in place übernehmen; `Apply` speichert deshalb den Wert und startet nur das ausgewählte laufende Profil kontrolliert neu. Die Oberfläche zeigt währenddessen **„Restarting live browser…“** und meldet Stop-/Relaunch-Fehler, statt eine nur gespeicherte Größe als live angewendet darzustellen.
 
 ## Frische Latenzmessung
 
@@ -91,6 +91,22 @@ Der r49-Runner verwendete eine bereits laufende, loopback-gebundene 1024-×-576-
 | VNC-WebSocket-Upgrade | 20/20 | 3,457 ms | 8,931 ms | 49,980 ms |
 
 Diese Zahlen messen TCP/HTTP beziehungsweise den WebSocket-Upgrade. Sie messen **nicht** Browserstart, ersten Bildinhalt, Frame-Rate, Berührung bis Pixeländerung, Tailnet/WAN oder Mobilfunk.
+
+### Aktueller VCVM-only-Produktpfad
+
+Der aktuelle Manager, das React-UI, SQLite, CloakBrowser, Xvnc/KasmVNC und das Profilvolume liefen gemeinsam auf der VCVM; der Mac war ausschließlich Client über einen authentifizierten SSH-/Tailscale-Tunnel. Die VCVM veröffentlichte weder den Manager noch rohe VNC-Ports außerhalb von Loopback.
+
+| Messpunkt | Läufe | Median | p95 | Maximum |
+|---|---:|---:|---:|---:|
+| VCVM `/health` total | 30 | 0,514 ms | 1,179 ms | 13,268 ms |
+| VCVM authentifiziertes Profil-API total | 30 | 2,148 ms | 4,147 ms | 10,878 ms |
+| VCVM VNC-WebSocket open | 20 | 6,689 ms | 9,989 ms | 70,799 ms |
+| VCVM erstes RFB-Frame | 20 | 19,558 ms | 26,837 ms | 91,409 ms |
+| Mac-Tunnel `/health` total | 30 | 61,8 ms | 125,6 ms | 150,7 ms |
+| Mac-Tunnel VNC-WebSocket open | 15 | 195,2 ms | 266,8 ms | 502,5 ms |
+| Mac-Tunnel erstes RFB-Frame | 15 | 204,6 ms | 328,6 ms | 555,1 ms |
+
+Tailscale nutzte `DERP(nue)` mit 49–64 ms beobachtetem Ping und stellte keine direkte Verbindung her. `netcheck` zeigte auf dem Mac öffentliches IPv4 ohne IPv6, auf der VCVM dagegen öffentliches IPv6 ohne gefundenes IPv4; damit fehlt aktuell ein gemeinsamer direkter Adresspfad. Eine fünfsekündige synthetische Bewegungsseite ergab auf dem verbundenen Canvas **6,96 sichtbare Änderungen/s** VCVM-lokal und **4,18/s** über den Mac-Relay-Pfad. Das ist ein reproduzierbarer visueller Update-Proxy, aber weder Codec-FPS noch Touch-to-Pixel-Latenz.
 
 ### r50-VCVM/Neko-Tailnet-Beleg
 
@@ -123,7 +139,7 @@ Frühere isolierte KasmVNC-1.4- und Selkies-POCs sowie der neue Selkies-Readines
 
 1. **1024 × 576 als verifizierten Standard behalten.** Genau diese laufende Profilauflösung bestand die frischen Mobile-, Auth- und warmen Loopback-Gates; der r49-Lauf enthält keinen neuen 1440-×-900-Vergleich.
 2. **Pane und noVNC-Zoom für spontane Anpassungen nutzen.** Sie reagieren live und halten den Remote-Browserprozess stabil.
-3. **390 × 844 oder Phone-fit bewusst pro Profil speichern**, wenn die Zielseite ihre echte Mobile-Responsive-Variante liefern soll; anschließend Profil neu starten.
+3. **390 × 844 oder Phone-fit bewusst pro Profil anwenden**, wenn die Zielseite ihre echte Mobile-Responsive-Variante liefern soll; die UI startet ein laufendes Profil dafür kontrolliert neu und verbindet den Canvas anschließend wieder.
 4. **1440 × 900 nicht aus dem r49-Lauf bewerten.** Bei einer konkreten Desktop-Layout-Anforderung separat auf demselben Gerät und Transport messen.
 5. **Browserfenster an den VNC-Framebuffer anpassen.** Der integrierte PR-47-Pfad hält Chrome innerhalb des sichtbaren Desktops.
 6. **Mobile User-Agent nicht global erzwingen.** Viewport, Plattform/Fingerprint und gewünschte Website-Variante müssen pro Profil zusammenpassen.
@@ -150,7 +166,7 @@ Frühere isolierte KasmVNC-1.4- und Selkies-POCs sowie der neue Selkies-Readines
 - Kein physischer iPhone-/Mobile-Safari-E2E. Chromium-Device-Emulation und macOS-WebKit ersetzen ihn nicht.
 - Safari Remote Automation war lokal nicht freigegeben; das vorbereitete WebKit-Gate meldete diesen Zustand korrekt als blockiert.
 - Tailscale Serve ist im Tailnet nicht aktiviert. Es existiert daher noch keine geprüfte private HTTPS-iPhone-URL.
-- Der r50-VCVM/Neko-Lauf belegt Tailnet-HTTP und geschützten Login über Codex Computer Use, aber wegen fehlgeschlagenem WebRTC-ICE keine Framerate.
+- Der r50-VCVM/Neko-Lauf belegt Tailnet-HTTP und geschützten Login über Codex Computer Use, aber wegen fehlgeschlagenem WebRTC-ICE keine Neko-Framerate. Für KasmVNC existiert nur der oben klar begrenzte Canvas-Änderungsproxy.
 - Kein echter Mobilfunk- und kein Touch-to-Pixel-p50/p95-Bericht.
 - Der Grid-View ist ein schneller Session-/Profilumschalter, kein gleichzeitiges Multi-Canvas-Monitoring.
 - Der Chat-Composer akzeptiert in r56 ausschließlich den verifizierten Codex-Computer-Use-Providervertrag, benötigt aber weiterhin einen realen Host-Bridge-Prozess und ist keine eigenständige Vendor-API.
@@ -158,4 +174,4 @@ Frühere isolierte KasmVNC-1.4- und Selkies-POCs sowie der neue Selkies-Readines
 
 ## Freigabeempfehlung
 
-Der r56-Stand ist als **lokales, rollenbasiertes Mobile-Web-MVP** freigabefähig. Für eine externe oder iPhone-spezifische Freigabe fehlen noch Tailscale Serve/HTTPS, ein physisches Safari-Gerät sowie echte Touch-to-Pixel- und Reconnect-Messungen. Die höchste nächste Produktpriorität ist die iOS-IME-Bridge, gefolgt von Keyboard-Zubehörleiste und echter Eingabelatenztelemetrie. Die UI/UX-Details stehen im [Mobile UI/UX and universal browser-action audit](MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md).
+Der aktuelle Stand ist als **VCVM-gehostetes, rollenbasiertes Mobile-Web-MVP** freigabefähig. Für eine direkte iPhone-Freigabe fehlen noch Tailscale Serve/HTTPS, ein physisches Safari-Gerät sowie echte Touch-to-Pixel- und Reconnect-Messungen. Die höchste nächste Produktpriorität ist die direkte Tailnet-Verbindung, danach iOS-IME-Bridge, Keyboard-Zubehörleiste und echte Eingabelatenztelemetrie. Die UI/UX-Details stehen im [Mobile UI/UX and universal browser-action audit](MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md).

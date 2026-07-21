@@ -83,6 +83,12 @@
     min-height: clamp(20rem, 60dvh, 40rem);
   }
 
+  .mobile-live-pane-fit:not(.mobile-live-pane-fullscreen) {
+    flex: 0 0 var(--mobile-live-pane-basis, 68%);
+    min-height: 0;
+    max-height: none;
+  }
+
   .mobile-live-header {
     @apply flex min-h-11 shrink-0 items-center justify-between gap-2 border-b border-border/70 bg-surface-1 px-2 py-0;
   }
@@ -125,6 +131,10 @@
     flex: 1 1 auto;
     min-height: 0;
     max-height: none;
+  }
+
+  .mobile-workspace-collapsed .mobile-live-pane-fit:not(.mobile-live-pane-fullscreen) {
+    flex: 0 0 var(--mobile-live-pane-basis, 68%);
   }
 
   .mobile-workspace-collapsed .mobile-control-pane {

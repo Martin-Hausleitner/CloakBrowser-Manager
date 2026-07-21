@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
+import { createPortal } from "react-dom";
 import { ClipboardCopy, Code2, Ellipsis, Maximize2, Minimize2 } from "lucide-react";
 import { api } from "../lib/api";
 
@@ -10,6 +11,10 @@ interface ProfileViewerProps {
   compactControls?: boolean;
   layoutMode?: "inline" | "fullscreen";
   viewportScale?: number;
+  remoteToolsOpen?: boolean;
+  remoteToolsPortalId?: string;
+  onRemoteToolsOpenChange?: (open: boolean) => void;
+  onConnectionStatusChange?: (status: ConnectionStatus, connected: boolean) => void;
   onDisconnect: () => void;
 }
 
@@ -88,6 +93,10 @@ export function ProfileViewer({
   compactControls = false,
   layoutMode = "inline",
   viewportScale = 1,
+  remoteToolsOpen,
+  remoteToolsPortalId,
+  onRemoteToolsOpenChange,
+  onConnectionStatusChange,
   onDisconnect,
 }: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -102,13 +111,32 @@ export function ProfileViewer({
   );
   const [cdpCopied, setCdpCopied] = useState(false);
   const [pastePanelOpen, setPastePanelOpen] = useState(false);
-  const [toolsOpen, setToolsOpen] = useState(false);
+  const [localToolsOpen, setLocalToolsOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [pasteError, setPasteError] = useState<string | null>(null);
   const [pasting, setPasting] = useState(false);
+  const [remoteToolsPortal, setRemoteToolsPortal] = useState<HTMLElement | null>(null);
   const effectiveViewportScale = clampViewportScale(viewportScale);
   const viewportScaleRef = useRef(effectiveViewportScale);
   viewportScaleRef.current = effectiveViewportScale;
+  const toolsOpen = remoteToolsOpen ?? localToolsOpen;
+  const setToolsOpen = useCallback(
+    (next: boolean | ((open: boolean) => boolean)) => {
+      const resolved = typeof next === "function" ? next(toolsOpen) : next;
+      if (remoteToolsOpen === undefined) {
+        setLocalToolsOpen(resolved);
+      }
+      onRemoteToolsOpenChange?.(resolved);
+    },
+    [onRemoteToolsOpenChange, remoteToolsOpen, toolsOpen],
+  );
+  useEffect(() => {
+    if (!remoteToolsPortalId || typeof document === "undefined") {
+      setRemoteToolsPortal(null);
+      return;
+    }
+    setRemoteToolsPortal(document.getElementById(remoteToolsPortalId));
+  }, [remoteToolsPortalId, toolsOpen]);
 
   const sendRemotePasteKeystroke = useCallback(() => {
     const rfb = rfbRef.current;
@@ -176,7 +204,11 @@ export function ProfileViewer({
     setToolsOpen(false);
     setPastePanelOpen(false);
     setPasteError(null);
-  }, [layoutMode]);
+  }, [layoutMode, setToolsOpen]);
+
+  useEffect(() => {
+    onConnectionStatusChange?.(connectionStatus, connected);
+  }, [connected, connectionStatus, onConnectionStatusChange]);
 
   useEffect(() => {
     let rfb: any = null;
@@ -588,6 +620,64 @@ export function ProfileViewer({
     </>
   );
 
+  const pastePanel = pastePanelOpen ? (
+    <form
+      className={compactControls ? "mobile-vnc-paste-panel" : "border-b border-border bg-surface-1 px-3 py-2"}
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submitManualPaste();
+      }}
+    >
+      <label htmlFor={`remote-paste-${profileId}`} className="block text-xs text-gray-300">
+        Paste text into the remote browser
+      </label>
+      <textarea
+        id={`remote-paste-${profileId}`}
+        value={pasteText}
+        onChange={(event) => setPasteText(event.target.value)}
+        autoFocus
+        rows={3}
+        placeholder="Paste or type text here"
+        className="mt-1 w-full resize-y rounded border border-border bg-surface-2 px-2 py-1.5 text-sm text-gray-100 outline-none placeholder:text-gray-500 focus:border-accent"
+      />
+      {pasteError && (
+        <p role="alert" className="mt-1 text-xs text-red-400">
+          {pasteError}
+        </p>
+      )}
+      <div className="mt-2 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            setPastePanelOpen(false);
+            setPasteError(null);
+          }}
+          className="min-h-11 rounded px-3 py-1 text-xs text-gray-400 hover:bg-surface-2"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          className="min-h-11 rounded bg-accent px-3 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          aria-label="Send pasted text to remote browser"
+          disabled={!pasteText || pasting}
+        >
+          {pasting ? "Pasting..." : "Paste"}
+        </button>
+      </div>
+    </form>
+  ) : null;
+
+  const compactPortalTools = compactControls && remoteToolsPortal && toolsOpen
+    ? createPortal(
+      <div className="mobile-vnc-tools-portal" aria-label="Remote browser tools">
+        <div className="mobile-vnc-tools-portal-grid">{remoteToolButtons}</div>
+        {pastePanel}
+      </div>,
+      remoteToolsPortal,
+    )
+    : null;
+
   if (error) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -601,7 +691,8 @@ export function ProfileViewer({
 
   return (
     <div className={`profile-viewer relative flex h-full flex-col ${compactControls ? "profile-viewer-compact" : ""}`}>
-      <div className="profile-viewer-toolbar flex items-center justify-between bg-surface-1 px-3 py-1.5 border-b border-border">
+      {compactPortalTools}
+      <div className={`profile-viewer-toolbar flex items-center justify-between bg-surface-1 px-3 py-1.5 border-b border-border ${compactControls && remoteToolsPortalId ? "profile-viewer-toolbar-hidden" : ""}`}>
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-yellow-400 animate-pulse"}`} />
           <span className="text-xs text-gray-400">
@@ -646,59 +737,13 @@ export function ProfileViewer({
         </div>
       </div>
 
-      {compactControls && toolsOpen ? (
+      {compactControls && !remoteToolsPortalId && toolsOpen ? (
         <div id="mobile-remote-browser-tools" className="mobile-vnc-tools-drawer" aria-label="Remote browser tools">
           {remoteToolButtons}
         </div>
       ) : null}
 
-      {pastePanelOpen && (
-        <form
-          className="border-b border-border bg-surface-1 px-3 py-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void submitManualPaste();
-          }}
-        >
-          <label htmlFor={`remote-paste-${profileId}`} className="block text-xs text-gray-300">
-            Paste text into the remote browser
-          </label>
-          <textarea
-            id={`remote-paste-${profileId}`}
-            value={pasteText}
-            onChange={(event) => setPasteText(event.target.value)}
-            autoFocus
-            rows={3}
-            placeholder="Paste or type text here"
-            className="mt-1 w-full resize-y rounded border border-border bg-surface-2 px-2 py-1.5 text-sm text-gray-100 outline-none placeholder:text-gray-500 focus:border-accent"
-          />
-          {pasteError && (
-            <p role="alert" className="mt-1 text-xs text-red-400">
-              {pasteError}
-            </p>
-          )}
-          <div className="mt-2 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setPastePanelOpen(false);
-                setPasteError(null);
-              }}
-              className="min-h-11 rounded px-3 py-1 text-xs text-gray-400 hover:bg-surface-2"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="min-h-11 rounded bg-accent px-3 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-              aria-label="Send pasted text to remote browser"
-              disabled={!pasteText || pasting}
-            >
-              {pasting ? "Pasting..." : "Paste"}
-            </button>
-          </div>
-        </form>
-      )}
+      {!remoteToolsPortalId ? pastePanel : null}
 
       {/* VNC canvas container */}
       <div

@@ -61,7 +61,7 @@ Each CloakBrowser profile generates a completely different device identity. To t
 - **One-click launch/stop** — each profile runs as an isolated CloakBrowser instance
 - **Session persistence** — cookies, localStorage, and cache survive browser restarts
 - **In-browser viewing** — interact with launched browsers via noVNC, directly in the web GUI
-- **Mobile task workspace** — compact live-VNC split with editable viewport, ratio and visual zoom; fullscreen, grid, task history, attachments and a touch-sized composer
+- **Mobile task workspace** — browser-first live-VNC split with collapsed chat, central tools, fullscreen shortcuts, editable viewport, visual zoom and an injected Codex Computer Use host bridge
 - **Playwright/Puppeteer API** — connect to any running profile programmatically via CDP, while still watching it live in the browser
 - **Optional scoped access** — protect the web UI with a bootstrap token, then give people and Paperclip agents only the browser sandboxes they need
 - **Powered by CloakBrowser** — 32 source-level C++ patches, passes Cloudflare Turnstile, 0.9 reCAPTCHA v3 score
@@ -74,9 +74,9 @@ Each CloakBrowser profile generates a completely different device identity. To t
 - **Database**: SQLite
 - **Browser engine**: [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) (stealth Chromium binary)
 
-## Streaming Benchmarks
+## Streaming Diagnostics
 
-Streaming stack comparisons are documented in [docs/REMOTE-STREAMING-BENCHMARK.md](docs/REMOTE-STREAMING-BENCHMARK.md). New local runs should use the reproducible runner instead of editing benchmark numbers by hand:
+Streaming stack comparisons and Tailnet checks are documented in [docs/REMOTE-STREAMING-BENCHMARK.md](docs/REMOTE-STREAMING-BENCHMARK.md). New runs should use the headless diagnostic runner instead of editing numbers by hand:
 
 ```bash
 python3 scripts/streaming_benchmark_runner.py \
@@ -87,11 +87,11 @@ python3 scripts/streaming_benchmark_runner.py \
   --latest-markdown docs/streaming-benchmark-latest.md
 ```
 
-The administrator-only **Streaming benchmarks** view reads the configured report through `/api/benchmarks/latest`; set `BENCHMARK_REPORT_PATH` on the manager if its persistent report file is not `/data/benchmark-report.json`. The runner emits JSONL progress events for a browser UI, writes JSON plus Markdown reports, and separates `measured` candidates from `not_installed` or `architecture_only` entries. Its browser-facing output deliberately omits local paths, endpoints, commands, raw process output, and request headers. Pair it with `scripts/mobile_ui_gate.py` when a candidate also needs proof that the real mobile UI and live canvas still work. On macOS, `scripts/mobile_webkit_gate.py` adds a Safari/WebKit shell check after Remote Automation has been deliberately enabled in Safari Settings; it reports that prerequisite as blocked instead of weakening the result.
+The runner writes JSON plus Markdown reports and separates `measured` candidates from `not_installed` or `architecture_only` entries. It deliberately omits local paths, endpoints, commands, raw process output and request headers from the public report. Benchmarks are offline diagnostics and are not part of the compact mobile UI. Pair them with `scripts/mobile_ui_gate.py` when a candidate also needs proof that the real mobile UI and live canvas still work. On macOS, `scripts/mobile_webkit_gate.py` adds a Safari/WebKit shell check after Remote Automation has been deliberately enabled in Safari Settings; it reports that prerequisite as blocked instead of weakening the result.
 
 The current [redacted 20-run report](docs/streaming-benchmark-latest.md) is a fresh warm loopback recheck against the persistent r49 live-VNC preview: the Manager health endpoint reached a median first byte at **1.438 ms** (p95 **4.005 ms**), and the real KasmVNC/noVNC WebSocket upgrade reached a median **3.457 ms** handshake (p95 **8.931 ms**). Selkies was explicitly `not_installed`; Sunshine/Moonlight and Guacamole were explicitly `architecture_only`. These are loopback regression probes for the existing path, not a cross-technology winner claim; the full context and limits are in [docs/REMOTE-STREAMING-BENCHMARK.md](docs/REMOTE-STREAMING-BENCHMARK.md).
 
-The current compact mobile split has separately passed the r49 live VNC gate across iPhone 14 portrait, iPhone SE portrait, iPhone Pro Max portrait, iPhone 14 landscape, and a touch tablet: **249/249 checks** and **22 screenshots** passed with one connected canvas, no horizontal overflow, CDP-observed pointer/touch targeting, fullscreen, grid, ratio/zoom adjustment, editable admin-only profile viewports, a deterministic manual iOS-paste fallback, and a visible task chat/composer. The artifact does not record a keyboard/RFB-to-CDP validation. Legacy token, bootstrap token, named operator, and named viewer logins were also exercised at 390 × 844 against a real connected stream; viewer paste and remote tools were hidden, while viewer clipboard and launch requests were denied. The full critical audit and remaining physical-iPhone/Safari limits are in [docs/MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md](docs/MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md).
+The current r50 mobile implementation is browser-first: chat starts collapsed, browser tools are centralized, benchmark controls are not shown in the UI, and the task composer uses an injected host bridge. **Codex Computer Use is the configured and release-validated host**; without its valid injected bridge, task submission is explicitly unavailable instead of being simulated. No direct vendor API key is required in the UI. The final r50 mobile gate passed **272/272 checks** across five mobile viewports with **22 screenshots**, including a real connected VNC canvas, compact touch targets, chat, Grid, Fullscreen, viewport and clipboard paths. A separate Codex Computer Use run then exercised the final `390 x 844` release preview through real UI interactions and confirmed the connected canvas, four persistent actions, chat round-trip, Grid, viewport save/restore and live pane/zoom controls. The VCVM/Neko Tailnet check adds transport evidence only: Codex Computer Use completed the protected login and observed `/ws`, but WebRTC ICE stayed `checking` then failed, so no honest FPS value was recorded. Full details and limits are in [docs/MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md](docs/MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md).
 
 ## Development
 
@@ -216,7 +216,7 @@ environment:
 3. Create a Paperclip agent identity and copy its generated bearer key once into the agent's secret store.
 4. Rotate or deactivate a person or agent immediately when access changes.
 
-The access-control implementation and backend test matrix cover profile discovery, VNC, clipboard, launch/stop, CDP HTTP and CDP WebSockets. The fresh r49 login audit directly verified scoped profile visibility and live VNC access, plus viewer clipboard and launch denial; it did not re-record stop or CDP grant checks. A profile outside a caller's scope returns the same `404` response as a missing profile. The dashboard is a convenience layer; it is not the security boundary.
+The access-control implementation and backend test matrix cover profile discovery, VNC, clipboard, launch/stop, CDP HTTP and CDP WebSockets. The fresh r49 login audit directly verified scoped profile visibility and live VNC access, plus viewer clipboard and launch denial; it did not re-record stop or CDP grant checks. The r50 backend fix also covers dashboard-style updates to Paperclip-agent grants. A profile outside a caller's scope returns the same `404` response as a missing profile. The dashboard is a convenience layer; it is not the security boundary.
 
 | Grant | What it allows |
 | --- | --- |

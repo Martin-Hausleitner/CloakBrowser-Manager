@@ -477,6 +477,74 @@ describe("ProfileViewer", () => {
     expect(screen.queryByLabelText("Native fullscreen")).toBeNull();
   });
 
+  it("renders compact remote tools in the parent mobile tools sheet without a duplicate toolbar toggle", async () => {
+    const onRemoteToolsOpenChange = vi.fn();
+    render(
+      <>
+        <div id="mobile-remote-browser-tools-portal" />
+        <ProfileViewer
+          profileId="profile-1"
+          cdpUrl="/api/profiles/profile-1/cdp"
+          clipboardSync={true}
+          compactControls
+          remoteToolsOpen
+          remoteToolsPortalId="mobile-remote-browser-tools-portal"
+          onRemoteToolsOpenChange={onRemoteToolsOpenChange}
+          onDisconnect={vi.fn()}
+        />
+      </>,
+    );
+    await flushAsyncWork();
+    act(() => rfbMock.instances[0]?.emit("connect"));
+
+    expect(document.querySelector(".profile-viewer-toolbar-hidden")).toBeTruthy();
+    expect(screen.queryByLabelText("Open remote browser tools")).toBeNull();
+    expect(screen.getByLabelText("Remote browser tools")).toBeTruthy();
+    expect(screen.getByLabelText("Copy CDP endpoint URL")).toBeTruthy();
+    expect(screen.getByLabelText("Paste text into remote browser")).toBeTruthy();
+    expect(screen.getByLabelText("Disable clipboard sync")).toBeTruthy();
+  });
+
+  it("keeps manual paste available from the external mobile tools sheet", async () => {
+    const onRemoteToolsOpenChange = vi.fn();
+    render(
+      <>
+        <div id="mobile-remote-browser-tools-portal" />
+        <ProfileViewer
+          profileId="profile-1"
+          cdpUrl={null}
+          clipboardSync={true}
+          compactControls
+          remoteToolsOpen
+          remoteToolsPortalId="mobile-remote-browser-tools-portal"
+          onRemoteToolsOpenChange={onRemoteToolsOpenChange}
+          onDisconnect={vi.fn()}
+        />
+      </>,
+    );
+    await flushAsyncWork();
+    act(() => rfbMock.instances[0]?.emit("connect"));
+
+    fireEvent.click(screen.getByLabelText("Paste text into remote browser"));
+    fireEvent.change(screen.getByLabelText("Paste text into the remote browser"), {
+      target: { value: "hello from the mobile tools sheet" },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send pasted text to remote browser" }));
+      await Promise.resolve();
+    });
+
+    expect(api.setClipboard).toHaveBeenCalledWith("profile-1", "hello from the mobile tools sheet");
+    expect(rfbMock.instances[0]?.sendKeyCalls).toEqual([
+      [0xffe3, "ControlLeft", true],
+      [0x0076, "KeyV", true],
+      [0x0076, "KeyV", false],
+      [0xffe3, "ControlLeft", false],
+    ]);
+    expect(onRemoteToolsOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
   it("closes compact remote tools when the parent opens its mobile fullscreen viewer", async () => {
     const onDisconnect = vi.fn();
     const { rerender } = render(

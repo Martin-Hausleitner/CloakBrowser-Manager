@@ -1209,7 +1209,10 @@ async def update_access_agent(agent_id: str, body: AccessAgentUpdate, request: R
     actor = _require_admin(request.scope)
     data = body.model_dump(exclude_unset=True)
     if "grants" in data and data["grants"] is not None:
-        data["grants"] = [grant.model_dump() for grant in data["grants"]]
+        data["grants"] = [
+            grant.model_dump() if hasattr(grant, "model_dump") else grant
+            for grant in data["grants"]
+        ]
     agent = db.update_access_agent(agent_id, **data)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")

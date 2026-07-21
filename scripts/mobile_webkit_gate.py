@@ -190,10 +190,103 @@ def parse_browser_value(value: Any, label: str) -> dict[str, Any]:
     return decoded
 
 
-INITIAL_STATE_SCRIPT = r"""return JSON.stringify({
+INSTALL_HARNESS_SCRIPT = r"""window.cloakBrowserHarness = {
+  capabilities: {
+    chat: true,
+    streaming: true,
+    clipboard: true,
+    browser_actions: ['click', 'type', 'copy', 'paste', 'screenshot'],
+    metadata: { mode: 'webkit-gate', label: 'Codex Computer Use Bridge · connected' }
+  },
+  send: (request) => ({
+    id: 'webkit-gate-reply',
+    role: 'assistant',
+    content: `Queued in WebKit gate: ${request.text || ''}`.trim(),
+    created_at: new Date().toISOString(),
+    metadata: { mode: 'webkit-gate' }
+  }),
+  subscribe: () => () => undefined
+};
+window.dispatchEvent(new Event('cloakbrowserharnessready'));
+return true;"""
+
+INITIAL_STATE_SCRIPT = r"""const isVisible = (node) => {
+  if (!node) return false;
+  const rect = node.getBoundingClientRect();
+  const style = window.getComputedStyle(node);
+  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+};
+const composer = document.querySelector('#mobile-task-input');
+const sendButton = document.querySelector('button[aria-label="Run task"]');
+const harness = window.cloakBrowserHarness;
+const capabilities = typeof harness?.capabilities === 'function' ? harness.capabilities() : harness?.capabilities;
+const bodyText = document.body.innerText || '';
+const primarySelectors = [
+  'button[aria-label="Open fullscreen browser"]',
+  'button[aria-label="Open browser tools"]',
+  'button[aria-label="Close browser tools"]',
+  'button[aria-label="Expand task chat"]',
+  'button[aria-label="Collapse task chat"]',
+  'button[aria-label="Run task"]'
+];
+const primaryLabels = Array.from(document.querySelectorAll(primarySelectors.join(',')))
+  .filter(isVisible)
+  .map((node) => node.getAttribute('aria-label') || node.textContent || '');
+return JSON.stringify({
   ready: Boolean(document.querySelector('.mobile-split-root')),
   browserFrame: Boolean(document.querySelector('[data-testid="mobile-browser-frame"]')),
-  composer: Boolean(document.querySelector('#mobile-task-input')),
+  composer: isVisible(composer),
+  composerEnabled: isVisible(composer) && !composer.disabled && !composer.readOnly,
+  harnessInjected: Boolean(harness && typeof harness.send === 'function'),
+  harnessMode: capabilities?.metadata?.mode || null,
+  harnessConnectedLabel: bodyText.includes('Codex Computer Use Bridge · connected'),
+  harnessUnavailableLabel: bodyText.includes('unavailable') || bodyText.includes('local fallback'),
+  benchmarkButton: Boolean(document.querySelector('button[aria-label="Streaming benchmark results"]')),
+  benchmarkDashboard: bodyText.includes('Live streaming benchmark results'),
+  chatPanelVisible: isVisible(document.querySelector('#mobile-task-chat-panel')),
+  fullscreenButton: isVisible(document.querySelector('button[aria-label="Open fullscreen browser"]')),
+  toolsButton: isVisible(document.querySelector('button[aria-label="Open browser tools"]')),
+  chatButton: Boolean(document.querySelector('button[aria-label="Expand task chat"], button[aria-label="Collapse task chat"]')),
+  sendButton: isVisible(sendButton),
+  sendButtonEnabled: isVisible(sendButton) && !sendButton.disabled,
+  visiblePrimaryActions: primaryLabels,
+  width: window.innerWidth,
+  height: window.innerHeight,
+  scrollWidth: document.documentElement.scrollWidth,
+  clientWidth: document.documentElement.clientWidth
+});"""
+
+ENABLE_COMPOSER_SCRIPT = r"""const composer = document.querySelector('#mobile-task-input');
+if (!composer) return false;
+const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+if (setter) {
+  setter.call(composer, 'WebKit gate harness check');
+} else {
+  composer.value = 'WebKit gate harness check';
+}
+composer.dispatchEvent(new Event('input', { bubbles: true }));
+composer.dispatchEvent(new Event('change', { bubbles: true }));
+return true;"""
+
+OPEN_TOOLS_SCRIPT = r"""const button = document.querySelector(
+  'button[aria-label="Open browser tools"], button[aria-label="Close browser tools"]'
+);
+if (!button) return false;
+if (button.getAttribute('aria-label') === 'Open browser tools') button.click();
+return true;"""
+
+TOOLS_STATE_SCRIPT = r"""const isVisible = (node) => {
+  if (!node) return false;
+  const rect = node.getBoundingClientRect();
+  const style = window.getComputedStyle(node);
+  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+};
+return JSON.stringify({
+  toolsSheet: isVisible(document.querySelector('#mobile-tools-sheet')),
+  viewportButton: isVisible(document.querySelector('button[aria-label="Edit browser viewport"]')),
+  gridButton: isVisible(document.querySelector('button[aria-label="Toggle grid view"]')),
+  remoteToolsPortal: Boolean(document.querySelector('#mobile-remote-browser-tools-portal')),
+  harnessLabel: document.body.innerText.includes('Codex Computer Use'),
   benchmarkButton: Boolean(document.querySelector('button[aria-label="Streaming benchmark results"]')),
   width: window.innerWidth,
   height: window.innerHeight,
@@ -201,19 +294,45 @@ INITIAL_STATE_SCRIPT = r"""return JSON.stringify({
   clientWidth: document.documentElement.clientWidth
 });"""
 
-OPEN_BENCHMARKS_SCRIPT = r"""const button = document.querySelector(
-  'button[aria-label="Streaming benchmark results"]'
-);
+OPEN_VIEWPORT_SCRIPT = r"""const button = document.querySelector('button[aria-label="Edit browser viewport"]');
 if (!button) return false;
 button.click();
 return true;"""
 
-BENCHMARK_STATE_SCRIPT = r"""return JSON.stringify({
-  heading: document.querySelector('h1')?.textContent || null,
-  cards: Array.from(document.querySelectorAll('section h2')).map((node) => node.textContent || ''),
-  measured: document.body.innerText.includes('Measured'),
-  notInstalled: document.body.innerText.includes('Not Installed'),
-  architectureOnly: document.body.innerText.includes('Architecture Only'),
+VIEWPORT_STATE_SCRIPT = r"""const isVisible = (node) => {
+  if (!node) return false;
+  const rect = node.getBoundingClientRect();
+  const style = window.getComputedStyle(node);
+  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+};
+return JSON.stringify({
+  viewportControls: isVisible(document.querySelector('#mobile-viewport-settings')),
+  widthInput: isVisible(document.querySelector('#mobile-viewport-width')),
+  heightInput: isVisible(document.querySelector('#mobile-viewport-height')),
+  phoneFit: Array.from(document.querySelectorAll('button')).some((button) => isVisible(button) && button.textContent?.includes('Phone fit')),
+  width: window.innerWidth,
+  height: window.innerHeight,
+  scrollWidth: document.documentElement.scrollWidth,
+  clientWidth: document.documentElement.clientWidth
+});"""
+
+OPEN_FULLSCREEN_SCRIPT = r"""const button = document.querySelector('button[aria-label="Open fullscreen browser"]');
+if (!button) return false;
+button.click();
+return true;"""
+
+FULLSCREEN_STATE_SCRIPT = r"""const isVisible = (node) => {
+  if (!node) return false;
+  const rect = node.getBoundingClientRect();
+  const style = window.getComputedStyle(node);
+  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+};
+return JSON.stringify({
+  fullscreenViewer: isVisible(document.querySelector('[aria-label="Fullscreen browser viewer"]')),
+  fullscreenControls: isVisible(document.querySelector('[aria-label="Fullscreen browser controls"]')),
+  viewControlsButton: isVisible(document.querySelector('button[aria-label="Toggle fullscreen view controls"]')),
+  viewportButton: Boolean(document.querySelector('button[aria-label="Edit fullscreen browser viewport"]')),
+  closeButton: isVisible(document.querySelector('button[aria-label="Close fullscreen browser"]')),
   width: window.innerWidth,
   height: window.innerHeight,
   scrollWidth: document.documentElement.scrollWidth,
@@ -221,19 +340,22 @@ BENCHMARK_STATE_SCRIPT = r"""return JSON.stringify({
 });"""
 
 
-def wait_for_benchmark_state(
+def wait_for_state(
     client: WebDriverClient,
     session_id: str,
+    script: str,
+    label: str,
+    predicate: str,
     timeout: float,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     state: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        state = parse_browser_value(client.execute(session_id, BENCHMARK_STATE_SCRIPT), "benchmark state")
-        if state.get("heading") == "Live streaming benchmark results":
+        state = parse_browser_value(client.execute(session_id, script), label)
+        if state.get(predicate):
             return state
         time.sleep(0.2)
-    raise GateError("Timed out waiting for the streaming benchmark dashboard")
+    raise GateError(f"Timed out waiting for {label}")
 
 
 def run_gate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
@@ -260,6 +382,7 @@ def run_gate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             wait_for_driver(client, args.timeout)
 
         session_id = client.create_session()
+        harness_installed_before_navigation = client.execute(session_id, INSTALL_HARNESS_SCRIPT)
         client.request(
             "POST",
             f"/session/{session_id}/window/rect",
@@ -267,6 +390,19 @@ def run_gate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         )
         client.request("POST", f"/session/{session_id}/url", {"url": args.base_url})
         time.sleep(args.settle_seconds)
+        harness_installed = client.execute(session_id, INSTALL_HARNESS_SCRIPT)
+        add_check(
+            report,
+            "Codex Computer Use harness is injected for WebKit",
+            harness_installed_before_navigation is True and harness_installed is True,
+            {
+                "before_navigation": harness_installed_before_navigation,
+                "after_navigation": harness_installed,
+            },
+        )
+        composer_prepared = client.execute(session_id, ENABLE_COMPOSER_SCRIPT)
+        add_check(report, "Codex Computer Use composer accepts input", composer_prepared is True, {"prepared": composer_prepared})
+        time.sleep(0.1)
 
         initial = parse_browser_value(client.execute(session_id, INITIAL_STATE_SCRIPT), "initial mobile state")
         report["viewport"]["actual_width"] = initial.get("width")
@@ -279,50 +415,96 @@ def run_gate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         )
         add_check(
             report,
+            "mobile shell hides benchmark UI",
+            not initial.get("benchmarkButton") and not initial.get("benchmarkDashboard"),
+            initial,
+        )
+        add_check(
+            report,
+            "task chat starts collapsed while composer stays connected to Codex Computer Use",
+            bool(initial.get("harnessInjected"))
+            and initial.get("harnessMode") == "webkit-gate"
+            and bool(initial.get("harnessConnectedLabel"))
+            and not initial.get("harnessUnavailableLabel")
+            and bool(initial.get("composerEnabled"))
+            and bool(initial.get("sendButtonEnabled"))
+            and not initial.get("chatPanelVisible"),
+            initial,
+        )
+        add_check(
+            report,
+            "mobile shell keeps primary actions compact",
+            bool(initial.get("fullscreenButton"))
+            and bool(initial.get("toolsButton"))
+            and bool(initial.get("chatButton"))
+            and len(initial.get("visiblePrimaryActions") or []) <= 4,
+            initial,
+        )
+        add_check(
+            report,
             "mobile workspace has no horizontal overflow in WebKit",
             initial.get("scrollWidth") == initial.get("clientWidth"),
             initial,
         )
-        opened = client.execute(session_id, OPEN_BENCHMARKS_SCRIPT)
-        add_check(report, "streaming benchmark action opens", opened is True, {"opened": opened})
+        tools_opened = client.execute(session_id, OPEN_TOOLS_SCRIPT)
+        add_check(report, "browser tools action opens", tools_opened is True, {"opened": tools_opened})
 
-        benchmark = wait_for_benchmark_state(client, session_id, args.timeout)
+        tools = wait_for_state(client, session_id, TOOLS_STATE_SCRIPT, "browser tools state", "toolsSheet", args.timeout)
         add_check(
             report,
-            "streaming benchmark dashboard renders in WebKit",
-            benchmark.get("heading") == "Live streaming benchmark results",
-            benchmark,
+            "browser tools centralize viewport, grid, and harness controls",
+            bool(tools.get("toolsSheet"))
+            and bool(tools.get("viewportButton"))
+            and bool(tools.get("gridButton"))
+            and bool(tools.get("remoteToolsPortal"))
+            and bool(tools.get("harnessLabel"))
+            and not tools.get("benchmarkButton"),
+            tools,
+        )
+        viewport_opened = client.execute(session_id, OPEN_VIEWPORT_SCRIPT)
+        add_check(report, "viewport settings action opens", viewport_opened is True, {"opened": viewport_opened})
+
+        viewport = wait_for_state(client, session_id, VIEWPORT_STATE_SCRIPT, "viewport settings state", "viewportControls", args.timeout)
+        add_check(
+            report,
+            "viewport settings expose phone fit and editable dimensions",
+            bool(viewport.get("viewportControls"))
+            and bool(viewport.get("widthInput"))
+            and bool(viewport.get("heightInput"))
+            and bool(viewport.get("phoneFit")),
+            viewport,
+        )
+        fullscreen_opened = client.execute(session_id, OPEN_FULLSCREEN_SCRIPT)
+        add_check(report, "fullscreen browser action opens", fullscreen_opened is True, {"opened": fullscreen_opened})
+
+        fullscreen = wait_for_state(client, session_id, FULLSCREEN_STATE_SCRIPT, "fullscreen browser state", "fullscreenViewer", args.timeout)
+        add_check(
+            report,
+            "fullscreen browser keeps view and viewport controls reachable",
+            bool(fullscreen.get("fullscreenViewer"))
+            and bool(fullscreen.get("fullscreenControls"))
+            and bool(fullscreen.get("viewControlsButton"))
+            and bool(fullscreen.get("closeButton")),
+            fullscreen,
         )
         add_check(
             report,
-            "benchmark report has expected candidate coverage",
-            len(benchmark.get("cards") or []) >= args.min_benchmark_cards,
-            benchmark,
-        )
-        add_check(
-            report,
-            "benchmark report preserves measured and unmeasured labels",
-            bool(benchmark.get("measured"))
-            and bool(benchmark.get("notInstalled"))
-            and bool(benchmark.get("architectureOnly")),
-            benchmark,
-        )
-        add_check(
-            report,
-            "benchmark dashboard has no horizontal overflow in WebKit",
-            benchmark.get("scrollWidth") == benchmark.get("clientWidth"),
-            benchmark,
+            "interactive mobile surfaces have no horizontal overflow in WebKit",
+            tools.get("scrollWidth") == tools.get("clientWidth")
+            and viewport.get("scrollWidth") == viewport.get("clientWidth")
+            and fullscreen.get("scrollWidth") == fullscreen.get("clientWidth"),
+            {"tools": tools, "viewport": viewport, "fullscreen": fullscreen},
         )
 
         screenshot = client.request("GET", f"/session/{session_id}/screenshot").get("value")
         if not isinstance(screenshot, str):
             raise GateError("SafariDriver returned no screenshot")
-        screenshot_path = args.output_dir / "safari-mobile-benchmark-dashboard.png"
+        screenshot_path = args.output_dir / "safari-mobile-compact-shell.png"
         screenshot_path.write_bytes(base64.b64decode(screenshot))
         metadata = png_metadata(screenshot_path)
         add_check(
             report,
-            "Safari/WebKit benchmark screenshot artifact",
+            "Safari/WebKit compact shell screenshot artifact",
             metadata["bytes"] > 4_096 and metadata["width"] > 0 and metadata["height"] > 0,
             metadata,
         )
@@ -379,14 +561,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--safaridriver", default="safaridriver", help="SafariDriver executable for --start-driver.")
     parser.add_argument("--width", type=int, default=390)
     parser.add_argument("--height", type=int, default=844)
-    parser.add_argument("--min-benchmark-cards", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--settle-seconds", type=float, default=1.0)
     args = parser.parse_args(argv)
     if args.width < 1 or args.height < 1:
         parser.error("--width and --height must be positive")
-    if args.min_benchmark_cards < 1:
-        parser.error("--min-benchmark-cards must be at least 1")
     if args.timeout <= 0 or args.settle_seconds < 0:
         parser.error("--timeout must be positive and --settle-seconds cannot be negative")
     return args

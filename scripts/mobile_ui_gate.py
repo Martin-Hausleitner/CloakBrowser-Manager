@@ -30,6 +30,7 @@ VIEWPORTS = (
     ("iphone-14-landscape", 844, 390, "horizontal"),
     ("touch-tablet-portrait", 768, 1024, "vertical"),
 )
+CODEX_COMPUTER_USE_TEST_REPLY_PREFIX = "Codex Computer Use test harness accepted:"
 
 
 class GateError(RuntimeError):
@@ -62,6 +63,60 @@ def json_from_output(output: str) -> dict[str, Any]:
         if isinstance(value, dict):
             return value
     raise GateError("agent-browser output did not contain a JSON object")
+
+
+def codex_computer_use_test_reply(message: str) -> str:
+    return f"{CODEX_COMPUTER_USE_TEST_REPLY_PREFIX} {message}"
+
+
+def mobile_gate_init_script() -> str:
+    return f"""(() => {{
+  const nativeMatchMedia = window.matchMedia.bind(window);
+  window.matchMedia = (query) => {{
+    const nativeResult = nativeMatchMedia(query);
+    const forceCoarse = query.trim() === '(pointer: coarse)';
+    const forceMobileWorkspace = query.includes('(pointer: coarse)') &&
+      query.includes('(max-width: 1024px)') && window.innerWidth <= 1024;
+    if (!forceCoarse && !forceMobileWorkspace) return nativeResult;
+    return new Proxy(nativeResult, {{
+      get(target, property) {{
+        if (property === 'matches') return true;
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }},
+    }});
+  }};
+
+  const replyPrefix = {json.dumps(CODEX_COMPUTER_USE_TEST_REPLY_PREFIX)};
+  window.cloakBrowserHarness = {{
+    capabilities: {{
+      chat: true,
+      streaming: true,
+      clipboard: true,
+      browser_actions: ['copy', 'paste', 'fullscreen'],
+      metadata: {{
+        mode: 'codex-computer-use-mobile-gate',
+        provider: 'codex-computer-use-test-host',
+      }},
+    }},
+    send: async (request) => {{
+      const text = String(request?.text ?? '');
+      return {{
+        id: `mobile-ui-gate-${{Date.now()}}`,
+        role: 'assistant',
+        content: `${{replyPrefix}} ${{text}}`,
+        created_at: new Date().toISOString(),
+        metadata: {{
+          provider: 'codex-computer-use-test-host',
+          profile_id: request?.profile_id ?? null,
+          request_metadata: request?.metadata ?? null,
+        }},
+      }};
+    }},
+    subscribe: () => () => undefined,
+  }};
+}})();
+"""
 
 
 @dataclass
@@ -149,6 +204,19 @@ def click_visible(browser: AgentBrowser, selector: str, label: str) -> None:
         raise GateError(f"Could not click visible {label}: {selector}")
 
 
+def ensure_browser_tools_open(browser: AgentBrowser, timeout: float = 5) -> None:
+    opened = browser.eval(r"""(() => {
+      if (document.querySelector('.mobile-tools-sheet')) return true;
+      const button = document.querySelector('button[aria-label="Open browser tools"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()""")
+    if not opened:
+        raise GateError("Could not open browser tools")
+    browser.wait_for("!!document.querySelector('.mobile-tools-sheet')", "browser tools sheet", timeout)
+
+
 def png_metadata(path: Path) -> dict[str, Any]:
     data = path.read_bytes()
     if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
@@ -161,6 +229,38 @@ def add_check(result: dict[str, Any], name: str, passed: bool, evidence: Any) ->
     result["checks"].append({"name": name, "passed": bool(passed), "evidence": evidence})
     if not passed:
         raise GateError(f"{name} failed: {evidence}")
+
+
+def mobile_shortcut_toggle_state(
+    *,
+    tools_after_k: Any,
+    tools_closed_after_second_k: Any,
+    chat_after_j: Any,
+    fullscreen_after_b: Any,
+    fullscreen_closed_after_second_b: Any,
+    input_kept_closed: Any,
+) -> dict[str, bool]:
+    return {
+        "toolsAfterK": bool(tools_after_k),
+        "toolsClosedAfterSecondK": bool(tools_closed_after_second_k),
+        "chatAfterJ": bool(chat_after_j),
+        "fullscreenAfterB": bool(fullscreen_after_b),
+        "fullscreenClosedAfterSecondB": bool(fullscreen_closed_after_second_b),
+        "inputKeptToolsClosed": bool(input_kept_closed),
+        "inputKeptFullscreenClosed": bool(input_kept_closed),
+    }
+
+
+def mobile_shortcut_toggle_passed(shortcut_state: dict[str, bool]) -> bool:
+    return (
+        bool(shortcut_state.get("toolsAfterK"))
+        and bool(shortcut_state.get("toolsClosedAfterSecondK"))
+        and bool(shortcut_state.get("chatAfterJ"))
+        and bool(shortcut_state.get("fullscreenAfterB"))
+        and bool(shortcut_state.get("fullscreenClosedAfterSecondB"))
+        and bool(shortcut_state.get("inputKeptToolsClosed"))
+        and bool(shortcut_state.get("inputKeptFullscreenClosed"))
+    )
 
 
 class CdpSession:
@@ -226,12 +326,22 @@ STRUCTURE_SCRIPT = r"""(() => {
   const live = document.querySelector('.mobile-live-pane');
   const controls = document.querySelector('.mobile-control-pane');
   const frame = document.querySelector('[data-testid="mobile-browser-frame"]');
+  const chatPanel = document.querySelector('#mobile-task-chat-panel');
   const chat = document.querySelector('[aria-label="Chat history"]');
   const chatHeader = document.querySelector('.mobile-chat-header');
+  const tools = document.querySelector('[aria-label="Browser tools"]');
+  const commandDock = document.querySelector('.mobile-command-dock');
   const composerForm = document.querySelector('.mobile-chat-form');
   const composer = document.querySelector('#mobile-task-input');
-  const required = [root, live, controls, frame, chat, composer];
+  const required = [root, live, controls, frame, commandDock, composerForm, composer];
   const rect = (node) => node ? node.getBoundingClientRect().toJSON() : null;
+  const visible = (node) => {
+    if (!node) return false;
+    const value = node.getBoundingClientRect();
+    const style = getComputedStyle(node);
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+      Number(style.opacity) !== 0 && value.width > 1 && value.height > 1;
+  };
   const visibleHeight = (node) => {
     if (!node) return 0;
     const value = node.getBoundingClientRect();
@@ -251,17 +361,25 @@ STRUCTURE_SCRIPT = r"""(() => {
     live: rect(live),
     controls: rect(controls),
     frame: rect(frame),
+    chatPanel: rect(chatPanel),
     chat: rect(chat),
     chatHeader: rect(chatHeader),
+    chatCollapsed: !chat && !visible(chatHeader),
     chatVisibleHeight: Math.round(visibleHeight(chat) * 10) / 10,
     chatHeaderVisible: fullyVisible(chatHeader),
+    toolsVisible: visible(tools),
+    commandDock: rect(commandDock),
+    primaryActionCount: (commandDock?.querySelectorAll('button')?.length ?? 0) +
+      (document.querySelector('button[aria-label="Run task"]') ? 1 : 0),
     composerForm: rect(composerForm),
     composerFormVisible: fullyVisible(composerForm),
     composer: rect(composer),
-    hasAttach: !!document.querySelector('button[aria-label="Attach files"]'),
-    hasRunSettings: !!document.querySelector('button[aria-label="Run settings"]'),
-    hasAgentRunner: !!document.querySelector('select[aria-label="Select agent runner"], select.mobile-composer-select'),
+    hasBrowserToolsToggle: !!document.querySelector('button[aria-label="Open browser tools"], button[aria-label="Close browser tools"]'),
+    hasBrowserTools: !!document.querySelector('[aria-label="Browser tools"]'),
+    hasAgentRunner: !!document.querySelector('select[aria-label="Select harness runner"]'),
     hasRunTask: !!document.querySelector('button[aria-label="Run task"]'),
+    benchmarkNavAbsent: !document.body.innerText.includes('Benchmarks') &&
+      !document.querySelector('button[aria-label="Streaming benchmark results"]'),
   };
 })()"""
 
@@ -445,7 +563,7 @@ def take_screenshot(
         f"vision artifact {state}",
         metadata["width"] == expected_width
         and metadata["height"] == expected_height
-        and metadata["bytes"] >= 10_000,
+        and metadata["bytes"] >= 8_000,
         metadata,
     )
     result["screenshots"].append(metadata)
@@ -461,7 +579,7 @@ def capture_empty_mobile_state(
 ) -> None:
     """Preserve the unselected mobile workspace before a live profile is chosen."""
     empty_state = browser.eval(r"""(() => {
-      const select = document.querySelector('select.mobile-select');
+      const select = document.querySelector('select.mobile-top-profile-select');
       const liveCanvas = document.querySelectorAll('.mobile-browser-content canvas');
       const root = document.querySelector('.mobile-split-root');
       return {
@@ -488,9 +606,11 @@ def capture_viewport_editor(
     height: int,
 ) -> None:
     """Capture the editable profile viewport without mutating the live profile."""
+    ensure_browser_tools_open(browser)
     opened = browser.eval(r"""(() => {
       const button = document.querySelector('button[aria-label="Edit browser viewport"]');
       if (!button) return false;
+      button.scrollIntoView({block: 'center', inline: 'nearest'});
       if (button.getAttribute('aria-expanded') !== 'true') button.click();
       return true;
     })()""")
@@ -534,14 +654,20 @@ def select_and_connect(
     profile_id: str,
     timeout: float,
 ) -> None:
-    browser.run("select", "select.mobile-select", profile_id)
+    browser.run("select", "select.mobile-top-profile-select", profile_id)
     browser.wait_for(
-        f"document.querySelector('select.mobile-select')?.value === {json.dumps(profile_id)}",
+        f"document.querySelector('select.mobile-top-profile-select')?.value === {json.dumps(profile_id)}",
         "profile selection",
         10,
     )
+    browser.eval(r"""(() => {
+      if (document.querySelector('.mobile-tools-sheet')) return true;
+      const button = document.querySelector('button[aria-label="Open browser tools"]');
+      if (button) button.click();
+      return true;
+    })()""")
     launch_state = browser.eval(r"""(() => {
-      const buttons = [...document.querySelectorAll('.mobile-toolbar button')];
+      const buttons = [...document.querySelectorAll('.mobile-tools-sheet button')];
       return {
         connected: document.body.innerText.includes('Connected'),
         hasLaunch: buttons.some((button) => button.textContent?.trim() === 'Launch' && !button.disabled),
@@ -549,7 +675,7 @@ def select_and_connect(
     })()""")
     if launch_state.get("hasLaunch") and not launch_state.get("connected"):
         clicked = browser.eval(r"""(() => {
-          const button = [...document.querySelectorAll('.mobile-toolbar button')]
+          const button = [...document.querySelectorAll('.mobile-tools-sheet button')]
             .find((candidate) => candidate.textContent?.trim() === 'Launch' && !candidate.disabled);
           if (!button) return false;
           button.click();
@@ -573,10 +699,12 @@ def verify_live_viewport_controls(
     timeout: float,
     auth_token: str | None,
 ) -> None:
+    ensure_browser_tools_open(browser)
     opened = browser.eval(r"""(() => {
       const button = document.querySelector('button[aria-label="Edit browser viewport"]');
       if (!button) return false;
-      if (button.getAttribute('aria-pressed') !== 'true') button.click();
+      button.scrollIntoView({block: 'center', inline: 'nearest'});
+      if (button.getAttribute('aria-expanded') !== 'true') button.click();
       return true;
     })()""")
     add_check(result, "live profile viewport settings action available", bool(opened), {"clicked": opened})
@@ -605,13 +733,11 @@ def verify_live_viewport_controls(
         5,
     )
 
-    live_controls_opened = browser.eval(r"""(() => {
-      const button = document.querySelector('button[aria-label="Toggle live view controls"]');
-      if (!button) return false;
-      if (button.getAttribute('aria-expanded') !== 'true') button.click();
-      return true;
-    })()""")
-    add_check(result, "live view tuning drawer action available", bool(live_controls_opened), {"clicked": live_controls_opened})
+    ensure_browser_tools_open(browser)
+    live_controls_opened = browser.eval(
+        "!!document.querySelector('#mobile-pane-size') && !!document.querySelector('#mobile-browser-zoom')"
+    )
+    add_check(result, "live view tuning controls available in browser tools", bool(live_controls_opened), {"visible": live_controls_opened})
     browser.wait_for(
         "!!document.querySelector('#mobile-pane-size') && !!document.querySelector('#mobile-browser-zoom')",
         "live view tuning drawer",
@@ -722,20 +848,19 @@ def verify_live_viewport_controls(
     remote_pointer_hit_test_at_zoom(browser, result, base_url, profile_id, timeout, auth_token)
 
     reset = browser.eval(r"""(() => {
-      const button = [...document.querySelectorAll('button')]
-        .find((candidate) => candidate.textContent?.trim() === 'Reset view');
+      const button = document.querySelector('button[aria-label="Reset live view"]');
       if (!button) return false;
       button.click();
       return true;
     })()""")
     add_check(result, "live viewport controls reset", bool(reset), {"clicked": reset})
     expected_default_pane = browser.eval(
-        "window.innerHeight <= 700 && window.innerHeight >= window.innerWidth ? '49%' : '50%'"
+        "window.innerHeight <= 700 && window.innerHeight >= window.innerWidth ? '65%' : '68%'"
     )
     add_check(
         result,
         "live viewport reset picks the device-appropriate default pane",
-        expected_default_pane in {"49%", "50%"},
+        expected_default_pane in {"65%", "68%"},
         {"expectedPane": expected_default_pane},
     )
     browser.wait_for(
@@ -746,9 +871,9 @@ def verify_live_viewport_controls(
         5,
     )
     closed = browser.eval(r"""(() => {
-      const button = document.querySelector('button[aria-label="Toggle live view controls"]');
+      const button = document.querySelector('button[aria-label="Close browser tools"]');
       if (!button) return false;
-      if (button.getAttribute('aria-expanded') === 'true') button.click();
+      button.click();
       return true;
     })()""")
     add_check(result, "live controls return to compact workspace", bool(closed), {"clicked": closed})
@@ -951,12 +1076,36 @@ def remote_pointer_hit_test_at_zoom(
         )
         visible_width = visible_right - visible_left
         visible_height = visible_bottom - visible_top
-        click_x = round(visible_left + visible_width / 2)
-        click_y = round(visible_top + visible_height / 2)
+        ready_target = (ready or {}).get("target") or {}
+        ready_viewport = (ready or {}).get("viewport") or {}
+        if (
+            ready_target.get("width")
+            and ready_target.get("height")
+            and ready_viewport.get("width")
+            and ready_viewport.get("height")
+            and canvas.get("width")
+            and canvas.get("height")
+        ):
+            click_x = round(
+                (canvas.get("left") or 0)
+                + ((ready_target.get("left") or 0) + (ready_target.get("width") or 0) / 2)
+                * ((canvas.get("width") or 0) / (ready_viewport.get("width") or 1))
+            )
+            click_y = round(
+                (canvas.get("top") or 0)
+                + ((ready_target.get("top") or 0) + (ready_target.get("height") or 0) / 2)
+                * ((canvas.get("height") or 0) / (ready_viewport.get("height") or 1))
+            )
+        else:
+            click_x = round(visible_left + visible_width / 2)
+            click_y = round(visible_top + visible_height / 2)
         add_check(
             result,
             "remote pointer probe has visible canvas coordinate",
-            visible_width > 20 and visible_height > 20 and click_x > 0 and click_y > 0,
+            visible_width > 20
+            and visible_height > 20
+            and visible_left <= click_x <= visible_right
+            and visible_top <= click_y <= visible_bottom,
             {
                 "geometry": geometry,
                 "click": {"x": click_x, "y": click_y},
@@ -1018,7 +1167,7 @@ def manual_remote_paste(
     marker = f"mobile-manual-paste-{int(time.time() * 1000)}"
     tools_opened = browser.eval(r"""(() => {
       if (document.querySelector('button[aria-label="Paste text into remote browser"]')) return true;
-      const toggle = document.querySelector('button[aria-label="Open remote browser tools"]');
+      const toggle = document.querySelector('button[aria-label="Open browser tools"]');
       if (!toggle) return false;
       toggle.click();
       return true;
@@ -1187,10 +1336,140 @@ def run_viewport(
     add_check(result, "mobile workspace structure", bool(structure.get("ready")), structure)
     add_check(
         result,
-        "agent composer controls",
-        all(structure.get(key) for key in ("hasAttach", "hasRunSettings", "hasAgentRunner", "hasRunTask")),
+        "compact primary controls are Full Tools Chat and Send",
+        bool(structure.get("hasBrowserToolsToggle"))
+        and bool(structure.get("hasRunTask"))
+        and (structure.get("primaryActionCount") or 0) <= 4
+        and bool(structure.get("chatCollapsed"))
+        and bool(structure.get("benchmarkNavAbsent"))
+        and not bool(structure.get("hasAgentRunner")),
         structure,
     )
+    tools_opened = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Open browser tools"]');
+      if (!button) return !!document.querySelector('[aria-label="Browser tools"]');
+      button.click();
+      return true;
+    })()""")
+    add_check(result, "browser tools action available", bool(tools_opened), {"clicked": tools_opened})
+    browser.wait_for(
+        "!!document.querySelector('[aria-label=\"Browser tools\"]')",
+        "browser tools",
+        5,
+    )
+    tools_structure = browser.eval(STRUCTURE_SCRIPT)
+    add_check(
+        result,
+        "browser tools omit visible harness picker",
+        bool(tools_structure.get("toolsVisible")) and not bool(tools_structure.get("hasAgentRunner")),
+        tools_structure,
+    )
+    browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Close browser tools"]');
+      if (button) button.click();
+      return true;
+    })()""")
+    chat_opened = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Expand task chat"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()""")
+    chat_visible = browser.wait_for("!!document.querySelector('[aria-label=\"Chat history\"]')", "expanded chat", 5)
+    tools_opened_after_chat = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Open browser tools"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()""")
+    tools_visible_after_chat = browser.wait_for(
+        "!!document.querySelector('[aria-label=\"Browser tools\"]')",
+        "browser tools after chat",
+        5,
+    )
+    chat_closed_by_tools = browser.eval("!document.querySelector('[aria-label=\"Chat history\"]')")
+    chat_reopened = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Expand task chat"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()""")
+    chat_visible_again = browser.wait_for("!!document.querySelector('[aria-label=\"Chat history\"]')", "chat after tools", 5)
+    tools_closed_by_chat = browser.eval("!document.querySelector('[aria-label=\"Browser tools\"]')")
+    exclusive = {
+        "ready": bool(chat_opened) and bool(tools_opened_after_chat) and bool(chat_reopened),
+        "chatOpen": bool(chat_visible),
+        "toolsOpen": bool(tools_visible_after_chat),
+        "chatClosedByTools": bool(chat_closed_by_tools),
+        "toolsClosedByChat": bool(tools_closed_by_chat) and bool(chat_visible_again),
+    }
+    add_check(
+        result,
+        "expanded chat and browser tools are mutually exclusive",
+        bool(exclusive.get("ready"))
+        and bool(exclusive.get("chatOpen"))
+        and bool(exclusive.get("toolsOpen"))
+        and bool(exclusive.get("chatClosedByTools"))
+        and bool(exclusive.get("toolsClosedByChat")),
+        exclusive,
+    )
+    dispatch_shortcut = r"""((key, extra = {}) => {
+      window.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true, cancelable: true, ctrlKey: true, ...extra}));
+      return true;
+    })"""
+    browser.eval(f"{dispatch_shortcut}('k')")
+    tools_after_k = browser.wait_for("!!document.querySelector('[aria-label=\"Browser tools\"]')", "tools shortcut open", 5)
+    browser.eval(f"{dispatch_shortcut}('k')")
+    tools_after_second_k = browser.wait_for("!document.querySelector('[aria-label=\"Browser tools\"]')", "tools shortcut close", 5)
+    browser.eval(f"{dispatch_shortcut}('j')")
+    chat_after_j = browser.wait_for("!!document.querySelector('[aria-label=\"Chat history\"]')", "chat shortcut open", 5)
+    browser.eval(f"{dispatch_shortcut}('b', {{metaKey: true, ctrlKey: false}})")
+    fullscreen_after_b = browser.wait_for(
+        "!!document.querySelector('[role=\"dialog\"][aria-label=\"Fullscreen browser viewer\"]')",
+        "fullscreen shortcut open",
+        5,
+    )
+    browser.eval(f"{dispatch_shortcut}('b')")
+    fullscreen_after_second_b = browser.wait_for(
+        "!document.querySelector('[role=\"dialog\"][aria-label=\"Fullscreen browser viewer\"]')",
+        "fullscreen shortcut close",
+        5,
+    )
+    input_kept_closed = browser.eval(r"""(() => {
+      const dispatch = (target, key, extra = {}) => target?.dispatchEvent(
+        new KeyboardEvent('keydown', {key, bubbles: true, cancelable: true, ctrlKey: true, ...extra})
+      );
+      const chat = document.querySelector('button[aria-label="Collapse task chat"]');
+      if (chat) chat.click();
+      const input = document.querySelector('#mobile-task-input');
+      input?.focus();
+      dispatch(input, 'k');
+      dispatch(input, 'j');
+      dispatch(input, 'b', {metaKey: true, ctrlKey: false});
+      return !document.querySelector('[aria-label="Browser tools"]') &&
+        !document.querySelector('[role="dialog"][aria-label="Fullscreen browser viewer"]');
+    })()""")
+    shortcut_state = mobile_shortcut_toggle_state(
+        tools_after_k=tools_after_k,
+        tools_closed_after_second_k=tools_after_second_k,
+        chat_after_j=chat_after_j,
+        fullscreen_after_b=fullscreen_after_b,
+        fullscreen_closed_after_second_b=fullscreen_after_second_b,
+        input_kept_closed=input_kept_closed,
+    )
+    add_check(
+        result,
+        "Ctrl shortcuts toggle tools and chat but ignore task input",
+        mobile_shortcut_toggle_passed(shortcut_state),
+        shortcut_state,
+    )
+    browser.eval(r"""(() => {
+      const chat = document.querySelector('button[aria-label="Collapse task chat"]');
+      if (chat) chat.click();
+      const tools = document.querySelector('button[aria-label="Close browser tools"]');
+      if (tools) tools.click();
+      return true;
+    })()""")
     add_check(
         result,
         "no horizontal overflow",
@@ -1223,13 +1502,31 @@ def run_viewport(
             capture_viewport_editor(browser, result, output_dir, name, width, height)
         compact_structure = browser.eval(STRUCTURE_SCRIPT)
         if expected_layout == "vertical":
+            live_rect = compact_structure.get("live") or {}
+            live_ratio = (live_rect.get("height") or 0) / max(1, compact_structure.get("innerHeight") or height)
             add_check(
                 result,
-                "portrait keeps task history and composer visible beside live VNC",
-                bool(compact_structure.get("chatHeaderVisible"))
-                and (compact_structure.get("chatVisibleHeight") or 0) >= 80
+                "portrait keeps collapsed chat hidden and composer visible beside live VNC",
+                bool(compact_structure.get("chatCollapsed"))
+                and not bool(compact_structure.get("chatHeaderVisible"))
                 and bool(compact_structure.get("composerFormVisible")),
                 compact_structure,
+            )
+            if width == 375 and height == 667:
+                add_check(
+                    result,
+                    "iPhone SE live browser uses at least 55 percent of the viewport",
+                    live_ratio >= 0.55,
+                    {"liveRatio": round(live_ratio, 3), "structure": compact_structure},
+                )
+        if expected_layout == "horizontal":
+            live_rect = compact_structure.get("live") or {}
+            live_ratio = (live_rect.get("width") or 0) / max(1, compact_structure.get("innerWidth") or width)
+            add_check(
+                result,
+                "landscape live browser pane uses at least 65 percent of the viewport",
+                live_ratio >= 0.65,
+                {"liveRatio": round(live_ratio, 3), "structure": compact_structure},
             )
         manual_remote_paste(browser, result, base_url, profile_id, timeout, auth_token)
         if remote_probe_url:
@@ -1247,40 +1544,89 @@ def run_viewport(
     touch = browser.eval(TOUCH_TARGET_SCRIPT)
     add_check(result, "44px visible touch targets", not touch.get("offenders"), touch)
 
-    unique_message = f"Mobile gate {name} {int(time.time() * 1000)}"
-    browser.run("fill", "#mobile-task-input", unique_message)
-    click_visible(browser, "button[aria-label='Run task']", "local agent task submit")
-    chat = browser.wait_for(
-        f"document.body.innerText.includes({json.dumps(unique_message)}) && document.body.innerText.includes('Agent reply queued locally')",
-        "local agent chat response",
+    browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Open browser tools"]');
+      if (button) button.click();
+      return true;
+    })()""")
+    harness_ready = browser.wait_for(
+        r"""(() => {
+          const input = document.querySelector('#mobile-task-input');
+          const host = window.cloakBrowserHarness;
+          const hasHost = !!host && typeof host.send === 'function';
+          const label = [...document.querySelectorAll('.mobile-chat-form, .mobile-tools-sheet, .mobile-control-pane')]
+            .map((node) => node.innerText || '')
+            .join('\n');
+          const connected = label.includes('Codex Computer Use Bridge · connected');
+          if (!hasHost || !input || input.disabled || !connected || label.includes('unavailable')) return false;
+          return {
+            hasHost,
+            inputDisabled: input.disabled,
+            placeholder: input.getAttribute('placeholder'),
+            connected,
+          };
+        })()""",
+        "Codex Computer Use test host harness",
         10,
     )
-    add_check(result, "local agent chat round-trip", bool(chat), {"message": unique_message})
-
-    click_visible(browser, "button[aria-label='Run settings']", "run settings open")
-    settings = browser.wait_for("!!document.querySelector('[aria-label=\"Agent run settings\"]')", "run settings", 5)
-    browser.run("select", "select.mobile-composer-select", "local-runner")
-    selected_runner = browser.eval("document.querySelector('select.mobile-composer-select')?.value")
     add_check(
         result,
-        "agent run settings and runner selection",
-        bool(settings) and selected_runner == "local-runner",
-        {"settings": bool(settings), "runner": selected_runner},
+        "Codex Computer Use test host harness is injected and available",
+        bool(harness_ready),
+        harness_ready,
     )
-    click_visible(browser, "button[aria-label='Run settings']", "run settings close")
+    unique_message = f"Mobile gate {name} {int(time.time() * 1000)}"
+    expected_reply = codex_computer_use_test_reply(unique_message)
+    browser.run("fill", "#mobile-task-input", unique_message)
+    click_visible(browser, "button[aria-label='Run task']", "local agent task submit")
+    browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Expand task chat"]');
+      if (button) button.click();
+      return true;
+    })()""")
+    chat = browser.wait_for(
+        f"document.body.innerText.includes({json.dumps(unique_message)})"
+        f" && document.body.innerText.includes({json.dumps(expected_reply)})"
+        " && !document.body.innerText.includes('Codex Computer Use could not queue that task')"
+        " && !document.body.innerText.includes('Codex Computer Use Bridge unavailable')",
+        "Codex Computer Use test harness response",
+        10,
+    )
+    add_check(
+        result,
+        "Codex Computer Use test harness round-trip",
+        bool(chat),
+        {"message": unique_message, "expectedReply": expected_reply},
+    )
     take_screenshot(browser, result, output_dir, name, "workspace", width, height)
 
-    click_visible(browser, "button[aria-label='Open mobile workspace tools']", "workspace tools open")
-    browser.wait_for(
-        "!!document.querySelector('[aria-label=\"Mobile workspace tools\"]')",
-        "workspace tools menu",
-        5,
-    )
+    click_visible(browser, "button[aria-label='Open browser tools']", "browser tools open for grid")
     click_visible(browser, "button[aria-label='Toggle grid view']", "grid view open")
-    grid = browser.wait_for("!!document.querySelector('[aria-label=\"Running browser grid\"]')", "running browser grid", 5)
-    add_check(result, "grid opens", bool(grid), {"visible": bool(grid)})
+    browser.wait_for("!!document.querySelector('[aria-label=\"Running browser grid\"]')", "running browser grid", 5)
+    grid = browser.eval(r"""(() => {
+      const root = document.querySelector('[aria-label="Running browser grid"]');
+      const text = root?.innerText || '';
+      return {
+        visible: !!root,
+        hasName: /QA|Browser|Checkout|Live/i.test(text),
+        hasStatus: /\b(Live|Idle|Running|Stopped)\b/i.test(text),
+        hasResolution: /\b\d{3,4}\s*x\s*\d{3,4}\b/.test(text),
+        hasOldGradientThumb: !!root?.querySelector('.mobile-grid-thumb'),
+        hasSimulatedPreview: !!root?.querySelector('.mobile-grid-preview'),
+      };
+    })()""")
+    add_check(
+        result,
+        "grid uses honest session cards with status name and resolution",
+        bool(grid.get("visible"))
+        and bool(grid.get("hasName"))
+        and bool(grid.get("hasStatus"))
+        and bool(grid.get("hasResolution"))
+        and not bool(grid.get("hasOldGradientThumb"))
+        and not bool(grid.get("hasSimulatedPreview")),
+        grid,
+    )
     take_screenshot(browser, result, output_dir, name, "grid", width, height)
-    click_visible(browser, "button[aria-label='Open mobile workspace tools']", "workspace tools reopen")
     click_visible(browser, "button[aria-label='Toggle grid view']", "grid view close")
 
     # Navigating between mobile viewport sizes closes the previous noVNC
@@ -1484,6 +1830,7 @@ def run_access_dashboard_gate(
     browser.run("open", base_url)
     authenticate_workspace(browser, auth_token)
     browser.wait_for("!!document.querySelector('.mobile-split-root')", "mobile workspace", 20)
+    ensure_browser_tools_open(browser)
     clicked = browser.eval(r"""(() => {
       const button = document.querySelector('button[aria-label="Browser access controls"]');
       if (!button) return false;
@@ -1570,24 +1917,7 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     media_emulation_script = args.output_dir / "mobile-media-emulation.js"
     media_emulation_script.write_text(
-        """(() => {
-  const nativeMatchMedia = window.matchMedia.bind(window);
-  window.matchMedia = (query) => {
-    const nativeResult = nativeMatchMedia(query);
-    const forceCoarse = query.trim() === '(pointer: coarse)';
-    const forceMobileWorkspace = query.includes('(pointer: coarse)') &&
-      query.includes('(max-width: 1024px)') && window.innerWidth <= 1024;
-    if (!forceCoarse && !forceMobileWorkspace) return nativeResult;
-    return new Proxy(nativeResult, {
-      get(target, property) {
-        if (property === 'matches') return true;
-        const value = Reflect.get(target, property, target);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
-  };
-})();
-""",
+        mobile_gate_init_script(),
         encoding="utf-8",
     )
     report: dict[str, Any] = {

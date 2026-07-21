@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { ArrowLeft, Gauge, Lock, PanelLeftClose, PanelLeft, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import {
   api,
@@ -17,11 +17,11 @@ import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
 import { MobileSplitScreen } from "./components/mobile/MobileSplitScreen";
 import { AccessDashboard } from "./components/AccessDashboard";
-import { StreamingBenchmarkPanel } from "./components/StreamingBenchmarkPanel";
 
 type AuthState = "checking" | "required" | "ok" | "error";
-type View = "empty" | "create" | "edit" | "view" | "access" | "benchmarks";
+type View = "empty" | "create" | "edit" | "view" | "access";
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
+type MobileConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
@@ -112,6 +112,8 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileFullscreenOpen, setMobileFullscreenOpen] = useState(false);
   const [mobileBrowserZoom, setMobileBrowserZoom] = useState(100);
+  const [mobileRemoteToolsOpen, setMobileRemoteToolsOpen] = useState(false);
+  const [mobileConnectionStatus, setMobileConnectionStatus] = useState<MobileConnectionStatus>("connecting");
   const isMobile = useIsMobile();
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
@@ -187,30 +189,6 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   }
 
   if (isMobile) {
-    if (view === "benchmarks" && canManageProfiles) {
-      return (
-        <div className="flex h-dvh flex-col overflow-hidden bg-surface-0">
-          <div className="flex items-center gap-2 border-b border-border bg-surface-1 px-3 py-2">
-            <button
-              type="button"
-              onClick={() => setView(selected ? "view" : "empty")}
-              className="mobile-icon-button"
-              aria-label="Back to mobile browser workspace"
-            >
-              <ArrowLeft className="h-4 w-4" />
-            </button>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold">Streaming benchmarks</p>
-              <p className="text-[11px] text-gray-500">Latest runner report</p>
-            </div>
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <StreamingBenchmarkPanel />
-          </div>
-        </div>
-      );
-    }
-
     if (canManageProfiles && (view === "create" || (view === "edit" && selected))) {
       const editing = view === "edit" && selected;
 
@@ -266,6 +244,10 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           compactControls
           layoutMode={mobileFullscreenOpen ? "fullscreen" : "inline"}
           viewportScale={mobileBrowserZoom / 100}
+          remoteToolsOpen={mobileRemoteToolsOpen}
+          remoteToolsPortalId="mobile-remote-browser-tools-portal"
+          onRemoteToolsOpenChange={setMobileRemoteToolsOpen}
+          onConnectionStatusChange={setMobileConnectionStatus}
           onDisconnect={handleVncDisconnect}
         />
       ) : null;
@@ -285,6 +267,9 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           identityName={identity?.display_name ?? null}
           browserView={browserView}
           browserZoom={mobileBrowserZoom}
+          browserConnectionStatus={selected?.status === "running" ? mobileConnectionStatus : null}
+          remoteToolsOpen={mobileRemoteToolsOpen}
+          onRemoteToolsOpenChange={setMobileRemoteToolsOpen}
           onSelect={handleSelect}
           onNew={handleNew}
           onEdit={() => setView("edit")}
@@ -294,7 +279,6 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           onFullscreenChange={setMobileFullscreenOpen}
           onBrowserZoomChange={setMobileBrowserZoom}
           onAccessControls={() => setView("access")}
-          onOpenBenchmarks={canManageProfiles ? () => setView("benchmarks") : undefined}
           onLogout={onLogout}
         />
       </>
@@ -354,16 +338,6 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                 aria-label="Browser access controls"
               >
                 <ShieldCheck className="h-4 w-4" />
-              </button>
-            )}
-            {canManageProfiles && (
-              <button
-                onClick={() => setView("benchmarks")}
-                className="text-gray-500 hover:text-gray-300 p-1"
-                title="Streaming benchmark results"
-                aria-label="Streaming benchmark results"
-              >
-                <Gauge className="h-4 w-4" />
               </button>
             )}
             {identity && (
@@ -429,10 +403,6 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
               canInteract={canInteractSelected}
               onDisconnect={handleVncDisconnect}
             />
-          )}
-
-          {view === "benchmarks" && (
-            <StreamingBenchmarkPanel />
           )}
         </div>
       </div>

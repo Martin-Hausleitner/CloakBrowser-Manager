@@ -9,8 +9,8 @@
 
   body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter",
-      system-ui, sans-serif;
+    font-family: "Avenir Next", "SF Pro Text", "Helvetica Neue", system-ui,
+      sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     background: #0a0a0a;
@@ -80,17 +80,31 @@
   }
 
   .mobile-live-pane-running {
-    /*
-     * A running viewer needs to preserve a real split: the canvas stays
-     * immediately usable while the chat history and composer remain visible
-     * on an iPhone. The ratio slider can still grow this pane beyond its
-     * compact default.
-     */
-    min-height: clamp(18rem, 40dvh, 26rem);
+    min-height: clamp(20rem, 60dvh, 40rem);
   }
 
   .mobile-live-header {
     @apply flex min-h-11 shrink-0 items-center justify-between gap-2 border-b border-border/70 bg-surface-1 px-2 py-0;
+  }
+
+  .mobile-top-profile-select {
+    @apply h-11 w-full min-w-0 appearance-none truncate border-0 bg-transparent p-0 text-sm font-semibold text-gray-100 focus:outline-none focus:ring-0;
+  }
+
+  .mobile-connection-pill {
+    @apply inline-flex h-8 shrink-0 items-center rounded-md border px-2 text-[11px] font-semibold;
+  }
+
+  .mobile-connection-live {
+    @apply border-emerald-400/30 bg-emerald-400/10 text-emerald-200;
+  }
+
+  .mobile-connection-pending {
+    @apply border-yellow-400/30 bg-yellow-400/10 text-yellow-100;
+  }
+
+  .mobile-connection-failed {
+    @apply border-red-400/30 bg-red-400/10 text-red-200;
   }
 
   .mobile-live-pane .mobile-browser-wrap {
@@ -133,7 +147,7 @@
   }
 
   .mobile-browser-content > .relative > div:first-child {
-    @apply min-h-11 px-1 py-0;
+    @apply min-h-10 px-1 py-0;
   }
 
   .mobile-browser-content > .relative > div:first-child button {
@@ -142,11 +156,21 @@
   }
 
   .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar {
-    @apply min-h-11 gap-1 px-2 py-0;
+    @apply pointer-events-none absolute left-2 right-2 top-2 z-30 min-h-0 gap-1 border-0 bg-transparent px-0 py-0;
   }
 
   .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar > div:first-child {
-    @apply min-w-0;
+    @apply pointer-events-auto min-w-0 rounded-md border border-border/70 bg-black/70 px-2 py-1 shadow-lg backdrop-blur;
+    min-height: 2rem;
+  }
+
+  .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar > div:last-child {
+    @apply pointer-events-auto rounded-md border border-border/70 bg-black/70 p-0.5 shadow-lg backdrop-blur;
+    min-height: 2rem;
+  }
+
+  .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar-hidden {
+    display: none;
   }
 
   .mobile-vnc-tools-toggle {
@@ -154,13 +178,26 @@
   }
 
   .profile-viewer-compact .mobile-vnc-tools-drawer {
-    @apply absolute right-2 top-11 z-40 grid gap-1 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
+    @apply absolute right-2 top-12 z-40 grid gap-1 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
     width: min(17rem, calc(100% - 1rem));
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .mobile-vnc-tool-button {
     @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-2 px-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-3 disabled:cursor-not-allowed disabled:text-gray-600 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-vnc-tools-portal {
+    @apply grid gap-2;
+  }
+
+  .mobile-vnc-tools-portal-grid {
+    @apply grid gap-1.5;
+    grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  }
+
+  .mobile-vnc-paste-panel {
+    @apply rounded-md border border-border bg-surface-1 p-2;
   }
 
   .mobile-browser-chrome {
@@ -192,7 +229,7 @@
   }
 
   .mobile-session-bar-live {
-    @apply py-1.5;
+    @apply py-1;
   }
 
   .mobile-session-bar-live .mobile-session-select {
@@ -229,12 +266,17 @@
     @apply text-[11px] leading-4 text-gray-400;
   }
 
-  .mobile-viewport-disclosure {
-    @apply shrink-0 border-b border-border bg-surface-0 px-3 py-2;
+  .mobile-command-dock {
+    @apply grid shrink-0 gap-1 border-b border-border bg-surface-0 px-2 py-1;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .mobile-disclosure-button {
-    @apply flex min-h-11 w-full items-center gap-2 rounded-md border border-border bg-surface-1 px-3 text-left text-sm font-medium text-gray-200 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  .mobile-command-button {
+    @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-1.5 text-[11px] font-medium text-gray-300 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-command-button-active {
+    @apply border-accent/50 bg-accent/15 text-indigo-100;
   }
 
   .mobile-live-control-drawer {
@@ -274,12 +316,13 @@
   }
 
   .mobile-fullscreen-strip {
-    @apply absolute left-2 right-2 z-[60] grid grid-cols-3 items-stretch gap-1 rounded-md border border-border bg-surface-0/95 p-1 shadow-lg backdrop-blur;
+    @apply absolute left-2 right-2 z-[60] grid items-stretch gap-1 rounded-md border border-border bg-surface-0/95 p-1 shadow-lg backdrop-blur;
+    grid-template-columns: repeat(auto-fit, minmax(4rem, 1fr));
     top: max(0.5rem, env(safe-area-inset-top));
   }
 
   .mobile-fullscreen-tools-panel {
-    @apply absolute left-2 right-2 z-[60] grid grid-cols-[minmax(0,1fr)_auto] items-stretch gap-2 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
+    @apply absolute left-2 right-2 z-[60] grid items-stretch gap-2 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
     top: max(4rem, calc(env(safe-area-inset-top) + 3.5rem));
   }
 
@@ -314,24 +357,39 @@
   }
 
   .mobile-grid {
-    @apply grid grid-cols-2 gap-2 border-b border-border px-3 py-3;
+    @apply grid grid-cols-1 gap-1.5 border-b border-border bg-surface-0 px-2 py-2;
   }
 
   .mobile-grid-tile {
-    @apply min-w-0 rounded-md border border-border bg-surface-1 p-2 text-left transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply grid min-h-11 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-border bg-surface-1 px-2 py-1.5 text-left transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
-  .mobile-grid-thumb {
-    @apply mb-2 block aspect-video rounded bg-surface-3;
-    background-image: linear-gradient(135deg, #1f2937, #111827 48%, #2a2a2a);
+  .mobile-grid-tile-active {
+    @apply border-accent/50 bg-accent/10;
+  }
+
+  .mobile-grid-card-main {
+    @apply flex min-w-0 items-center gap-2;
+  }
+
+  .mobile-grid-card-state {
+    @apply rounded border border-border bg-surface-2 px-1.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400;
+  }
+
+  .mobile-chat-panel {
+    @apply flex min-h-0 shrink flex-col overflow-hidden border-b border-border bg-surface-0;
   }
 
   .mobile-chat-header {
-    @apply flex shrink-0 items-center gap-2 border-b border-border px-3 py-2;
+    @apply flex shrink-0 items-center gap-2 px-3 py-1.5;
+  }
+
+  .mobile-chat-collapse-button {
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-1 text-gray-300 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-chat-log {
-    @apply flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-3;
+    @apply flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto border-t border-border px-3 py-2;
     scroll-padding-bottom: 7rem;
   }
 
@@ -375,14 +433,18 @@
     @apply self-end bg-accent text-white;
   }
 
+  .mobile-message-tool {
+    @apply max-w-full border border-yellow-400/25 bg-yellow-400/10 text-yellow-100;
+  }
+
   .mobile-chat-form {
-    @apply sticky bottom-0 z-10 flex w-full max-w-full shrink-0 flex-col gap-2 border-t border-border bg-surface-1 px-3 py-3;
-    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+    @apply sticky bottom-0 z-10 flex w-full max-w-full shrink-0 flex-col gap-2 border-t border-border bg-surface-1 px-2 py-2;
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
   }
 
   .mobile-composer-toolbar {
     @apply grid w-full items-center gap-2;
-    grid-template-columns: 2.75rem 2.75rem 2.75rem minmax(0, 1fr);
+    grid-template-columns: 2.75rem;
   }
 
   .mobile-composer-toolbar label {
@@ -402,11 +464,61 @@
   }
 
   .mobile-send-button {
-    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-accent text-white transition-colors hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-accent text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-chat-form-collapsed {
+    @apply grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2;
+  }
+
+  .mobile-chat-form-collapsed textarea {
+    @apply min-h-11;
+    height: 2.75rem;
+  }
+
+  .mobile-chat-form-collapsed .mobile-composer-toolbar {
+    @apply w-auto gap-1;
+    grid-template-columns: 2.75rem;
+  }
+
+  .mobile-tools-sheet {
+    @apply grid shrink-0 gap-2 border-b border-border bg-surface-0 px-2 py-2;
+    max-height: min(44dvh, 24rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .mobile-tools-row {
+    @apply grid gap-1.5;
+    grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr));
+  }
+
+  .mobile-tool-action {
+    @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-gray-600 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-tool-action-primary {
+    @apply border-accent/50 bg-accent/20 text-indigo-100;
+  }
+
+  .mobile-tool-action-danger {
+    @apply border-red-500/30 bg-red-500/10 text-red-200;
+  }
+
+  .mobile-tool-select {
+    @apply grid min-h-11 min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded-md border border-border bg-surface-1 px-2 text-xs text-gray-300;
+  }
+
+  .mobile-tool-select > span:last-child {
+    @apply min-w-0;
+  }
+
+  .mobile-tools-meta {
+    @apply text-[11px] leading-4 text-gray-500;
   }
 
   .mobile-run-settings {
-    @apply grid shrink-0 gap-2 border-t border-border bg-surface-1 px-3 py-3;
+    @apply grid shrink-0 gap-2 border-t border-border bg-surface-1 px-3 py-2;
   }
 
   .mobile-run-settings label {
@@ -463,6 +575,12 @@
   .mobile-chat-form {
     padding-top: 0.5rem;
     padding-bottom: 0.5rem;
+  }
+}
+
+@media (min-width: 600px) {
+  .mobile-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

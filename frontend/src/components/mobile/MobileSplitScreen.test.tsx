@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import type { Profile } from "../../lib/api";
+import { taskHarnessReadyEvent } from "../../lib/taskHarness";
 import { MobileSplitScreen } from "./MobileSplitScreen";
 
 const stoppedProfile: Profile = {
@@ -45,9 +47,36 @@ const runningProfile: Profile = {
   vnc_ws_port: 5901,
 };
 
+const secondRunningProfile: Profile = {
+  ...runningProfile,
+  id: "profile-3",
+  name: "Payments QA",
+};
+
+function installTaskHarness() {
+  const send = vi.fn().mockResolvedValue({
+    id: "host-1",
+    role: "assistant",
+    content: "Harness accepted the task.",
+    created_at: "2026-07-21T10:00:00.000Z",
+    metadata: { provider: "codex-test" },
+  });
+  window.cloakBrowserHarness = {
+    capabilities: {
+      chat: true,
+      streaming: true,
+      clipboard: true,
+      browser_actions: ["copy", "paste", "fullscreen"],
+      metadata: { mode: "codex-test" },
+    },
+    send,
+  };
+  return { send };
+}
+
 function renderMobileSplit(overrides: Partial<Parameters<typeof MobileSplitScreen>[0]> = {}) {
   const props: Parameters<typeof MobileSplitScreen>[0] = {
-    profiles: [stoppedProfile, runningProfile],
+    profiles: [stoppedProfile, runningProfile, secondRunningProfile],
     selected: stoppedProfile,
     selectedId: stoppedProfile.id,
     error: null,
@@ -59,6 +88,9 @@ function renderMobileSplit(overrides: Partial<Parameters<typeof MobileSplitScree
     identityName: null,
     browserView: <div>VNC stream</div>,
     browserZoom: 100,
+    browserConnectionStatus: null,
+    remoteToolsOpen: false,
+    onRemoteToolsOpenChange: vi.fn(),
     onSelect: vi.fn(),
     onNew: vi.fn(),
     onEdit: vi.fn(),
@@ -68,213 +100,187 @@ function renderMobileSplit(overrides: Partial<Parameters<typeof MobileSplitScree
     onFullscreenChange: vi.fn(),
     onBrowserZoomChange: vi.fn(),
     onAccessControls: vi.fn(),
-    onOpenBenchmarks: vi.fn(),
     onLogout: vi.fn(),
     ...overrides,
   };
 
+  function ControlledMobileSplit() {
+    const [remoteToolsOpen, setRemoteToolsOpen] = useState(Boolean(props.remoteToolsOpen));
+
+    return (
+      <MobileSplitScreen
+        {...props}
+        remoteToolsOpen={remoteToolsOpen}
+        onRemoteToolsOpenChange={(open) => {
+          props.onRemoteToolsOpenChange(open);
+          setRemoteToolsOpen(open);
+        }}
+      />
+    );
+  }
+
   return {
-    ...render(<MobileSplitScreen {...props} />),
+    ...render(<ControlledMobileSplit />),
     props,
   };
 }
 
-function openWorkspaceTools() {
-  fireEvent.click(screen.getByLabelText("Open mobile workspace tools"));
+function openBrowserTools() {
+  if (!screen.queryByLabelText("Browser tools")) {
+    fireEvent.click(screen.getByLabelText("Open browser tools"));
+  }
 }
 
-function openLiveViewControls() {
-  fireEvent.click(screen.getByLabelText("Toggle live view controls"));
+function runningSplit(overrides: Partial<Parameters<typeof MobileSplitScreen>[0]> = {}) {
+  return renderMobileSplit({
+    selected: runningProfile,
+    selectedId: runningProfile.id,
+    browserConnectionStatus: "connected",
+    ...overrides,
+  });
 }
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+  installTaskHarness();
+});
+
+afterEach(() => {
+  delete window.cloakBrowserHarness;
+  vi.unstubAllGlobals();
+});
 
 describe("MobileSplitScreen", () => {
-  it("renders the agent task and local chat input", () => {
+  it("renders the default Codex Computer Use composer with browser tools and chat collapsed", async () => {
     renderMobileSplit();
 
-    expect(screen.getByText(/Agent task: compare the first three visible results/)).toBeTruthy();
-    expect(screen.getByText("Browser preview")).toBeTruthy();
-    expect(screen.getByLabelText("Agent task steps")).toBeTruthy();
-    expect(screen.getByPlaceholderText("Send a follow-up...")).toBeTruthy();
-    expect(screen.getByLabelText("Attach files")).toBeTruthy();
-    expect(screen.getByLabelText("Run settings")).toBeTruthy();
-    expect(screen.getByLabelText("Select agent runner")).toBeTruthy();
+    expect(screen.getByText("Codex Computer Use")).toBeTruthy();
+    expect(await screen.findByPlaceholderText("Ask Codex Computer Use...")).toBeTruthy();
+    expect(screen.getByLabelText("Open browser tools")).toBeTruthy();
+    expect(screen.queryByLabelText("Browser tools")).toBeNull();
+    expect(screen.queryByText("Task chat")).toBeNull();
+    expect(screen.queryByLabelText("Select harness runner")).toBeNull();
+    await waitFor(() => expect(window.cloakBrowserHarness?.send).toBeTruthy());
   });
 
-  it("adds a local user message and agent reply when submitted", () => {
+  it("disables the composer when the injected Codex Computer Use Bridge is invalid", async () => {
+    window.cloakBrowserHarness = {
+      capabilities: {
+        chat: true,
+        streaming: true,
+        clipboard: true,
+        browser_actions: ["paste"],
+      },
+    };
     renderMobileSplit();
 
-    fireEvent.change(screen.getByPlaceholderText("Send a follow-up..."), {
+    const input = await screen.findByPlaceholderText("Codex Computer Use Bridge unavailable");
+    expect((input as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Run task") as HTMLButtonElement).disabled).toBe(true);
+
+    openBrowserTools();
+    expect(screen.getByText("Codex Computer Use Bridge · unavailable")).toBeTruthy();
+    expect(screen.getByText("Codex Computer Use Bridge is required and must be injected by the host before tasks can run.")).toBeTruthy();
+
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(screen.queryByText(/Queued locally/)).toBeNull();
+    expect(screen.queryByText(/could not queue/)).toBeNull();
+  });
+
+  it("enables the composer when a valid host bridge is injected after mount", async () => {
+    delete window.cloakBrowserHarness;
+    renderMobileSplit();
+
+    const unavailableInput = await screen.findByPlaceholderText("Codex Computer Use Bridge unavailable");
+    expect((unavailableInput as HTMLTextAreaElement).disabled).toBe(true);
+
+    const { send } = installTaskHarness();
+    window.dispatchEvent(new Event(taskHarnessReadyEvent));
+
+    const input = await screen.findByPlaceholderText("Ask Codex Computer Use...");
+    expect((input as HTMLTextAreaElement).disabled).toBe(false);
+
+    fireEvent.change(input, {
+      target: { value: "Open the late bridge target" },
+    });
+    fireEvent.click(screen.getByLabelText("Run task"));
+
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        {
+          text: "Open the late bridge target",
+          profile_id: stoppedProfile.id,
+          metadata: {
+            runner: "codex-computer-use",
+            preferred_surface: "codex-computer-use",
+            browser_visible: true,
+          },
+        },
+        undefined,
+      ),
+    );
+    expect(await screen.findByText("Harness accepted the task.")).toBeTruthy();
+  });
+
+  it("sends a task through the injected task harness with profile and runner metadata", async () => {
+    const { send } = installTaskHarness();
+    renderMobileSplit();
+
+    fireEvent.change(await screen.findByPlaceholderText("Ask Codex Computer Use..."), {
       target: { value: "Open the pricing page" },
     });
     fireEvent.click(screen.getByLabelText("Run task"));
 
-    expect(screen.getByText("Open the pricing page")).toBeTruthy();
-    expect(screen.getByText(/Agent reply queued locally/)).toBeTruthy();
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        {
+          text: "Open the pricing page",
+          profile_id: stoppedProfile.id,
+          metadata: {
+            runner: "codex-computer-use",
+            preferred_surface: "codex-computer-use",
+            browser_visible: true,
+          },
+        },
+        undefined,
+      ),
+    );
+    expect(await screen.findByText("Harness accepted the task.")).toBeTruthy();
   });
 
-  it("does not submit an empty or whitespace-only agent task", () => {
+  it("does not submit empty or whitespace-only harness tasks", async () => {
+    const { send } = installTaskHarness();
     renderMobileSplit();
 
-    fireEvent.change(screen.getByPlaceholderText("Send a follow-up..."), {
+    const input = await screen.findByPlaceholderText("Ask Codex Computer Use...");
+    fireEvent.change(input, {
       target: { value: "   " },
     });
     fireEvent.click(screen.getByLabelText("Run task"));
 
-    expect(screen.queryByText(/^\s+$/)).toBeNull();
-    expect(screen.queryByText(/Agent reply queued locally/)).toBeNull();
-    expect((screen.getByPlaceholderText("Send a follow-up...") as HTMLTextAreaElement).value).toBe("   ");
+    expect(send).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Harness accepted/)).toBeNull();
+    expect((input as HTMLTextAreaElement).value).toBe("   ");
   });
 
-  it("opens neutral agent run settings and changes the runner", () => {
-    renderMobileSplit();
-
-    fireEvent.click(screen.getByLabelText("Run settings"));
-    expect(screen.getByLabelText("Agent run settings")).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Select agent runner"), {
-      target: { value: "local-runner" },
-    });
-    expect((screen.getByLabelText("Select agent runner") as HTMLSelectElement).value).toBe("local-runner");
-    expect(screen.queryByText(new RegExp("Browser " + "Use", "i"))).toBeNull();
-    expect(screen.queryByText(new RegExp("De" + "mo", "i"))).toBeNull();
-  });
-
-  it("updates the editable viewport from a preset", async () => {
-    const { props } = renderMobileSplit();
-
-    expect(screen.getAllByText(/390 x 844/).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
-    fireEvent.click(screen.getByText("Tablet"));
-    const applyButton = screen.getByText("Apply");
-    expect(applyButton.className).toContain("min-h-11");
-    fireEvent.click(applyButton);
-
-    expect(screen.getAllByText(/768 x 1024/).length).toBeGreaterThan(0);
-    await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(768, 1024));
-    expect(await screen.findByText("Saved")).toBeTruthy();
-  });
-
-  it("keeps the mobile gate selectors on the compact session control", () => {
-    const { container } = renderMobileSplit();
-
-    expect(container.querySelector(".mobile-toolbar")).toBeTruthy();
-    expect(container.querySelector(".mobile-toolbar select.mobile-select")).toBeTruthy();
-    expect(screen.getByLabelText("Edit browser viewport").getAttribute("aria-controls")).toBe("mobile-viewport-settings");
-  });
-
-  it("keeps benchmark navigation in the compact workspace tools menu", () => {
-    const { props } = renderMobileSplit();
-
-    openWorkspaceTools();
-    expect(screen.getByLabelText("Mobile workspace tools")).toBeTruthy();
-    fireEvent.click(screen.getByLabelText("Streaming benchmark results"));
-
-    expect(props.onOpenBenchmarks).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps task steps compact until the feed is expanded", () => {
-    renderMobileSplit();
-
-    const stepsFeed = screen.getByLabelText("Agent task steps");
-    const stepsToggle = within(stepsFeed).getByRole("button", { name: /Steps · 3/i });
-    expect(stepsToggle.getAttribute("aria-expanded")).toBe("false");
-    expect(within(stepsFeed).queryByText("Step 1")).toBeNull();
-    expect(within(stepsFeed).getByText(/Step 3: Ready for screenshot notes/)).toBeTruthy();
-
-    fireEvent.click(stepsToggle);
-
-    expect(stepsToggle.getAttribute("aria-expanded")).toBe("true");
-    expect(within(stepsFeed).getByText("Step 1")).toBeTruthy();
-    expect(within(stepsFeed).getByText("Ran mobile task shell")).toBeTruthy();
-  });
-
-  it("keeps the browser grid and viewport tool panels mutually exclusive", () => {
-    renderMobileSplit();
-
-    const viewportButton = screen.getByLabelText("Edit browser viewport");
-
-    openWorkspaceTools();
-    const gridButton = screen.getByLabelText("Toggle grid view");
-    fireEvent.click(gridButton);
-    expect(screen.getByLabelText("Running browser grid")).toBeTruthy();
-    expect(screen.queryByLabelText("Viewport controls")).toBeNull();
-
-    fireEvent.click(viewportButton);
-    expect(viewportButton.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByLabelText("Viewport controls")).toBeTruthy();
-    expect(screen.queryByLabelText("Running browser grid")).toBeNull();
-
-    openWorkspaceTools();
-    fireEvent.click(screen.getByLabelText("Toggle grid view"));
-    expect(screen.getByLabelText("Running browser grid")).toBeTruthy();
-    expect(screen.queryByLabelText("Viewport controls")).toBeNull();
-  });
-
-  it("live-adjusts browser pane ratio and requests noVNC visual zoom without remounting the stream", () => {
-    const { props, rerender } = renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
-
-    const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("50%");
-    expect(livePane.style.getPropertyValue("--mobile-browser-zoom")).toBe("");
-    expect(screen.queryByLabelText("Browser pane")).toBeNull();
-
-    openLiveViewControls();
-
-    fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
-    fireEvent.change(screen.getByLabelText("Visual zoom"), { target: { value: "135" } });
-
-    rerender(
-      <MobileSplitScreen
-        {...props}
-        selected={runningProfile}
-        selectedId={runningProfile.id}
-        browserZoom={135}
-      />,
-    );
-
-    expect(screen.getByLabelText("Browser pane size").textContent).toBe("64%");
-    expect(screen.getByLabelText("Visual zoom level").textContent).toBe("135%");
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("64%");
-    expect(livePane.style.getPropertyValue("--mobile-browser-zoom")).toBe("");
-    expect(props.onBrowserZoomChange).toHaveBeenCalledWith(135);
-    expect(screen.getAllByText("VNC stream")).toHaveLength(1);
-
-    fireEvent.click(screen.getByText("Reset view"));
-
-    rerender(
-      <MobileSplitScreen
-        {...props}
-        selected={runningProfile}
-        selectedId={runningProfile.id}
-        browserZoom={100}
-      />,
-    );
-
-    expect(screen.getByLabelText("Browser pane size").textContent).toBe("50%");
-    expect(screen.getByLabelText("Visual zoom level").textContent).toBe("100%");
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("50%");
-    expect(livePane.style.getPropertyValue("--mobile-browser-zoom")).toBe("");
-    expect(props.onBrowserZoomChange).toHaveBeenLastCalledWith(100);
-    expect(screen.getAllByText("VNC stream")).toHaveLength(1);
-  });
-
-  it("starts a short live mobile viewport compact while keeping the ratio directly adjustable", () => {
+  it("starts a short portrait live browser with a larger collapsed browser pane", () => {
     const originalInnerHeight = window.innerHeight;
     const originalInnerWidth = window.innerWidth;
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 667 });
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
 
     try {
-      renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
+      runningSplit();
 
       const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-      openLiveViewControls();
-      expect(screen.getByLabelText("Browser pane size").textContent).toBe("49%");
-      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("49%");
+      const pane = Number.parseInt(livePane.style.getPropertyValue("--mobile-live-pane-basis"), 10);
+      expect(pane).toBe(82);
+      expect(screen.queryByLabelText("Chat history")).toBeNull();
+      expect(screen.getByLabelText("Expand task chat").getAttribute("aria-expanded")).toBe("false");
 
-      fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
-
-      expect(screen.getByLabelText("Browser pane size").textContent).toBe("64%");
-      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("64%");
+      openBrowserTools();
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("65%");
     } finally {
       Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
       Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
@@ -282,90 +288,100 @@ describe("MobileSplitScreen", () => {
     }
   });
 
-  it("uses compact preview sizing until a live browser is running", () => {
-    const { rerender, props } = renderMobileSplit();
+  it("keeps only Full Tools Chat and Send visible as persistent primary actions", () => {
+    const { container } = runningSplit();
 
-    let livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("42%");
-
-    rerender(
-      <MobileSplitScreen
-        {...props}
-        selected={runningProfile}
-        selectedId={runningProfile.id}
-      />,
-    );
-
-    livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("50%");
+    const dock = container.querySelector(".mobile-command-dock");
+    expect(dock).toBeTruthy();
+    expect(dock?.querySelectorAll("button")).toHaveLength(3);
+    expect(screen.getByLabelText("Run task")).toBeTruthy();
+    expect(screen.queryByText("Task chat")).toBeNull();
+    expect(screen.queryByText("Benchmarks")).toBeNull();
+    expect(screen.queryByLabelText("Streaming benchmark results")).toBeNull();
   });
 
-  it("preserves a user-adjusted pane ratio across profile status changes", () => {
-    const { rerender, props } = renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
+  it("keeps profile and browser actions inside the central tools sheet without a harness picker", () => {
+    runningSplit({ canManageAccess: true });
 
-    openLiveViewControls();
-    fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
+    expect(screen.queryByRole("button", { name: /Stop/i })).toBeNull();
+    expect(screen.queryByLabelText("New profile")).toBeNull();
+    expect(screen.queryByLabelText("Edit selected profile")).toBeNull();
+    expect(screen.queryByLabelText("Browser access controls")).toBeNull();
 
-    rerender(
-      <MobileSplitScreen
-        {...props}
-        selected={stoppedProfile}
-        selectedId={stoppedProfile.id}
-      />,
-    );
+    openBrowserTools();
 
-    const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("64%");
+    const tools = screen.getByLabelText("Browser tools");
+    expect(within(tools).getByRole("button", { name: /Stop/i })).toBeTruthy();
+    expect(within(tools).getByLabelText("New profile")).toBeTruthy();
+    expect(within(tools).getByLabelText("Edit selected profile")).toBeTruthy();
+    expect(within(tools).getByLabelText("Browser access controls")).toBeTruthy();
+    expect(within(tools).queryByLabelText("Select harness runner")).toBeNull();
+  });
+
+  it("keeps viewport and grid panels mutually exclusive inside browser tools", async () => {
+    const { props } = renderMobileSplit();
+    openBrowserTools();
+
+    fireEvent.click(screen.getByLabelText("Toggle grid view"));
+    expect(screen.getByLabelText("Running browser grid")).toBeTruthy();
+    expect(screen.queryByLabelText("Viewport controls")).toBeNull();
+
     fireEvent.click(screen.getByLabelText("Edit browser viewport"));
-    expect(screen.getByLabelText("Browser pane size").textContent).toBe("64%");
+    expect(screen.getByLabelText("Viewport controls")).toBeTruthy();
+    expect(screen.queryByLabelText("Running browser grid")).toBeNull();
+
+    fireEvent.click(screen.getByText("Tablet"));
+    fireEvent.click(screen.getByText("Apply"));
+    await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(768, 1024));
+    expect(await screen.findByText("Saved")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Toggle grid view"));
+    expect(screen.getByLabelText("Running browser grid")).toBeTruthy();
+    expect(screen.queryByLabelText("Viewport controls")).toBeNull();
   });
 
-  it("does not add fake browser chrome around the running operator surface", () => {
-    renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
+  it("renders honest session grid cards with status name and resolution instead of simulated browser art", () => {
+    const { container } = runningSplit();
+    openBrowserTools();
+    fireEvent.click(screen.getByLabelText("Toggle grid view"));
 
-    const frame = screen.getByTestId("mobile-browser-frame");
-    expect(frame.className).toContain("mobile-browser-frame-live");
-    expect(screen.getByText("VNC stream")).toBeTruthy();
-    expect(screen.queryByText("Browser preview")).toBeNull();
-    expect(frame.querySelector(".mobile-browser-chrome")).toBeNull();
+    const grid = screen.getByLabelText("Running browser grid");
+    expect(within(grid).getByText("Live Checkout QA")).toBeTruthy();
+    expect(within(grid).getByText("Payments QA")).toBeTruthy();
+    expect(within(grid).getAllByText(/390 x 844/).length).toBeGreaterThan(0);
+    expect(within(grid).getAllByText("Live").length).toBeGreaterThan(0);
+    expect(container.querySelector(".mobile-grid-thumb")).toBeNull();
+    expect(container.querySelector(".mobile-grid-preview")).toBeNull();
   });
 
-  it("renders the live VNC surface before the compact live controls", () => {
-    const { container } = renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
-
+  it("adjusts pane ratio and noVNC zoom from the central browser tools without remounting the stream", () => {
+    const { props } = runningSplit();
     const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-    const browserWrap = livePane.querySelector(".mobile-browser-wrap") as HTMLElement;
 
-    expect(browserWrap.querySelector(".mobile-live-control-drawer")).toBeNull();
-    expect(container.querySelector(".mobile-live-control-header")).toBeNull();
-    expect(screen.queryByLabelText("Reset live view")).toBeNull();
-    openLiveViewControls();
-    expect(browserWrap.querySelector(".mobile-live-control-drawer")).toBeTruthy();
-    expect(screen.getByLabelText("Reset live view").className).toContain("mobile-live-reset-button");
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("82%");
+    expect(screen.queryByLabelText("Browser pane")).toBeNull();
+
+    openBrowserTools();
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("68%");
+    fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
+    fireEvent.change(screen.getByLabelText("Visual zoom"), { target: { value: "135" } });
+
+    expect(screen.getByLabelText("Browser pane size").textContent).toBe("64%");
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("64%");
+    expect(props.onBrowserZoomChange).toHaveBeenCalledWith(135);
+    expect(screen.getAllByText("VNC stream")).toHaveLength(1);
+
+    fireEvent.click(screen.getByLabelText("Reset live view"));
+    expect(screen.getByLabelText("Browser pane size").textContent).toBe("68%");
+    expect(props.onBrowserZoomChange).toHaveBeenLastCalledWith(100);
+    expect(screen.getAllByText("VNC stream")).toHaveLength(1);
   });
 
-  it("keeps pane and zoom inside an on-demand compact live control drawer", () => {
-    renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
+  it("keeps local view controls but hides viewport editing without profile management access", () => {
+    runningSplit({ canManageProfiles: false });
 
-    expect(screen.queryByLabelText("Live view controls")).toBeNull();
-    expect(screen.getByLabelText("Toggle live view controls").getAttribute("aria-expanded")).toBe("false");
-    openLiveViewControls();
-    const controls = screen.getByLabelText("Live view controls");
-    expect(controls.querySelector(".mobile-live-control-cluster")).toBeTruthy();
-    expect(controls.querySelectorAll(".mobile-live-slider")).toHaveLength(2);
-    expect(screen.getByLabelText("Browser pane size").textContent).toBe("50%");
-    expect(screen.getByLabelText("Visual zoom level").textContent).toBe("100%");
-  });
+    openBrowserTools();
 
-  it("keeps local view controls but hides remote viewport editing without profile management access", () => {
-    renderMobileSplit({
-      selected: runningProfile,
-      selectedId: runningProfile.id,
-      canManageProfiles: false,
-    });
-
-    openLiveViewControls();
-    expect(screen.getByLabelText("Live view controls")).toBeTruthy();
     expect(screen.getByLabelText("Browser pane")).toBeTruthy();
     expect(screen.getByLabelText("Visual zoom")).toBeTruthy();
     expect(screen.queryByLabelText("Edit browser viewport")).toBeNull();
@@ -375,34 +391,20 @@ describe("MobileSplitScreen", () => {
     expect(screen.queryByLabelText("Edit fullscreen browser viewport")).toBeNull();
   });
 
-  it("collapses profile administration actions while a browser is live", () => {
-    renderMobileSplit({
-      selected: runningProfile,
-      selectedId: runningProfile.id,
-      canManageAccess: true,
-    });
-
-    expect(screen.getByLabelText("Session control")).toBeTruthy();
-    expect(screen.queryByLabelText("New profile")).toBeNull();
-    expect(screen.queryByLabelText("Edit selected profile")).toBeNull();
-    expect(screen.queryByLabelText("Browser access controls")).toBeNull();
-    expect(screen.getByRole("button", { name: /Stop/i })).toBeTruthy();
-  });
-
   it("applies a one-tap phone-fit viewport from the current visual viewport", async () => {
     const { props } = renderMobileSplit();
     vi.stubGlobal("visualViewport", { width: 412.4, height: 891.6 });
 
+    openBrowserTools();
     fireEvent.click(screen.getByLabelText("Edit browser viewport"));
     fireEvent.click(screen.getByText("Phone fit"));
 
     await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(412, 892));
     expect(screen.getAllByText(/412 x 892/).length).toBeGreaterThan(0);
-    vi.unstubAllGlobals();
   });
 
   it("keeps editable viewport settings and zoom available in fullscreen while background controls are inert", async () => {
-    const { props } = renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
+    const { props } = runningSplit();
 
     fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
 
@@ -411,11 +413,10 @@ describe("MobileSplitScreen", () => {
     const controlPane = document.querySelector(".mobile-control-pane") as HTMLElement;
     expect(controlPane.hasAttribute("inert")).toBe(true);
     expect(controlPane.getAttribute("aria-hidden")).toBe("true");
-    expect(screen.getByLabelText("Edit fullscreen browser viewport").className).toContain("mobile-fullscreen-action");
-    expect(screen.getByLabelText("Close fullscreen browser").className).toContain("mobile-fullscreen-action");
 
     fireEvent.click(screen.getByLabelText("Toggle fullscreen view controls"));
     expect(screen.getByLabelText("Fullscreen view controls")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Fullscreen browser pane"), { target: { value: "70" } });
     fireEvent.change(screen.getByLabelText("Fullscreen visual zoom"), { target: { value: "125" } });
     expect(props.onBrowserZoomChange).toHaveBeenCalledWith(125);
 
@@ -427,32 +428,67 @@ describe("MobileSplitScreen", () => {
     fireEvent.change(screen.getByLabelText("Fullscreen viewport height"), { target: { value: "1024" } });
     fireEvent.click(within(editor).getByText("Apply"));
     await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(768, 1024));
-    expect(screen.getByRole("dialog", { name: "Fullscreen browser viewer" })).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Close fullscreen browser"));
     expect(screen.queryByRole("dialog", { name: "Fullscreen browser viewer" })).toBeNull();
     expect(document.activeElement).toBe(screen.getByLabelText("Open fullscreen browser"));
   });
 
+  it("uses Ctrl or Cmd shortcuts for fullscreen chat and browser tools", () => {
+    runningSplit();
+
+    fireEvent.keyDown(window, { key: "j", ctrlKey: true });
+    expect(screen.getByLabelText("Chat history")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    expect(screen.getByLabelText("Browser tools")).toBeTruthy();
+    expect(screen.queryByLabelText("Chat history")).toBeNull();
+
+    fireEvent.keyDown(window, { key: "b", metaKey: true });
+    expect(screen.getByRole("dialog", { name: "Fullscreen browser viewer" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    expect(screen.queryByRole("dialog", { name: "Fullscreen browser viewer" })).toBeNull();
+  });
+
+  it("keeps expanded chat and browser tools mutually exclusive", () => {
+    runningSplit();
+
+    fireEvent.click(screen.getByLabelText("Expand task chat"));
+    expect(screen.getByLabelText("Chat history")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Open browser tools"));
+    expect(screen.getByLabelText("Browser tools")).toBeTruthy();
+    expect(screen.queryByLabelText("Chat history")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Expand task chat"));
+    expect(screen.getByLabelText("Chat history")).toBeTruthy();
+    expect(screen.queryByLabelText("Browser tools")).toBeNull();
+  });
+
+  it("does not steal Ctrl or Cmd shortcuts while typing in the task input", async () => {
+    runningSplit();
+
+    const input = await screen.findByPlaceholderText("Ask Codex Computer Use...");
+    fireEvent.focus(input);
+    fireEvent.keyDown(input, { key: "j", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "k", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "b", metaKey: true });
+
+    expect(screen.queryByLabelText("Chat history")).toBeNull();
+    expect(screen.queryByLabelText("Browser tools")).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Fullscreen browser viewer" })).toBeNull();
+  });
+
   it("shows a viewport save error when persistence fails", async () => {
     renderMobileSplit({ onViewportApply: vi.fn().mockResolvedValue(false) });
 
+    openBrowserTools();
     fireEvent.click(screen.getByLabelText("Edit browser viewport"));
     fireEvent.click(screen.getByText("Apply"));
 
     expect(await screen.findByText("Could not save viewport")).toBeTruthy();
     expect(screen.queryByText("Saved")).toBeNull();
-  });
-
-  it("shows the running session grid", () => {
-    renderMobileSplit();
-
-    openWorkspaceTools();
-    fireEvent.click(screen.getByLabelText("Toggle grid view"));
-
-    const grid = screen.getByLabelText("Running browser grid");
-    expect(grid).toBeTruthy();
-    expect(within(grid).getByText("Live Checkout QA")).toBeTruthy();
   });
 
   it("provides a mobile-sized logout action for authenticated sessions", () => {
@@ -462,20 +498,5 @@ describe("MobileSplitScreen", () => {
     expect(logout.className).toContain("mobile-logout-button");
     fireEvent.click(logout);
     expect(props.onLogout).toHaveBeenCalledTimes(1);
-  });
-
-  it("opens a fullscreen touch viewer without losing the stream content", () => {
-    const { props } = renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
-
-    fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
-
-    expect(screen.getByRole("dialog", { name: "Fullscreen browser viewer" })).toBeTruthy();
-    expect(screen.getByText("VNC stream")).toBeTruthy();
-    expect(screen.getAllByText("VNC stream")).toHaveLength(1);
-    expect(screen.getByLabelText("Fullscreen browser controls")).toBeTruthy();
-    expect(props.onFullscreenChange).toHaveBeenLastCalledWith(true);
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Fullscreen browser viewer" })).toBeNull();
-    expect(props.onFullscreenChange).toHaveBeenLastCalledWith(false);
   });
 });

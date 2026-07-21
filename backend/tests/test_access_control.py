@@ -241,6 +241,32 @@ def test_admin_can_update_a_user_grants_from_the_access_dashboard_payload(client
     assert updated.json()["grants"] == [{"sandbox_id": "beta", "permission": "operate"}]
 
 
+def test_admin_can_update_an_agent_grants_from_the_access_dashboard_payload(
+    client_access: TestClient,
+):
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Grant editable Paperclip agent",
+            "paperclip_agent_id": "paperclip-agent-grant-editor",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    )
+    assert created.status_code == 201
+
+    updated = client_access.put(
+        f"/api/access/agents/{created.json()['id']}",
+        headers=bootstrap_headers(),
+        json={
+            "grants": [{"sandbox_id": "beta", "permission": "automate"}],
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["grants"] == [{"sandbox_id": "beta", "permission": "automate"}]
+
+
 def test_paperclip_agent_key_is_scoped_and_rotation_revokes_old_key(client_access: TestClient):
     alpha, beta = create_scoped_profiles()
     created = client_access.post(

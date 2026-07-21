@@ -1,6 +1,6 @@
 # Streaming Speed-Test Runner
 
-`scripts/streaming_benchmark_runner.py` is the reproducible adapter for comparing live-streaming candidates without inventing missing numbers. It emits newline-delimited JSON progress events on stdout for a browser UI or log tailer, then writes both a machine-readable JSON report and a Markdown summary.
+`scripts/streaming_benchmark_runner.py` is the reproducible adapter for comparing live-streaming candidates without inventing missing numbers. It emits newline-delimited JSON progress events on stdout for logs or automation, then writes both a machine-readable JSON report and a Markdown summary.
 
 ## Candidate config
 
@@ -15,7 +15,7 @@ Start from `scripts/streaming_benchmark_example.json` and replace endpoints with
 
 For a measurable candidate that depends on a local binary, add `requires_executable`. If the binary is not on `PATH`, the candidate is reported as `not_installed` and receives no timing fields.
 
-HTTP and WebSocket candidates may include a `headers` object for disposable local auth headers or cookies. Header values are used for the request but omitted from the public report. The runner also omits candidate URLs, commands, local paths, raw process output, and reproduction commands so the JSON can be safely projected in the manager dashboard.
+HTTP and WebSocket candidates may include a `headers` object for disposable local auth headers or cookies. Header values are used for the request but omitted from the public report. The runner also omits candidate URLs, commands, local paths, raw process output, and reproduction commands so reports can be shared without leaking local details.
 
 ## Run
 
@@ -28,7 +28,7 @@ python3 scripts/streaming_benchmark_runner.py \
   --latest-markdown docs/streaming-benchmark-latest.md
 ```
 
-The stdout stream is JSONL. A UI can consume it incrementally and react to `run_started`, `candidate_started`, `iteration_started`, `iteration_finished`, `candidate_finished`, and `run_finished` events.
+The stdout stream is JSONL. Automation or a log tailer can consume it incrementally and react to `run_started`, `candidate_started`, `iteration_started`, `iteration_finished`, `candidate_finished`, and `run_finished` events.
 
 ## Report contract
 
@@ -41,9 +41,9 @@ Each result has:
 
 The runner treats connection failures and non-101 WebSocket handshakes as measured outcomes, not architecture claims. A long-running command is considered available when its `ready_regex` is observed, then the probe is terminated cleanly; without a readiness regex it must exit successfully before the timeout. It treats missing binaries and intentionally conceptual candidates as not measured.
 
-## Browser dashboard
+## Report storage
 
-The manager reads the latest report from `BENCHMARK_REPORT_PATH` (default `/data/benchmark-report.json`) through `/api/benchmarks/latest`. That endpoint is administrator-only and serves a second, allow-listed projection of the report, so older artifacts cannot disclose local runner details in the browser. It never starts a benchmark; run this script separately and persist its output before refreshing the dashboard.
+The manager can read the latest report from `BENCHMARK_REPORT_PATH` (default `/data/benchmark-report.json`) through the administrator-only `/api/benchmarks/latest` endpoint when an operator needs a backend health check. r50 does not show benchmark controls in the mobile UI. Run this script separately and persist its output before attaching a report to a release decision.
 
 ## Pairing with the mobile UI gate
 

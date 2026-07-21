@@ -71,7 +71,7 @@ Ein zusätzlicher, frischer Runner-Lauf vom 20. Juli 2026 (UTC) prüfte den bere
 | Sunshine + Moonlight | – | `architecture_only` | – | – | nativer Clientpfad, kein eingebetteter Browser-WebSocket konfiguriert |
 | Apache Guacamole | – | `architecture_only` | – | – | Gateway-Pfad, in diesem Lauf nicht provisioniert |
 
-Der daraus erzeugte, serverseitig redigierte Report wurde außerdem in einer frischen Manager-Instanz in einer iPhone-14-Ansicht geladen und aktualisiert. Die mobile Seite zeigte alle fünf Kandidaten bei exakt 390 px Inhaltsbreite ohne horizontalen Overflow; „2 measured / 5 listed“ bleibt sichtbar und verhindert, dass die drei nicht gemessenen Kandidaten als Leistungswerte gelesen werden. Lokale Endpunkte, Profilkennungen und Header erscheinen weder im Browserreport noch in dieser Dokumentation.
+Der daraus erzeugte, serverseitig redigierte Report trennte die zwei gemessenen Kandidaten von drei nicht gemessenen Kandidaten. Lokale Endpunkte, Profilkennungen und Header erscheinen weder im öffentlichen Report noch in dieser Dokumentation.
 
 ### Frischer isolierter Preview-Nachtest (21. Juli 2026)
 
@@ -87,6 +87,22 @@ Der finale r49-Preview verwendet einen persistenten Workspace-Mount statt eines 
 | KasmVNC/noVNC WebSocket-Upgrade | 3,457 ms | 8,931 ms | 49,980 ms | Upgrade, kein Touch-to-Pixel |
 
 Der vollständige mobile Browser-Gate desselben Builds bestand anschließend **249/249 Checks** über fünf Viewpoints und erzeugte 22 Screenshot-Artefakte. Vier Authentifizierungswege – Legacy-Token, Bootstrap-Token, benannter Operator und benannter Viewer – erreichten einen verbundenen Canvas; Viewer-Eingabe blieb server- und UI-seitig gesperrt. Die Details und zehn priorisierten Eingabeverbesserungen stehen im [kritischen Mobile-/Auth-/Latenz-Audit](MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md).
+
+### r50 VCVM/Neko über Tailscale
+
+Am 21. Juli 2026 wurde zusätzlich ein bereits laufender Neko/Chrome-Stack auf der VCVM über Tailscale geprüft. Dieser Lauf ist ein Transport- und Login-Beleg, kein fairer Ersatzbenchmark gegen den CloakBrowser-KasmVNC-Pfad.
+
+| Messpunkt | Ergebnis |
+|---|---:|
+| Tailscale-Pfad | DERP(nue), keine direkte Verbindung |
+| Tailnet-Ping | p50 **59 ms**, Bereich **45-153 ms** |
+| VCVM-lokaler HTTP-Zugriff | p50 TTFB **1,318 ms**, p50 total **1,372 ms** |
+| Mac zu VCVM per SSH-Tunnel | p50 TTFB **226,095 ms**, p50 total **230,826 ms** |
+| Browser First Paint | **2.140 ms** |
+| Browser FCP | **2.232 ms** |
+| Browser Load | **2.953,6 ms** |
+
+Codex Computer Use absolvierte den geschützten Login und beobachtete `/ws`. WebRTC ICE blieb aber bei `checking` und wechselte danach zu `failed`; das Video blieb bei `readyState 0`. Deshalb wurde **kein FPS-Wert** berichtet. Die nächste sinnvolle Performance-Arbeit ist direkte Tailnet-Konnektivität beziehungsweise UDP/ICE zu reparieren und erst danach Frame- und Touch-to-Pixel-Messungen zu wiederholen.
 
 ## KasmVNC 1.3.3 gegen 1.4.0: isolierter A/B-Lauf
 
@@ -155,7 +171,7 @@ Das KasmVNC-1.4-Image ließ sich bauen. Sein erster Lauf war durch einen inzwisc
 6. Auf iPhone Safari zusätzlich Reconnect nach App-Hintergrund, Touch-Drag, Keyboard, Vollbild-Fallback und Tailscale-HTTPS prüfen.
 7. Median, p95 und Ausreißer zusammen berichten; fehlgeschlagene Läufe nicht aus der Stichprobe entfernen.
 
-Der reproduzierbare Adapter für neue Transport- und Speed-Tests liegt unter `scripts/streaming_benchmark_runner.py`; Details stehen in [STREAMING-SPEED-TEST-RUNNER.md](STREAMING-SPEED-TEST-RUNNER.md). Er liest eine JSON-Kandidatenliste, sendet live konsumierbare JSONL-Ereignisse an stdout und schreibt danach einen JSON- und Markdown-Report. Beispiel:
+Der reproduzierbare Adapter für neue Transport- und Speed-Tests liegt unter `scripts/streaming_benchmark_runner.py`; Details stehen in [STREAMING-SPEED-TEST-RUNNER.md](STREAMING-SPEED-TEST-RUNNER.md). Er liest eine JSON-Kandidatenliste, sendet JSONL-Ereignisse an stdout und schreibt danach einen JSON- und Markdown-Report. Beispiel:
 
 ```bash
 python3 scripts/streaming_benchmark_runner.py \
@@ -166,9 +182,9 @@ python3 scripts/streaming_benchmark_runner.py \
   --latest-markdown docs/streaming-benchmark-latest.md
 ```
 
-Der Runner unterscheidet absichtlich zwischen `measured`, `not_installed` und `architecture_only`. Eine fehlende lokale Installation oder ein reiner Architekturpfad erhält keine erfundenen Zeiten; ein erreichbarer HTTP-/WebSocket-/Command-Kandidat erhält dagegen rohe Messungen und Median-Min-Max-P95-Zusammenfassungen. Die Manager-Ansicht liest den Report ausschließlich über den administratorgeschützten Endpunkt `/api/benchmarks/latest`; `BENCHMARK_REPORT_PATH` muss auf die persistente JSON-Datei zeigen. Der browserfähige Report enthält bewusst keine lokalen Pfade, Endpunkte, Commands, Header oder Prozessausgaben.
+Der Runner unterscheidet absichtlich zwischen `measured`, `not_installed` und `architecture_only`. Eine fehlende lokale Installation oder ein reiner Architekturpfad erhält keine erfundenen Zeiten; ein erreichbarer HTTP-/WebSocket-/Command-Kandidat erhält dagegen rohe Messungen und Median-Min-Max-P95-Zusammenfassungen. Der Report ist als Headless-/Offline-Diagnostik gedacht; r50 zeigt Benchmarks nicht in der mobilen UI. Die öffentliche Projektion enthält bewusst keine lokalen Pfade, Endpunkte, Commands, Header oder Prozessausgaben.
 
-Der Browser-/UI-Gate-Runner liegt unter `scripts/mobile_ui_gate.py`. Er prüft fünf Viewports (iPhone 14, iPhone SE, iPhone Pro Max, iPhone 14 Landscape und Touch-Tablet), Touch-Ziele, Overflow, Split-Geometrie, Demo-Composer, Grid, Fullscreen-Fokus und – mit einer Profil-ID – genau einen echten VNC-Canvas. Mit Profil-ID öffnet er außerdem den manuellen iOS-Paste-Fallback, prüft dessen Touch-Ziele und bestätigt den kontrollierten Clipboard-Bridge-Rundlauf ohne Clipboard-Text im Report zu speichern. Optional tippt `--remote-probe-url` eine harmlose, eindeutige URL per Keyboard-Events durch noVNC/RFB und verifiziert die Zielseite danach über den CDP-Proxy. Seine Screenshotprüfung validiert Abmessungen und Mindestdateigröße; die abschließende semantische Sichtprüfung bleibt bewusst ein separater menschlicher oder Vision-Agent-Gate.
+Der Browser-/UI-Gate-Runner liegt unter `scripts/mobile_ui_gate.py`. Er prüft fünf Viewports (iPhone 14, iPhone SE, iPhone Pro Max, iPhone 14 Landscape und Touch-Tablet), Touch-Ziele, Overflow, Split-Geometrie, den injizierten Codex-Computer-Use-Composer, Grid, Fullscreen-Fokus und – mit einer Profil-ID – genau einen echten VNC-Canvas. Der finale r50-Lauf bestand **272/272 Checks** und erzeugte **22 Screenshots**. Mit Profil-ID öffnet der Runner außerdem den manuellen iOS-Paste-Fallback, prüft dessen Touch-Ziele und bestätigt den kontrollierten Clipboard-Bridge-Rundlauf, ohne Clipboard-Text im Report zu speichern. Optional tippt `--remote-probe-url` eine harmlose, eindeutige URL per Keyboard-Events durch noVNC/RFB und verifiziert die Zielseite danach über den CDP-Proxy. Seine Screenshotprüfung validiert Abmessungen und Mindestdateigröße; die abschließende semantische Sichtprüfung bleibt bewusst ein separater menschlicher oder Vision-Agent-Gate.
 
 ## Gepinnte Referenzstände
 

@@ -576,7 +576,7 @@ def verify_live_viewport_controls(
     })()""")
     add_check(result, "live viewport controls reset", bool(reset), {"clicked": reset})
     browser.wait_for(
-        "document.querySelector('[aria-label=\"Browser pane size\"]')?.textContent?.trim() === '66%' && "
+        "document.querySelector('[aria-label=\"Browser pane size\"]')?.textContent?.trim() === '50%' && "
         "document.querySelector('[aria-label=\"Visual zoom level\"]')?.textContent?.trim() === '100%'",
         "live viewport controls reset state",
         5,

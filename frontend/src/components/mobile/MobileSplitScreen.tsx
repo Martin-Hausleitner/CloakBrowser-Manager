@@ -65,7 +65,9 @@ const presets = [
 ] as const;
 
 const defaultPreviewPanePercent = 42;
-const defaultLivePanePercent = 66;
+// Keep enough room for the visible task chat on an iPhone-sized viewport.
+// Operators can still expand the live pane at any time with the ratio control.
+const defaultLivePanePercent = 50;
 const defaultBrowserZoom = 100;
 const minimumPhoneFitWidth = 320;
 const minimumPhoneFitHeight = 480;

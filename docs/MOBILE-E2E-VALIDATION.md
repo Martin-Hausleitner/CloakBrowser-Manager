@@ -51,6 +51,16 @@ Für das Dashboard betrugen `scrollWidth` und `clientWidth` jeweils exakt 390 px
 
 Zum dokumentierten Endstand bestanden außerdem der Produktionsbuild, **63 Frontend-Tests** und **220 Backend-Tests** (eine bekannte Starlette-Deprecation-Warnung). Der spezifische Streaming-Runner-Test und die Python-Kompilationsprüfung des Mobile-Gate-Runners waren ebenfalls grün.
 
+## Aktueller Compact-Split-Nachtest
+
+Die Live-Ansicht wurde anschließend auf einem iPhone-Viewport bewusst kompakter ausbalanciert: Der anfängliche laufende Browseranteil beträgt nun **50 %** statt 66 %. Er lässt sich weiterhin direkt von 42 % bis 82 % verstellen, aber hält bei 390 × 844 gleichzeitig den verbundenen VNC-Viewer, den sichtbaren Task-Verlauf und den Composer im selben Bildschirm. Das ist eine eigene, browser-agent-inspirierte Interaktion; es werden weder fremde Cloud-Logik noch Marken- oder UI-Assets übernommen.
+
+Ein frischer isolierter Source-Container mit einem nur für den Test angelegten 390-×-844-Profil bestand danach den vollständigen Live-Gate: **139/139 Checks** über iPhone 14 Portrait, iPhone Pro Max Portrait, iPhone 14 Landscape und Touch-Tablet. Der Nachweis umfasste genau einen verbundenen noVNC-Canvas, VNC-/RFB-Remote-Eingabe mit CDP-Bestätigung, Ratio- und Canvas-Zoom ohne CSS-Transform, Grid, Vollbild, Touch-Ziele sowie den Chat-Composer.
+
+Für den iPhone-14-Stand wurden zusätzlich folgende sichtbare Werte geprüft: `scrollWidth = clientWidth = 390`, ein Canvas, ein 131-px-hoher Chat-Verlauf und ein bei 723 px beginnender Composer. Eine harmlose eingegebene Task-Nachricht und die lokale, ausdrücklich gekennzeichnete Antwort erschienen bei weiterhin verbundenem Canvas. Der zugehörige Portrait-Screenshot wurde nach dem Lauf visuell kontrolliert: Der Browser liegt oben, der Task-Chat mit Verlauf darunter und der Composer bleibt vollständig erreichbar. Die temporären Testartefakte und Testdaten sind nicht versioniert.
+
+Im selben Arbeitsstand bestanden der Produktionsbuild, **63 Frontend-Tests**, **221 Backend-Tests**, der Streaming-Runner-Vertrag und drei WebKit-Gate-Vertragstests. Dieser Browser-/Chromium-Nachweis ersetzt weiterhin weder eine physische Mobile-Safari-Abnahme noch die private Tailnet-HTTPS-Freigabe.
+
 ## Safari/WebKit-Gate (vorbereitet, lokale Freigabe ausstehend)
 
 Zusätzlich liegt nun `scripts/mobile_webkit_gate.py` vor. Es startet optional einen ausschließlich loopback-gebundenen SafariDriver, prüft auf 390 × 844 die Mobile-Shell, die Navigation zum Benchmark-Report, Kandidaten-/Statuskennzeichnungen, horizontalen Overflow und ein Screenshot-Artefakt. Das Gate ergänzt den Chromium-/Live-VNC-Lauf; Safari auf macOS ist WebKit, aber weiterhin kein Ersatz für Mobile Safari auf einem physischen iPhone.

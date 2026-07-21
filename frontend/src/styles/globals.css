@@ -80,7 +80,13 @@
   }
 
   .mobile-live-pane-running {
-    min-height: min(36rem, 74dvh);
+    /*
+     * A running viewer needs to preserve a real split: the canvas stays
+     * immediately usable while the chat history and composer remain visible
+     * on an iPhone. The ratio slider can still grow this pane beyond its
+     * compact default.
+     */
+    min-height: clamp(18rem, 40dvh, 26rem);
   }
 
   .mobile-live-header {

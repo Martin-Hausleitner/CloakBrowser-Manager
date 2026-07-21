@@ -61,6 +61,7 @@ Each CloakBrowser profile generates a completely different device identity. To t
 - **One-click launch/stop** — each profile runs as an isolated CloakBrowser instance
 - **Session persistence** — cookies, localStorage, and cache survive browser restarts
 - **In-browser viewing** — interact with launched browsers via noVNC, directly in the web GUI
+- **Mobile task workspace** — compact live-VNC split with editable viewport, ratio and visual zoom; fullscreen, grid, task history, attachments and a touch-sized composer
 - **Playwright/Puppeteer API** — connect to any running profile programmatically via CDP, while still watching it live in the browser
 - **Optional scoped access** — protect the web UI with a bootstrap token, then give people and Paperclip agents only the browser sandboxes they need
 - **Powered by CloakBrowser** — 32 source-level C++ patches, passes Cloudflare Turnstile, 0.9 reCAPTCHA v3 score
@@ -89,6 +90,8 @@ python3 scripts/streaming_benchmark_runner.py \
 The administrator-only **Streaming benchmarks** view reads the configured report through `/api/benchmarks/latest`; set `BENCHMARK_REPORT_PATH` on the manager if its persistent report file is not `/data/benchmark-report.json`. The runner emits JSONL progress events for a browser UI, writes JSON plus Markdown reports, and separates `measured` candidates from `not_installed` or `architecture_only` entries. Its browser-facing output deliberately omits local paths, endpoints, commands, raw process output, and request headers. Pair it with `scripts/mobile_ui_gate.py` when a candidate also needs proof that the real mobile UI and live canvas still work. On macOS, `scripts/mobile_webkit_gate.py` adds a Safari/WebKit shell check after Remote Automation has been deliberately enabled in Safari Settings; it reports that prerequisite as blocked instead of weakening the result.
 
 The latest verified warm local baseline used five runs: the Manager health endpoint reached a median first byte at **8.196 ms**, and the real KasmVNC/noVNC WebSocket upgrade reached a median **66.627 ms** handshake. Selkies was explicitly `not_installed`; Sunshine/Moonlight and Guacamole were explicitly `architecture_only`. The redacted report was rendered and refreshed in an iPhone-14-sized manager view with no horizontal overflow. These are loopback regression probes for the existing path, not a cross-technology winner claim; the full context and limits are in [docs/REMOTE-STREAMING-BENCHMARK.md](docs/REMOTE-STREAMING-BENCHMARK.md).
+
+The current compact mobile split has separately passed the live VNC gate across iPhone 14 portrait, iPhone Pro Max portrait, iPhone 14 landscape, and a touch tablet: **139/139 checks** passed with one connected canvas, no horizontal overflow, touch/keyboard input, fullscreen, grid, ratio/zoom adjustment, and a visible task chat/composer. The evidence and remaining physical-iPhone/Safari limits are in [docs/MOBILE-E2E-VALIDATION.md](docs/MOBILE-E2E-VALIDATION.md).
 
 ## Development
 

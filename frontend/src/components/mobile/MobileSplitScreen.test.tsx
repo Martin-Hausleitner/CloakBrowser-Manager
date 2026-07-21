@@ -204,7 +204,7 @@ describe("MobileSplitScreen", () => {
 
     expect(screen.getByLabelText("Live view controls")).toBeTruthy();
     const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("66%");
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("50%");
     expect(livePane.style.getPropertyValue("--mobile-browser-zoom")).toBe("");
 
     fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
@@ -237,9 +237,9 @@ describe("MobileSplitScreen", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Browser pane size").textContent).toBe("66%");
+    expect(screen.getByLabelText("Browser pane size").textContent).toBe("50%");
     expect(screen.getByLabelText("Visual zoom level").textContent).toBe("100%");
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("66%");
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("50%");
     expect(livePane.style.getPropertyValue("--mobile-browser-zoom")).toBe("");
     expect(props.onBrowserZoomChange).toHaveBeenLastCalledWith(100);
     expect(screen.getAllByText("VNC stream")).toHaveLength(1);
@@ -260,7 +260,7 @@ describe("MobileSplitScreen", () => {
     );
 
     livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("66%");
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("50%");
   });
 
   it("preserves a user-adjusted pane ratio across profile status changes", () => {

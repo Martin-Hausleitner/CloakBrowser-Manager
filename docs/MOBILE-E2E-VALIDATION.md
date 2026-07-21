@@ -2,28 +2,31 @@
 
 Stand: 21. Juli 2026
 
-## Ergebnis
+## Ergebnis (aktueller r38-Live-Gate)
 
-Der Produktionscontainer und der echte KasmVNC/noVNC-Stream wurden mit dem reproduzierbaren Runner `scripts/mobile_ui_gate.py` geprüft. Alle vier Viewports und insgesamt 87 automatisierte Assertions waren grün:
+Der aktuelle isolierte Source-Container und der echte KasmVNC/noVNC-Stream wurden mit dem reproduzierbaren Runner `scripts/mobile_ui_gate.py` geprüft. **195/195 Checks** bestanden ohne Fehler über fünf Ziel-Viewports:
 
-| Viewport | Layout | Workspace bereit | Live-Verbindung | Ergebnis |
-|---|---|---:|---:|---|
-| iPhone 14, 390 × 844 | vertikaler Split | 147,5 ms | 37,9 ms | bestanden |
-| iPhone Pro Max, 430 × 932 | vertikaler Split | 118,0 ms | 35,4 ms | bestanden |
-| iPhone 14 Landscape, 844 × 390 | 58/42 Side-by-Side | 132,2 ms | 38,3 ms | bestanden |
-| Touch-Tablet, 768 × 1024 | vertikaler Split | 133,6 ms | 37,8 ms | bestanden |
+| Viewport | Layout | Checks | Ergebnis |
+|---|---|---:|---|
+| iPhone 14, 390 × 844 | vertikaler Split | 41/41 | bestanden |
+| iPhone SE, 375 × 667 | kompakter vertikaler Split | 38/38 | bestanden |
+| iPhone Pro Max, 430 × 932 | vertikaler Split | 41/41 | bestanden |
+| iPhone 14 Landscape, 844 × 390 | Side-by-Side | 37/37 | bestanden |
+| Touch-Tablet, 768 × 1024 | vertikaler Split | 38/38 | bestanden |
 
-Die Tabelle stammt aus dem finalen Wiederholungslauf gegen einen bereits laufenden Browser. In einem unmittelbar vorangehenden Lauf startete derselbe Build das gestoppte Testprofil und erreichte die erste Live-Verbindung nach 4.904,8 ms. Dieser Einzelwert ist ein E2E-Smoke-Nachweis, kein belastbarer Median.
+Der Lauf deckt genau einen verbundenen Canvas, VNC-/RFB-Remote-Eingabe mit CDP-Bestätigung, Ratio und Canvas-Zoom, Grid, Vollbild, 44-px-Touch-Ziele, Chat/Composer sowie den manuellen iOS-Paste-Fallback ab. Zusätzlich wurden der leere iPhone-14-Workspace und der editierbare Pro-Max-Viewport als Vision-Artefakte festgehalten. Die geschützte Access-Verwaltung wurde separat bei 390 px ohne horizontalen Overflow und mit mindestens 44 px hohen sichtbaren Controls geprüft.
 
-## Aktueller Kompatibilitäts-Wiederholungslauf
+Die nachfolgenden Abschnitte bewahren ältere, enger abgegrenzte Läufe als Vergleichs- und Fehlerhistorie. Sie ersetzen nicht dieses aktuelle Ergebnis.
+
+## Historischer Kompatibilitäts-Wiederholungslauf
 
 Nach dem Frontend-Kompatibilitätsfix für einen offenen Legacy-Backend-Status wurde der aktuelle Vite-Build erneut gegen denselben bereits laufenden KasmVNC/noVNC-Browser ausgeführt. **95/95 Prüfungen** bestanden: 26 im iPhone-14-Portrait-Lauf sowie je 23 auf iPhone Pro Max, iPhone Landscape und Touch-Tablet. Der Lauf prüfte den echten 1024-×-576-Canvas, Verbindungsstatus, CSS-Vollbild, Grid, die Browser-Use-inspirierte Demo-Composer-Interaktion, 44-px-Touch-Ziele und den kontrollierten Remote-Clipboard-/CDP-Pfad.
 
 Zusätzlich bestanden im identischen Arbeitsstand der Produktionsbuild, **40 Frontend-Tests** und **194 Backend-Tests**. Der Lauf verwendete ausschließlich einen bereits vorhandenen Testbrowser und eine harmlose lokale Status-URL als Remote-Probe; Screenshot-Artefakte sind bewusst ignorierte lokale Testausgaben. Er erhöht die Wiederholbarkeit des Browser-E2E-Nachweises, ersetzt aber die unten genannte Abnahme auf physischem Mobile Safari über Tailscale-HTTPS nicht.
 
-## Abgesicherter Policy- und Dashboard-Nachtest
+## Historischer Policy- und Dashboard-Nachtest
 
-Der aktuelle Source-Build wurde in einem frischen, isolierten Container mit ausschließlich `127.0.0.1:18081`-Bindung, aktivem `AUTH_TOKEN` und `ACCESS_CONTROL_ENABLED=1` ausgeführt. Ein erster vollständig frischer Lauf deckte auf dem iPhone-14-Viewport einen echten First-Connect-Fokusfehler auf: Nach einem Touch erhielt der noVNC-Canvas nicht zuverlässig sofort den Tastaturfokus. Der Viewer fokussiert deshalb jetzt bei Pointer- und Touch-Interaktion den dynamisch erzeugten Canvas; View-only bleibt davon ausgenommen.
+Der damalige Source-Build wurde in einem frischen, isolierten Container mit ausschließlich `127.0.0.1:18081`-Bindung, aktivem `AUTH_TOKEN` und `ACCESS_CONTROL_ENABLED=1` ausgeführt. Ein erster vollständig frischer Lauf deckte auf dem iPhone-14-Viewport einen echten First-Connect-Fokusfehler auf: Nach einem Touch erhielt der noVNC-Canvas nicht zuverlässig sofort den Tastaturfokus. Der Viewer fokussiert deshalb jetzt bei Pointer- und Touch-Interaktion den dynamisch erzeugten Canvas; View-only bleibt davon ausgenommen.
 
 Der daraufhin neu gebaute und erneut isoliert gestartete Nachtest bestand **100/100 Assertions**: **96** für die vier Workspace-/VNC-Viewports sowie **4** für den iPhone-14-großen Access-Dashboard-Gate. Die eine zusätzliche Workspace-Assertion ist der explizite Fokusnachweis im ersten iPhone-14-Lauf.
 
@@ -36,7 +39,7 @@ Der Dashboard-Gate ist Teil von `scripts/mobile_ui_gate.py` und wird mit `--acce
 
 Diese Prüfung beweist die geschützte Browser-/VNC- und Dashboard-Oberfläche im Browser. Sie ersetzt nicht den noch offenen physischen iPhone-Safari-Test über private Tailscale-HTTPS, weil Tailscale Serve in diesem Tailnet derzeit administrativ deaktiviert ist.
 
-## Finaler Mobile-Overflow-Nachtest für das Access Dashboard
+## Historischer Mobile-Overflow-Nachtest für das Access Dashboard
 
 Die Mobile-UX wurde danach noch einmal gegen eine lange Sandbox-Kennung nachgetestet. Auslöser war ein echter iPhone-14-Befund: Das zweispaltige Dashboard-Grid erzeugte auf 390 px eine implizite zu breite Spalte. Die Oberfläche verwendet dort nun explizit einen einspaltigen Grid-Pfad; Eingabefelder und Schlüsselbereich dürfen schrumpfen beziehungsweise umbrechen.
 
@@ -51,7 +54,7 @@ Für das Dashboard betrugen `scrollWidth` und `clientWidth` jeweils exakt 390 px
 
 Zum dokumentierten Endstand bestanden außerdem der Produktionsbuild, **63 Frontend-Tests** und **220 Backend-Tests** (eine bekannte Starlette-Deprecation-Warnung). Der spezifische Streaming-Runner-Test und die Python-Kompilationsprüfung des Mobile-Gate-Runners waren ebenfalls grün.
 
-## Aktueller Compact-Split-Nachtest
+## Aktueller Compact-Split-Nachtest (r38)
 
 Die Live-Ansicht wurde anschließend auf einem iPhone-Viewport bewusst kompakter ausbalanciert: Der anfängliche laufende Browseranteil beträgt nun **50 %** statt 66 %. Er lässt sich weiterhin direkt von 42 % bis 82 % verstellen, aber hält bei 390 × 844 gleichzeitig den verbundenen VNC-Viewer, den sichtbaren Task-Verlauf und den Composer im selben Bildschirm. Das ist eine eigene, browser-agent-inspirierte Interaktion; es werden weder fremde Cloud-Logik noch Marken- oder UI-Assets übernommen.
 
@@ -61,7 +64,7 @@ Der neue iPhone-SE-Run bei 375 × 667 deckt den vorher nicht abgesicherten kurze
 
 Für den iPhone-14-Stand wurden zusätzlich folgende sichtbare Werte geprüft: `scrollWidth = clientWidth = 390`, ein Canvas, ein 131-px-hoher Chat-Verlauf und ein bei 723 px beginnender Composer. Eine harmlose eingegebene Task-Nachricht und die lokale, ausdrücklich gekennzeichnete Antwort erschienen bei weiterhin verbundenem Canvas. Der zugehörige Portrait-Screenshot wurde nach dem Lauf visuell kontrolliert: Der Browser liegt oben, der Task-Chat mit Verlauf darunter und der Composer bleibt vollständig erreichbar. Der Gate schließt nach der Ratio-/Zoom-Prüfung die Viewport-Disclosure wieder und verlangt auf allen Portrait-Läufen einen sichtbaren Chat-Kopf, mindestens 80 px sichtbaren Verlauf sowie einen vollständig sichtbaren Composer. Die temporären Testartefakte und Testdaten sind nicht versioniert.
 
-Im selben Arbeitsstand bestanden der Produktionsbuild, **63 Frontend-Tests**, **221 Backend-Tests**, der Streaming-Runner-Vertrag und drei WebKit-Gate-Vertragstests. Dieser Browser-/Chromium-Nachweis ersetzt weiterhin weder eine physische Mobile-Safari-Abnahme noch die private Tailnet-HTTPS-Freigabe.
+Im aktuellen Arbeitsstand bestanden der Produktionsbuild, **65 Frontend-Tests**, **221 Backend-Tests**, der Streaming-Runner-Vertrag und drei WebKit-Gate-Vertragstests. Dieser Browser-/Chromium-Nachweis ersetzt weiterhin weder eine physische Mobile-Safari-Abnahme noch die private Tailnet-HTTPS-Freigabe.
 
 ## Safari/WebKit-Gate (vorbereitet, lokale Freigabe ausstehend)
 
@@ -79,13 +82,13 @@ python3 scripts/mobile_webkit_gate.py \
 
 Der isolierte Vertrags-Test `scripts/test_mobile_webkit_gate.py` simuliert den WebDriver-Austausch und prüft den erfolgreichen Report-, Redaktions- und Screenshotpfad ohne eine Safari- oder Netzwerkfreigabe zu benötigen.
 
-## Nachtest: iOS-Paste-Fallback
+## Historischer Nachtest: iOS-Paste-Fallback
 
-Der aktuelle Source-Build wurde anschließend über den lokalen Vite-Proxy gegen denselben laufenden Testbrowser geprüft. Alle vier Viewports bestanden erneut. Zusätzlich öffnete jeder Durchlauf den manuellen **Paste text**-Dialog, validierte alle sichtbaren Touch-Ziele mit mindestens 44 × 44 CSS-Pixeln und bestätigte Browser → API → Remote-Clipboard bei weiterhin verbundenem VNC-Canvas. Der zugehörige Frontend-Test deckt die vollständige RFB-`Ctrl+V`-Sequenz ab.
+Der damalige Source-Build wurde anschließend über den lokalen Vite-Proxy gegen denselben laufenden Testbrowser geprüft. Alle vier Viewports bestanden erneut. Zusätzlich öffnete jeder Durchlauf den manuellen **Paste text**-Dialog, validierte alle sichtbaren Touch-Ziele mit mindestens 44 × 44 CSS-Pixeln und bestätigte Browser → API → Remote-Clipboard bei weiterhin verbundenem VNC-Canvas. Der zugehörige Frontend-Test deckt die vollständige RFB-`Ctrl+V`-Sequenz ab.
 
 Der Nachtest prüft den manuellen Fallback unabhängig von `navigator.clipboard`, damit eine fehlende oder von Mobile Safari abgelehnte Clipboard-Berechtigung keinen Paste-Flow blockiert. Der Report speichert keine Clipboard-Inhalte, sondern nur Match-Status und Längen eines nicht sensitiven Einmal-Markers. Die Artefakte lagen ausschließlich temporär außerhalb des Git-Repositories; repräsentative Workspace- und Vollbild-Screenshots wurden visuell kontrolliert.
 
-## Isolierter KasmVNC-A/B-Nachtest
+## Historischer isolierter KasmVNC-A/B-Nachtest
 
 Die komplette Suite wurde zusätzlich gegen je einen isolierten KasmVNC-1.3.3- und KasmVNC-1.4.0-Container mit gleichem 1024-×-576-Profil ausgeführt. Beide Varianten bestanden vier Viewports, exakt einen echten VNC-Canvas, Grid, Vollbild, den lokalen Browser-Use-inspirierten Composer sowie die RFB-Keyboard-zu-CDP-Probe; pro Variante waren **88/88 Checks** und **13 Screenshots** grün.
 
@@ -115,7 +118,7 @@ Der erste Wert je Zeile startete aus einem gestoppten Profil und ist deshalb nur
 - Escape schließt Vollbild, gibt den Fokus zurück und erzeugt keinen Overflow.
 - Dreizehn PNG-Artefakte besitzen die erwartete Viewportgröße und eine nichttriviale Dateigröße.
 
-## Frische Code-Gates
+## Historische Code-Gates
 
 | Gate | Ergebnis |
 |---|---|

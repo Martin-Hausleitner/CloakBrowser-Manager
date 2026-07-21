@@ -196,7 +196,17 @@ def test_scoped_viewer_only_sees_granted_sandbox_and_no_sensitive_config(client_
     assert ("profile.permission.interact", "alpha", alpha["id"], "denied") in denied_events
 
 
-def test_operator_can_operate_only_its_scoped_profile(client_access: TestClient):
+def test_operator_can_operate_only_its_scoped_profile(
+    client_access: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend import main
+
+    monkeypatch.setattr(
+        main.browser_mgr,
+        "launch",
+        AsyncMock(side_effect=RuntimeError("launch unavailable in policy test")),
+    )
     alpha, beta = create_scoped_profiles()
     created = client_access.post(
         "/api/access/users",
@@ -214,8 +224,9 @@ def test_operator_can_operate_only_its_scoped_profile(client_access: TestClient)
     assert client_access.post(
         "/api/auth/login", json={"username": "operator", "password": "operator-password-123"}
     ).status_code == 200
-    # No running browser is expected in this test. The error proves the policy
-    # allowed the request to reach the lifecycle handler.
+    # The controlled lifecycle error proves policy allowed the request to reach
+    # the handler without depending on whether CloakBrowser is installed in the
+    # test image.
     allowed = client_access.post(f"/api/profiles/{alpha['id']}/launch")
     assert allowed.status_code in {409, 500}
     denied = client_access.post(f"/api/profiles/{beta['id']}/launch")

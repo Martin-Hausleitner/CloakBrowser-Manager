@@ -6,7 +6,7 @@ import asyncio
 import logging
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger("cloakbrowser.manager.vnc")
 
@@ -60,6 +60,10 @@ class VNCManager:
             "-SecurityTypes", "None",
             "-DisableBasicAuth",
             "-interface", "127.0.0.1",  # internal only, proxied by FastAPI
+            # KasmVNC otherwise blocks startup while probing public STUN
+            # servers. This Manager deliberately keeps KasmVNC loopback-only
+            # behind the authenticated FastAPI reverse proxy.
+            "-publicIP", "127.0.0.1",
             "-AlwaysShared",
             "-httpd", httpd_dir,
         ]

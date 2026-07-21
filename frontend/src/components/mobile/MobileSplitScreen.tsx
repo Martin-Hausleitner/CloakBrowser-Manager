@@ -88,6 +88,8 @@ const minimumAspectFitPaneHeight = 220;
 const minimumPhoneFitWidth = 320;
 const minimumPhoneFitHeight = 480;
 
+type FullscreenFitMode = "contain" | "width" | "height";
+
 type PinnedHarnessAction = Omit<TaskHarnessAction, "kind"> & {
   kind: "screenshot" | "copy" | "paste";
 };
@@ -184,6 +186,16 @@ function isInteractiveShortcutTarget(target: EventTarget | null) {
   return Boolean(target.closest("canvas, .mobile-browser-frame, .profile-viewer"));
 }
 
+function isKeyboardEntryTarget(target: Element | null) {
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+  if (target instanceof HTMLInputElement) {
+    return !["button", "checkbox", "file", "hidden", "radio", "range", "reset", "submit"].includes(
+      target.type,
+    );
+  }
+  return target instanceof HTMLElement && target.isContentEditable;
+}
+
 function toChatMessage(message: TaskHarnessMessage): ChatMessage {
   return {
     id: message.id,
@@ -241,7 +253,9 @@ export function MobileSplitScreen({
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [fullscreenViewOpen, setFullscreenViewOpen] = useState(false);
   const [fullscreenViewportOpen, setFullscreenViewportOpen] = useState(false);
+  const [fullscreenFitMode, setFullscreenFitMode] = useState<FullscreenFitMode>("contain");
   const [liveViewportSize, setLiveViewportSize] = useState(currentLiveViewportSize);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [compactLivePane, setCompactLivePane] = useState(usesCompactLivePane);
   const [panePercent, setPanePercent] = useState(() =>
     defaultPanePercent(selected?.status === "running", usesCompactLivePane()),
@@ -257,6 +271,8 @@ export function MobileSplitScreen({
   const viewportProfileIdRef = useRef(selected?.id);
   const chatAdjustedRef = useRef(false);
   const taskHarnessRef = useRef<ReturnType<typeof createTaskHarness> | null>(null);
+  const keyboardBaselineHeightRef = useRef(liveViewportSize.height);
+  const keyboardEntryFocusedRef = useRef(false);
 
   const runningProfiles = useMemo(
     () => profiles.filter((profile) => profile.status === "running"),
@@ -277,6 +293,10 @@ export function MobileSplitScreen({
       : `${panePercent}%`;
   const livePaneStyle = {
     "--mobile-live-pane-basis": effectivePanePercent,
+    "--mobile-remote-aspect": `${selected?.screen_width || presets[0].width} / ${selected?.screen_height || presets[0].height}`,
+  } as CSSProperties;
+  const rootStyle = {
+    "--mobile-visual-viewport-height": `${liveViewportSize.height}px`,
   } as CSSProperties;
   const connectionLabel =
     browserConnectionStatus === "connected"
@@ -431,17 +451,52 @@ export function MobileSplitScreen({
   useEffect(() => {
     const updateLiveViewport = () => {
       const nextSize = currentLiveViewportSize();
+      const visualViewport = window.visualViewport;
+      const activeEntry = keyboardEntryFocusedRef.current || isKeyboardEntryTarget(document.activeElement);
+      const layoutHeight = Math.max(window.innerHeight || 0, keyboardBaselineHeightRef.current);
+      const occludedHeight = Math.max(
+        0,
+        layoutHeight - nextSize.height - Math.max(0, visualViewport?.offsetTop ?? 0),
+      );
+      const shrunkFromBaseline = keyboardBaselineHeightRef.current - nextSize.height >= 80;
+      const keyboardOccludesViewport = occludedHeight >= 80 || shrunkFromBaseline;
+
       setLiveViewportSize((current) =>
         current.width === nextSize.width && current.height === nextSize.height ? current : nextSize,
       );
+      // Keep keyboard mode through the close animation after blur. Releasing
+      // it while the visual viewport is still short makes the dock flash back
+      // over the composer on Mobile Safari.
+      setKeyboardOpen((current) => keyboardOccludesViewport && (activeEntry || current));
       setCompactLivePane(usesCompactLivePane());
+      if (!activeEntry && occludedHeight < 80) {
+        keyboardBaselineHeightRef.current = nextSize.height;
+      }
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      if (isKeyboardEntryTarget(event.target as Element | null)) {
+        keyboardEntryFocusedRef.current = true;
+      }
+      updateLiveViewport();
+    };
+    const handleFocusOut = (event: FocusEvent) => {
+      if (isKeyboardEntryTarget(event.target as Element | null)) {
+        keyboardEntryFocusedRef.current = false;
+      }
+      window.requestAnimationFrame(updateLiveViewport);
     };
     updateLiveViewport();
     window.addEventListener("resize", updateLiveViewport);
     window.visualViewport?.addEventListener("resize", updateLiveViewport);
+    window.visualViewport?.addEventListener("scroll", updateLiveViewport);
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("focusout", handleFocusOut);
     return () => {
       window.removeEventListener("resize", updateLiveViewport);
       window.visualViewport?.removeEventListener("resize", updateLiveViewport);
+      window.visualViewport?.removeEventListener("scroll", updateLiveViewport);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("focusout", handleFocusOut);
     };
   }, []);
 
@@ -613,6 +668,7 @@ export function MobileSplitScreen({
   const resetLiveViewport = () => {
     setPaneAdjusted(false);
     setPanePercent(preferredPanePercent);
+    setFullscreenFitMode("contain");
     onBrowserZoomChange(defaultBrowserZoom);
   };
 
@@ -662,6 +718,27 @@ export function MobileSplitScreen({
     const editorId = fullscreen ? "mobile-fullscreen-viewport-settings" : "mobile-viewport-settings";
     const widthInputId = fullscreen ? "mobile-fullscreen-viewport-width" : "mobile-viewport-width";
     const heightInputId = fullscreen ? "mobile-fullscreen-viewport-height" : "mobile-viewport-height";
+    const viewportStatus = viewportApplying
+      ? selected?.status === "running"
+        ? "Restarting live browser..."
+        : "Saving viewport..."
+      : viewportSaveFailed
+        ? selected?.status === "running"
+          ? "Could not apply viewport"
+          : "Could not save viewport"
+        : viewportSaved
+          ? "Saved"
+          : selected?.status === "running"
+            ? "Restarts live browser to apply"
+            : "Applied when this profile launches";
+    const setViewportDimension = (dimension: "width" | "height", value: string) => {
+      setViewport((current) => ({
+        ...current,
+        [dimension]: Number(value) || current[dimension],
+      }));
+      setViewportSaved(false);
+      setViewportSaveFailed(false);
+    };
 
     return (
       <div
@@ -669,20 +746,81 @@ export function MobileSplitScreen({
         className={`mobile-viewport-editor ${fullscreen ? "mobile-fullscreen-viewport-editor" : ""}`}
         aria-label={fullscreen ? "Fullscreen viewport controls" : "Viewport controls"}
       >
-        {fullscreen ? (
-          <p className="mobile-viewport-editor-note">
-            {selected?.status === "running"
-              ? "Restarts live browser to apply this viewport."
-              : "Save the viewport for the next launch."}
-          </p>
-        ) : null}
         {!fullscreen ? (
           <>
             {renderLiveViewControls()}
             <p className="mobile-viewport-editor-note">Pane and zoom update this viewer immediately.</p>
           </>
         ) : null}
-        {canManageProfiles ? (
+        {canManageProfiles && fullscreen ? (
+          <>
+            <div className="mobile-fullscreen-viewport-fields">
+              <label htmlFor={widthInputId}>
+                <span className="sr-only">Viewport width</span>
+                <input
+                  id={widthInputId}
+                  aria-label="Fullscreen viewport width"
+                  className="input no-spin"
+                  type="number"
+                  min={240}
+                  max={2560}
+                  value={viewport.width}
+                  onChange={(event) => setViewportDimension("width", event.target.value)}
+                  disabled={viewportApplying}
+                />
+              </label>
+              <span className="mobile-fullscreen-viewport-times" aria-hidden="true">×</span>
+              <label htmlFor={heightInputId}>
+                <span className="sr-only">Viewport height</span>
+                <input
+                  id={heightInputId}
+                  aria-label="Fullscreen viewport height"
+                  className="input no-spin"
+                  type="number"
+                  min={320}
+                  max={1600}
+                  value={viewport.height}
+                  onChange={(event) => setViewportDimension("height", event.target.value)}
+                  disabled={viewportApplying}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn-primary mobile-fullscreen-viewport-apply"
+                disabled={!selected || viewportApplying}
+                onClick={applyViewport}
+              >
+                {viewportApplying ? "Wait" : "Apply"}
+              </button>
+            </div>
+            <div className="mobile-fullscreen-preset-row" aria-label="Fullscreen viewport presets">
+              <button
+                type="button"
+                onClick={applyPhoneFitViewport}
+                className="mobile-preset-button mobile-phone-fit-button"
+                disabled={viewportApplying}
+              >
+                Phone
+              </button>
+              {presets.map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => {
+                    setViewport({ width: preset.width, height: preset.height });
+                    setViewportSaved(false);
+                    setViewportSaveFailed(false);
+                  }}
+                  className="mobile-preset-button"
+                  disabled={viewportApplying}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            <p className="mobile-fullscreen-viewport-status" aria-live="polite">{viewportStatus}</p>
+          </>
+        ) : canManageProfiles ? (
           <>
             <div className="flex gap-1 overflow-x-auto">
               <button
@@ -720,14 +858,7 @@ export function MobileSplitScreen({
                   min={240}
                   max={2560}
                   value={viewport.width}
-                  onChange={(event) => {
-                    setViewport((current) => ({
-                      ...current,
-                      width: Number(event.target.value) || current.width,
-                    }));
-                    setViewportSaved(false);
-                    setViewportSaveFailed(false);
-                  }}
+                  onChange={(event) => setViewportDimension("width", event.target.value)}
                   disabled={viewportApplying}
                 />
               </label>
@@ -741,37 +872,18 @@ export function MobileSplitScreen({
                   min={320}
                   max={1600}
                   value={viewport.height}
-                  onChange={(event) => {
-                    setViewport((current) => ({
-                      ...current,
-                      height: Number(event.target.value) || current.height,
-                    }));
-                    setViewportSaved(false);
-                    setViewportSaveFailed(false);
-                  }}
+                  onChange={(event) => setViewportDimension("height", event.target.value)}
                   disabled={viewportApplying}
                 />
               </label>
             </div>
-            <div className="flex items-center justify-between gap-3">
+            <div className="mobile-viewport-apply-row">
               <p className="text-[11px] text-gray-500">
-                {viewportApplying
-                  ? selected?.status === "running"
-                    ? "Restarting live browser..."
-                    : "Saving viewport..."
-                  : viewportSaveFailed
-                  ? selected?.status === "running"
-                    ? "Could not apply viewport"
-                    : "Could not save viewport"
-                  : viewportSaved
-                    ? "Saved"
-                    : selected?.status === "running"
-                      ? "Restarts live browser to apply"
-                      : "Applied when this profile launches"}
+                {viewportStatus}
               </p>
               <button
                 type="button"
-                className="btn-primary min-h-11 shrink-0"
+                className="btn-primary min-h-9 shrink-0 px-2 text-[11px]"
                 disabled={!selected || viewportApplying}
                 onClick={applyViewport}
               >
@@ -841,23 +953,24 @@ export function MobileSplitScreen({
 
   const renderFullscreenViewControls = () => (
     <div id="mobile-fullscreen-view-controls" className="mobile-fullscreen-tools-panel" aria-label="Fullscreen view controls">
-      <label className="mobile-fullscreen-zoom" htmlFor="mobile-fullscreen-pane-size">
-        <span className="text-[10px] font-semibold uppercase text-gray-500">Pane</span>
-        <input
-          id="mobile-fullscreen-pane-size"
-          type="range"
-          min={42}
-          max={82}
-          step={1}
-          value={panePercent}
-          onChange={(event) => updatePanePercent(Number(event.target.value))}
-          aria-label="Fullscreen browser pane"
-          aria-valuetext={`${panePercent}% of the workspace`}
-        />
-        <output htmlFor="mobile-fullscreen-pane-size" aria-label="Fullscreen browser pane size" aria-live="polite">
-          {panePercent}%
-        </output>
-      </label>
+      <div className="mobile-fullscreen-fit-row" role="group" aria-label="Fullscreen browser fit mode">
+        {([
+          ["contain", "Fit"],
+          ["width", "Width"],
+          ["height", "Height"],
+        ] as const).map(([mode, label]) => (
+          <button
+            key={mode}
+            type="button"
+            className="mobile-fullscreen-fit-button"
+            aria-label={`Fit fullscreen browser to ${mode === "contain" ? "screen" : mode}`}
+            aria-pressed={fullscreenFitMode === mode}
+            onClick={() => setFullscreenFitMode(mode)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <label className="mobile-fullscreen-zoom" htmlFor="mobile-fullscreen-browser-zoom">
         <span className="text-[10px] font-semibold uppercase text-gray-500">Zoom</span>
         <input
@@ -976,10 +1089,15 @@ export function MobileSplitScreen({
   );
 
   return (
-    <main className={`mobile-split-root ${compactWorkspace ? "mobile-workspace-collapsed" : ""} bg-surface-0 text-gray-100`}>
+    <main
+      className={`mobile-split-root ${compactWorkspace ? "mobile-workspace-collapsed" : ""} ${keyboardOpen ? "mobile-keyboard-open" : ""} bg-surface-0 text-gray-100`}
+      style={rootStyle}
+      data-keyboard-open={keyboardOpen ? "true" : "false"}
+    >
       <section
         className={`mobile-live-pane ${isLiveBrowser ? "mobile-live-pane-running" : ""} ${fitLivePaneToBrowser ? "mobile-live-pane-fit" : ""} ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
         style={livePaneStyle}
+        data-fullscreen-fit={fullscreenOpen ? fullscreenFitMode : undefined}
         role={fullscreenOpen ? "dialog" : undefined}
         aria-modal={fullscreenOpen ? true : undefined}
         aria-label={fullscreenOpen ? "Fullscreen browser viewer" : undefined}
@@ -1341,8 +1459,18 @@ export function MobileSplitScreen({
             id="mobile-task-input"
             value={draft}
             onChange={updateDraft}
+            onFocus={(event) => {
+              keyboardEntryFocusedRef.current = true;
+              if (remoteToolsOpen) closeTools();
+              const target = event.currentTarget;
+              window.requestAnimationFrame(() => target.scrollIntoView?.({ block: "nearest" }));
+            }}
+            onBlur={() => {
+              keyboardEntryFocusedRef.current = false;
+            }}
             className="input min-h-9 resize-none overflow-y-auto"
             rows={1}
+            enterKeyHint="send"
             placeholder={harnessPlaceholder}
             disabled={harnessPending || !composerReady}
           />

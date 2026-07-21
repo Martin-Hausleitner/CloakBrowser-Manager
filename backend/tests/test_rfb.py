@@ -5,6 +5,7 @@ from __future__ import annotations
 import struct
 
 from backend.main import (
+    _RfbServerStreamFilter,
     _build_server_cut_text,
     _filter_rfb_client_messages,
     _parse_kasmvnc_clipboard,
@@ -65,6 +66,39 @@ def _make_kasmvnc_clipboard(mime: str, data: str) -> bytes:
     buf.extend(struct.pack(">I", len(data_bytes)))  # data_len (u32 BE)
     buf.extend(data_bytes)
     return bytes(buf)
+
+
+def _make_server_init(
+    *, width: int = 768, height: int = 1024, name: bytes = b"Test desktop"
+) -> bytes:
+    pixel_format = struct.pack(
+        ">BBBBHHHBBBxxx",
+        32,  # bits per pixel
+        24,  # depth
+        0,   # little endian
+        1,   # true colour
+        255,
+        255,
+        255,
+        16,
+        8,
+        0,
+    )
+    return (
+        struct.pack(">HH", width, height)
+        + pixel_format
+        + struct.pack(">I", len(name))
+        + name
+    )
+
+
+def _make_server_handshake() -> bytes:
+    return (
+        b"RFB 003.008\n"
+        + b"\x01\x01"  # one advertised security type: None
+        + b"\0\0\0\0"  # successful SecurityResult
+        + _make_server_init()
+    )
 
 
 # ── _parse_kasmvnc_clipboard ────────────────────────────────────────────────
@@ -136,6 +170,101 @@ def test_build_cut_text_latin1_fallback():
     text_bytes = result[8:]
     assert b"?" in text_bytes  # unicode replaced
     assert text_bytes.startswith(b"hello ")
+
+
+def test_viewer_drops_standard_and_kasm_server_clipboard():
+    standard = _build_server_cut_text("viewer-secret")
+    kasm = _make_kasmvnc_clipboard("text/plain", "viewer-secret")
+    standard_filter = _RfbServerStreamFilter(
+        can_interact=False, handshake_complete=True
+    )
+    kasm_filter = _RfbServerStreamFilter(
+        can_interact=False, handshake_complete=True
+    )
+
+    assert standard_filter.filter(standard) == b""
+    assert standard_filter.last_dropped_clipboard is True
+    assert kasm_filter.filter(kasm) == b""
+    assert kasm_filter.last_dropped_clipboard is True
+
+
+def test_interactor_receives_standardized_kasm_server_clipboard():
+    kasm = _make_kasmvnc_clipboard("text/plain", "operator-copy")
+    rfb_filter = _RfbServerStreamFilter(can_interact=True)
+
+    assert rfb_filter.filter(kasm) == _build_server_cut_text("operator-copy")
+
+
+def test_viewer_preserves_fragmented_server_handshake():
+    handshake = _make_server_handshake()
+    rfb_filter = _RfbServerStreamFilter(can_interact=False)
+    chunks = (
+        handshake[:5],
+        handshake[5:13],
+        handshake[13:18],
+        handshake[18:31],
+        handshake[31:],
+    )
+
+    assert b"".join(rfb_filter.filter(chunk) for chunk in chunks) == handshake
+
+
+def test_viewer_does_not_mistake_server_init_for_clipboard():
+    # A 768px-wide ServerInit starts with byte 3, the standard ServerCutText
+    # message type. Handshake state disambiguates it from normal messages.
+    handshake = _make_server_handshake()
+    rfb_filter = _RfbServerStreamFilter(can_interact=False)
+
+    assert rfb_filter.filter(handshake) == handshake
+
+
+def test_viewer_filters_clipboard_coalesced_between_display_messages():
+    framebuffer_update = b"\0\0\0\0"  # zero-rectangle update
+    clipboard = _build_server_cut_text("viewer-secret")
+    bell = b"\x02"
+    rfb_filter = _RfbServerStreamFilter(
+        can_interact=False, handshake_complete=True
+    )
+
+    assert rfb_filter.filter(framebuffer_update + clipboard + bell) == (
+        framebuffer_update + bell
+    )
+    assert rfb_filter.last_dropped_clipboard is True
+
+
+def test_viewer_filters_clipboard_split_across_websocket_chunks():
+    framebuffer_update = b"\0\0\0\0"  # zero-rectangle update
+    clipboard = _build_server_cut_text("viewer-secret")
+    bell = b"\x02"
+    rfb_filter = _RfbServerStreamFilter(
+        can_interact=False, handshake_complete=True
+    )
+
+    assert rfb_filter.filter(framebuffer_update + clipboard[:5]) == framebuffer_update
+    assert rfb_filter.last_dropped_clipboard is False
+    assert rfb_filter.filter(clipboard[5:] + bell) == bell
+    assert rfb_filter.last_dropped_clipboard is True
+
+
+def test_viewer_preserves_fragmented_zrle_framebuffer_around_clipboard():
+    compressed = b"test-zrle-payload"
+    framebuffer_update = (
+        struct.pack(">BBH", 0, 0, 1)
+        + struct.pack(">HHHHi", 0, 0, 64, 32, 16)
+        + struct.pack(">I", len(compressed))
+        + compressed
+    )
+    clipboard = _build_server_cut_text("viewer-secret")
+    bell = b"\x02"
+    rfb_filter = _RfbServerStreamFilter(
+        can_interact=False, handshake_complete=True
+    )
+
+    assert rfb_filter.filter(framebuffer_update[:19]) == b""
+    assert rfb_filter.filter(framebuffer_update[19:] + clipboard + bell) == (
+        framebuffer_update + bell
+    )
+    assert rfb_filter.last_dropped_clipboard is True
 
 
 # ── _rfb_msg_length ─────────────────────────────────────────────────────────

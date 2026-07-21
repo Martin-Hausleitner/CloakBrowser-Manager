@@ -69,15 +69,20 @@ def _validate_proxy(url: str) -> None:
     """Validate that a normalized proxy URL has scheme, host, and port."""
     from urllib.parse import urlparse
 
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ValueError("Invalid proxy URL") from None
     if parsed.scheme not in ("http", "https", "socks5"):
         raise ValueError(
             f"Invalid proxy scheme '{parsed.scheme}'. Must be http, https, or socks5."
         )
-    if not parsed.hostname:
-        raise ValueError(f"Proxy URL missing hostname: {url}")
-    if not parsed.port:
-        raise ValueError(f"Proxy URL missing port: {url}")
+    if not hostname:
+        raise ValueError("Proxy URL missing hostname")
+    if not port:
+        raise ValueError("Proxy URL missing port")
 
 
 def _init_profile_defaults(user_data_dir: Path, search_engine: str | None = None) -> None:
@@ -446,8 +451,8 @@ class BrowserManager:
                 logger.info("Auto-launched profile %s (%s)", profile["name"], profile["id"])
             except Exception as exc:
                 logger.error(
-                    "Auto-launch failed for profile %s (%s): %s",
-                    profile["name"], profile["id"], exc,
+                    "Auto-launch failed for profile %s (%s) (%s)",
+                    profile["name"], profile["id"], type(exc).__name__,
                 )
         logger.info("Auto-launch complete: %d running", len(self.running))
 

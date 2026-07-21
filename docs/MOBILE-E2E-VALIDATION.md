@@ -4,9 +4,11 @@ Stand: 21. Juli 2026
 
 ## Aktueller VCVM-Nachweis
 
-Der aktuelle authentifizierte Release-Gate lief gegen den loopback-gebundenen Manager auf der VCVM und umfasst fünf Mobile-Viewports plus Access-Dashboard. Er bestand **294/294 Checks** mit **24 Screenshots**. Geprüft wurden der echte verbundene VNC-Canvas, RFB-/CDP-Eingabe, Clipboard, Grid, Vollbild, editierbare Viewports, 44-px-Touch-Ziele und fehlender horizontaler Overflow. Der iPhone-SE-Gate verlangt zusätzlich, dass der Canvas sein intrinsisches Seitenverhältnis behält, vollständig im Content liegt, dessen Höhe ausfüllt und Dock sowie Composer sichtbar bleiben. Damit wird die frühere große Leerflächen-Regression ausdrücklich abgefangen.
+Der aktuelle authentifizierte r63-Release-Gate lief gegen den loopback-gebundenen Manager auf der VCVM und umfasst fünf Mobile-Viewports plus Access-Dashboard. Er bestand **307/307 Checks** mit **25 Screenshots**: 66 auf iPhone 14 Portrait, 59 auf iPhone SE, 61 auf iPhone Pro Max, je 58 auf iPhone Landscape und Touch-Tablet sowie 5 im Access-Dashboard. Geprüft wurden der echte verbundene VNC-Canvas, RFB-/CDP-Eingabe, Clipboard, Grid, Vollbild mit getrennten Fit-/Width-/Height-Modi, editierbare Viewports, kompakte 36-px-Controls und fehlender horizontaler Overflow. Der iPhone-14-Gate emuliert zusätzlich die geöffnete Softwaretastatur und verlangt, dass Visual Viewport, VNC-Pane, einzeiliger Composer und Send-Aktion sichtbar bleiben und nicht überlappen. Der iPhone-SE-Gate sichert weiterhin Seitenverhältnis, vollständigen Canvas und die kompakte Browser-/Composer-Anordnung ab.
 
-Der manuelle VCVM-Lauf änderte den Browser-Framebuffer live von **1024 × 576** auf **390 × 844**, wartete den vollständigen Browser-/VNC-Neustart ab und stellte ihn anschließend wieder auf **1024 × 576** zurück. Xvnc lief danach erneut mit `-geometry 1024x576`; die mobile Oberfläche blieb auf 390 × 844 ohne horizontalen Overflow. Der Composer akzeptiert ausschließlich eine Host-Bridge mit `provider: codex-computer-use`; fehlende oder generische Harnesses bleiben deaktiviert. Details, Grenzen und die aktuellen Performancewerte stehen im [Mobile-/Auth-/Latenz-Audit](MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md); die kompakte Informationsarchitektur und universellen Quick actions sind im [Mobile UI/UX and universal browser-action audit](MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md) dokumentiert.
+Der manuelle VCVM-Lauf änderte den Browser-Framebuffer live von **1024 × 576** auf **390 × 844**, wartete den vollständigen Browser-/VNC-Neustart ab und stellte ihn anschließend wieder auf **1024 × 576** zurück. Xvnc lief danach erneut mit `-geometry 1024x576`; die mobile Oberfläche blieb auf 390 × 844 ohne horizontalen Overflow. Ein separates kurzlebiges Viewer-Konto sah genau dieses eine Profil und einen echten Live-Canvas, aber keine Administration; die Deaktivierung trennte seine bereits aktive VNC-Verbindung sofort. Connected- und Revoked-Screenshot wurden visuell kontrolliert, alle angelegten E2E-Viewer blieben inaktiv.
+
+Der Composer akzeptiert ausschließlich eine Host-Bridge mit `provider: codex-computer-use`; fehlende oder generische Harnesses bleiben deaktiviert. Der r63-Gate injiziert diesen Host deterministisch und beweist damit den UI-Vertrag, nicht einen produktiven Codex Computer Use Browser im VCVM-CLI/IDE. Servergespeicherter Chatverlauf ist Persistenz und führt selbst keine Agent-Aufgabe aus. Details, Grenzen und die aktuellen Performancewerte stehen im [Mobile-/Auth-/Latenz-Audit](MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md); die kompakte Informationsarchitektur und universellen Quick actions sind im [Mobile UI/UX and universal browser-action audit](MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md) dokumentiert.
 
 Die folgenden Abschnitte bewahren ältere, enger abgegrenzte Läufe als Regressionsevidenz.
 
@@ -26,7 +28,7 @@ Die Dauerleisten wurden entfernt: Workspace-Aktionen, Pane-/Zoom-Regler und selt
 
 Der Vollbildmodus startet mit drei klaren 44-px-Aktionen (View, Viewport, Exit). Der Viewport-Dialog bietet im Vollbild Phone-fit und Presets, editierbare Breite/Höhe sowie `Apply`, ohne den VNC-Viewer verlassen zu müssen. Der Gate prüft dazu genau einen verbundenen Canvas, RFB-Remote-Eingabe mit CDP-Bestätigung, Ratio und Canvas-Zoom, Grid, den iOS-Paste-Fallback, Vollbild-Viewport-Persistenz, Fokus-Rückgabe, fehlenden horizontalen Overflow und alle sichtbaren Touch-Ziele. Es entstanden 22 lokale PNG-Artefakte; repräsentative iPhone-SE-, Vollbild- und Vollbild-Viewport-Screenshots wurden visuell kontrolliert.
 
-Die nachfolgenden Abschnitte bewahren weitere ältere, enger abgegrenzte Läufe als Vergleichs- und Fehlerhistorie. Sie ersetzen nicht den r56-Nachweis oben.
+Die nachfolgenden Abschnitte bewahren weitere ältere, enger abgegrenzte Läufe als Vergleichs- und Fehlerhistorie. Sie ersetzen nicht den r63-Nachweis oben.
 
 ## Historischer Kompatibilitäts-Wiederholungslauf
 
@@ -113,20 +115,20 @@ Der erste Wert je Zeile startete aus einem gestoppten Profil und ist deshalb nur
 
 - Mobile Workspace statt Desktop-UI, einschließlich Landscape und 768-px-Touch-Tablet.
 - Root-Geometrie entspricht dem jeweiligen Visual Viewport.
+- Bei emulierter offener Softwaretastatur entspricht die Root-Höhe dem verkleinerten Visual Viewport; Browser, Composer und Send-Aktion bleiben sichtbar und überlappen sich nicht.
 - Kein horizontaler Body-Overflow.
 - Vertikaler beziehungsweise horizontaler Split liegt ohne Lücke oder Überlappung aneinander.
 - Browserfläche, Task-Verlauf und Composer sind vorhanden.
-- Attach-, Run-Settings-, Demo-Modell- und Run-Task-Control sind programmatisch erreichbar.
-- Alle sichtbaren Buttons, Selects, Textareas und normalen Inputs sind mindestens 44 × 44 px groß.
-- Lokale Chat-Nachricht und ausdrücklich gekennzeichnete Demo-Antwort funktionieren.
-- Run Settings öffnen; das Demo-Modell lässt sich ändern.
+- Alle sichtbaren geprüften Buttons, Selects, Textareas und normalen Inputs sind mindestens 36 × 36 px groß; Input-Text bleibt 16 px groß.
+- Full, Tools, Chat und Send sind die einzigen persistenten Primäraktionen; Tools und Chat schließen sich gegenseitig.
+- Der capability-geprüfte Hostvertrag akzeptiert eine deterministische Testnachricht; fehlende oder falsch bezeichnete Hosts bleiben deaktiviert.
 - Grid öffnet und rendert den aktuellen Profilzustand.
 - Der echte VNC-Status erreicht `Connected`.
 - Vor, während und nach CSS-Vollbild existiert exakt ein Canvas.
 - Der noVNC-Canvas erhält bei Pointer-/Touch-Interaktion Fokus; `Ctrl+L`, URL-Zeichen und Enter werden als deterministische Keyboard-Events durch RFB gesendet. Der CDP-Proxy bestätigt anschließend die harmlose eindeutige HTTP(S)-Probe, und der VNC-Screenshot zeigt die geladene Zielseite.
-- Vollbild deckt den Viewport ab, setzt den Hintergrund `inert` und fokussiert die Schließen-Aktion.
+- Vollbild deckt den Viewport ab, setzt den Hintergrund `inert`, fokussiert die Schließen-Aktion und unterscheidet Fit, Width und Height sichtbar und geometrisch.
 - Escape schließt Vollbild, gibt den Fokus zurück und erzeugt keinen Overflow.
-- Dreizehn PNG-Artefakte besitzen die erwartete Viewportgröße und eine nichttriviale Dateigröße.
+- 25 PNG-Artefakte besitzen die erwartete Viewportgröße und eine nichttriviale Dateigröße; repräsentative Workspace-, Keyboard-, Fullscreen-, Access- und Viewer-Bilder wurden visuell kontrolliert.
 
 ## Historische Code-Gates
 

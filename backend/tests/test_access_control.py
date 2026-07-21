@@ -2,17 +2,91 @@
 
 from __future__ import annotations
 
+import asyncio
 import struct
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from backend import access_control as access
 from backend import database as db
-from backend.main import _RfbClientStreamFilter, _filter_rfb_viewer_messages
+from backend.main import (
+    _RfbClientStreamFilter,
+    _build_server_cut_text,
+    _filter_rfb_viewer_messages,
+)
+
+
+class _BlockingWebSocketUpstream:
+    """Minimal fake upstream that stays open until the proxy cancels it."""
+
+    def __init__(
+        self,
+        subprotocol: str | None = None,
+        messages: tuple[bytes | str, ...] = (),
+    ):
+        self.subprotocol = subprotocol
+        self.close_code = None
+        self.sent: list[bytes | str] = []
+        self.messages = list(messages)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        self.close_code = 1000
+        return False
+
+    async def send(self, message: bytes | str):
+        self.sent.append(message)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.messages:
+            return self.messages.pop(0)
+        await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+
+def _receive_websocket_message(session, timeout: float = 2.0):
+    async def receive_with_timeout():
+        with anyio.fail_after(timeout):
+            return await session._send_rx.receive()
+
+    return session.portal.call(receive_with_timeout)
+
+
+def _kasm_server_clipboard(text: str) -> bytes:
+    mime = b"text/plain"
+    payload = text.encode("utf-8")
+    return (
+        bytes([180, 0])
+        + b"\0" * 4
+        + bytes([len(mime)])
+        + mime
+        + struct.pack(">I", len(payload))
+        + payload
+    )
+
+
+def _rfb_server_handshake() -> bytes:
+    name = b"Viewer test desktop"
+    pixel_format = struct.pack(
+        ">BBBBHHHBBBxxx", 32, 24, 0, 1, 255, 255, 255, 16, 8, 0
+    )
+    server_init = (
+        struct.pack(">HH", 1024, 768)
+        + pixel_format
+        + struct.pack(">I", len(name))
+        + name
+    )
+    return b"RFB 003.008\n" + b"\x01\x01" + b"\0\0\0\0" + server_init
 
 
 @pytest.fixture()
@@ -67,13 +141,20 @@ def test_viewer_rfb_filter_allows_only_display_negotiation():
 def test_viewer_rfb_filter_keeps_safe_encoding_negotiation():
     # Viewers still need the normal noVNC display-negotiation sequence.  This
     # catches a regression where a view grant would connect but remain black.
-    set_encodings = struct.pack(">BBHii", 2, 0, 2, 7, -239)
+    advertised = [7, 16, 21, -260, 1, 0, -239, -224, -308, -307, -258]
+    set_encodings = struct.pack(">BBH", 2, 0, len(advertised)) + b"".join(
+        struct.pack(">i", encoding) for encoding in advertised
+    )
+    viewer_encodings = [16, 1, 0, -239, -224]
+    expected_encodings = struct.pack(">BBH", 2, 0, len(viewer_encodings)) + b"".join(
+        struct.pack(">i", encoding) for encoding in viewer_encodings
+    )
     frame_request = bytes([3]) + b"\0" * 9
     key_event = bytes([4]) + b"\0" * 7
 
     filtered = _filter_rfb_viewer_messages(set_encodings + frame_request + key_event)
 
-    assert filtered == set_encodings + frame_request
+    assert filtered == expected_encodings + frame_request
 
 
 def test_viewer_rfb_stream_filter_drops_appended_input_in_early_frames():
@@ -127,7 +208,8 @@ def test_viewer_rfb_stream_filter_preserves_handshake_and_display_negotiation():
     version = b"RFB 003.008\n"
     security_none = b"\x01"
     client_init = b"\x01"
-    set_encodings = struct.pack(">BBHii", 2, 0, 2, 7, -239)
+    set_encodings = struct.pack(">BBHiii", 2, 0, 3, 7, 16, -239)
+    viewer_encodings = struct.pack(">BBHii", 2, 0, 2, 16, -239)
     frame_request = bytes([3]) + b"\0" * 9
     key_event = bytes([4]) + b"\0" * 7
 
@@ -136,7 +218,7 @@ def test_viewer_rfb_stream_filter_preserves_handshake_and_display_negotiation():
     assert rfb_filter.filter(security_none) == security_none
     assert rfb_filter.filter(client_init) == client_init
     assert rfb_filter.filter(set_encodings + frame_request + key_event) == (
-        set_encodings + frame_request
+        viewer_encodings + frame_request
     )
 
 
@@ -467,6 +549,196 @@ def test_paperclip_agent_key_is_scoped_and_rotation_revokes_old_key(client_acces
     assert rotated.status_code == 200
     assert rotated.json()["api_key"] != agent["api_key"]
     assert client_access.get("/api/profiles", headers=agent_headers).status_code == 401
+
+
+def test_open_vnc_closes_immediately_after_agent_key_rotation(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Rotating VNC", sandbox_id="alpha")
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Rotating VNC agent",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    agent_headers = {"Authorization": f"Bearer {created['api_key']}"}
+    upstream = _BlockingWebSocketUpstream(subprotocol="binary")
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6102, cdp_port=5102, display=102
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/vnc", headers=agent_headers
+        ) as websocket:
+            rotated = client_access.post(
+                f"/api/access/agents/{created['id']}/rotate-key",
+                headers=bootstrap_headers(),
+            )
+            assert rotated.status_code == 200
+            message = _receive_websocket_message(websocket)
+            assert message == {
+                "type": "websocket.close",
+                "code": 4403,
+                "reason": "Access revoked",
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_open_viewer_vnc_filters_split_and_coalesced_server_clipboard(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Filtered viewer VNC", sandbox_id="alpha")
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Filtered viewer agent",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    agent_headers = {"Authorization": f"Bearer {created['api_key']}"}
+    handshake = _rfb_server_handshake()
+    framebuffer_update = b"\0\0\0\0"
+    clipboard = _build_server_cut_text("never-send-to-viewer")
+    bell = b"\x02"
+    upstream = _BlockingWebSocketUpstream(
+        subprotocol="binary",
+        messages=(
+            handshake,
+            framebuffer_update + clipboard[:5],
+            clipboard[5:] + bell,
+        ),
+    )
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6105, cdp_port=5105, display=105
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/vnc", headers=agent_headers
+        ) as websocket:
+            assert _receive_websocket_message(websocket) == {
+                "type": "websocket.send",
+                "bytes": handshake,
+            }
+            assert _receive_websocket_message(websocket) == {
+                "type": "websocket.send",
+                "bytes": framebuffer_update,
+            }
+            assert _receive_websocket_message(websocket) == {
+                "type": "websocket.send",
+                "bytes": bell,
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+@pytest.mark.parametrize(
+    "update_payload",
+    [
+        pytest.param({"active": False}, id="principal-deactivated"),
+        pytest.param({"grants": []}, id="sandbox-grant-revoked"),
+    ],
+)
+def test_open_cdp_closes_immediately_after_agent_access_revoked(
+    client_access: TestClient, monkeypatch, update_payload
+):
+    from backend import main
+
+    profile = db.create_profile("Revocable CDP", sandbox_id="alpha")
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Revocable CDP agent",
+            "grants": [{"sandbox_id": "alpha", "permission": "automate"}],
+        },
+    ).json()
+    agent_headers = {"Authorization": f"Bearer {created['api_key']}"}
+    upstream = _BlockingWebSocketUpstream()
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6103, cdp_port=5103, display=103
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/cdp/devtools/page/REVOCABLE",
+            headers=agent_headers,
+        ) as websocket:
+            updated = client_access.put(
+                f"/api/access/agents/{created['id']}",
+                headers=bootstrap_headers(),
+                json=update_payload,
+            )
+            assert updated.status_code == 200
+            message = _receive_websocket_message(websocket)
+            assert message == {
+                "type": "websocket.close",
+                "code": 4403,
+                "reason": "Access revoked",
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_open_vnc_closes_immediately_after_user_deactivation(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Revocable user VNC", sandbox_id="alpha")
+    created = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "revocable-viewer",
+            "password": "revocable-viewer-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "revocable-viewer",
+            "password": "revocable-viewer-password-123",
+        },
+    ).status_code == 200
+    upstream = _BlockingWebSocketUpstream(subprotocol="binary")
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6104, cdp_port=5104, display=104
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/vnc"
+        ) as websocket:
+            updated = client_access.put(
+                f"/api/access/users/{created['id']}",
+                headers=bootstrap_headers(),
+                json={"active": False},
+            )
+            assert updated.status_code == 200
+            message = _receive_websocket_message(websocket)
+            assert message == {
+                "type": "websocket.close",
+                "code": 4403,
+                "reason": "Access revoked",
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
 
 
 def test_scoped_user_cannot_reach_out_of_scope_vnc_upstream(client_access: TestClient, monkeypatch):

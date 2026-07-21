@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -80,13 +81,53 @@ def test_validate_bad_scheme():
 
 
 def test_validate_no_hostname():
-    with pytest.raises(ValueError, match="missing hostname"):
-        _validate_proxy("http://:8080")
+    proxy = "http://proxy-user:top-secret@:8080"
+    with pytest.raises(ValueError, match="missing hostname") as exc_info:
+        _validate_proxy(proxy)
+    assert "proxy-user" not in str(exc_info.value)
+    assert "top-secret" not in str(exc_info.value)
+    assert proxy not in str(exc_info.value)
 
 
 def test_validate_no_port():
-    with pytest.raises(ValueError, match="missing port"):
-        _validate_proxy("http://host")
+    proxy = "http://proxy-user:top-secret@host"
+    with pytest.raises(ValueError, match="missing port") as exc_info:
+        _validate_proxy(proxy)
+    assert "proxy-user" not in str(exc_info.value)
+    assert "top-secret" not in str(exc_info.value)
+    assert proxy not in str(exc_info.value)
+
+
+def test_validate_malformed_port_redacts_credentials():
+    proxy = "http://proxy-user:top-secret@host:not-a-port"
+    with pytest.raises(ValueError, match="Invalid proxy URL") as exc_info:
+        _validate_proxy(proxy)
+    assert "proxy-user" not in str(exc_info.value)
+    assert "top-secret" not in str(exc_info.value)
+    assert proxy not in str(exc_info.value)
+
+
+def test_auto_launch_failure_redacts_exception_details(monkeypatch, caplog):
+    from backend import database as db
+
+    profile = {
+        "id": "auto-launch-redaction",
+        "name": "Redaction test",
+        "auto_launch": True,
+    }
+    leaked_proxy = "http://proxy-user:top-secret@proxy.test:8080"
+    mgr = BrowserManager()
+    mgr.launch = AsyncMock(
+        side_effect=RuntimeError(f"browser failed while using {leaked_proxy}")
+    )
+    monkeypatch.setattr(db, "list_profiles", lambda: [profile])
+
+    asyncio.run(mgr.auto_launch_all())
+
+    assert "RuntimeError" in caplog.text
+    assert "proxy-user" not in caplog.text
+    assert "top-secret" not in caplog.text
+    assert leaked_proxy not in caplog.text
 
 
 # ── _build_fingerprint_args ──────────────────────────────────────────────────

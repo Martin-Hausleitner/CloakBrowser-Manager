@@ -112,20 +112,20 @@ describe("AccessDashboard", () => {
     expect(await screen.findByText("alice")).toBeTruthy();
 
     for (const buttonName of ["Refresh", "Close", "Add person", "Create agent key"]) {
-      expect(screen.getByRole("button", { name: buttonName }).className).toContain("min-h-11");
+      expect(screen.getByRole("button", { name: buttonName }).className).toContain("min-h-9");
     }
 
     for (const permissionSelect of screen.getAllByLabelText("Browser control for research")) {
-      expect(permissionSelect.className).toContain("h-11");
+      expect(permissionSelect.className).toContain("h-9");
     }
     for (const automationToggle of screen.getAllByLabelText("CDP automation for research")) {
-      expect(automationToggle.closest("label")?.className).toContain("min-h-11");
+      expect(automationToggle.closest("label")?.className).toContain("min-h-9");
     }
-    expect(screen.getByLabelText("Username").className).toContain("min-h-11");
-    expect(screen.getByLabelText("Password").className).toContain("min-h-11");
-    expect(screen.getByLabelText("Role").className).toContain("h-11");
-    expect(screen.getByLabelText("Display name").className).toContain("min-h-11");
-    expect(screen.getByLabelText("Paperclip agent ID (optional)").className).toContain("min-h-11");
+    expect(screen.getByLabelText("Username").className).toContain("min-h-9");
+    expect(screen.getByLabelText("Password").className).toContain("min-h-9");
+    expect(screen.getByLabelText("Role").className).toContain("h-9");
+    expect(screen.getByLabelText("Display name").className).toContain("min-h-9");
+    expect(screen.getByLabelText("Paperclip agent ID (optional)").className).toContain("min-h-9");
     expect(screen.getByRole("button", { name: "Edit alice" }).className).toBe("mobile-icon-button");
     expect(screen.getByRole("button", { name: "Rotate key for Research helper" }).className).toBe("mobile-icon-button");
     expect(screen.getByRole("button", { name: "Edit Research helper" }).className).toBe("mobile-icon-button");

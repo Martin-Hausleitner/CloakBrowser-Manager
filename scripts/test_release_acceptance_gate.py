@@ -61,12 +61,13 @@ def vision_report() -> dict[str, object]:
 def streaming_report() -> dict[str, object]:
     return {
         "finished_at": "2026-07-21T15:58:00+00:00",
+        "config": {"iterations": 3},
         "results": [
             {
                 "candidate": {"id": "kasm-vnc", "name": "Kasm VNC", "type": "websocket"},
                 "status": "measured",
                 "availability": "available",
-                "summary": {"runs": 3},
+                "summary": {"runs": 3, "success_rate_pct": 100.0},
             },
             {
                 "candidate": {"id": "selkies", "name": "Selkies", "type": "websocket"},
@@ -211,6 +212,36 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
                 release_gate.parse_time(NOW, "now"),
                 24,
             )
+
+    def test_streaming_report_fails_when_measured_candidate_has_partial_sample_failure(self) -> None:
+        report = streaming_report()
+        report["config"] = {"iterations": 20}
+        first = report["results"][0]  # type: ignore[index]
+        assert isinstance(first, dict)
+        first["summary"] = {"runs": 20, "success_rate_pct": 95.0}
+
+        with self.assertRaises(release_gate.GateError):
+            release_gate.summarize_streaming(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
+    def test_streaming_report_passes_when_measured_candidate_has_all_samples_successful(self) -> None:
+        report = streaming_report()
+        report["config"] = {"iterations": 20}
+        first = report["results"][0]  # type: ignore[index]
+        assert isinstance(first, dict)
+        first["summary"] = {"runs": 20, "success_rate_pct": 100.0}
+
+        summary = release_gate.summarize_streaming(
+            report,
+            release_gate.parse_time(NOW, "now"),
+            24,
+        )
+
+        self.assertTrue(summary["passed"])
+        self.assertEqual(summary["measured_candidates"], 1)
 
     def test_mobile_summary_requires_authenticated_access_dashboard_evidence(self) -> None:
         report = mobile_report()

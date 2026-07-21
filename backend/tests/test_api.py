@@ -153,20 +153,32 @@ def test_launch_invalid_proxy_400(app_client: TestClient):
     """ValueError from browser_mgr.launch should map to 400."""
     create = app_client.post("/api/profiles", json={"name": "BadProxy"})
     pid = create.json()["id"]
-    main.browser_mgr.launch = AsyncMock(side_effect=ValueError("Invalid proxy scheme 'ftp'"))
+    leaked_proxy = "http://proxy-user:top-secret@:8080"
+    main.browser_mgr.launch = AsyncMock(
+        side_effect=ValueError(f"Proxy URL missing hostname: {leaked_proxy}")
+    )
     resp = app_client.post(f"/api/profiles/{pid}/launch")
     assert resp.status_code == 400
-    assert "ftp" in resp.json()["detail"]
+    assert resp.json()["detail"] == "Invalid browser profile configuration"
+    assert "proxy-user" not in resp.text
+    assert "top-secret" not in resp.text
+    assert leaked_proxy not in resp.text
 
 
-def test_launch_failure_500(app_client: TestClient):
+def test_launch_failure_500(app_client: TestClient, caplog):
     """Generic exception from browser_mgr.launch should map to 500."""
     create = app_client.post("/api/profiles", json={"name": "Crash"})
     pid = create.json()["id"]
-    main.browser_mgr.launch = AsyncMock(side_effect=RuntimeError("Xvnc failed"))
+    leaked_proxy = "http://proxy-user:top-secret@proxy.test:8080"
+    main.browser_mgr.launch = AsyncMock(
+        side_effect=RuntimeError(f"Xvnc failed while using {leaked_proxy}")
+    )
     resp = app_client.post(f"/api/profiles/{pid}/launch")
     assert resp.status_code == 500
     assert resp.json()["detail"] == "Failed to launch browser"
+    assert "proxy-user" not in caplog.text
+    assert "top-secret" not in caplog.text
+    assert leaked_proxy not in caplog.text
 
 
 def test_stop_not_running(app_client: TestClient):

@@ -2,48 +2,51 @@
 
 Stand: 21. Juli 2026
 
-Dieser Audit bewertet den final geprüften r56-Stand des CloakBrowser Managers und ordnet die älteren r49-/r50-Basen ein. Er trennt nachgewiesene Funktion, lokale Messung, Tailnet-Transport und noch offene Produktbehauptung. Browser-Use diente nur als Interaktionsreferenz; fremde Marken-, Cloud- oder UI-Assets wurden nicht übernommen.
+Dieser Audit bewertet den final geprüften r63-Stand des CloakBrowser Managers und ordnet die älteren r49-/r50-Basen ein. Er trennt nachgewiesene Funktion, lokale Messung, Tailnet-Transport und noch offene Produktbehauptung. Browser-Use diente nur als Interaktionsreferenz; fremde Marken-, Cloud- oder UI-Assets wurden nicht übernommen.
 
 ## Ergebnis in einem Satz
 
-Für das mobile Web-MVP bleibt **KasmVNC 1.3.3 + noVNC 1.4.x** die am besten nachgewiesene Basis: Der authentifizierte r56-Gate bestand fünf mobile Viewpoints plus Access-Dashboard mit **291/291 Checks** und **23 Screenshots**, während die ältere r49-Auth-Suite vier Authentifizierungswege bis zu einem echten verbundenen Canvas belegte. Im frischen browserbeobachteten Fünferlauf erreichte der vollständige lokale KasmVNC/noVNC-Produktpfad den ersten nichtschwarzen Frame nach **180 ms Median**, Guacamole nach **351 ms** und Selkies nach **5.272 ms**; der Selkies-Erstlauf lag bei 296 ms, vier Reloads jedoch nahe 5,3 s. Diese Werte sind wegen der unterschiedlichen Integration nur richtungsweisend. Ein zusätzlicher Codex-Computer-Use-Lauf bediente die finale iPhone-Ansicht real und bestätigte Canvas, vier persistente Aktionen, Rechte-Dashboard und den strikt verifizierten Hostvertrag. Das beweist weiterhin keine physische iPhone-, WAN-, FPS- oder Touch-to-Pixel-Latenz.
+Für das mobile Web-MVP bleibt **KasmVNC 1.3.3 + noVNC 1.4.x** die am besten nachgewiesene Basis: Der authentifizierte r63-Gate bestand fünf mobile Viewpoints plus Access-Dashboard mit **307/307 Checks** und **25 Screenshots**, während die ältere r49-Auth-Suite vier Authentifizierungswege bis zu einem echten verbundenen Canvas belegte. Im frischen browserbeobachteten Fünferlauf erreichte der vollständige lokale KasmVNC/noVNC-Produktpfad den ersten nichtschwarzen Frame nach **180 ms Median**, Guacamole nach **351 ms** und Selkies nach **5.272 ms**; der Selkies-Erstlauf lag bei 296 ms, vier Reloads jedoch nahe 5,3 s. Diese Werte sind wegen der unterschiedlichen Integration nur richtungsweisend. Der r63-Lauf bestätigte außerdem die offene Softwaretastatur, kompakte 36-px-Controls, Fullscreen-Fit-Modi und einen echten viewer-only VNC-Login mit sofortigem Rechteentzug. Das beweist weiterhin keine physische iPhone-, WAN-, FPS- oder Touch-to-Pixel-Latenz.
 
-## r56-Endstand: UI-Architektur und Codex Computer Use
+## r63-Endstand: UI-Architektur und Codex-Hostvertrag
 
-Der belegte r56-Stand ist eine Umstrukturierung und vollständige lokale Abnahme der mobilen Oberfläche, nicht ein allgemeiner Performance-Sieg:
+Der belegte r63-Stand ist eine Umstrukturierung und vollständige VCVM-Abnahme der mobilen Oberfläche, nicht ein allgemeiner Performance-Sieg:
 
 - **Browser-first:** Der Live-Browser ist die primäre Fläche. Chat startet bei laufendem Browser collapsed, damit VNC nicht von Steuerleisten verdrängt wird.
 - **Zentrale Tools:** Browser-Werkzeuge, Viewport, Zoom, Fullscreen, Sessions und Kontoaktionen sind in einem einzigen Tool-Sheet zusammengeführt. Benchmarks werden nicht in der mobilen UI angezeigt.
 - **Quick actions statt Bookmarks:** Capture, Copy und Paste sind typisierte Hostaktionen und keine gespeicherten URLs. Sie werden nur aktiviert, wenn der verifizierte Host die passende Capability meldet.
 - **Shortcuts:** Chat-Collapse und Fullscreen-Preview sind als schnelle Bedienwege vorgesehen, ohne Touch-only Bedienung zu erzwingen.
+- **Kompakte Controls:** Primäraktionen, Login, Access-Dashboard und Paste-Aktionen verwenden 36 px statt 44 px; Inputs behalten 16 px Text, damit iOS beim Fokus nicht automatisch zoomt.
+- **Softwaretastatur:** Die Oberfläche folgt `visualViewport.height`, blendet während der Tastatur nicht benötigte Controls aus und hält Live-Browser, Composer und Send-Aktion ohne Überlappung im sichtbaren Bereich.
+- **Fullscreen-View:** Fit, Width und Height sind eigenständige Modi; Zoom und ein kompakter Profil-Viewport-Editor bleiben im Fullscreen erreichbar.
 - **Grid:** Grid bleibt ein kompakter Session-/Profilumschalter und soll nicht still mehrere Streams starten, weil das iPhone-FPS und Akku verfälschen würde.
 - **Codex-only Hostvertrag:** Der Composer akzeptiert nur eine injizierte Bridge, deren Capabilities explizit `provider: codex-computer-use` melden. Fehlende, generische oder nur umbenannte Harnesses bleiben deaktiviert; auch `send()` kann die Prüfung nicht umgehen.
-- **Chat-Anbindung:** Der freigegebene UI- und Testpfad verwendet Codex Computer Use, hält Browser-Credentials außerhalb des Chats und simuliert keinen lokalen Erfolg. Der r56-Stand behauptet noch keine produktive externe Agent-Task-API ohne einen realen Host-Bridge-Prozess.
+- **Chat-Anbindung:** Der freigegebene UI-Vertrag hält Browser-Credentials außerhalb des Chats und simuliert keinen lokalen Erfolg. Der Browser-Gate injiziert dafür deterministisch einen als `codex-computer-use` ausgewiesenen Testhost. Codex CLI/IDE auf der VCVM stellt hier keinen produktiven Computer-Use-Browser bereit; gespeicherter Server-Chatverlauf ist keine Agent-Ausführung.
 - **Rechte-Dashboard:** Browsersteuerung (`view`/`interact`/`operate`) und CDP-Automation sind getrennte Controls. Dadurch ist `operate + automate` auf derselben Sandbox möglich; eine einklappbare Vorschau zeigt die tatsächlich erreichbaren Profile und effektiven Fähigkeiten.
 
-Der finale r56-Mobile-Gate ist abgeschlossen: fünf Viewports plus Access-Dashboard, **291/291 Checks**, **23 Screenshots**, keine Fehler. Er prüft Touch-Ziele, Fullscreen, Grid, Viewport/Zoom, Chat-Collapse, den einzeiligen Composer, Kontoaktionen nur im Tool-Sheet, Clipboard/Paste, eine echte VNC-Verbindung und die authentifizierte Access-Oberfläche. Ein separater Codex-Computer-Use-Lauf bestätigte den Release-Container zusätzlich über echte UI-Interaktionen und vergab einem Paperclip-Agenten kombiniert `operate + automate`.
+Der finale r63-Mobile-Gate ist abgeschlossen: fünf Viewports plus Access-Dashboard, **307/307 Checks**, **25 Screenshots**, keine Fehler. Er prüft kompakte Controls, den emulierten offenen Mobile-Keyboard-Zustand, Fullscreen Fit/Width/Height, Grid, Viewport/Zoom, Chat-Collapse, den einzeiligen Composer, Kontoaktionen nur im Tool-Sheet, Clipboard/Paste, eine echte VNC-Verbindung und die authentifizierte Access-Oberfläche. Ein separater echter Viewer-Login bestätigte genau ein freigegebenes Profil, einen verbundenen Live-Canvas, fehlende Admin-Aktionen und sofortige Trennung nach Deaktivierung.
 
 ## Was jetzt nachgewiesen ist
 
 | Bereich | Nachweis | Ergebnis |
 |---|---|---|
-| iPhone 14 Portrait | 390 × 844, echter VNC-Canvas, Split, Grid, Fullscreen, Viewport-Editor und Codex-Computer-Use-Composer | 58/58 |
-| iPhone SE Portrait | 375 × 667, kurzer Viewport mit kompaktem Live-Anteil und vollständig erreichbarem Composer | 57/57 |
-| iPhone Pro Max Portrait | 430 × 932, inklusive sichtbarem Inline-Viewport-Editor | 59/59 |
-| iPhone 14 Landscape | 844 × 390, horizontaler Split und Fullscreen | 56/56 |
-| Touch-Tablet | 768 × 1024, coarse pointer, Grid und Fullscreen | 56/56 |
+| iPhone 14 Portrait | 390 × 844, echter VNC-Canvas, Split, Softwaretastatur, Grid, Fullscreen, Viewport-Editor und Hostvertrag | 66/66 |
+| iPhone SE Portrait | 375 × 667, kurzer Viewport mit kompaktem Live-Anteil und vollständig erreichbarem Composer | 59/59 |
+| iPhone Pro Max Portrait | 430 × 932, inklusive sichtbarem Inline-Viewport-Editor | 61/61 |
+| iPhone 14 Landscape | 844 × 390, horizontaler Split und Fullscreen | 58/58 |
+| Touch-Tablet | 768 × 1024, coarse pointer, Grid und Fullscreen | 58/58 |
 | Access-Dashboard | authentifizierter Adminpfad, kompakte Grants und mobile Overflow-Prüfung | 5/5 |
-| Vision-Artefakte | Empty, Workspace, Grid, Fullscreen, Fullscreen-Viewport und Access-Dashboard | 23 Screenshots |
+| Vision-Artefakte | Initial, Workspace, Keyboard, Grid, Fullscreen, Fullscreen-Viewport und Access-Dashboard | 25 Screenshots |
 | Legacy-Token | Login, Profilwahl und verbundener Canvas bei 390 × 844 | bestanden |
 | Bootstrap-Token | Admin-Login, Profilwahl, verbundener Canvas und Viewport-Administration | bestanden |
 | Operator-Konto | Nur zugewiesene Sandbox; Stream und sichtbare Remote-Werkzeuge; keine Profil-Viewport-Administration | bestanden |
-| Viewer-Konto | Nur zugewiesene Sandbox; Stream und Fullscreen; Paste/Remote-Werkzeuge ausgeblendet, Start und Clipboard per API verweigert | bestanden |
+| Viewer-Konto | Nur zugewiesene Sandbox; genau ein echter 1024 × 576 Canvas; keine Admin-Aktionen; sofortige VNC-Trennung nach Deaktivierung | bestanden |
 
-Der Gate prüfte unter anderem einen echten Canvas, `Connected`, keinen horizontalen Overflow, mindestens 44 × 44 CSS-Pixel große sichtbare Controls, Live-Pane und visuellen noVNC-Zoom, Pointer-/Touch-Zielkoordinaten über eine CDP-beobachtete Probe, manuellen iOS-Paste-Fallback, Fullscreen-Fokus, `inert`-Hintergrund, Escape-Rückkehr, Grid, Chat-Verlauf und den Codex-Computer-Use-Composer. Eine echte WAN-Touch-to-Pixel-Messung wurde in diesem lokalen Artefakt nicht aufgezeichnet.
+Der Gate prüfte unter anderem einen echten Canvas, `Connected`, keinen horizontalen Overflow, mindestens 36 × 36 CSS-Pixel große sichtbare Controls, Live-Pane und visuellen noVNC-Zoom, Pointer-/Touch-Zielkoordinaten über eine CDP-beobachtete Probe, manuellen iOS-Paste-Fallback, den geöffneten Softwaretastatur-Zustand, Fullscreen-Fokus, `inert`-Hintergrund, Escape-Rückkehr, Grid, Chat-Verlauf und den Codex-Hostvertrag. Eine echte WAN-Touch-to-Pixel-Messung wurde in diesem lokalen Artefakt nicht aufgezeichnet.
 
 Lokale Belege:
 
-- `artifacts/mobile-ui-gate-r56-auth-final-r2/report.json`
+- `artifacts/vcvm-r63-compact-keyboard-final/mobile-ui-gate/report.json`
 - `artifacts/selkies-benchmark/r55-local/streaming-benchmark-report.json`
 - `artifacts/guacamole-benchmark/r55-local/streaming-benchmark-report.json`
 - `artifacts/streaming-login-audit-r49/auth-api-summary.json`
@@ -60,9 +63,9 @@ Der r50-Nachtrag behebt denselben Payload-Fehler auch für `PUT /api/access/agen
 
 Der r51-Nachtrag behebt außerdem zwei Mehrfachgrant-Fehler: Das Dashboard löscht beim Setzen der Steuerstufe nicht mehr ein vorhandenes `automate`, und die App prüft nicht mehr nur den ersten Grant einer Sandbox. Die gemeinsame Frontend-Policy spiegelt jetzt die serverseitige Vererbung. Abgelehnte REST- und WebSocket-Policyentscheidungen werden als redigierte Audit-Metadaten protokolliert.
 
-### 2. Login-Controls waren auf Mobilgeräten zu klein
+### 2. Login-Controls und Softwaretastatur waren auf Mobilgeräten zu groß beziehungsweise instabil
 
-Account-Eingaben, Token-Eingabe, Hauptaktion und Moduswechsel lagen teilweise unter dem 44-Pixel-Touchziel. Alle vier Control-Typen sind jetzt mindestens 44 Pixel hoch. Der reale 390-×-844-Lauf maß für jedes sichtbare Login-Control exakt 44 Pixel ohne horizontalen Overflow.
+Account-Eingaben, Token-Eingabe, Hauptaktion und Moduswechsel waren für die gewünschte kompakte Oberfläche zu hoch. Alle vier Control-Typen verwenden jetzt eine 36-Pixel-Höhe; Eingabetext bleibt bewusst 16 Pixel groß, um iOS-Fokuszoom zu vermeiden. Im Workspace folgt die Root-Höhe dem Visual Viewport. Der reale 390-×-844-Gate emulierte die geöffnete Tastatur und bestätigte, dass VNC, Composer und Send-Aktion sichtbar, getrennt und ohne horizontalen Overflow bleiben.
 
 ### 3. Operator und Viewer sahen eine scheinbar editierbare Remote-Viewport-Aktion
 
@@ -124,11 +127,11 @@ Zusätzlich wurde ein bereits laufender Neko/Chrome-Stack auf der VCVM über Tai
 
 Codex Computer Use führte den geschützten Login erfolgreich aus und sah `/ws`. WebRTC ICE blieb jedoch `checking` und wechselte danach zu `failed`; das Video blieb bei `readyState 0`. Deshalb gibt es aus diesem Lauf **keinen ehrlichen FPS-Wert**. Die wichtigste Performance-Empfehlung ist nicht weiteres UI-Tuning auf Basis erfundener FPS, sondern zuerst direkte Tailscale-Konnektivität und UDP/ICE zu reparieren und danach Frame- sowie Touch-to-Pixel-Messung erneut auszuführen.
 
-### Einordnung der Streaming-Stapel nach dem r56-Nachtest
+### Einordnung der Streaming-Stapel nach dem r63-Nachtest
 
 | Stack | frischer lokaler Stand | Entscheidung |
 |---|---|---|
-| KasmVNC 1.3.3 + noVNC 1.4.x | vollständiger aktueller Produktpfad, 291 Mobile-/Access-Checks; erster nichtschwarzer Frame Median 180 ms | beibehalten |
+| KasmVNC 1.3.3 + noVNC 1.4.x | vollständiger aktueller Produktpfad, 307 Mobile-/Access-Checks; erster nichtschwarzer Frame Median 180 ms | beibehalten |
 | Selkies | 20/20 HTTP und WebSocket; erster nichtschwarzer Frame Median 5.272 ms nach langsamen Reloads; kein gleichwertiger Produkt-E2E | Reload-/Sessionproblem untersuchen, noch nicht migrieren |
 | Sunshine/Moonlight | `architecture_only`, keine aktuelle Messung | nicht als Latenzvergleich werten |
 | Apache Guacamole 1.6 | 20/20 HTTP; erster nichtschwarzer Frame Median 351 ms; zusätzliche Gateway- und fehlende Policy-/CDP-Integration | kein Web-MVP-Core |
@@ -151,7 +154,7 @@ Frühere isolierte KasmVNC-1.4- und Selkies-POCs sowie der neue Selkies-Readines
 | Rang | Implementierung | Warum sie den größten Nutzen bringt | Abnahmekriterium |
 |---:|---|---|---|
 | 1 | **iOS-IME-Bridge über fokussierbares Hidden Textarea** | öffnet die native Tastatur zuverlässig und unterstützt Komposition, Autokorrektur und Sonderzeichen statt nur einzelner Key-Events | `beforeinput`/composition bis RFB oder CDP; Umlaute, Emoji und CJK auf iPhone geprüft |
-| 2 | **Kompakte Keyboard-Zubehörleiste** | Esc, Tab, Enter, Pfeile, Cmd/Ctrl, Alt und Backspace fehlen auf der iPhone-Tastatur oder sind umständlich | einhändig erreichbar, 44-Pixel-Ziele, Sticky nur bei aktivem Input |
+| 2 | **Kompakte Keyboard-Zubehörleiste** | Esc, Tab, Enter, Pfeile, Cmd/Ctrl, Alt und Backspace fehlen auf der iPhone-Tastatur oder sind umständlich | einhändig erreichbar, kompakte 36-Pixel-Ziele, Sticky nur bei aktivem Input |
 | 3 | **Trackpad-/Direkt-Touch-Umschalter** | Desktop-Seiten brauchen präzisen Cursor, mobile Seiten direkte Taps | sichtbarer Modus, Cursor-Speed, Tap/Drag/Right-click und Haptik geprüft |
 | 4 | **Explizite Gesten-Zustandsmaschine** | verhindert Konflikte zwischen Remote-Scroll, Pinch-Zoom, Pane-Resize und Browsernavigation | ein Finger = Pointer, zwei Finger = Scroll, Pinch = lokaler Zoom; keine Ghost-Clicks |
 | 5 | **Paste Sheet 2.0 mit Queue und Zielanzeige** | baut auf dem vorhandenen manuellen iOS-Paste-Fallback auf und macht Mehrzeiler/Passwörter kontrollierbar | Preview, Maskierung, Länge, Ziel-Sandbox, Erfolg/Fehler und kein stilles Doppel-Senden |
@@ -169,7 +172,7 @@ Frühere isolierte KasmVNC-1.4- und Selkies-POCs sowie der neue Selkies-Readines
 - Der r50-VCVM/Neko-Lauf belegt Tailnet-HTTP und geschützten Login über Codex Computer Use, aber wegen fehlgeschlagenem WebRTC-ICE keine Neko-Framerate. Für KasmVNC existiert nur der oben klar begrenzte Canvas-Änderungsproxy.
 - Kein echter Mobilfunk- und kein Touch-to-Pixel-p50/p95-Bericht.
 - Der Grid-View ist ein schneller Session-/Profilumschalter, kein gleichzeitiges Multi-Canvas-Monitoring.
-- Der Chat-Composer akzeptiert in r56 ausschließlich den verifizierten Codex-Computer-Use-Providervertrag, benötigt aber weiterhin einen realen Host-Bridge-Prozess und ist keine eigenständige Vendor-API.
+- Der Chat-Composer akzeptiert in r63 ausschließlich den verifizierten Codex-Computer-Use-Providervertrag. Der aktuelle Gate beweist den synthetisch injizierten Vertrag, nicht einen produktiven Codex Computer Use Browser auf der VCVM; dafür wird weiterhin ein realer Host-Bridge-Prozess benötigt.
 - Selkies und Guacamole sind reproduzierbar provisioniert und browserbeobachtet, aber weiterhin keine gleichwertigen authentifizierten Produktdeployments; Sunshine/Moonlight bleibt ein Architekturpfad.
 
 ## Freigabeempfehlung

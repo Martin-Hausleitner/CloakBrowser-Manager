@@ -135,6 +135,9 @@ def main() -> None:
         "backend/.data",
         "artifacts",
         "benchmarks",
+        "docker-compose.guacamole-benchmark.yml",
+        "scripts/guacamole_benchmark_config.json",
+        "scripts/run_guacamole_benchmark.sh",
         ".env.vcvm",
         "*token*",
     ):

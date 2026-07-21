@@ -420,7 +420,7 @@ TOUCH_TARGET_SCRIPT = r"""(() => {
       height: Math.round(rect.height * 10) / 10,
     };
   });
-  return {count: controls.length, offenders: controls.filter((item) => item.width < 44 || item.height < 44)};
+  return {count: controls.length, offenders: controls.filter((item) => item.width < 36 || item.height < 36)};
 })()"""
 
 
@@ -457,7 +457,7 @@ ACCESS_DASHBOARD_SCRIPT = r"""(() => {
     } : null,
     touchTargets: {
       count: controls.length,
-      offenders: controls.filter((item) => item.width < 44 || item.height < 44),
+      offenders: controls.filter((item) => item.width < 36 || item.height < 36),
     },
   };
 })()"""
@@ -651,18 +651,38 @@ def capture_viewport_editor(
       const rect = root?.getBoundingClientRect();
       const inputs = [...(root?.querySelectorAll('input[type="number"]') ?? [])];
       const apply = [...(root?.querySelectorAll('button') ?? [])]
-        .some((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+        .find((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+      const applyRect = apply?.getBoundingClientRect();
+      const centerTarget = applyRect
+        ? document.elementFromPoint(applyRect.left + applyRect.width / 2, applyRect.top + applyRect.height / 2)
+        : null;
+      const applyReachable = Boolean(
+        apply &&
+        applyRect &&
+        applyRect.width >= 36 &&
+        applyRect.height >= 36 &&
+        applyRect.top >= 0 &&
+        applyRect.bottom <= window.innerHeight &&
+        centerTarget &&
+        (centerTarget === apply || apply.contains(centerTarget))
+      );
       return {
         visible: Boolean(rect && rect.width > 1 && rect.height > 1),
         inputCount: inputs.length,
-        apply,
+        apply: Boolean(apply),
+        applyReachable,
+        applyRect: applyRect ? applyRect.toJSON() : null,
+        centerTarget: centerTarget?.getAttribute?.('aria-label') || centerTarget?.textContent?.trim() || null,
         rect: rect ? rect.toJSON() : null,
       };
     })()""")
     add_check(
         result,
         "editable viewport editor renders width height and apply controls",
-        bool(editor.get("visible")) and editor.get("inputCount") == 2 and bool(editor.get("apply")),
+        bool(editor.get("visible"))
+        and editor.get("inputCount") == 2
+        and bool(editor.get("apply"))
+        and bool(editor.get("applyReachable")),
         editor,
     )
     take_screenshot(browser, result, output_dir, viewport_name, "viewport-editor", width, height)
@@ -670,6 +690,107 @@ def capture_viewport_editor(
     browser.wait_for(
         "!document.querySelector('[aria-label=\"Viewport controls\"]')",
         "compact workspace after viewport editor",
+        5,
+    )
+
+
+def verify_mobile_keyboard_layout(
+    browser: AgentBrowser,
+    result: dict[str, Any],
+    output_dir: Path,
+    viewport_name: str,
+    width: int,
+    height: int,
+) -> None:
+    """Emulate the reduced visual viewport exposed by an open iOS keyboard."""
+    keyboard_height = min(430, max(320, height - 240))
+    browser.wait_for(
+        "!!document.querySelector('#mobile-task-input:not(:disabled)')",
+        "keyboard-ready task input",
+        10,
+    )
+    focused = browser.eval(r"""(() => {
+      const input = document.querySelector('#mobile-task-input');
+      if (!input || input.disabled) return false;
+      input.focus({preventScroll: true});
+      return document.activeElement === input;
+    })()""")
+    add_check(result, "mobile task input accepts keyboard focus", bool(focused), {"focused": focused})
+    browser.run("set", "viewport", str(width), str(keyboard_height))
+    browser.wait_for(
+        "document.querySelector('.mobile-split-root')?.getAttribute('data-keyboard-open') === 'true'",
+        "visual viewport keyboard mode",
+        5,
+    )
+    state = browser.eval(r"""(() => {
+      const root = document.querySelector('.mobile-split-root');
+      const frame = document.querySelector('[data-testid="mobile-browser-frame"]');
+      const dock = document.querySelector('.mobile-command-dock');
+      const composer = document.querySelector('.mobile-chat-form');
+      const input = document.querySelector('#mobile-task-input');
+      const send = document.querySelector('button[aria-label="Run task"]');
+      const rect = (node) => node ? node.getBoundingClientRect().toJSON() : null;
+      const visibleHeight = window.visualViewport?.height ?? window.innerHeight;
+      const frameRect = frame?.getBoundingClientRect();
+      const composerRect = composer?.getBoundingClientRect();
+      const sendRect = send?.getBoundingClientRect();
+      const centerTarget = sendRect
+        ? document.elementFromPoint(sendRect.left + sendRect.width / 2, sendRect.top + sendRect.height / 2)
+        : null;
+      return {
+        keyboardOpen: root?.getAttribute('data-keyboard-open') === 'true',
+        activeInput: document.activeElement === input,
+        visibleHeight,
+        root: rect(root),
+        frame: rect(frame),
+        dock: rect(dock),
+        composer: rect(composer),
+        send: rect(send),
+        browserVisibleHeight: frameRect
+          ? Math.max(0, Math.min(frameRect.bottom, visibleHeight) - Math.max(frameRect.top, 0))
+          : 0,
+        composerAboveKeyboard: Boolean(
+          composerRect && composerRect.top >= 0 &&
+          composerRect.bottom <= visibleHeight + 1
+        ),
+        browserAboveComposer: Boolean(
+          frameRect && composerRect && frameRect.bottom <= composerRect.top + 1
+        ),
+        sendReachable: Boolean(
+          sendRect && sendRect.width >= 36 && sendRect.height >= 36 && centerTarget &&
+          (centerTarget === send || send.contains(centerTarget))
+        ),
+        overflowFree: (document.scrollingElement?.scrollWidth ?? 0) <= window.innerWidth + 1,
+      };
+    })()""")
+    root_rect = state.get("root") or {}
+    add_check(
+        result,
+        "open mobile keyboard keeps browser visible and composer above keyboard",
+        bool(state.get("keyboardOpen"))
+        and bool(state.get("activeInput"))
+        and abs((root_rect.get("height") or 0) - (state.get("visibleHeight") or 0)) <= 1
+        and (state.get("browserVisibleHeight") or 0) >= 72
+        and bool(state.get("composerAboveKeyboard"))
+        and bool(state.get("browserAboveComposer"))
+        and bool(state.get("sendReachable"))
+        and bool(state.get("overflowFree")),
+        state,
+    )
+    take_screenshot(
+        browser,
+        result,
+        output_dir,
+        viewport_name,
+        "keyboard-open",
+        width,
+        keyboard_height,
+    )
+    browser.eval("document.activeElement?.blur(); true")
+    browser.run("set", "viewport", str(width), str(height))
+    browser.wait_for(
+        "document.querySelector('.mobile-split-root')?.getAttribute('data-keyboard-open') === 'false'",
+        "visual viewport keyboard close",
         5,
     )
 
@@ -743,13 +864,36 @@ def verify_live_viewport_controls(
       const root = document.querySelector('[aria-label="Viewport controls"]');
       const inputs = [...(root?.querySelectorAll('input[type="number"]') ?? [])];
       const apply = [...(root?.querySelectorAll('button') ?? [])]
-        .some((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
-      return {visible: Boolean(root), inputCount: inputs.length, apply};
+        .find((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+      const applyRect = apply?.getBoundingClientRect();
+      const centerTarget = applyRect
+        ? document.elementFromPoint(applyRect.left + applyRect.width / 2, applyRect.top + applyRect.height / 2)
+        : null;
+      const applyReachable = Boolean(
+        apply &&
+        applyRect &&
+        applyRect.width >= 36 &&
+        applyRect.height >= 36 &&
+        applyRect.top >= 0 &&
+        applyRect.bottom <= window.innerHeight &&
+        centerTarget &&
+        (centerTarget === apply || apply.contains(centerTarget))
+      );
+      return {
+        visible: Boolean(root),
+        inputCount: inputs.length,
+        apply: Boolean(apply),
+        applyReachable,
+        applyRect: applyRect ? applyRect.toJSON() : null,
+      };
     })()""")
     add_check(
         result,
         "live profile viewport settings render width height and apply",
-        bool(editor.get("visible")) and editor.get("inputCount") == 2 and bool(editor.get("apply")),
+        bool(editor.get("visible"))
+        and editor.get("inputCount") == 2
+        and bool(editor.get("apply"))
+        and bool(editor.get("applyReachable")),
         editor,
     )
     live_controls_opened = browser.eval(
@@ -865,6 +1009,20 @@ def verify_live_viewport_controls(
     )
     remote_pointer_hit_test_at_zoom(browser, result, base_url, profile_id, timeout, auth_token)
 
+    # Pointer interaction and compact landscape reflow may return the outer UI
+    # to its collapsed state. Re-open the disclosed view panel before testing
+    # Reset instead of relying on stale panel state.
+    ensure_browser_tools_open(browser)
+    browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Edit browser viewport"]');
+      if (button?.getAttribute('aria-expanded') !== 'true') button?.click();
+      return true;
+    })()""")
+    browser.wait_for(
+        "!!document.querySelector('button[aria-label=\"Reset live view\"]')",
+        "live viewport reset control",
+        5,
+    )
     reset = browser.eval(r"""(() => {
       const button = document.querySelector('button[aria-label="Reset live view"]');
       if (!button) return false;
@@ -1004,6 +1162,46 @@ def current_remote_clipboard(
     return payload["text"]
 
 
+def remote_target_center_on_canvas(
+    canvas_rect: dict[str, Any],
+    framebuffer: dict[str, Any],
+    target: dict[str, Any],
+    viewport: dict[str, Any],
+) -> tuple[int, int] | None:
+    """Map CDP content coordinates through browser chrome into the VNC canvas."""
+    framebuffer_width = float(framebuffer.get("width") or 0)
+    framebuffer_height = float(framebuffer.get("height") or 0)
+    viewport_width = float(viewport.get("width") or 0)
+    viewport_height = float(viewport.get("height") or 0)
+    canvas_width = float(canvas_rect.get("width") or 0)
+    canvas_height = float(canvas_rect.get("height") or 0)
+    target_width = float(target.get("width") or 0)
+    target_height = float(target.get("height") or 0)
+    if min(
+        framebuffer_width,
+        framebuffer_height,
+        viewport_width,
+        viewport_height,
+        canvas_width,
+        canvas_height,
+        target_width,
+        target_height,
+    ) <= 0:
+        return None
+
+    # Chromium's CDP target rectangle is relative to the page content, while
+    # the VNC framebuffer also contains the browser tab/address/bookmark chrome.
+    # The content consumes the full width in this profile, and the remaining
+    # framebuffer height is the top chrome inset.
+    remote_top_inset = max(0.0, framebuffer_height - viewport_height)
+    remote_target_x = float(target.get("left") or 0) + target_width / 2
+    remote_target_y = remote_top_inset + float(target.get("top") or 0) + target_height / 2
+    return (
+        round(float(canvas_rect.get("left") or 0) + remote_target_x * canvas_width / framebuffer_width),
+        round(float(canvas_rect.get("top") or 0) + remote_target_y * canvas_height / framebuffer_height),
+    )
+
+
 def remote_pointer_hit_test_at_zoom(
     browser: AgentBrowser,
     result: dict[str, Any],
@@ -1012,6 +1210,22 @@ def remote_pointer_hit_test_at_zoom(
     timeout: float,
     auth_token: str | None,
 ) -> None:
+    # Keep the viewer geometry stable during the real pointer sequence. The
+    # disclosed tool sheet changes the available VNC height, and focusing the
+    # canvas on pointer-down can otherwise race noVNC's ResizeObserver.
+    browser.eval(r"""(() => {
+      const tools = document.querySelector('button[aria-label="Close browser tools"]');
+      if (tools) tools.click();
+      const active = document.activeElement;
+      if (active instanceof HTMLElement) active.blur();
+      return true;
+    })()""")
+    browser.wait_for(
+        "!document.querySelector('[aria-label=\"Browser tools\"]')",
+        "compact viewer before remote pointer probe",
+        5,
+    )
+
     marker = f"mobile-pointer-probe-{int(time.time() * 1000)}"
     html = f"""<!doctype html>
 <html>
@@ -1099,8 +1313,37 @@ def remote_pointer_hit_test_at_zoom(
             ready,
         )
 
-        geometry = browser.eval(LIVE_VIEWER_GEOMETRY_SCRIPT)
-        canvas = (geometry.get("canvas") or {}).get("rect") or {}
+        geometry: dict[str, Any] = {}
+        previous_signature: tuple[float, ...] | None = None
+        stable_reads = 0
+        geometry_deadline = time.monotonic() + min(timeout, 8)
+        while time.monotonic() < geometry_deadline:
+            geometry = browser.eval(LIVE_VIEWER_GEOMETRY_SCRIPT)
+            canvas_rect = ((geometry.get("canvas") or {}).get("rect") or {})
+            host_rect = geometry.get("host") or {}
+            signature = tuple(
+                round(float(value or 0), 1)
+                for value in (
+                    canvas_rect.get("left"),
+                    canvas_rect.get("top"),
+                    canvas_rect.get("width"),
+                    canvas_rect.get("height"),
+                    host_rect.get("left"),
+                    host_rect.get("top"),
+                    host_rect.get("width"),
+                    host_rect.get("height"),
+                )
+            )
+            if signature == previous_signature:
+                stable_reads += 1
+                if stable_reads >= 2:
+                    break
+            else:
+                previous_signature = signature
+                stable_reads = 0
+            time.sleep(0.15)
+        canvas_info = geometry.get("canvas") or {}
+        canvas = canvas_info.get("rect") or {}
         content = geometry.get("content") or {}
         visible_left = max(canvas.get("left") or 0, content.get("left") or 0)
         visible_top = max(canvas.get("top") or 0, content.get("top") or 0)
@@ -1116,24 +1359,14 @@ def remote_pointer_hit_test_at_zoom(
         visible_height = visible_bottom - visible_top
         ready_target = (ready or {}).get("target") or {}
         ready_viewport = (ready or {}).get("viewport") or {}
-        if (
-            ready_target.get("width")
-            and ready_target.get("height")
-            and ready_viewport.get("width")
-            and ready_viewport.get("height")
-            and canvas.get("width")
-            and canvas.get("height")
-        ):
-            click_x = round(
-                (canvas.get("left") or 0)
-                + ((ready_target.get("left") or 0) + (ready_target.get("width") or 0) / 2)
-                * ((canvas.get("width") or 0) / (ready_viewport.get("width") or 1))
-            )
-            click_y = round(
-                (canvas.get("top") or 0)
-                + ((ready_target.get("top") or 0) + (ready_target.get("height") or 0) / 2)
-                * ((canvas.get("height") or 0) / (ready_viewport.get("height") or 1))
-            )
+        mapped_center = remote_target_center_on_canvas(
+            canvas,
+            canvas_info,
+            ready_target,
+            ready_viewport,
+        )
+        if mapped_center:
+            click_x, click_y = mapped_center
         else:
             click_x = round(visible_left + visible_width / 2)
             click_y = round(visible_top + visible_height / 2)
@@ -1223,7 +1456,7 @@ def manual_remote_paste(
         5,
     )
     panel_touch = browser.eval(TOUCH_TARGET_SCRIPT)
-    add_check(result, "manual paste has 44px touch targets", not panel_touch.get("offenders"), panel_touch)
+    add_check(result, "manual paste has compact 36px touch targets", not panel_touch.get("offenders"), panel_touch)
 
     browser.run("fill", "textarea[id^=remote-paste-]", marker)
     # The agent-browser click command can remain in its auto-wait phase after
@@ -1579,6 +1812,8 @@ def run_viewport(
         if name == "iphone-pro-max-portrait":
             capture_viewport_editor(browser, result, output_dir, name, width, height)
         compact_structure = browser.eval(STRUCTURE_SCRIPT)
+        if name == "iphone-14-portrait":
+            verify_mobile_keyboard_layout(browser, result, output_dir, name, width, height)
         if expected_layout == "vertical":
             live_rect = compact_structure.get("live") or {}
             live_ratio = (live_rect.get("height") or 0) / max(1, compact_structure.get("innerHeight") or height)
@@ -1623,8 +1858,8 @@ def run_viewport(
                     - ((frame_rect.get("top") or 0) + (frame_rect.get("height") or 0))
                 ) <= 2
                 lower_controls_visible = (
-                    (dock_rect.get("height") or 0) >= 44
-                    and (composer_rect.get("height") or 0) >= 44
+                    (dock_rect.get("height") or 0) >= 36
+                    and (composer_rect.get("height") or 0) >= 36
                     and (dock_rect.get("top") or -1) >= 0
                     and (dock_rect.get("bottom") or height + 1) <= height
                     and (composer_rect.get("top") or -1) >= 0
@@ -1671,7 +1906,7 @@ def run_viewport(
             take_screenshot(browser, result, output_dir, name, "remote-input", width, height)
 
     touch = browser.eval(TOUCH_TARGET_SCRIPT)
-    add_check(result, "44px visible touch targets", not touch.get("offenders"), touch)
+    add_check(result, "compact 36px visible touch targets", not touch.get("offenders"), touch)
 
     browser.eval(r"""(() => {
       const button = document.querySelector('button[aria-label="Open browser tools"]');
@@ -1863,17 +2098,94 @@ def run_viewport(
         fullscreen_tuning = browser.eval(r"""(() => {
           const root = document.querySelector('[aria-label="Fullscreen view controls"]');
           const zoom = root?.querySelector('#mobile-fullscreen-browser-zoom');
+          const fit = root?.querySelector('[aria-label="Fullscreen browser fit mode"]');
+          const fitButtons = [...(fit?.querySelectorAll('button[aria-pressed]') ?? [])];
+          const stage = document.querySelector('[aria-label="Fullscreen browser viewer"]');
+          const frame = document.querySelector('[data-testid="mobile-browser-frame"]');
+          const canvas = document.querySelector('.mobile-browser-content canvas');
+          const rect = (node) => node ? node.getBoundingClientRect().toJSON() : null;
           return {
             visible: Boolean(root),
             zoom: Boolean(zoom),
+            fit: Boolean(fit),
+            fitButtons: fitButtons.length,
+            activeFit: fitButtons.find((button) => button.getAttribute('aria-pressed') === 'true')?.textContent?.trim() ?? null,
+            stageFit: stage?.getAttribute('data-fullscreen-fit') ?? null,
             zoomValue: zoom?.value ?? null,
+            frame: rect(frame),
+            canvas: rect(canvas),
           };
         })()""")
         add_check(
             result,
-            "fullscreen view tuning drawer exposes zoom",
-            bool(fullscreen_tuning.get("visible")) and bool(fullscreen_tuning.get("zoom")),
+            "fullscreen view tuning drawer exposes fit modes and zoom",
+            bool(fullscreen_tuning.get("visible"))
+            and bool(fullscreen_tuning.get("zoom"))
+            and bool(fullscreen_tuning.get("fit"))
+            and fullscreen_tuning.get("fitButtons") == 3
+            and fullscreen_tuning.get("activeFit") == "Fit"
+            and fullscreen_tuning.get("stageFit") == "contain",
             fullscreen_tuning,
+        )
+
+        fullscreen_fit_adjusted = browser.eval(r"""(() => {
+          const button = document.querySelector('button[aria-label="Fit fullscreen browser to width"]');
+          if (!button) return false;
+          button.click();
+          return true;
+        })()""")
+        add_check(
+            result,
+            "fullscreen fit control accepts input",
+            bool(fullscreen_fit_adjusted),
+            {"adjusted": bool(fullscreen_fit_adjusted)},
+        )
+        time.sleep(0.25)
+        fullscreen_after_fit = browser.eval(r"""(() => {
+          const stage = document.querySelector('[aria-label="Fullscreen browser viewer"]');
+          const frame = document.querySelector('[data-testid="mobile-browser-frame"]');
+          const canvas = document.querySelector('.mobile-browser-content canvas');
+          const button = document.querySelector('button[aria-label="Fit fullscreen browser to width"]');
+          const rect = (node) => node ? node.getBoundingClientRect().toJSON() : null;
+          return {
+            stageFit: stage?.getAttribute('data-fullscreen-fit') ?? null,
+            widthPressed: button?.getAttribute('aria-pressed') ?? null,
+            frame: rect(frame),
+            canvas: rect(canvas),
+          };
+        })()""")
+        before_frame = fullscreen_tuning.get("frame") or {}
+        after_frame = fullscreen_after_fit.get("frame") or {}
+        before_canvas = fullscreen_tuning.get("canvas") or {}
+        after_canvas = fullscreen_after_fit.get("canvas") or {}
+        fullscreen_frame_changed = (
+            abs((before_frame.get("width") or 0) - (after_frame.get("width") or 0)) >= 2
+            or abs((before_frame.get("height") or 0) - (after_frame.get("height") or 0)) >= 2
+        )
+        fullscreen_canvas_changed = (
+            abs((before_canvas.get("width") or 0) - (after_canvas.get("width") or 0)) >= 2
+            or abs((before_canvas.get("height") or 0) - (after_canvas.get("height") or 0)) >= 2
+        )
+        fullscreen_frame_wraps_canvas = (
+            (after_canvas.get("width") or 0) > 20
+            and (after_canvas.get("height") or 0) > 20
+            and abs((after_frame.get("width") or 0) - (after_canvas.get("width") or 0)) <= 2
+            and abs((after_frame.get("height") or 0) - (after_canvas.get("height") or 0)) <= 2
+        )
+        add_check(
+            result,
+            "fullscreen fit control changes visible browser geometry",
+            fullscreen_after_fit.get("stageFit") == "width"
+            and fullscreen_after_fit.get("widthPressed") == "true"
+            and fullscreen_frame_changed
+            and (fullscreen_canvas_changed or fullscreen_frame_wraps_canvas),
+            {
+                "before": fullscreen_tuning,
+                "after": fullscreen_after_fit,
+                "frameChanged": fullscreen_frame_changed,
+                "canvasChanged": fullscreen_canvas_changed,
+                "frameWrapsCanvas": fullscreen_frame_wraps_canvas,
+            },
         )
 
         opened_fullscreen_viewport = browser.eval(r"""(() => {
@@ -1898,11 +2210,27 @@ def run_viewport(
           const inputs = [...(root?.querySelectorAll('input[type="number"]') ?? [])];
           const apply = [...(root?.querySelectorAll('button') ?? [])]
             .find((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+          const applyRect = apply?.getBoundingClientRect();
+          const centerTarget = applyRect
+            ? document.elementFromPoint(applyRect.left + applyRect.width / 2, applyRect.top + applyRect.height / 2)
+            : null;
+          const applyReachable = Boolean(
+            apply &&
+            applyRect &&
+            applyRect.width >= 36 &&
+            applyRect.height >= 36 &&
+            applyRect.top >= 0 &&
+            applyRect.bottom <= window.innerHeight &&
+            centerTarget &&
+            (centerTarget === apply || apply.contains(centerTarget))
+          );
           return {
             visible: Boolean(root),
             inputCount: inputs.length,
             values: inputs.map((input) => input.value),
             canApply: Boolean(apply),
+            applyReachable,
+            applyRect: applyRect ? applyRect.toJSON() : null,
           };
         })()""")
         add_check(
@@ -1910,7 +2238,8 @@ def run_viewport(
             "fullscreen viewport editor renders editable width height and apply",
             bool(fullscreen_editor.get("visible"))
             and fullscreen_editor.get("inputCount") == 2
-            and bool(fullscreen_editor.get("canApply")),
+            and bool(fullscreen_editor.get("canApply"))
+            and bool(fullscreen_editor.get("applyReachable")),
             fullscreen_editor,
         )
         applied = browser.eval(r"""(() => {
@@ -2011,7 +2340,7 @@ def run_access_dashboard_gate(
         },
     )
     touch = dashboard.get("touchTargets") or {}
-    add_check(result, "access dashboard 44px visible touch targets", not touch.get("offenders"), touch)
+    add_check(result, "access dashboard compact 36px visible touch targets", not touch.get("offenders"), touch)
     take_screenshot(
         browser,
         result,

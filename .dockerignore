@@ -31,6 +31,9 @@ __pycache__
 backend/.data
 artifacts
 benchmarks
+docker-compose.guacamole-benchmark.yml
+scripts/guacamole_benchmark_config.json
+scripts/run_guacamole_benchmark.sh
 
 .DS_Store
 *.log

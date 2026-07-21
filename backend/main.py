@@ -16,6 +16,7 @@ import struct
 import shutil
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
@@ -127,6 +128,63 @@ _TASK_SENSITIVE_KEY_PARTS = (
     "api_key",
     "apikey",
 )
+
+
+@dataclass(eq=False)
+class _WebSocketAccessLease:
+    """Process-local handle used to revoke an already-authorized WebSocket."""
+
+    identity_kind: str
+    identity_id: str
+    profile_id: str
+    revoked: asyncio.Event
+
+
+_active_websocket_access_leases: set[_WebSocketAccessLease] = set()
+
+
+def _register_websocket_access(
+    identity: access.AccessIdentity, profile_id: str
+) -> _WebSocketAccessLease | None:
+    """Track mutable principals without adding authorization work per frame."""
+    if (
+        not ACCESS_CONTROL_ENABLED
+        or identity.kind not in {"user", "agent"}
+        or not identity.id
+    ):
+        return None
+    lease = _WebSocketAccessLease(
+        identity_kind=identity.kind,
+        identity_id=identity.id,
+        profile_id=profile_id,
+        revoked=asyncio.Event(),
+    )
+    _active_websocket_access_leases.add(lease)
+    return lease
+
+
+def _unregister_websocket_access(lease: _WebSocketAccessLease | None) -> None:
+    if lease is not None:
+        _active_websocket_access_leases.discard(lease)
+
+
+def _revoke_websocket_access(
+    *,
+    identity_kind: str | None = None,
+    identity_id: str | None = None,
+    profile_id: str | None = None,
+) -> None:
+    """Signal matching proxy tasks after a principal or sandbox policy change."""
+    if identity_kind is None and identity_id is None and profile_id is None:
+        return
+    for lease in tuple(_active_websocket_access_leases):
+        if identity_kind is not None and lease.identity_kind != identity_kind:
+            continue
+        if identity_id is not None and lease.identity_id != identity_id:
+            continue
+        if profile_id is not None and lease.profile_id != profile_id:
+            continue
+        lease.revoked.set()
 
 _BENCHMARK_REPORT_ENV = "BENCHMARK_REPORT_PATH"
 _DEFAULT_BENCHMARK_REPORT_PATH = Path("/data/benchmark-report.json")
@@ -691,6 +749,246 @@ def _build_server_cut_text(text: str) -> bytes:
     return struct.pack(">BxxxI", 3, len(text_bytes)) + text_bytes
 
 
+def _filter_vnc_server_message(
+    data: bytes, *, can_interact: bool
+) -> bytes | None:
+    """Translate a frame-aligned Kasm clipboard message for operators."""
+    if not data:
+        return data
+
+    if data[0] == 180:
+        if not can_interact:
+            return None
+        text = _parse_kasmvnc_clipboard(data)
+        return _build_server_cut_text(text) if text is not None else None
+
+    return data
+
+
+_RFB_SERVER_MAX_BUFFER = 64 * 1024 * 1024
+
+
+class _RfbServerProtocolError(ValueError):
+    """Raised when a viewer stream cannot be parsed without leaking data."""
+
+
+class _RfbServerStreamFilter:
+    """Stateful server→client RFB filter for view-only connections.
+
+    RFB is a byte stream, so WebSocket messages may split or coalesce RFB
+    messages. The filter buffers until it can identify complete top-level
+    messages and framebuffer rectangles. Clipboard messages are removed at
+    RFB boundaries; unknown message types or encodings fail closed instead of
+    forwarding bytes that might contain clipboard content.
+    """
+
+    def __init__(self, *, can_interact: bool, handshake_complete: bool = False):
+        self.can_interact = can_interact
+        self._phase = "normal" if handshake_complete else "protocol_version"
+        self._protocol_minor = 8
+        self._pixel_size = 4
+        self._buffer = bytearray()
+        self.last_dropped_clipboard = False
+
+    @staticmethod
+    def _bounded_length(length: int, label: str) -> int:
+        if length < 0 or length > _RFB_SERVER_MAX_BUFFER:
+            raise _RfbServerProtocolError(f"Invalid {label} length")
+        return length
+
+    def _handshake_message_length(self) -> int | None:
+        data = self._buffer
+        if self._phase == "protocol_version":
+            if len(data) < 12:
+                return None
+            version = bytes(data[:12])
+            if not version.startswith(b"RFB 003.") or version[11:12] != b"\n":
+                raise _RfbServerProtocolError("Invalid RFB protocol version")
+            try:
+                self._protocol_minor = int(version[8:11])
+            except ValueError as exc:
+                raise _RfbServerProtocolError("Invalid RFB protocol version") from exc
+            self._phase = "security_types"
+            return 12
+
+        if self._phase == "security_types":
+            if self._protocol_minor <= 3:
+                if len(data) < 4:
+                    return None
+                security_type = struct.unpack_from(">I", data, 0)[0]
+                if security_type != _RFB_SECURITY_TYPE_NONE:
+                    raise _RfbServerProtocolError("Unsupported RFB security type")
+                self._phase = "server_init"
+                return 4
+
+            if not data:
+                return None
+            count = data[0]
+            if count == 0:
+                if len(data) < 5:
+                    return None
+                reason_length = self._bounded_length(
+                    struct.unpack_from(">I", data, 1)[0], "RFB failure reason"
+                )
+                total = 5 + reason_length
+                if len(data) < total:
+                    return None
+                self._phase = "failed"
+                return total
+            total = 1 + count
+            if len(data) < total:
+                return None
+            if _RFB_SECURITY_TYPE_NONE not in data[1:total]:
+                raise _RfbServerProtocolError("Unsupported RFB security types")
+            self._phase = "security_result"
+            return total
+
+        if self._phase == "security_result":
+            if len(data) < 4:
+                return None
+            result = struct.unpack_from(">I", data, 0)[0]
+            self._phase = "server_init" if result == 0 else "failed"
+            return 4
+
+        if self._phase == "server_init":
+            if len(data) < 24:
+                return None
+            name_length = self._bounded_length(
+                struct.unpack_from(">I", data, 20)[0], "RFB desktop name"
+            )
+            total = 24 + name_length
+            if len(data) < total:
+                return None
+            bits_per_pixel = data[4]
+            self._pixel_size = 1 if bits_per_pixel == 8 else 4
+            self._phase = "normal"
+            return total
+
+        if self._phase == "failed":
+            raise _RfbServerProtocolError("RFB negotiation failed")
+        return None
+
+    def _rectangle_payload_length(
+        self,
+        data: bytearray,
+        offset: int,
+        width: int,
+        height: int,
+        encoding: int,
+    ) -> int | None:
+        if encoding == 0:  # Raw
+            return self._bounded_length(
+                width * height * self._pixel_size, "Raw rectangle"
+            )
+        if encoding == 1:  # CopyRect
+            return 4
+        if encoding == 16:  # ZRLE
+            if len(data) < offset + 4:
+                return None
+            compressed = self._bounded_length(
+                struct.unpack_from(">I", data, offset)[0], "compressed rectangle"
+            )
+            return 4 + compressed
+        if encoding == -239:  # Cursor
+            return self._bounded_length(
+                width * height * self._pixel_size + ((width + 7) // 8) * height,
+                "cursor rectangle",
+            )
+        if encoding == -224:  # LastRect
+            return 0
+        raise _RfbServerProtocolError(f"Unsupported RFB encoding {encoding}")
+
+    def _framebuffer_update_length(self) -> int | None:
+        data = self._buffer
+        if len(data) < 4:
+            return None
+        rectangles = struct.unpack_from(">H", data, 2)[0]
+        cursor = 4
+        for _ in range(rectangles):
+            if len(data) < cursor + 12:
+                return None
+            width, height = struct.unpack_from(">HH", data, cursor + 4)
+            encoding = struct.unpack_from(">i", data, cursor + 8)[0]
+            cursor += 12
+            payload_length = self._rectangle_payload_length(
+                data, cursor, width, height, encoding
+            )
+            if payload_length is None or len(data) < cursor + payload_length:
+                return None
+            cursor += payload_length
+            if encoding == -224:  # LastRect terminates the update early.
+                break
+        return cursor
+
+    def _normal_message_length(self) -> int | None:
+        data = self._buffer
+        if not data:
+            return None
+        message_type = data[0]
+        if message_type == 0:
+            return self._framebuffer_update_length()
+        if message_type == 1:  # SetColourMapEntries
+            if len(data) < 6:
+                return None
+            colors = struct.unpack_from(">H", data, 4)[0]
+            return 6 + colors * 6
+        if message_type in {2, 150}:  # Bell / EndOfContinuousUpdates
+            return 1
+        if message_type == 3:  # ServerCutText, including extended clipboard
+            if len(data) < 8:
+                return None
+            signed_length = struct.unpack_from(">i", data, 4)[0]
+            return 8 + self._bounded_length(abs(signed_length), "ServerCutText")
+        if message_type == 248:  # ServerFence
+            if len(data) < 9:
+                return None
+            return 9 + data[8]
+        if message_type == 250:  # XVP
+            return 4
+        raise _RfbServerProtocolError(
+            f"Unsupported RFB server message {message_type}"
+        )
+
+    def filter(self, data: bytes) -> bytes:
+        self.last_dropped_clipboard = False
+        if self.can_interact:
+            filtered = _filter_vnc_server_message(data, can_interact=True)
+            return filtered or b""
+
+        if len(self._buffer) + len(data) > _RFB_SERVER_MAX_BUFFER:
+            raise _RfbServerProtocolError("RFB server buffer limit exceeded")
+        self._buffer.extend(data)
+        result = bytearray()
+
+        while self._buffer:
+            if self._phase != "normal":
+                message_length = self._handshake_message_length()
+                if message_length is None:
+                    break
+                result.extend(self._buffer[:message_length])
+                del self._buffer[:message_length]
+                continue
+
+            # KasmVNC BinaryClipboard is a WebSocket-framed extension without
+            # a stream-level total length. Drop the complete buffered extension
+            # and any coalesced tail rather than risk forwarding clipboard data.
+            if self._buffer[0] == 180:
+                self.last_dropped_clipboard = True
+                self._buffer.clear()
+                break
+
+            message_length = self._normal_message_length()
+            if message_length is None or len(self._buffer) < message_length:
+                break
+            if self._buffer[0] == 3:
+                self.last_dropped_clipboard = True
+            else:
+                result.extend(self._buffer[:message_length])
+            del self._buffer[:message_length]
+
+        return bytes(result)
+
+
 # ---------------------------------------------------------------------------
 # RFB client message filter — strip extension types KasmVNC doesn't support
 # ---------------------------------------------------------------------------
@@ -737,6 +1035,18 @@ _ALLOWED_ENCODINGS: set[int] = {
     *range(-256, -246),  # compress levels 0-9
 }
 
+# View-only egress filtering needs deterministic server-message boundaries.
+# Keep one compressed framebuffer encoding (ZRLE), simple fallbacks, and the
+# two pseudo-encodings whose rectangle payloads are unambiguous. Interactive
+# connections retain the broader KasmVNC-compatible allow-list above.
+_VIEWER_ALLOWED_ENCODINGS: set[int] = {
+    0,     # Raw
+    1,     # CopyRect
+    16,    # ZRLE
+    -239,  # Cursor
+    -224,  # LastRect
+}
+
 
 def _rfb_msg_length(data: bytes, offset: int) -> int | None:
     """Return total length of the RFB message at offset, or None if unrecognized."""
@@ -760,15 +1070,22 @@ def _rfb_msg_length(data: bytes, offset: int) -> int | None:
     return None  # truly unknown type
 
 
-def _rewrite_set_encodings(data: bytes, offset: int, msg_len: int) -> bytes:
+def _rewrite_set_encodings(
+    data: bytes,
+    offset: int,
+    msg_len: int,
+    *,
+    allowed_encodings: set[int] | None = None,
+) -> bytes:
     """Keep only whitelisted encodings in a SetEncodings message."""
     _log = logging.getLogger("cloakbrowser.manager")
+    allowed = _ALLOWED_ENCODINGS if allowed_encodings is None else allowed_encodings
     num_enc = struct.unpack_from(">H", data, offset + 2)[0]
     kept = []
     stripped = []
     for i in range(num_enc):
         enc = struct.unpack_from(">i", data, offset + 4 + i * 4)[0]  # signed
-        if enc in _ALLOWED_ENCODINGS:
+        if enc in allowed:
             kept.append(enc)
         else:
             stripped.append(enc)
@@ -860,7 +1177,14 @@ def _filter_rfb_viewer_messages(data: bytes) -> bytes:
         if msg_type == 0:  # SetPixelFormat
             result.extend(data[offset:offset + msg_len])
         elif msg_type == 2:  # SetEncodings, with the same safe allow-list
-            result.extend(_rewrite_set_encodings(data, offset, msg_len))
+            result.extend(
+                _rewrite_set_encodings(
+                    data,
+                    offset,
+                    msg_len,
+                    allowed_encodings=_VIEWER_ALLOWED_ENCODINGS,
+                )
+            )
         elif msg_type == 3:  # FramebufferUpdateRequest
             result.extend(data[offset:offset + msg_len])
         offset += msg_len
@@ -1323,6 +1647,8 @@ async def update_access_user(user_id: str, body: AccessUserUpdate, request: Requ
     user = db.update_access_user(user_id, **data)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if {"password_hash", "role", "active", "grants"}.intersection(data):
+        _revoke_websocket_access(identity_kind="user", identity_id=user_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_user.update", "allowed")
     return _access_user_response(user)
 
@@ -1359,6 +1685,8 @@ async def update_access_agent(agent_id: str, body: AccessAgentUpdate, request: R
     agent = db.update_access_agent(agent_id, **data)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    if {"active", "grants"}.intersection(data):
+        _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.update", "allowed")
     return _access_agent_response(agent)
 
@@ -1370,6 +1698,7 @@ async def rotate_access_agent_key(agent_id: str, request: Request):
     agent = db.update_access_agent(agent_id, key_hash=access.hash_agent_key(key))
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.rotate_key", "allowed")
     return AccessAgentCreatedResponse(**_access_agent_response(agent).model_dump(), api_key=key)
 
@@ -1605,6 +1934,8 @@ async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
     profile = db.update_profile(profile_id, **data)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
+    if "sandbox_id" in data:
+        _revoke_websocket_access(profile_id=profile_id)
     db.record_access_audit_event(
         identity.kind, identity.id, "profile.update", "allowed", str(profile.get("sandbox_id") or "default"), profile_id
     )
@@ -1648,10 +1979,15 @@ async def launch_profile(profile_id: str, request: Request):
 
     try:
         running = await browser_mgr.launch(profile)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError:
+        # Validation errors can originate in URL-parsing or browser libraries
+        # and may contain embedded proxy credentials. Keep the API boundary
+        # intentionally generic while preserving the useful 400 classification.
+        raise HTTPException(status_code=400, detail="Invalid browser profile configuration")
     except Exception as exc:
-        logger.error("Failed to launch profile %s: %s", profile_id, exc)
+        # Third-party launch errors may echo the configured proxy URL. Log the
+        # exception class for diagnosis without persisting embedded credentials.
+        logger.error("Failed to launch profile %s (%s)", profile_id, type(exc).__name__)
         raise HTTPException(status_code=500, detail="Failed to launch browser")
 
     db.record_access_audit_event(
@@ -1850,9 +2186,14 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
     # the server must not respond with a subprotocol the client didn't request.
     requested = websocket.scope.get("subprotocols", [])
     subprotocol = "binary" if "binary" in requested else None
-    await websocket.accept(subprotocol=subprotocol)
-
     import websockets
+
+    access_lease = _register_websocket_access(identity, profile_id)
+    try:
+        await websocket.accept(subprotocol=subprotocol)
+    except BaseException:
+        _unregister_websocket_access(access_lease)
+        raise
 
     vnc_url = f"ws://127.0.0.1:{running.ws_port}/websockify"
 
@@ -1929,27 +2270,28 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
 
             async def vnc_to_client():
                 count = 0
+                dropped = 0
+                rfb_filter = _RfbServerStreamFilter(can_interact=can_interact)
                 try:
                     async for msg in vnc_ws:
                         count += 1
-                        if isinstance(msg, bytes) and len(msg) > 0:
-                            msg_type = msg[0]
-                            if msg_type == 180:
-                                # KasmVNC BinaryClipboard → convert to standard
-                                # ServerCutText (type 3) so noVNC can handle it
-                                text = _parse_kasmvnc_clipboard(msg)
-                                if text:
-                                    logger.info("VNC proxy [v->c]: clipboard %d chars", len(text))
-                                    await websocket.send_bytes(_build_server_cut_text(text))
-                                else:
-                                    logger.info("VNC proxy [v->c]: dropped type 180 (no text/plain)")
+                        if isinstance(msg, bytes):
+                            filtered = rfb_filter.filter(msg)
+                            if rfb_filter.last_dropped_clipboard:
+                                dropped += 1
+                                logger.info(
+                                    "VNC proxy [v->c]: dropped clipboard message for %s",
+                                    identity.kind,
+                                )
+                            if not filtered:
                                 continue
-                            await websocket.send_bytes(msg)
-                        elif isinstance(msg, bytes):
-                            await websocket.send_bytes(msg)
+                            await websocket.send_bytes(filtered)
                         else:
+                            if not can_interact:
+                                dropped += 1
+                                continue
                             await websocket.send_text(msg)
-                    logger.info("VNC proxy [v->c]: KasmVNC stream ended after %d msgs (close_code=%s)", count, vnc_ws.close_code)
+                    logger.info("VNC proxy [v->c]: KasmVNC stream ended after %d msgs (%d dropped, close_code=%s)", count, dropped, vnc_ws.close_code)
                 except WebSocketDisconnect as exc:
                     logger.info("VNC proxy [v->c]: client disconnect code=%s after %d msgs", exc.code, count)
                 except Exception as exc:
@@ -1957,11 +2299,19 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
 
             c2v = asyncio.create_task(client_to_vnc(), name="c2v")
             v2c = asyncio.create_task(vnc_to_client(), name="v2c")
+            proxy_tasks = [c2v, v2c]
+            revocation_task = None
+            if access_lease is not None:
+                revocation_task = asyncio.create_task(
+                    access_lease.revoked.wait(), name="access-revocation"
+                )
+                proxy_tasks.append(revocation_task)
 
             done, pending = await asyncio.wait(
-                [c2v, v2c],
+                proxy_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            access_revoked = revocation_task is not None and revocation_task in done
             finished = [t.get_name() for t in done]
             still_running = [t.get_name() for t in pending]
 
@@ -1985,10 +2335,16 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
 
             for task in pending:
                 task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if access_revoked:
+                logger.info("VNC proxy: access revoked for %s", profile_id)
+                await websocket.close(code=4403, reason="Access revoked")
 
     except Exception as exc:
         logger.error("VNC proxy connect error for %s: %s: %s", profile_id, type(exc).__name__, exc)
     finally:
+        _unregister_websocket_access(access_lease)
         try:
             await websocket.close()
         except Exception as exc:
@@ -2073,7 +2429,10 @@ async def cdp_json_list(profile_id: str, request: Request):
 
 
 async def _proxy_cdp_websocket(
-    websocket: WebSocket, target_url: str, label: str,
+    websocket: WebSocket,
+    target_url: str,
+    label: str,
+    access_lease: _WebSocketAccessLease | None = None,
 ) -> None:
     """Bidirectional WebSocket proxy between a FastAPI client and a CDP target.
 
@@ -2116,11 +2475,24 @@ async def _proxy_cdp_websocket(
 
             c2d = asyncio.create_task(client_to_cdp(), name="c2d")
             d2c = asyncio.create_task(cdp_to_client(), name="d2c")
+            proxy_tasks = [c2d, d2c]
+            revocation_task = None
+            if access_lease is not None:
+                revocation_task = asyncio.create_task(
+                    access_lease.revoked.wait(), name="access-revocation"
+                )
+                proxy_tasks.append(revocation_task)
             done, pending = await asyncio.wait(
-                [c2d, d2c], return_when=asyncio.FIRST_COMPLETED
+                proxy_tasks, return_when=asyncio.FIRST_COMPLETED
             )
+            access_revoked = revocation_task is not None and revocation_task in done
             for task in pending:
                 task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if access_revoked:
+                logger.info("%s: access revoked", label)
+                await websocket.close(code=4403, reason="Access revoked")
             logger.info("%s: disconnected", label)
 
     except Exception as exc:
@@ -2141,27 +2513,34 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
     access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
     if not access_result:
         return
+    _profile, identity = access_result
 
     running = browser_mgr.running.get(profile_id)
     if not running:
         await websocket.close(code=4004, reason="Profile not running")
         return
 
-    await websocket.accept()
-
-    # Get browser-level CDP WebSocket URL from Chrome
+    access_lease = _register_websocket_access(identity, profile_id)
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"http://127.0.0.1:{running.cdp_port}/json/version", timeout=5
-            )
-            ws_url = resp.json()["webSocketDebuggerUrl"]
-    except Exception as exc:
-        logger.error("CDP proxy: failed to get WS URL for %s: %s", profile_id, exc)
-        await websocket.close(code=4005, reason="CDP not available")
-        return
+        await websocket.accept()
 
-    await _proxy_cdp_websocket(websocket, ws_url, f"CDP proxy [{profile_id}]")
+        # Get browser-level CDP WebSocket URL from Chrome
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"http://127.0.0.1:{running.cdp_port}/json/version", timeout=5
+                )
+                ws_url = resp.json()["webSocketDebuggerUrl"]
+        except Exception as exc:
+            logger.error("CDP proxy: failed to get WS URL for %s: %s", profile_id, exc)
+            await websocket.close(code=4005, reason="CDP not available")
+            return
+
+        await _proxy_cdp_websocket(
+            websocket, ws_url, f"CDP proxy [{profile_id}]", access_lease
+        )
+    finally:
+        _unregister_websocket_access(access_lease)
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp/devtools/{path:path}")
@@ -2173,16 +2552,22 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
     if not access_result:
         return
+    _profile, identity = access_result
 
     running = browser_mgr.running.get(profile_id)
     if not running:
         await websocket.close(code=4004, reason="Profile not running")
         return
 
-    await websocket.accept()
-
-    target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
-    await _proxy_cdp_websocket(websocket, target_url, f"CDP page proxy [{profile_id}]")
+    access_lease = _register_websocket_access(identity, profile_id)
+    try:
+        await websocket.accept()
+        target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
+        await _proxy_cdp_websocket(
+            websocket, target_url, f"CDP page proxy [{profile_id}]", access_lease
+        )
+    finally:
+        _unregister_websocket_access(access_lease)
 
 
 # ── Static Frontend ───────────────────────────────────────────────────────────

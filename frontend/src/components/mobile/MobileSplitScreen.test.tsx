@@ -479,6 +479,57 @@ describe("MobileSplitScreen", () => {
     await waitFor(() => expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("280px"));
   });
 
+  it("shrinks the workspace to the visual viewport while the mobile keyboard is open", async () => {
+    const originalInnerHeight = window.innerHeight;
+    const originalInnerWidth = window.innerWidth;
+    let resizeHandler: (() => void) | null = null;
+    vi.stubGlobal("visualViewport", {
+      width: 390,
+      height: 844,
+      offsetTop: 0,
+      addEventListener: vi.fn((event: string, handler: () => void) => {
+        if (event === "resize") resizeHandler = handler;
+      }),
+      removeEventListener: vi.fn(),
+    });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+
+    try {
+      const { container } = runningSplit();
+      const workspace = container.querySelector(".mobile-split-root") as HTMLElement;
+      const input = await screen.findByPlaceholderText("Ask Codex Computer Use...") as HTMLTextAreaElement;
+
+      expect(workspace.style.getPropertyValue("--mobile-visual-viewport-height")).toBe("844px");
+      expect(workspace.classList.contains("mobile-keyboard-open")).toBe(false);
+
+      await act(async () => input.focus());
+      expect(document.activeElement).toBe(input);
+      Object.assign(window.visualViewport!, { height: 420 });
+      await act(async () => {
+        resizeHandler?.();
+      });
+
+      await waitFor(() => {
+        expect(workspace.style.getPropertyValue("--mobile-visual-viewport-height")).toBe("420px");
+        expect(workspace.classList.contains("mobile-keyboard-open")).toBe(true);
+      });
+
+      await act(async () => input.blur());
+      await waitFor(() => expect(workspace.classList.contains("mobile-keyboard-open")).toBe(true));
+
+      Object.assign(window.visualViewport!, { height: 844 });
+      await act(async () => {
+        resizeHandler?.();
+      });
+      await waitFor(() => expect(workspace.classList.contains("mobile-keyboard-open")).toBe(false));
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
+      fireEvent(window, new Event("resize"));
+    }
+  });
+
   it("keeps only Full Tools Chat and Send visible as persistent primary actions", () => {
     const { container } = runningSplit();
 
@@ -704,7 +755,9 @@ describe("MobileSplitScreen", () => {
 
     fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
 
-    expect(screen.getByRole("dialog", { name: "Fullscreen browser viewer" })).toBeTruthy();
+    const fullscreenDialog = screen.getByRole("dialog", { name: "Fullscreen browser viewer" }) as HTMLElement;
+    expect(fullscreenDialog).toBeTruthy();
+    expect(fullscreenDialog.getAttribute("data-fullscreen-fit")).toBe("contain");
     expect(screen.getByLabelText("Fullscreen browser controls")).toBeTruthy();
     const controlPane = document.querySelector(".mobile-control-pane") as HTMLElement;
     expect(controlPane.hasAttribute("inert")).toBe(true);
@@ -712,8 +765,10 @@ describe("MobileSplitScreen", () => {
 
     fireEvent.click(screen.getByLabelText("Toggle fullscreen view controls"));
     expect(screen.getByLabelText("Fullscreen view controls")).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Fullscreen browser pane"), { target: { value: "70" } });
+    fireEvent.click(screen.getByLabelText("Fit fullscreen browser to width"));
     fireEvent.change(screen.getByLabelText("Fullscreen visual zoom"), { target: { value: "125" } });
+    expect(screen.getByLabelText("Fit fullscreen browser to width").getAttribute("aria-pressed")).toBe("true");
+    expect(fullscreenDialog.getAttribute("data-fullscreen-fit")).toBe("width");
     expect(props.onBrowserZoomChange).toHaveBeenCalledWith(125);
 
     fireEvent.click(screen.getByLabelText("Edit fullscreen browser viewport"));

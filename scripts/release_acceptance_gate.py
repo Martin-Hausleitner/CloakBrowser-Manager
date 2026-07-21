@@ -305,6 +305,10 @@ def summarize_streaming(report: dict[str, Any], now: datetime, max_age_hours: fl
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise GateError("streaming benchmark report has no candidates")
+    expected_runs = None
+    config = report.get("config")
+    if isinstance(config, dict) and isinstance(config.get("iterations"), int):
+        expected_runs = config["iterations"]
     candidate_summaries: list[dict[str, Any]] = []
     measured = 0
     failed = 0
@@ -318,6 +322,15 @@ def summarize_streaming(report: dict[str, Any], now: datetime, max_age_hours: fl
         if status == "measured":
             measured += 1
             if availability != "available":
+                failed += 1
+            summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+            runs = summary.get("runs", 0)
+            success_rate = summary.get("success_rate_pct")
+            if expected_runs is not None and runs != expected_runs:
+                failed += 1
+            if expected_runs is not None and success_rate != 100.0:
+                failed += 1
+            elif success_rate is not None and success_rate != 100.0:
                 failed += 1
         candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
         candidate_summaries.append(

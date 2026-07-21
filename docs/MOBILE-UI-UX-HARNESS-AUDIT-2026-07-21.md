@@ -1,6 +1,6 @@
 # Mobile UI/UX and universal browser-action audit
 
-Status: 21 July 2026 · r56 locally implemented and end-to-end verified
+Status: 21 July 2026 · r63 deployed on the VCVM and end-to-end verified
 
 ## Decision
 
@@ -23,7 +23,9 @@ Primary references:
 - Portrait defaults to a browser-first split; the collapsed workspace allocates up to 82% of the visual height to the live pane.
 - Landscape gives the live browser the main horizontal pane and keeps the control pane narrow.
 - Fullscreen keeps the same live canvas rather than opening a second stream.
-- Visual zoom and pane ratio update immediately. A real profile width/height change is saved for the next browser launch and is labelled accordingly.
+- Fullscreen exposes distinct Fit, Width and Height modes, visual zoom and a compact width/height editor without leaving the live canvas.
+- Visual zoom and pane ratio update immediately. A real profile width/height change is saved and a running browser is deliberately restarted so the framebuffer really changes.
+- While an iOS-style software keyboard is open, the root follows `visualViewport.height`, layout transitions are disabled and the browser remains above the composer. Nonessential dock controls disappear until the keyboard closes.
 
 ### 2. Command dock
 
@@ -31,7 +33,8 @@ Primary references:
 - **Tools** opens the only settings/action sheet.
 - **Chat** opens or collapses the task history.
 - **Send** remains beside the text field in both collapsed and expanded chat states.
-- Every visible interactive control is at least 44 by 44 CSS pixels.
+- Primary buttons, login controls, access administration and paste actions use a compact 36 by 36 CSS-pixel floor with separation between adjacent actions. This is intentionally smaller than Apple's 44-point recommendation but remains above WCAG 2.2's 24-CSS-pixel minimum target size.
+- Text fields retain a 16 px font size to prevent automatic iOS focus zoom even though their surrounding control is compact.
 
 ### 3. Progressive disclosure
 
@@ -53,38 +56,41 @@ Quick actions are reusable, typed browser commands. They do not store destinatio
 
 Each command carries an ID, label, action kind, `ui` or `host` scope and optional structured arguments. A host reports the exact actions it supports. The UI enables a Quick action only when that capability is present; unknown action kinds are discarded at the bridge boundary.
 
-This makes the action schema reusable by a harness adapter without binding the UI to a vendor API. For this product build, execution is intentionally stricter: the injected host must identify itself as `codex-computer-use`. Missing, generic or mislabeled bridges fail closed and keep the composer disabled. There is no local fake-success fallback and no browser credential is passed through the chat UI.
+This makes the action schema reusable by a harness adapter without binding the UI to a vendor API. For this product build, execution is intentionally stricter: the injected host must identify itself as `codex-computer-use`. Missing, generic or mislabeled bridges fail closed and keep the composer disabled. There is no local fake-success fallback and no browser credential is passed through the chat UI. The current VCVM/CLI environment does not itself provide a production Codex Computer Use browser runtime; the automated gate injects a deterministic host solely to verify this boundary. Server-backed task history persists messages but does not execute an agent by itself.
 
 Current trust boundary: the provider identity is an implementation contract, not cryptographic attestation. A stronger deployment should add a signed or session-bound host handshake before broad external exposure.
 
 ## End-to-end evidence
 
-The authenticated r56 gate ran the production container, selected a real browser profile, connected one live VNC canvas and exercised five device layouts plus the access dashboard.
+The authenticated r63 gate ran the production container on the VCVM, selected a real browser profile, connected one live VNC canvas and exercised five device layouts plus the access dashboard. The Mac participated only as the browser/test client through the authenticated SSH tunnel.
 
 | Surface | Result |
 |---|---:|
-| iPhone 14 portrait, 390 × 844 | 58 checks passed |
-| iPhone SE portrait, 375 × 667 | 57 checks passed |
-| iPhone Pro Max portrait, 430 × 932 | 59 checks passed |
-| iPhone 14 landscape, 844 × 390 | 56 checks passed |
-| Touch tablet portrait, 768 × 1024 | 56 checks passed |
+| iPhone 14 portrait, 390 × 844 | 66 checks passed |
+| iPhone SE portrait, 375 × 667 | 59 checks passed |
+| iPhone Pro Max portrait, 430 × 932 | 61 checks passed |
+| iPhone 14 landscape, 844 × 390 | 58 checks passed |
+| Touch tablet portrait, 768 × 1024 | 58 checks passed |
 | Authenticated access dashboard | 5 checks passed |
-| Total | **291/291 checks, 23 screenshots** |
+| Total | **307/307 checks, 25 screenshots** |
 
 The gate verifies, among other things:
 
 - exactly Full, Tools, Chat and Send as the compact primary controls;
 - no benchmark navigation or harness picker;
 - no horizontal document overflow;
-- 44-pixel touch targets and coarse-pointer behavior;
+- compact 36-pixel controls and coarse-pointer behavior;
+- an emulated open software keyboard whose Visual Viewport, VNC pane, one-row composer and reachable Send action neither overlap nor leave the visible screen;
 - Tools/Chat mutual exclusion and keyboard shortcuts that do not steal input focus;
 - a one-row composer with a visible Send control in collapsed and expanded chat;
 - account/logout controls absent from the compact surface and present only inside Tools;
-- live zoom, pane ratio, viewport persistence, fullscreen focus/inert behavior and one-canvas preservation;
+- live zoom, pane ratio, viewport persistence, distinct fullscreen Fit/Width/Height behavior, fullscreen focus/inert behavior and one-canvas preservation;
 - real VNC connection, pointer hit-testing, clipboard round-trip and manual iOS paste;
 - honest session cards and the authenticated access dashboard.
 
-Fresh verification also passed 79 frontend tests, 223 backend tests and the production frontend build. The release preview is loopback-only; physical iPhone Safari and private Tailnet HTTPS remain separate release gates.
+Fresh verification also passed 106 frontend tests, 250 backend tests, 18 release/mobile/benchmark script tests, the production frontend build and the VCVM deployment-surface gate. A separate disposable viewer-only login saw exactly one assigned profile, rendered one live 1024 × 576 canvas, exposed no profile/access administration and disconnected immediately after the principal was deactivated. Its connected and revoked states were both captured and visually inspected.
+
+The release preview remains loopback-only on the VCVM. The current Mac-to-VCVM Tailscale path is relayed rather than direct, and Tailscale Serve is disabled by tailnet policy; physical iPhone Safari and private Tailnet HTTPS therefore remain separate release gates.
 
 ## Ten highest-value next input and interaction improvements
 
@@ -101,4 +107,4 @@ Fresh verification also passed 79 frontend tests, 223 backend tests and the prod
 
 ## Release boundary
 
-The r56 UI is ready as a compact local mobile-web MVP. It is not yet evidence of a production Codex host bootstrap, physical iPhone Safari compatibility, public-network safety, WAN frame rate or touch-to-pixel latency. Those claims must stay blocked until a real host bridge, private HTTPS and physical-device measurements are present.
+The r63 UI is ready as a compact VCVM-hosted mobile-web MVP. It is not yet evidence of a production Codex host bootstrap, physical iPhone Safari compatibility, public-network safety, WAN frame rate or touch-to-pixel latency. Those claims must stay blocked until a real host bridge, private HTTPS and physical-device measurements are present.

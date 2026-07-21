@@ -71,9 +71,9 @@ const permissionOrder: Record<AccessPermission, number> = {
   automate: 3,
 };
 
-const actionButtonClass = "btn-secondary inline-flex min-h-11 items-center gap-1.5";
-const primaryActionButtonClass = "btn-primary inline-flex min-h-11 items-center gap-1.5";
-const compactActionButtonClass = "min-h-11 rounded-md px-3 text-xs text-gray-500 underline focus:outline-none focus:ring-2 focus:ring-accent/50";
+const actionButtonClass = "btn-secondary inline-flex min-h-9 items-center gap-1";
+const primaryActionButtonClass = "btn-primary inline-flex min-h-9 items-center gap-1";
+const compactActionButtonClass = "min-h-9 rounded-md px-2 text-[11px] text-gray-500 underline focus:outline-none focus:ring-2 focus:ring-accent/50";
 
 function summarizeGrants(grants: AccessGrant[]) {
   if (!grants.length) return "No sandbox access";
@@ -149,7 +149,7 @@ function EffectiveAccessPreview({
 
   return (
     <details className="mt-2 text-xs text-gray-500">
-      <summary className="min-h-11 cursor-pointer py-3 text-gray-400">
+      <summary className="min-h-9 cursor-pointer py-2 text-gray-400">
         Effective access · {visibleProfiles.length} browser{visibleProfiles.length === 1 ? "" : "s"}
       </summary>
       <div className="rounded-md border border-border bg-surface-0 p-2" aria-label={`Effective browser access for ${label}`}>
@@ -216,7 +216,7 @@ function GrantEditor({
                   <span className="ml-1 font-sans text-gray-500">({sandbox.profile_count} browser{sandbox.profile_count === 1 ? "" : "s"})</span>
                 </span>
                 <select
-                  className="input h-11 w-32 shrink-0 py-2 text-xs"
+                  className="input h-9 w-32 shrink-0 py-1 text-xs"
                   value={controlPermission}
                   aria-label={`Browser control for ${sandbox.sandbox_id}`}
                   onChange={(event) => onChange(updateControlGrant(
@@ -230,7 +230,7 @@ function GrantEditor({
                     <option key={value} value={value}>{permissionLabel[value]}</option>
                   ))}
                 </select>
-                <label className="col-start-2 flex min-h-11 items-center gap-2 text-xs text-gray-400 sm:col-start-3">
+                <label className="col-start-2 flex min-h-9 items-center gap-2 text-xs text-gray-400 sm:col-start-3">
                   <input
                     type="checkbox"
                     checked={automationEnabled}
@@ -432,7 +432,7 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
             </button>
           </div>
           <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-            <input className="input min-w-0 min-h-11 font-mono text-xs" value={revealedKey.key} readOnly aria-label="New Paperclip agent key" />
+            <input className="input min-h-9 min-w-0 font-mono text-xs" value={revealedKey.key} readOnly aria-label="New Paperclip agent key" />
             <button type="button" className={`${primaryActionButtonClass} self-start sm:shrink-0`} onClick={() => void copyKey()}>
               <Copy className="h-3.5 w-3.5" />
               {copied ? "Copied" : "Copy"}
@@ -506,17 +506,17 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
             <div className="grid gap-3 sm:grid-cols-2">
               <label>
                 <span className="label">Username</span>
-                <input className="input min-h-11" value={userDraft.username} disabled={Boolean(editingUserId)} required minLength={1} maxLength={80} onChange={(event) => setUserDraft((current) => ({ ...current, username: event.target.value }))} />
+                <input className="input min-h-9" value={userDraft.username} disabled={Boolean(editingUserId)} required minLength={1} maxLength={80} onChange={(event) => setUserDraft((current) => ({ ...current, username: event.target.value }))} />
               </label>
               <label>
                 <span className="label">{editingUserId ? "New password (optional)" : "Password"}</span>
-                <input className="input min-h-11" type="password" value={userDraft.password} required={!editingUserId} minLength={12} autoComplete="new-password" onChange={(event) => setUserDraft((current) => ({ ...current, password: event.target.value }))} />
+                <input className="input min-h-9" type="password" value={userDraft.password} required={!editingUserId} minLength={12} autoComplete="new-password" onChange={(event) => setUserDraft((current) => ({ ...current, password: event.target.value }))} />
               </label>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <label>
                 <span className="label">Role</span>
-                <select className="input h-11" value={userDraft.role} onChange={(event) => setUserDraft((current) => ({ ...current, role: event.target.value as AccessRole }))}>
+                <select className="input h-9" value={userDraft.role} onChange={(event) => setUserDraft((current) => ({ ...current, role: event.target.value as AccessRole }))}>
                   <option value="viewer">Viewer</option>
                   <option value="operator">Operator</option>
                   <option value="admin">Administrator</option>
@@ -603,11 +603,11 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
             </div>
             <label>
               <span className="label">Display name</span>
-              <input className="input min-h-11" value={agentDraft.display_name} required maxLength={120} onChange={(event) => setAgentDraft((current) => ({ ...current, display_name: event.target.value }))} />
+              <input className="input min-h-9" value={agentDraft.display_name} required maxLength={120} onChange={(event) => setAgentDraft((current) => ({ ...current, display_name: event.target.value }))} />
             </label>
             <label>
               <span className="label">Paperclip agent ID (optional)</span>
-              <input className="input min-h-11 font-mono" value={agentDraft.paperclip_agent_id} maxLength={160} placeholder="paperclip-agent-research" onChange={(event) => setAgentDraft((current) => ({ ...current, paperclip_agent_id: event.target.value }))} />
+              <input className="input min-h-9 font-mono" value={agentDraft.paperclip_agent_id} maxLength={160} placeholder="paperclip-agent-research" onChange={(event) => setAgentDraft((current) => ({ ...current, paperclip_agent_id: event.target.value }))} />
             </label>
             {editingAgentId ? (
               <label className="flex items-center gap-2 text-sm text-gray-300">

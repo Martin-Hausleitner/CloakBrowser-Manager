@@ -450,10 +450,23 @@ def merge_iteration_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         base["availability"] = "error"
     elif measurements:
         base["availability"] = (
-            "available" if any(item.get("available") for item in measurements) else "unavailable"
+            "available" if all(item.get("available") for item in measurements) else "unavailable"
         )
     base["summary"] = summarize_measurements(measurements)
     return base
+
+
+def measured_candidate_passed(result: dict[str, Any], expected_runs: int) -> bool:
+    if result.get("status") != "measured":
+        return True
+    if result.get("availability") != "available":
+        return False
+    summary = result.get("summary")
+    if not isinstance(summary, dict):
+        return False
+    if summary.get("runs") != expected_runs:
+        return False
+    return summary.get("success_rate_pct") == 100.0
 
 
 def percentile(values: list[float], percent: float) -> float:
@@ -634,8 +647,8 @@ def run(args: RunnerArgs) -> int:
             "report_markdown": markdown_path.name,
         }
     )
-    has_errors = any(result.get("availability") == "error" for result in results)
-    return 1 if args.strict and has_errors else 0
+    has_failures = any(not measured_candidate_passed(result, args.iterations) for result in results)
+    return 1 if args.strict and has_failures else 0
 
 
 def parse_args(argv: list[str] | None = None) -> RunnerArgs:

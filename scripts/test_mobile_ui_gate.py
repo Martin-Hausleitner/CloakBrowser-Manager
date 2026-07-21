@@ -65,6 +65,16 @@ class MobileUiGateTest(unittest.TestCase):
         self.assertNotIn("Queued locally:", script)
         self.assertNotIn("mode: 'unavailable'", script)
 
+    def test_remote_pointer_mapping_accounts_for_browser_chrome(self) -> None:
+        mapped = mobile_ui_gate.remote_target_center_on_canvas(
+            {"left": 0, "top": 102.3, "width": 506.3, "height": 284.8},
+            {"width": 1024, "height": 576},
+            {"left": 123, "top": 80, "width": 778, "height": 284},
+            {"width": 1024, "height": 443},
+        )
+
+        self.assertEqual(mapped, (253, 278))
+
     def test_access_dashboard_opens_browser_tools_before_access_controls(self) -> None:
         class FakeBrowser:
             def __init__(self) -> None:

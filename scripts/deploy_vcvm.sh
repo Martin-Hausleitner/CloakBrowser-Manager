@@ -165,6 +165,9 @@ rsync -az --delete \
   --exclude 'artifacts/' \
   --exclude 'frontend/tsconfig.tsbuildinfo' \
   --exclude 'benchmarks/' \
+  --exclude 'docker-compose.guacamole-benchmark.yml' \
+  --exclude 'scripts/guacamole_benchmark_config.json' \
+  --exclude 'scripts/run_guacamole_benchmark.sh' \
   ./ "$target_host:$remote_path/"
 
 {

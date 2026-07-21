@@ -304,6 +304,16 @@ describe("MobileSplitScreen", () => {
     expect(screen.getByLabelText("Reset live view").className).toContain("mobile-live-reset-button");
   });
 
+  it("keeps pane and zoom in one compact live control cluster", () => {
+    renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
+
+    const controls = screen.getByLabelText("Live view controls");
+    expect(controls.querySelector(".mobile-live-control-cluster")).toBeTruthy();
+    expect(controls.querySelectorAll(".mobile-live-slider")).toHaveLength(2);
+    expect(screen.getByLabelText("Browser pane size").textContent).toBe("50%");
+    expect(screen.getByLabelText("Visual zoom level").textContent).toBe("100%");
+  });
+
   it("keeps live viewport controls available without profile management access", () => {
     renderMobileSplit({
       selected: runningProfile,

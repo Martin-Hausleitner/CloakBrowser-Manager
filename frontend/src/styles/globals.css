@@ -212,31 +212,27 @@
   }
 
   .mobile-live-control-rail {
-    @apply grid shrink-0 grid-cols-1 gap-2 border-b border-border bg-surface-0 px-3 py-2;
+    @apply shrink-0 border-b border-border bg-surface-0 px-3 py-2;
   }
 
-  .mobile-live-control-row {
-    @apply grid grid-cols-[minmax(0,1fr)_3.25rem] items-center gap-2 rounded-md border border-border bg-surface-1 px-2 py-1;
+  .mobile-live-control-cluster {
+    @apply grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.75rem] items-stretch gap-2;
   }
 
-  .mobile-live-control-row-with-reset {
-    @apply grid-cols-[minmax(0,1fr)_3.25rem_2.75rem];
+  .mobile-live-slider {
+    @apply flex min-w-0 flex-col justify-center rounded-md border border-border bg-surface-1 px-2 py-1;
   }
 
-  .mobile-live-control-row label {
-    @apply grid min-w-0 grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-2;
+  .mobile-live-slider-label {
+    @apply flex min-w-0 items-center justify-between gap-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500;
   }
 
-  .mobile-live-control-row .label {
-    @apply mb-0 truncate;
+  .mobile-live-slider output {
+    @apply shrink-0 text-[11px] font-semibold normal-case tracking-normal text-gray-200;
   }
 
-  .mobile-live-control-row input[type="range"] {
+  .mobile-live-slider input[type="range"] {
     @apply min-h-11 w-full accent-accent;
-  }
-
-  .mobile-live-control-row output {
-    @apply rounded-md bg-surface-3 px-2 py-1 text-center text-sm font-medium text-gray-200;
   }
 
   .mobile-live-reset-button {

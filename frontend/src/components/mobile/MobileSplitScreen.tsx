@@ -243,54 +243,56 @@ export function MobileSplitScreen({
   };
 
   const renderLiveViewControls = () => (
-    <>
-      <div className="mobile-live-control-row">
-        <label htmlFor="mobile-pane-size">
-          <span className="label">Browser pane</span>
-          <input
-            id="mobile-pane-size"
-            type="range"
-            min={42}
-            max={82}
-            step={1}
-            value={panePercent}
-            onChange={(event) => updatePanePercent(Number(event.target.value))}
-            aria-valuetext={`${panePercent}% of the workspace`}
-          />
-        </label>
-        <output htmlFor="mobile-pane-size" aria-label="Browser pane size" aria-live="polite">
-          {panePercent}%
-        </output>
-      </div>
-      <div className="mobile-live-control-row mobile-live-control-row-with-reset">
-        <label htmlFor="mobile-browser-zoom">
-          <span className="label">Visual zoom</span>
-          <input
-            id="mobile-browser-zoom"
-            type="range"
-            min={75}
-            max={150}
-            step={5}
-            value={browserZoom}
-            onChange={(event) => onBrowserZoomChange(Number(event.target.value))}
-            aria-valuetext={`${browserZoom}%`}
-          />
-        </label>
-        <output htmlFor="mobile-browser-zoom" aria-label="Visual zoom level" aria-live="polite">
-          {browserZoom}%
-        </output>
-        <button
-          type="button"
-          className="mobile-live-reset-button"
-          onClick={resetLiveViewport}
-          aria-label="Reset live view"
-          title="Reset live view"
-        >
-          <RotateCcw className="h-4 w-4" aria-hidden="true" />
-          <span className="sr-only">Reset view</span>
-        </button>
-      </div>
-    </>
+    <div className="mobile-live-control-cluster">
+      <label className="mobile-live-slider" htmlFor="mobile-pane-size">
+        <span className="mobile-live-slider-label">
+          <span>Pane</span>
+          <output htmlFor="mobile-pane-size" aria-label="Browser pane size" aria-live="polite">
+            {panePercent}%
+          </output>
+        </span>
+        <input
+          id="mobile-pane-size"
+          type="range"
+          min={42}
+          max={82}
+          step={1}
+          value={panePercent}
+          onChange={(event) => updatePanePercent(Number(event.target.value))}
+          aria-label="Browser pane"
+          aria-valuetext={`${panePercent}% of the workspace`}
+        />
+      </label>
+      <label className="mobile-live-slider" htmlFor="mobile-browser-zoom">
+        <span className="mobile-live-slider-label">
+          <span>Zoom</span>
+          <output htmlFor="mobile-browser-zoom" aria-label="Visual zoom level" aria-live="polite">
+            {browserZoom}%
+          </output>
+        </span>
+        <input
+          id="mobile-browser-zoom"
+          type="range"
+          min={75}
+          max={150}
+          step={5}
+          value={browserZoom}
+          onChange={(event) => onBrowserZoomChange(Number(event.target.value))}
+          aria-label="Visual zoom"
+          aria-valuetext={`${browserZoom}%`}
+        />
+      </label>
+      <button
+        type="button"
+        className="mobile-live-reset-button"
+        onClick={resetLiveViewport}
+        aria-label="Reset live view"
+        title="Reset live view"
+      >
+        <RotateCcw className="h-4 w-4" aria-hidden="true" />
+        <span className="sr-only">Reset view</span>
+      </button>
+    </div>
   );
 
   const renderFullscreenControls = () => (
@@ -446,7 +448,7 @@ export function MobileSplitScreen({
 
         <div className={`mobile-toolbar mobile-session-bar ${isLiveBrowser ? "mobile-session-bar-live" : ""}`} aria-label="Session control">
           <div className="min-w-0 flex-1">
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Session</p>
+            {!isLiveBrowser ? <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Session</p> : null}
             <label>
               <span className="sr-only">Select profile</span>
               <select

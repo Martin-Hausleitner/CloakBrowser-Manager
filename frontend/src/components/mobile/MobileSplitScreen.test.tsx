@@ -566,7 +566,12 @@ describe("MobileSplitScreen", () => {
   it("provides a mobile-sized logout action for authenticated sessions", () => {
     const { props } = renderMobileSplit({ authRequired: true, identityName: "Scoped viewer" });
 
-    const logout = screen.getByRole("button", { name: "Log out" });
+    expect(screen.queryByRole("button", { name: "Log out" })).toBeNull();
+    openBrowserTools();
+
+    const tools = screen.getByLabelText("Browser tools");
+    expect(within(tools).getByText("Signed in as Scoped viewer")).toBeTruthy();
+    const logout = within(tools).getByRole("button", { name: "Log out" });
     expect(logout.className).toContain("mobile-logout-button");
     fireEvent.click(logout);
     expect(props.onLogout).toHaveBeenCalledTimes(1);

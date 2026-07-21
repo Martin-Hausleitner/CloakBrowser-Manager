@@ -968,33 +968,33 @@ export function MobileSplitScreen({
 
             {!toolPanelOpen ? (
               <section className="mobile-tool-section" aria-label="Pinned browser actions">
-              <div className="mobile-tool-section-header">
-                <span>Actions</span>
-                <span>{harnessReady ? "Codex ready" : "Codex unavailable"}</span>
-              </div>
-              <div className="mobile-tools-row mobile-pinned-actions">
-                {pinnedHarnessActions.map((action) => {
-                  const available = Boolean(
-                    harnessReady && harnessCapabilities?.browser_actions.includes(action.kind),
-                  );
-                  return (
-                    <button
-                      key={action.id}
-                      type="button"
-                      className="mobile-tool-action"
-                      aria-label={`Run ${action.label} with Codex Computer Use`}
-                      disabled={!available || harnessPending}
-                      title={available ? `${action.label} with Codex Computer Use` : `${action.label} is unavailable in this host`}
-                      onClick={() => void runPinnedHarnessAction(action)}
-                    >
-                      {action.kind === "screenshot" ? <Camera className="h-4 w-4" aria-hidden="true" /> : null}
-                      {action.kind === "copy" ? <ClipboardCopy className="h-4 w-4" aria-hidden="true" /> : null}
-                      {action.kind === "paste" ? <ClipboardPaste className="h-4 w-4" aria-hidden="true" /> : null}
-                      <span>{action.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
+                <div className="mobile-tool-section-header">
+                  <span>Quick actions</span>
+                  <span>{harnessReady ? "Codex ready" : "Codex unavailable"}</span>
+                </div>
+                <div className="mobile-tools-row mobile-pinned-actions">
+                  {pinnedHarnessActions.map((action) => {
+                    const available = Boolean(
+                      harnessReady && harnessCapabilities?.browser_actions.includes(action.kind),
+                    );
+                    return (
+                      <button
+                        key={action.id}
+                        type="button"
+                        className="mobile-tool-action"
+                        aria-label={`Run ${action.label} with Codex Computer Use`}
+                        disabled={!available || harnessPending}
+                        title={available ? `${action.label} with Codex Computer Use` : `${action.label} is unavailable in this host`}
+                        onClick={() => void runPinnedHarnessAction(action)}
+                      >
+                        {action.kind === "screenshot" ? <Camera className="h-4 w-4" aria-hidden="true" /> : null}
+                        {action.kind === "copy" ? <ClipboardCopy className="h-4 w-4" aria-hidden="true" /> : null}
+                        {action.kind === "paste" ? <ClipboardPaste className="h-4 w-4" aria-hidden="true" /> : null}
+                        <span>{action.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
               </section>
             ) : null}
 
@@ -1111,6 +1111,20 @@ export function MobileSplitScreen({
                 ? "A verified Codex Computer Use Bridge must be injected by the host before tasks can run."
                 : "Tasks run only through the verified Codex Computer Use host; browser credentials stay outside the chat UI."}
             </p>
+
+            {authRequired ? (
+              <div className="mobile-account-row">
+                {identityName ? <span className="truncate text-xs text-gray-500">Signed in as {identityName}</span> : <span />}
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  className="mobile-logout-button"
+                  aria-label="Log out"
+                >
+                  Log out
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -1178,19 +1192,6 @@ export function MobileSplitScreen({
           </div>
         </form>
 
-        {authRequired ? (
-          <div className="mx-3 mb-3 flex items-center justify-between gap-2">
-            {identityName ? <span className="truncate text-xs text-gray-500">Signed in as {identityName}</span> : <span />}
-            <button
-              type="button"
-              onClick={onLogout}
-              className="mobile-logout-button"
-              aria-label="Log out"
-            >
-              Log out
-            </button>
-          </div>
-        ) : null}
       </section>
 
     </main>

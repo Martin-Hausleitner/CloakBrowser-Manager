@@ -2,35 +2,36 @@
 
 Stand: 21. Juli 2026
 
-Dieser Audit bewertet den final geprüften r51-Stand des CloakBrowser Managers und ordnet die älteren r49-/r50-Basen ein. Er trennt nachgewiesene Funktion, lokale Messung, Tailnet-Transport und noch offene Produktbehauptung. Browser-Use diente nur als Interaktionsreferenz; fremde Marken-, Cloud- oder UI-Assets wurden nicht übernommen.
+Dieser Audit bewertet den final geprüften r56-Stand des CloakBrowser Managers und ordnet die älteren r49-/r50-Basen ein. Er trennt nachgewiesene Funktion, lokale Messung, Tailnet-Transport und noch offene Produktbehauptung. Browser-Use diente nur als Interaktionsreferenz; fremde Marken-, Cloud- oder UI-Assets wurden nicht übernommen.
 
 ## Ergebnis in einem Satz
 
-Für das mobile Web-MVP bleibt **KasmVNC 1.3.3 + noVNC 1.4.x** die am besten nachgewiesene Basis: Der authentifizierte r51-Gate bestand fünf mobile Viewpoints plus Access-Dashboard mit **276/276 Checks** und **23 Screenshots**, während die ältere r49-Auth-Suite vier Authentifizierungswege bis zu einem echten verbundenen Canvas belegte. Der warme lokale KasmVNC-WebSocket-Upgrade lag in 20/20 Läufen bei **3,457 ms Median / 8,931 ms p95**. Ein neuer, reproduzierbarer Selkies-Lauf erreichte **2,190 ms Median / 3,722 ms p95** für den isolierten WebSocket-Handshake, aber noch keinen gleichwertigen Produkt-, Frame- oder Eingabe-E2E. Ein zusätzlicher Codex-Computer-Use-Lauf bediente die finale iPhone-Ansicht real und bestätigte Canvas, vier persistente Aktionen, Rechte-Dashboard und den strikt verifizierten Hostvertrag. Das beweist weiterhin keine physische iPhone-, WAN- oder Touch-to-Pixel-Latenz.
+Für das mobile Web-MVP bleibt **KasmVNC 1.3.3 + noVNC 1.4.x** die am besten nachgewiesene Basis: Der authentifizierte r56-Gate bestand fünf mobile Viewpoints plus Access-Dashboard mit **291/291 Checks** und **23 Screenshots**, während die ältere r49-Auth-Suite vier Authentifizierungswege bis zu einem echten verbundenen Canvas belegte. Im frischen browserbeobachteten Fünferlauf erreichte der vollständige lokale KasmVNC/noVNC-Produktpfad den ersten nichtschwarzen Frame nach **180 ms Median**, Guacamole nach **351 ms** und Selkies nach **5.272 ms**; der Selkies-Erstlauf lag bei 296 ms, vier Reloads jedoch nahe 5,3 s. Diese Werte sind wegen der unterschiedlichen Integration nur richtungsweisend. Ein zusätzlicher Codex-Computer-Use-Lauf bediente die finale iPhone-Ansicht real und bestätigte Canvas, vier persistente Aktionen, Rechte-Dashboard und den strikt verifizierten Hostvertrag. Das beweist weiterhin keine physische iPhone-, WAN-, FPS- oder Touch-to-Pixel-Latenz.
 
-## r51-Endstand: UI-Architektur und Codex Computer Use
+## r56-Endstand: UI-Architektur und Codex Computer Use
 
-Der belegte r51-Stand ist eine Umstrukturierung und vollständige lokale Abnahme der mobilen Oberfläche, nicht ein neuer Performance-Sieg:
+Der belegte r56-Stand ist eine Umstrukturierung und vollständige lokale Abnahme der mobilen Oberfläche, nicht ein allgemeiner Performance-Sieg:
 
 - **Browser-first:** Der Live-Browser ist die primäre Fläche. Chat startet bei laufendem Browser collapsed, damit VNC nicht von Steuerleisten verdrängt wird.
-- **Zentrale Tools:** Browser-Werkzeuge, Viewport, Zoom, Fullscreen und Grid sind in einem zentralen Bedienbereich zusammengeführt. Benchmarks werden nicht in der mobilen UI angezeigt.
+- **Zentrale Tools:** Browser-Werkzeuge, Viewport, Zoom, Fullscreen, Sessions und Kontoaktionen sind in einem einzigen Tool-Sheet zusammengeführt. Benchmarks werden nicht in der mobilen UI angezeigt.
+- **Quick actions statt Bookmarks:** Capture, Copy und Paste sind typisierte Hostaktionen und keine gespeicherten URLs. Sie werden nur aktiviert, wenn der verifizierte Host die passende Capability meldet.
 - **Shortcuts:** Chat-Collapse und Fullscreen-Preview sind als schnelle Bedienwege vorgesehen, ohne Touch-only Bedienung zu erzwingen.
 - **Grid:** Grid bleibt ein kompakter Session-/Profilumschalter und soll nicht still mehrere Streams starten, weil das iPhone-FPS und Akku verfälschen würde.
 - **Codex-only Hostvertrag:** Der Composer akzeptiert nur eine injizierte Bridge, deren Capabilities explizit `provider: codex-computer-use` melden. Fehlende, generische oder nur umbenannte Harnesses bleiben deaktiviert; auch `send()` kann die Prüfung nicht umgehen.
-- **Chat-Anbindung:** Der freigegebene UI- und Testpfad verwendet Codex Computer Use, hält Browser-Credentials außerhalb des Chats und simuliert keinen lokalen Erfolg. Der r51-Stand behauptet noch keine produktive externe Agent-Task-API ohne einen realen Host-Bridge-Prozess.
+- **Chat-Anbindung:** Der freigegebene UI- und Testpfad verwendet Codex Computer Use, hält Browser-Credentials außerhalb des Chats und simuliert keinen lokalen Erfolg. Der r56-Stand behauptet noch keine produktive externe Agent-Task-API ohne einen realen Host-Bridge-Prozess.
 - **Rechte-Dashboard:** Browsersteuerung (`view`/`interact`/`operate`) und CDP-Automation sind getrennte Controls. Dadurch ist `operate + automate` auf derselben Sandbox möglich; eine einklappbare Vorschau zeigt die tatsächlich erreichbaren Profile und effektiven Fähigkeiten.
 
-Der finale r51-Mobile-Gate ist abgeschlossen: fünf Viewports plus Access-Dashboard, **276/276 Checks**, **23 Screenshots**, keine Fehler. Er prüft Touch-Ziele, Fullscreen, Grid, Viewport/Zoom, Chat-Collapse, Clipboard/Paste, eine echte VNC-Verbindung und die authentifizierte Access-Oberfläche. Ein separater Codex-Computer-Use-Lauf bestätigte den finalen Release-Container zusätzlich über echte UI-Interaktionen und vergab einem Paperclip-Agenten kombiniert `operate + automate`.
+Der finale r56-Mobile-Gate ist abgeschlossen: fünf Viewports plus Access-Dashboard, **291/291 Checks**, **23 Screenshots**, keine Fehler. Er prüft Touch-Ziele, Fullscreen, Grid, Viewport/Zoom, Chat-Collapse, den einzeiligen Composer, Kontoaktionen nur im Tool-Sheet, Clipboard/Paste, eine echte VNC-Verbindung und die authentifizierte Access-Oberfläche. Ein separater Codex-Computer-Use-Lauf bestätigte den Release-Container zusätzlich über echte UI-Interaktionen und vergab einem Paperclip-Agenten kombiniert `operate + automate`.
 
 ## Was jetzt nachgewiesen ist
 
 | Bereich | Nachweis | Ergebnis |
 |---|---|---|
-| iPhone 14 Portrait | 390 × 844, echter VNC-Canvas, Split, Grid, Fullscreen, Viewport-Editor und Codex-Computer-Use-Composer | 55/55 |
-| iPhone SE Portrait | 375 × 667, kurzer Viewport mit kompaktem Live-Anteil und vollständig erreichbarem Composer | 54/54 |
-| iPhone Pro Max Portrait | 430 × 932, inklusive sichtbarem Inline-Viewport-Editor | 56/56 |
-| iPhone 14 Landscape | 844 × 390, horizontaler Split und Fullscreen | 53/53 |
-| Touch-Tablet | 768 × 1024, coarse pointer, Grid und Fullscreen | 53/53 |
+| iPhone 14 Portrait | 390 × 844, echter VNC-Canvas, Split, Grid, Fullscreen, Viewport-Editor und Codex-Computer-Use-Composer | 58/58 |
+| iPhone SE Portrait | 375 × 667, kurzer Viewport mit kompaktem Live-Anteil und vollständig erreichbarem Composer | 57/57 |
+| iPhone Pro Max Portrait | 430 × 932, inklusive sichtbarem Inline-Viewport-Editor | 59/59 |
+| iPhone 14 Landscape | 844 × 390, horizontaler Split und Fullscreen | 56/56 |
+| Touch-Tablet | 768 × 1024, coarse pointer, Grid und Fullscreen | 56/56 |
 | Access-Dashboard | authentifizierter Adminpfad, kompakte Grants und mobile Overflow-Prüfung | 5/5 |
 | Vision-Artefakte | Empty, Workspace, Grid, Fullscreen, Fullscreen-Viewport und Access-Dashboard | 23 Screenshots |
 | Legacy-Token | Login, Profilwahl und verbundener Canvas bei 390 × 844 | bestanden |
@@ -42,10 +43,9 @@ Der Gate prüfte unter anderem einen echten Canvas, `Connected`, keinen horizont
 
 Lokale Belege:
 
-- `artifacts/mobile-ui-gate-r51-codex-access-acceptance-r2/report.json`
-- `artifacts/ui-redesign-r51/codex-computer-use-viewer-iphone14.png`
-- `artifacts/ui-redesign-r51/codex-computer-use-access-dashboard.png`
-- `artifacts/selkies-benchmark/local-r4-independent/streaming-benchmark-report.json`
+- `artifacts/mobile-ui-gate-r56-auth-final-r2/report.json`
+- `artifacts/selkies-benchmark/r55-local/streaming-benchmark-report.json`
+- `artifacts/guacamole-benchmark/r55-local/streaming-benchmark-report.json`
 - `artifacts/streaming-login-audit-r49/auth-api-summary.json`
 - `artifacts/streaming-login-audit-r49/auth-ui-summary.json`
 - `artifacts/streaming-benchmark-r49/streaming-benchmark-report.json`
@@ -108,14 +108,14 @@ Zusätzlich wurde ein bereits laufender Neko/Chrome-Stack auf der VCVM über Tai
 
 Codex Computer Use führte den geschützten Login erfolgreich aus und sah `/ws`. WebRTC ICE blieb jedoch `checking` und wechselte danach zu `failed`; das Video blieb bei `readyState 0`. Deshalb gibt es aus diesem Lauf **keinen ehrlichen FPS-Wert**. Die wichtigste Performance-Empfehlung ist nicht weiteres UI-Tuning auf Basis erfundener FPS, sondern zuerst direkte Tailscale-Konnektivität und UDP/ICE zu reparieren und danach Frame- sowie Touch-to-Pixel-Messung erneut auszuführen.
 
-### Einordnung der Streaming-Stapel nach dem r51-Nachtest
+### Einordnung der Streaming-Stapel nach dem r56-Nachtest
 
-| Stack | r49-Status | Entscheidung |
+| Stack | frischer lokaler Stand | Entscheidung |
 |---|---|---|
-| KasmVNC 1.3.3 + noVNC 1.4.x | vollständiger aktueller Produktpfad, 249 Mobile-Checks, vier Loginpfade | beibehalten |
-| Selkies | reproduzierbare HTTP-/WebSocket-Bereitschaft, 5/5 + 5/5; kein gleichwertiger Produkt-E2E | weiter messen, noch nicht migrieren |
+| KasmVNC 1.3.3 + noVNC 1.4.x | vollständiger aktueller Produktpfad, 291 Mobile-/Access-Checks; erster nichtschwarzer Frame Median 180 ms | beibehalten |
+| Selkies | 20/20 HTTP und WebSocket; erster nichtschwarzer Frame Median 5.272 ms nach langsamen Reloads; kein gleichwertiger Produkt-E2E | Reload-/Sessionproblem untersuchen, noch nicht migrieren |
 | Sunshine/Moonlight | `architecture_only`, keine aktuelle Messung | nicht als Latenzvergleich werten |
-| Apache Guacamole | `architecture_only`, keine aktuelle Messung | nicht als Latenzvergleich werten |
+| Apache Guacamole 1.6 | 20/20 HTTP; erster nichtschwarzer Frame Median 351 ms; zusätzliche Gateway- und fehlende Policy-/CDP-Integration | kein Web-MVP-Core |
 
 Frühere isolierte KasmVNC-1.4- und Selkies-POCs sowie der neue Selkies-Readiness-Lauf sind in `docs/REMOTE-STREAMING-BENCHMARK.md` methodisch getrennt dokumentiert. Einen technologieübergreifenden „Latenz-Sieger“ zu behaupten wäre weiterhin falsch. KasmVNC ist die aktuelle Produktempfehlung, weil nur dieser Pfad vollständig integriert und aktuell end-to-end geprüft ist.
 
@@ -153,9 +153,9 @@ Frühere isolierte KasmVNC-1.4- und Selkies-POCs sowie der neue Selkies-Readines
 - Der r50-VCVM/Neko-Lauf belegt Tailnet-HTTP und geschützten Login über Codex Computer Use, aber wegen fehlgeschlagenem WebRTC-ICE keine Framerate.
 - Kein echter Mobilfunk- und kein Touch-to-Pixel-p50/p95-Bericht.
 - Der Grid-View ist ein schneller Session-/Profilumschalter, kein gleichzeitiges Multi-Canvas-Monitoring.
-- Der Chat-Composer akzeptiert in r51 ausschließlich den verifizierten Codex-Computer-Use-Providervertrag, benötigt aber weiterhin einen realen Host-Bridge-Prozess und ist keine eigenständige Vendor-API.
-- Selkies ist reproduzierbar provisioniert, aber noch kein gleichwertiges authentifiziertes Produktdeployment; Sunshine/Moonlight und Guacamole bleiben Architekturpfade.
+- Der Chat-Composer akzeptiert in r56 ausschließlich den verifizierten Codex-Computer-Use-Providervertrag, benötigt aber weiterhin einen realen Host-Bridge-Prozess und ist keine eigenständige Vendor-API.
+- Selkies und Guacamole sind reproduzierbar provisioniert und browserbeobachtet, aber weiterhin keine gleichwertigen authentifizierten Produktdeployments; Sunshine/Moonlight bleibt ein Architekturpfad.
 
 ## Freigabeempfehlung
 
-Der r51-Stand ist als **lokales, rollenbasiertes Mobile-Web-MVP** freigabefähig. Für eine externe oder iPhone-spezifische Freigabe fehlen noch Tailscale Serve/HTTPS, ein physisches Safari-Gerät sowie echte Touch-to-Pixel- und Reconnect-Messungen. Die höchste nächste Produktpriorität ist die iOS-IME-Bridge, gefolgt von Keyboard-Zubehörleiste und echter Eingabelatenztelemetrie.
+Der r56-Stand ist als **lokales, rollenbasiertes Mobile-Web-MVP** freigabefähig. Für eine externe oder iPhone-spezifische Freigabe fehlen noch Tailscale Serve/HTTPS, ein physisches Safari-Gerät sowie echte Touch-to-Pixel- und Reconnect-Messungen. Die höchste nächste Produktpriorität ist die iOS-IME-Bridge, gefolgt von Keyboard-Zubehörleiste und echter Eingabelatenztelemetrie. Die UI/UX-Details stehen im [Mobile UI/UX and universal browser-action audit](MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md).

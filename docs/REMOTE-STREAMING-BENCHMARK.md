@@ -23,9 +23,9 @@ Für den aktuellen CloakBrowser Manager bleibt **KasmVNC 1.3.3 + noVNC 1.4.x bei
 | KasmVNC 1.3.3 + noVNC 1.4.x | Vollständiger echter Browserstream und Mobile-Vollbild lokal geprüft | E2E-verifiziert | Beibehalten |
 | KasmVNC 1.4 | Vollständiger isolierter Browser-, Mobile- und RFB/CDP-E2E-Lauf gegen dieselbe App-Konfiguration bestanden; kein Performancegewinn gegenüber 1.3.3 | E2E-verifiziert, lokale Stichprobe | Nicht migrieren |
 | noVNC 1.7 | Build scheitert ohne Migration an ESM-/Export-Änderungen und entfernter `showDotCursor`-API | Kompatibilitätsprüfung | Nicht direkt aktualisieren |
-| Selkies | Echter CloakBrowser auf X11, JPEG- und H.264-Frame im Browser sowie Remote-Eingabe lokal nachgewiesen; keine Produktintegration und kein brauchbares mobiles Raw-UI | Isolierter Browser-E2E-POC | Nicht als Drop-in ersetzen |
+| Selkies | Echter Browserstream und Eingabe lokal nachgewiesen; r55 zusätzlich 20 HTTP-/WebSocket- und fünf mobile First-frame-Beobachtungen; keine Produktintegration und instabile Reload-Zeit | Isolierter Browser-E2E-POC | Nicht als Drop-in ersetzen |
 | Sunshine + Moonlight | Architektur und Clientmodell geprüft; kein passender allgemeiner Web-Embed-Pfad | Architekturprüfung | Kein Web-MVP-Core |
-| Apache Guacamole | Browser-/Touch-Unterstützung und Gateway-Architektur geprüft; bestehender KasmVNC-Server hat bewusst keinen Raw-VNC-TCP-Port | Architektur-/Integrationsprüfung | Kein Web-MVP-Core |
+| Apache Guacamole | Version 1.6 lokal provisioniert; 20 HTTP-Läufe und fünf mobile First-frame-Beobachtungen bestanden, aber zusätzliche Gateway-, Policy- und CDP-Integration fehlt | Isolierter Gateway-E2E | Kein Web-MVP-Core |
 | Browser-Use Chat UI | Interaktions- und Informationsarchitektur geprüft | UI-Referenz | Als UX-Referenz, nicht als Streamingstack |
 
 ## Upstream-Snapshot
@@ -104,6 +104,26 @@ Der unabhängig wiederholte Lauf vom 21. Juli 2026 ergab:
 | Selkies `/websockets` | 5/5 | handshake **2,190 ms** | **3,722 ms** | Upgrade, kein Touch-to-Pixel |
 
 Damit ist die lokale Transport-Provisionierung reproduzierbar. Der Lauf misst jedoch weder Profilstart noch ersten nichtschwarzen Frame, Bildrate, Remote-Eingabe, Rechteintegration, Tailnet noch Mobile Safari. Er ist daher kein Beweis, dass Selkies den vollständigen KasmVNC/noVNC-Produktpfad überholt. Die Produktionsentscheidung bleibt unverändert, bis Selkies dieselben authentifizierten Profil-, Policy-, Canvas-, Mobile- und Eingabe-Gates besteht.
+
+### r55 Selkies-/Guacamole-/Kasm-Browserbeobachtung
+
+Der r55-Nachtest trennte erneut rohe Shell-/Handshake-Zeiten von sichtbarer Browserbereitschaft. Selkies und Guacamole liefen jeweils isoliert auf Loopback; KasmVNC/noVNC lief als vollständiger Manager-Pfad mit Profilwahl und Mobile-UI. Die Shell-Messungen verwendeten 20 Läufe:
+
+| Kandidat | Erfolg | Median | p95 | Aussagegrenze |
+|---|---:|---:|---:|---|
+| Selkies HTTP shell | 20/20 | total **0,708 ms** | **1,621 ms** | HTTP, kein Frame |
+| Selkies WebSocket | 20/20 | handshake **0,756 ms** | **1,882 ms** | Upgrade, kein Frame |
+| Guacamole 1.6 HTTP shell | 20/20 | total **1,749 ms** | **5,443 ms** | Gateway-HTML, kein Frame |
+
+Anschließend öffnete Codex Computer Use jedes lokale Mobile-UI fünfmal und markierte den ersten nichtschwarzen sichtbaren Frame. Diese Beobachtung ist näher an der wahrgenommenen Bereitschaft, bleibt aber wegen der unterschiedlichen Produktintegration ein Richtungswert:
+
+| Stack | fünf Beobachtungen | Median | Einordnung |
+|---|---|---:|---|
+| KasmVNC/noVNC im Manager | 289 / 230 / 180 / 161 / 157 ms | **180 ms** | vollständiger Profil-, Policy-, VNC- und Mobile-UI-Pfad |
+| Apache Guacamole 1.6 | 917 / 363 / 351 / 348 / 350 ms | **351 ms** | rohes Gateway-UI; kein Cloak-Policy-/CDP-Lifecycle |
+| Selkies Chromium | 296 / 5.249 / 5.272 / 5.296 / 5.323 ms | **5.272 ms** | schneller Erstlauf, danach reproduzierbare Reload-Verzögerung |
+
+Der Selkies-WebSocket-Handshake ist damit sehr schnell, aber der sichtbare Reload-Pfad in diesem Setup nicht. Guacamole zeigte einen brauchbaren ersten Frame, bringt jedoch eine zusätzliche Gateway-Schicht und keine vorhandene Manager-Integration mit. KasmVNC/noVNC bleibt die Empfehlung, weil es im gemessenen Gesamtpfad zugleich am schnellsten und vollständig integriert war. Es wurde weiterhin kein FPS-, WAN- oder Touch-to-Pixel-Wert erfunden.
 
 ### r50 VCVM/Neko über Tailscale
 
@@ -199,9 +219,9 @@ python3 scripts/streaming_benchmark_runner.py \
   --latest-markdown docs/streaming-benchmark-latest.md
 ```
 
-Der Runner unterscheidet absichtlich zwischen `measured`, `not_installed` und `architecture_only`. Eine fehlende lokale Installation oder ein reiner Architekturpfad erhält keine erfundenen Zeiten; ein erreichbarer HTTP-/WebSocket-/Command-Kandidat erhält dagegen rohe Messungen und Median-Min-Max-P95-Zusammenfassungen. Der Report ist als Headless-/Offline-Diagnostik gedacht; r51 zeigt Benchmarks nicht in der mobilen UI. Die öffentliche Projektion enthält bewusst keine lokalen Pfade, Endpunkte, Commands, Header oder Prozessausgaben.
+Der Runner unterscheidet absichtlich zwischen `measured`, `not_installed` und `architecture_only`. Eine fehlende lokale Installation oder ein reiner Architekturpfad erhält keine erfundenen Zeiten; ein erreichbarer HTTP-/WebSocket-/Command-Kandidat erhält dagegen rohe Messungen und Median-Min-Max-P95-Zusammenfassungen. Der Report ist als Headless-/Offline-Diagnostik gedacht; r56 zeigt Benchmarks nicht in der mobilen UI. Die öffentliche Projektion enthält bewusst keine lokalen Pfade, Endpunkte, Commands, Header oder Prozessausgaben.
 
-Der Browser-/UI-Gate-Runner liegt unter `scripts/mobile_ui_gate.py`. Er prüft fünf Viewports (iPhone 14, iPhone SE, iPhone Pro Max, iPhone 14 Landscape und Touch-Tablet), Touch-Ziele, Overflow, Split-Geometrie, den verifizierten Codex-Computer-Use-Composer, Grid, Fullscreen-Fokus und – mit einer Profil-ID – einen echten VNC-Canvas. Der authentifizierte r51-Lauf bestand **276/276 Checks** und erzeugte **23 Screenshots**, einschließlich Access-Dashboard. Mit Profil-ID öffnet der Runner außerdem den manuellen iOS-Paste-Fallback, prüft dessen Touch-Ziele und bestätigt den kontrollierten Clipboard-Bridge-Rundlauf, ohne Clipboard-Text im Report zu speichern. Optional tippt `--remote-probe-url` eine harmlose, eindeutige URL per Keyboard-Events durch noVNC/RFB und verifiziert die Zielseite danach über den CDP-Proxy. Seine Screenshotprüfung validiert Abmessungen und Mindestdateigröße; die abschließende semantische Sichtprüfung bleibt bewusst ein separater menschlicher oder Vision-Agent-Gate.
+Der Browser-/UI-Gate-Runner liegt unter `scripts/mobile_ui_gate.py`. Er prüft fünf Viewports (iPhone 14, iPhone SE, iPhone Pro Max, iPhone 14 Landscape und Touch-Tablet), Touch-Ziele, Overflow, Split-Geometrie, den verifizierten Codex-Computer-Use-Composer, Grid, Fullscreen-Fokus und – mit einer Profil-ID – einen echten VNC-Canvas. Der authentifizierte r56-Lauf bestand **291/291 Checks** und erzeugte **23 Screenshots**, einschließlich Access-Dashboard. Zusätzlich prüft er den einzeiligen sichtbaren Composer und dass Kontoaktionen nur hinter Tools liegen. Mit Profil-ID öffnet der Runner außerdem den manuellen iOS-Paste-Fallback, prüft dessen Touch-Ziele und bestätigt den kontrollierten Clipboard-Bridge-Rundlauf, ohne Clipboard-Text im Report zu speichern. Optional tippt `--remote-probe-url` eine harmlose, eindeutige URL per Keyboard-Events durch noVNC/RFB und verifiziert die Zielseite danach über den CDP-Proxy. Seine Screenshotprüfung validiert Abmessungen und Mindestdateigröße; die abschließende semantische Sichtprüfung bleibt bewusst ein separater menschlicher oder Vision-Agent-Gate.
 
 ## Gepinnte Referenzstände
 
@@ -218,7 +238,7 @@ Die folgenden `HEAD`-Stände wurden am 20. Juli 2026 direkt aus den öffentliche
 ## Offene Nachweise
 
 - Selkies: echter Mobile-Safari-/WebKit-Lauf auf einem physischen iPhone, Authentifizierung und Tailscale-HTTPS sowie ein bewusstes mobiles Client-Layout statt des nachgewiesenen Letterbox-POCs.
-- Selkies: WebRTC-Modus unter derselben echten Browser- und Eingabeprobe; der reproduzierbare r51-Lauf misst ausschließlich HTTP-/WebSocket-Bereitschaft.
+- Selkies: WebRTC-Modus unter derselben echten Browser- und Eingabeprobe; der r55-Lauf ergänzt WebSocket- und First-frame-Beobachtungen, aber noch keinen gleichwertigen WebRTC-/Policy-Produktpfad.
 - Physisches iPhone: Safari über freigegebenes Tailscale Serve/HTTPS. Der konkrete Aktivierungsversuch wurde vom Tailnet mit `Serve is not enabled on your tailnet` abgelehnt; ein Administrator muss Serve freigeben, bevor eine ehrliche iPhone-URL und der Safari-E2E-Test möglich sind.
 - Mehrfachmessung der kompletten Interaktionskette: fünf Start-zu-erster-nichtleerer-Frame- und Eingabeantwort-Läufe je Version, nicht nur API-Launches.
 

@@ -1,6 +1,6 @@
 # Paperclip-gestützte Browser-Zugriffskontrolle
 
-Stand: 2026-07-21 · Status: r51 lokal implementiert und Ende-zu-Ende geprüft; bereit für Fork-Review
+Stand: 2026-07-21 · Status: r56 lokal implementiert und Ende-zu-Ende geprüft; bereit für Fork-Review
 
 ## Kurzentscheidung
 
@@ -24,16 +24,16 @@ Die erste, lokale Policy-Schicht ist in diesem Fork umgesetzt. Sie bleibt absich
 
 Die Live-Abnahme lief isoliert gegen eine frische lokale Datenbank: zwei Sandboxes (`research`, `finance`), ein `view`-Nutzer und ein `automate`-Agent. Der Nutzer sah nur `research`; direkte `finance`-, Lifecycle- und Admin-Anfragen wurden mit `404` beziehungsweise `403` abgewiesen. Der Agent sah per eigenem Bearer-Key nur `research`; sein alter Key lieferte nach Rotation `401`.
 
-## Frische r51-Browser-E2E-Abnahme (21. Juli 2026)
+## Frische r56-Browser-E2E-Abnahme (21. Juli 2026)
 
 Die Policy wurde zusätzlich in einem nur auf `127.0.0.1` gebundenen Container mit isolierten Testprofilen und lokalen Wegwerf-Credentials geprüft. Nutzerbereitgestellte Zugangsdaten wurden nicht verwendet oder persistiert.
 
-- Der authentifizierte Mobile-Gate prüfte fünf Viewports plus Access-Dashboard und bestand **276/276 Checks** mit **23 Screenshots**.
+- Der authentifizierte Mobile-Gate prüfte fünf Viewports plus Access-Dashboard und bestand **291/291 Checks** mit **23 Screenshots**. Konto/Logout blieb außerhalb des Tool-Sheets verborgen; der Composer blieb in allen Viewports einzeilig und vollständig sichtbar.
 - Codex Computer Use meldete sich als `view`-Nutzer an, sah ausschließlich das laufende `beta`-Profil, erreichte einen echten verbundenen VNC-Canvas und fand weder Access- noch Launch-/Stop-Aktionen. Die iPhone-14-Ansicht hatte bei 390 px keinen horizontalen Overflow.
 - Codex Computer Use meldete sich danach als Wegwerf-Admin an und vergab dem Paperclip-Testagenten im echten Dashboard kombiniert `operate + automate`. Die effektive Vorschau zeigte genau das `beta`-Profil mit `Operate + CDP automation`.
 - Derselbe Agent sah per rotiertem Wegwerf-Key genau ein `beta`-Profil. Ein Lifecycle-Aufruf erreichte die erlaubte „bereits laufend“-Antwort, CDP lieferte HTTP 200 und ein direkter `alpha`-Aufruf HTTP 404.
 - Abgelehnte REST- und VNC-WebSocket-Entscheidungen werden als `profile.permission.<action>` mit Sandbox-/Profilkennung und `denied` protokolliert, ohne Secrets oder Browserinhalt.
-- Die vollständige Backend-Suite lief mit **223 bestanden**; die Frontend-Suite mit **75 bestanden**, gefolgt von einem erfolgreichen Produktions-Build.
+- Die vollständige Backend-Suite lief mit **223 bestanden**; die Frontend-Suite mit **79 bestanden**, gefolgt von einem erfolgreichen Produktions-Build.
 
 Diese Abnahme belegt die lokale Produktoberfläche und die serverseitige Entscheidung gemeinsam. Sie ersetzt keine externe Production-Abnahme, veröffentlicht keine Test- oder Produktions-Credentials und enthält keine Browserinhalte.
 

@@ -2,9 +2,9 @@
 
 Stand: 21. Juli 2026
 
-## Aktueller r51-Nachweis
+## Aktueller r56-Nachweis
 
-Der aktuelle authentifizierte Release-Gate umfasst fünf Mobile-Viewports plus Access-Dashboard und bestand **276/276 Checks** mit **23 Screenshots**. Der Composer akzeptiert ausschließlich eine Host-Bridge mit `provider: codex-computer-use`; fehlende oder generische Harnesses bleiben deaktiviert. Ein separater Codex-Computer-Use-Lauf bediente den echten verbundenen VNC-Canvas, den scoped Viewer-Login und die kombinierte `operate + automate`-Vergabe im Access-Dashboard. Details, Grenzen und die aktuellen Performancewerte stehen im [Mobile-/Auth-/Latenz-Audit](MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md).
+Der aktuelle authentifizierte Release-Gate umfasst fünf Mobile-Viewports plus Access-Dashboard und bestand **291/291 Checks** mit **23 Screenshots**. Der Composer akzeptiert ausschließlich eine Host-Bridge mit `provider: codex-computer-use`; fehlende oder generische Harnesses bleiben deaktiviert. Der Gate prüft zusätzlich den einzeiligen sichtbaren Composer und dass Kontoaktionen nur hinter Tools liegen. Ein separater Codex-Computer-Use-Lauf bediente den echten verbundenen VNC-Canvas, den scoped Viewer-Login und die kombinierte `operate + automate`-Vergabe im Access-Dashboard. Details, Grenzen und die aktuellen Performancewerte stehen im [Mobile-/Auth-/Latenz-Audit](MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md); die kompakte Informationsarchitektur und universellen Quick actions sind im [Mobile UI/UX and universal browser-action audit](MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md) dokumentiert.
 
 Die folgenden Abschnitte bewahren ältere, enger abgegrenzte Läufe als Regressionsevidenz.
 
@@ -24,7 +24,7 @@ Die Dauerleisten wurden entfernt: Workspace-Aktionen, Pane-/Zoom-Regler und selt
 
 Der Vollbildmodus startet mit drei klaren 44-px-Aktionen (View, Viewport, Exit). Der Viewport-Dialog bietet im Vollbild Phone-fit und Presets, editierbare Breite/Höhe sowie `Apply`, ohne den VNC-Viewer verlassen zu müssen. Der Gate prüft dazu genau einen verbundenen Canvas, RFB-Remote-Eingabe mit CDP-Bestätigung, Ratio und Canvas-Zoom, Grid, den iOS-Paste-Fallback, Vollbild-Viewport-Persistenz, Fokus-Rückgabe, fehlenden horizontalen Overflow und alle sichtbaren Touch-Ziele. Es entstanden 22 lokale PNG-Artefakte; repräsentative iPhone-SE-, Vollbild- und Vollbild-Viewport-Screenshots wurden visuell kontrolliert.
 
-Die nachfolgenden Abschnitte bewahren weitere ältere, enger abgegrenzte Läufe als Vergleichs- und Fehlerhistorie. Sie ersetzen nicht den r51-Nachweis oben.
+Die nachfolgenden Abschnitte bewahren weitere ältere, enger abgegrenzte Läufe als Vergleichs- und Fehlerhistorie. Sie ersetzen nicht den r56-Nachweis oben.
 
 ## Historischer Kompatibilitäts-Wiederholungslauf
 

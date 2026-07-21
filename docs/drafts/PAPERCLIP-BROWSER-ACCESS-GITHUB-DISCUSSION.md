@@ -29,7 +29,7 @@ VNC and CDP are direct API/WebSocket surfaces. A frontend-only filter would stil
 - Rotating an agent key invalidated the old key immediately.
 - A viewer-only noVNC connection displayed live frames. A real click sent through that viewer canvas did not reach a controlled remote button; keyboard, pointer, and clipboard input are filtered server-side after a validated RFB handshake.
 - The public container check is a metadata-free `/health` endpoint. Runtime/profile counts in `/api/status` require authentication.
-- The authenticated mobile acceptance gate passed 276/276 checks across five viewports plus the access dashboard, with 23 screenshots. A separate Codex Computer Use run exercised both the scoped viewer and admin grant-editing flows at 390 px without horizontal overflow.
+- The authenticated mobile acceptance gate passed 291/291 checks across five viewports plus the access dashboard, with 23 screenshots. It also verified that account controls remain behind Tools and that the composer stays in one visible row. A separate Codex Computer Use run exercised both the scoped viewer and admin grant-editing flows at 390 px without horizontal overflow.
 
 No production deployment, upstream merge, public URL, live credential, or browser content is included in this draft.
 

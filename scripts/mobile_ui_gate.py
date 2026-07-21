@@ -334,6 +334,7 @@ STRUCTURE_SCRIPT = r"""(() => {
   const commandDock = document.querySelector('.mobile-command-dock');
   const composerForm = document.querySelector('.mobile-chat-form');
   const composer = document.querySelector('#mobile-task-input');
+  const send = document.querySelector('button[aria-label="Run task"]');
   const pinnedActions = document.querySelector('[aria-label="Pinned browser actions"]');
   const required = [root, live, controls, frame, commandDock, composerForm, composer];
   const rect = (node) => node ? node.getBoundingClientRect().toJSON() : null;
@@ -377,6 +378,18 @@ STRUCTURE_SCRIPT = r"""(() => {
     composerForm: rect(composerForm),
     composerFormVisible: fullyVisible(composerForm),
     composer: rect(composer),
+    send: rect(send),
+    sendVisible: visible(send) && fullyVisible(send),
+    composerSingleRow: (() => {
+      if (!visible(composer) || !visible(send)) return false;
+      const inputRect = composer.getBoundingClientRect();
+      const sendRect = send.getBoundingClientRect();
+      return inputRect.width > 1 && sendRect.width > 1 &&
+        Math.abs(inputRect.top - sendRect.top) <= 2 && Math.abs(inputRect.bottom - sendRect.bottom) <= 2;
+    })(),
+    logoutInsideTools: !!tools?.querySelector('button[aria-label="Log out"]'),
+    logoutOutsideTools: [...document.querySelectorAll('button[aria-label="Log out"]')]
+      .some((button) => !tools?.contains(button)),
     hasBrowserToolsToggle: !!document.querySelector('button[aria-label="Open browser tools"], button[aria-label="Close browser tools"]'),
     hasBrowserTools: !!document.querySelector('[aria-label="Browser tools"]'),
     hasAgentRunner: !!document.querySelector('select[aria-label="Select harness runner"]'),
@@ -1363,6 +1376,25 @@ def run_viewport(
         and not bool(tools_structure.get("hasAgentRunner")),
         tools_structure,
     )
+    if auth_token:
+        add_check(
+            result,
+            "account controls stay behind browser tools disclosure",
+            not bool(structure.get("logoutInsideTools"))
+            and not bool(structure.get("logoutOutsideTools"))
+            and bool(tools_structure.get("logoutInsideTools"))
+            and not bool(tools_structure.get("logoutOutsideTools")),
+            {
+                "compact": {
+                    "insideTools": structure.get("logoutInsideTools"),
+                    "outsideTools": structure.get("logoutOutsideTools"),
+                },
+                "toolsOpen": {
+                    "insideTools": tools_structure.get("logoutInsideTools"),
+                    "outsideTools": tools_structure.get("logoutOutsideTools"),
+                },
+            },
+        )
     browser.eval(r"""(() => {
       const button = document.querySelector('button[aria-label="Close browser tools"]');
       if (button) button.click();
@@ -1395,6 +1427,7 @@ def run_viewport(
     })()""")
     chat_visible_again = browser.wait_for("!!document.querySelector('[aria-label=\"Chat history\"]')", "chat after tools", 5)
     tools_closed_by_chat = browser.eval("!document.querySelector('[aria-label=\"Browser tools\"]')")
+    expanded_chat_structure = browser.eval(STRUCTURE_SCRIPT)
     exclusive = {
         "ready": bool(chat_opened) and bool(tools_opened_after_chat) and bool(chat_reopened),
         "chatOpen": bool(chat_visible),
@@ -1411,6 +1444,14 @@ def run_viewport(
         and bool(exclusive.get("chatClosedByTools"))
         and bool(exclusive.get("toolsClosedByChat")),
         exclusive,
+    )
+    add_check(
+        result,
+        "expanded chat keeps composer in one compact row",
+        bool(expanded_chat_structure.get("composerSingleRow"))
+        and bool(expanded_chat_structure.get("composerFormVisible"))
+        and bool(expanded_chat_structure.get("sendVisible")),
+        expanded_chat_structure,
     )
     dispatch_shortcut = r"""((key, extra = {}) => {
       window.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true, cancelable: true, ctrlKey: true, ...extra}));

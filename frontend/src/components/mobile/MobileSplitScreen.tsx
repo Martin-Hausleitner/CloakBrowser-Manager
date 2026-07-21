@@ -270,7 +270,7 @@ export function MobileSplitScreen({
     liveViewportSize.height <= 500 && liveViewportSize.width > liveViewportSize.height
       ? `${collapsedLandscapeLivePanePercent}%`
       : collapsedLivePaneBasis(selected?.screen_width, selected?.screen_height, liveViewportSize);
-  const fitLivePaneToBrowser = isLiveBrowser && !remoteToolsOpen && !paneAdjusted;
+  const fitLivePaneToBrowser = isLiveBrowser && !paneAdjusted;
   const effectivePanePercent =
     fitLivePaneToBrowser
       ? collapsedPaneBasis

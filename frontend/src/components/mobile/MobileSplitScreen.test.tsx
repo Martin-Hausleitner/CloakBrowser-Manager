@@ -374,8 +374,8 @@ describe("MobileSplitScreen", () => {
       expect(screen.getByLabelText("Expand task chat").getAttribute("aria-expanded")).toBe("false");
 
       openBrowserTools();
-      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("68%");
-      expect(livePane.classList.contains("mobile-live-pane-fit")).toBe(false);
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("263px");
+      expect(livePane.classList.contains("mobile-live-pane-fit")).toBe(true);
     } finally {
       Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
       Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
@@ -609,7 +609,7 @@ describe("MobileSplitScreen", () => {
     expect(screen.queryByLabelText("Browser pane")).toBeNull();
 
     openBrowserTools();
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("68%");
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toMatch(/px$/);
     fireEvent.click(screen.getByLabelText("Edit browser viewport"));
     fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
     fireEvent.change(screen.getByLabelText("Visual zoom"), { target: { value: "135" } });

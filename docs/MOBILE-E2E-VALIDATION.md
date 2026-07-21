@@ -2,9 +2,11 @@
 
 Stand: 21. Juli 2026
 
-## Aktueller r56-Nachweis
+## Aktueller VCVM-Nachweis
 
-Der aktuelle authentifizierte Release-Gate umfasst fünf Mobile-Viewports plus Access-Dashboard und bestand **291/291 Checks** mit **23 Screenshots**. Der Composer akzeptiert ausschließlich eine Host-Bridge mit `provider: codex-computer-use`; fehlende oder generische Harnesses bleiben deaktiviert. Der Gate prüft zusätzlich den einzeiligen sichtbaren Composer und dass Kontoaktionen nur hinter Tools liegen. Ein separater Codex-Computer-Use-Lauf bediente den echten verbundenen VNC-Canvas, den scoped Viewer-Login und die kombinierte `operate + automate`-Vergabe im Access-Dashboard. Details, Grenzen und die aktuellen Performancewerte stehen im [Mobile-/Auth-/Latenz-Audit](MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md); die kompakte Informationsarchitektur und universellen Quick actions sind im [Mobile UI/UX and universal browser-action audit](MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md) dokumentiert.
+Der aktuelle authentifizierte Release-Gate lief gegen den loopback-gebundenen Manager auf der VCVM und umfasst fünf Mobile-Viewports plus Access-Dashboard. Er bestand **294/294 Checks** mit **24 Screenshots**. Geprüft wurden der echte verbundene VNC-Canvas, RFB-/CDP-Eingabe, Clipboard, Grid, Vollbild, editierbare Viewports, 44-px-Touch-Ziele und fehlender horizontaler Overflow. Der iPhone-SE-Gate verlangt zusätzlich, dass der Canvas sein intrinsisches Seitenverhältnis behält, vollständig im Content liegt, dessen Höhe ausfüllt und Dock sowie Composer sichtbar bleiben. Damit wird die frühere große Leerflächen-Regression ausdrücklich abgefangen.
+
+Der manuelle VCVM-Lauf änderte den Browser-Framebuffer live von **1024 × 576** auf **390 × 844**, wartete den vollständigen Browser-/VNC-Neustart ab und stellte ihn anschließend wieder auf **1024 × 576** zurück. Xvnc lief danach erneut mit `-geometry 1024x576`; die mobile Oberfläche blieb auf 390 × 844 ohne horizontalen Overflow. Der Composer akzeptiert ausschließlich eine Host-Bridge mit `provider: codex-computer-use`; fehlende oder generische Harnesses bleiben deaktiviert. Details, Grenzen und die aktuellen Performancewerte stehen im [Mobile-/Auth-/Latenz-Audit](MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md); die kompakte Informationsarchitektur und universellen Quick actions sind im [Mobile UI/UX and universal browser-action audit](MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md) dokumentiert.
 
 Die folgenden Abschnitte bewahren ältere, enger abgegrenzte Läufe als Regressionsevidenz.
 

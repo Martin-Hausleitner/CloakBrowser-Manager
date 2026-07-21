@@ -586,16 +586,23 @@ def take_screenshot(
     result["screenshots"].append(metadata)
 
 
-def capture_empty_mobile_state(
+def capture_initial_mobile_state(
     browser: AgentBrowser,
     result: dict[str, Any],
     output_dir: Path,
     viewport_name: str,
     width: int,
     height: int,
+    expected_profile_id: str,
 ) -> None:
-    """Preserve the unselected mobile workspace before a live profile is chosen."""
-    empty_state = browser.eval(r"""(() => {
+    """Preserve the initial mobile workspace before the full live checks run."""
+    browser.wait_for(
+        "document.querySelector('select.mobile-top-profile-select')?.value === "
+        f"{json.dumps(expected_profile_id)}",
+        "initial mobile profile selection",
+        10,
+    )
+    initial_state = browser.eval(r"""(() => {
       const select = document.querySelector('select.mobile-top-profile-select');
       const liveCanvas = document.querySelectorAll('.mobile-browser-content canvas');
       const root = document.querySelector('.mobile-split-root');
@@ -607,11 +614,13 @@ def capture_empty_mobile_state(
     })()""")
     add_check(
         result,
-        "empty mobile workspace has no selected browser canvas",
-        empty_state.get("selectedValue") == "" and empty_state.get("canvasCount") == 0 and bool(empty_state.get("rootVisible")),
-        empty_state,
+        "mobile workspace initializes with the expected profile and no duplicate canvas",
+        initial_state.get("selectedValue") == expected_profile_id
+        and int(initial_state.get("canvasCount") or 0) <= 1
+        and bool(initial_state.get("rootVisible")),
+        initial_state,
     )
-    take_screenshot(browser, result, output_dir, viewport_name, "empty", width, height)
+    take_screenshot(browser, result, output_dir, viewport_name, "initial", width, height)
 
 
 def capture_viewport_editor(
@@ -896,6 +905,26 @@ def verify_live_viewport_controls(
 def _authenticated_request(url: str, timeout: float, auth_token: str | None):
     headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
     return urlopen(Request(url, headers=headers), timeout=timeout)
+
+
+def expected_mobile_initial_profile_id(
+    base_url: str,
+    timeout: float,
+    auth_token: str | None,
+) -> str:
+    endpoint = urljoin(base_url.rstrip("/") + "/", "api/profiles")
+    with _authenticated_request(endpoint, timeout, auth_token) as response:
+        payload = json.load(response)
+    if not isinstance(payload, list):
+        raise GateError("Profile list did not return a list")
+    profiles = [profile for profile in payload if isinstance(profile, dict)]
+    if not profiles:
+        return ""
+    selected = next((profile for profile in profiles if profile.get("status") == "running"), profiles[0])
+    profile_id = selected.get("id")
+    if not isinstance(profile_id, str) or not profile_id:
+        raise GateError("Auto-selected profile did not include an id")
+    return profile_id
 
 
 def authenticate_workspace(browser: AgentBrowser, auth_token: str | None) -> None:
@@ -1339,7 +1368,16 @@ def run_viewport(
     result["workspace_ready_ms"] = round((time.monotonic() - navigation_started) * 1000, 1)
 
     if name == "iphone-14-portrait":
-        capture_empty_mobile_state(browser, result, output_dir, name, width, height)
+        expected_profile_id = expected_mobile_initial_profile_id(base_url, timeout, auth_token)
+        capture_initial_mobile_state(
+            browser,
+            result,
+            output_dir,
+            name,
+            width,
+            height,
+            expected_profile_id,
+        )
 
     structure = browser.eval(STRUCTURE_SCRIPT)
     add_check(result, "mobile workspace structure", bool(structure.get("ready")), structure)
@@ -1553,11 +1591,62 @@ def run_viewport(
                 compact_structure,
             )
             if width == 375 and height == 667:
+                compact_viewer = browser.eval(LIVE_VIEWER_GEOMETRY_SCRIPT)
+                frame_rect = compact_viewer.get("frame") or {}
+                content_rect = compact_viewer.get("content") or {}
+                canvas = compact_viewer.get("canvas") or {}
+                canvas_rect = canvas.get("rect") or {}
+                dock_rect = compact_structure.get("commandDock") or {}
+                composer_rect = compact_structure.get("composerForm") or {}
+                intrinsic_ratio = (canvas.get("width") or 0) / max(1, canvas.get("height") or 0)
+                css_ratio = (canvas_rect.get("width") or 0) / max(1, canvas_rect.get("height") or 0)
+                aspect_error = (
+                    abs(css_ratio - intrinsic_ratio) / intrinsic_ratio
+                    if intrinsic_ratio > 0
+                    else 1
+                )
+                canvas_inside_content = (
+                    (canvas_rect.get("width") or 0) > 0
+                    and (canvas_rect.get("height") or 0) > 0
+                    and (canvas_rect.get("left") or 0) >= (content_rect.get("left") or 0) - 1
+                    and (canvas_rect.get("top") or 0) >= (content_rect.get("top") or 0) - 1
+                    and (canvas_rect.get("left") or 0) + (canvas_rect.get("width") or 0)
+                    <= (content_rect.get("left") or 0) + (content_rect.get("width") or 0) + 1
+                    and (canvas_rect.get("top") or 0) + (canvas_rect.get("height") or 0)
+                    <= (content_rect.get("top") or 0) + (content_rect.get("height") or 0) + 1
+                )
+                canvas_fills_content_height = abs(
+                    (canvas_rect.get("height") or 0) - (content_rect.get("height") or 0)
+                ) <= 2
+                pane_follows_fitted_frame = abs(
+                    (live_rect.get("bottom") or 0)
+                    - ((frame_rect.get("top") or 0) + (frame_rect.get("height") or 0))
+                ) <= 2
+                lower_controls_visible = (
+                    (dock_rect.get("height") or 0) >= 44
+                    and (composer_rect.get("height") or 0) >= 44
+                    and (dock_rect.get("top") or -1) >= 0
+                    and (dock_rect.get("bottom") or height + 1) <= height
+                    and (composer_rect.get("top") or -1) >= 0
+                    and (composer_rect.get("bottom") or height + 1) <= height
+                )
                 add_check(
                     result,
-                    "iPhone SE live browser uses at least 55 percent of the viewport",
-                    live_ratio >= 0.55,
-                    {"liveRatio": round(live_ratio, 3), "structure": compact_structure},
+                    "iPhone SE keeps an aspect-fitted browser with lower controls reachable",
+                    aspect_error <= 0.03
+                    and canvas_inside_content
+                    and canvas_fills_content_height
+                    and pane_follows_fitted_frame
+                    and lower_controls_visible,
+                    {
+                        "aspectError": round(aspect_error, 4),
+                        "canvasInsideContent": canvas_inside_content,
+                        "canvasFillsContentHeight": canvas_fills_content_height,
+                        "paneFollowsFittedFrame": pane_follows_fitted_frame,
+                        "lowerControlsVisible": lower_controls_visible,
+                        "viewer": compact_viewer,
+                        "structure": compact_structure,
+                    },
                 )
         if expected_layout == "horizontal":
             live_rect = compact_structure.get("live") or {}

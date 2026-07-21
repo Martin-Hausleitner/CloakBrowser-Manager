@@ -1,6 +1,6 @@
 # Paperclip-gestützte Browser-Zugriffskontrolle
 
-Stand: 2026-07-20 · Status: lokal implementiert und Ende-zu-Ende geprüft; bereit für Fork-Review
+Stand: 2026-07-21 · Status: lokal implementiert und Ende-zu-Ende geprüft; bereit für Fork-Review
 
 ## Kurzentscheidung
 
@@ -22,6 +22,18 @@ Die erste, lokale Policy-Schicht ist in diesem Fork umgesetzt. Sie bleibt absich
 - Das Dashboard verwaltet Profile-Sandboxes, Personen, Paperclip-Agenten, Grants, Deaktivierung und Key-Rotation. Nichtadministratoren erhalten weder Profil-Administration noch Zugang zur Access-Verwaltung.
 
 Die Live-Abnahme lief isoliert gegen eine frische lokale Datenbank: zwei Sandboxes (`research`, `finance`), ein `view`-Nutzer und ein `automate`-Agent. Der Nutzer sah nur `research`; direkte `finance`-, Lifecycle- und Admin-Anfragen wurden mit `404` beziehungsweise `403` abgewiesen. Der Agent sah per eigenem Bearer-Key nur `research`; sein alter Key lieferte nach Rotation `401`.
+
+## Frische Browser-E2E-Abnahme (21. Juli 2026)
+
+Die Policy wurde zusätzlich in einem neuen, nur auf `127.0.0.1` gebundenen Container mit eigener temporärer Datenbank geprüft. Dabei wurden keine bestehenden Profile, Browser oder Zugangsdaten verwendet.
+
+- Der Bootstrap-Admin meldete sich im echten Dashboard an, legte ein Testprofil in einer Sandbox an und vergab dort einen benannten `view`-Nutzer sowie einen Paperclip-Agenten mit `automate`.
+- Das Dashboard zeigte die zwei Grants getrennt an; der Agent-Key wurde nur einmal angezeigt und danach wieder ausgeblendet.
+- Ein frischer Browser-Login als `view`-Nutzer zeigte genau das zugewiesene Profil. Weder Profilanlage, Launch/Stop, Benchmark-Ansicht noch Access-Verwaltung waren in dessen Oberfläche verfügbar.
+- Ein direkter Lifecycle-Aufruf desselben Nutzers lieferte absichtlich `404 Profile not found`, obwohl das Profil sichtbar war: Dadurch bleiben nicht erlaubte Lifecycle- und fremde Profil-URLs nicht von unbekannten IDs unterscheidbar.
+- Die vollständige Backend-Suite lief mit **221 bestanden**; die Frontend-Suite mit **65 bestanden**, gefolgt von einem erfolgreichen Produktions-Build.
+
+Diese Abnahme belegt die lokale Produktoberfläche und die serverseitige Entscheidung gemeinsam. Sie ersetzt keine externe Production-Abnahme, veröffentlicht keine Test- oder Produktions-Credentials und enthält keine Browserinhalte.
 
 ## Zielbild
 

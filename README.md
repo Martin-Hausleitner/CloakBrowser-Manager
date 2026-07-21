@@ -227,6 +227,8 @@ The server enforces every grant for profile discovery, VNC, clipboard, launch/st
 
 An administrator is unrestricted. A Paperclip agent uses its own opaque key with `Authorization: Bearer <agent-key>`; clients that connect directly to a CDP WebSocket must attach the same header to the WebSocket upgrade. Agent keys are stored only as hashes and are shown in the dashboard once at creation or rotation.
 
+The design, enforcement matrix and the latest isolated browser E2E evidence are in [docs/PAPERCLIP-BROWSER-ACCESS-CONTROL-PROPOSAL.md](docs/PAPERCLIP-BROWSER-ACCESS-CONTROL-PROPOSAL.md). The maintainer-facing discussion draft remains deliberately credential-free in [docs/drafts/PAPERCLIP-BROWSER-ACCESS-GITHUB-DISCUSSION.md](docs/drafts/PAPERCLIP-BROWSER-ACCESS-GITHUB-DISCUSSION.md).
+
 Existing installations stay on the previous single-token behavior until `ACCESS_CONTROL_ENABLED=1` is explicitly set. The local SQLite migration runs automatically, and existing profiles start in the `default` sandbox.
 
 ### Private Tailscale HTTPS for iPhone access

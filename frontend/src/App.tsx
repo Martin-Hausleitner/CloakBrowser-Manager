@@ -263,6 +263,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           cdpUrl={selected.cdp_url}
           clipboardSync={selected.clipboard_sync}
           canInteract={canInteractSelected}
+          compactControls
           layoutMode={mobileFullscreenOpen ? "fullscreen" : "inline"}
           viewportScale={mobileBrowserZoom / 100}
           onDisconnect={handleVncDisconnect}

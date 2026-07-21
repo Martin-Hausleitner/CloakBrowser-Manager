@@ -122,6 +122,33 @@ class AgentBrowser:
         raise GateError(f"Timed out waiting for {label}; last value: {last_value!r}")
 
 
+def click_visible(browser: AgentBrowser, selector: str, label: str) -> None:
+    """Click a visible, enabled HTML control without agent-browser auto-wait.
+
+    Agent-browser's native click occasionally stays in its post-click wait
+    phase after a React disclosure has already changed the DOM. The gate still
+    validates that the actual visible control exists, then invokes its browser
+    click handler directly so the test runner cannot stall on its transport
+    layer instead of reporting the product result.
+    """
+    clicked = browser.eval(
+        """(() => {
+          const element = document.querySelector(%s);
+          if (!(element instanceof HTMLElement) || element.hasAttribute('inert')) return false;
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          if (rect.width < 1 || rect.height < 1 || style.display === 'none' || style.visibility === 'hidden') return false;
+          if (element instanceof HTMLButtonElement && element.disabled) return false;
+          element.focus({preventScroll: true});
+          element.click();
+          return true;
+        })()"""
+        % json.dumps(selector)
+    )
+    if not clicked:
+        raise GateError(f"Could not click visible {label}: {selector}")
+
+
 def png_metadata(path: Path) -> dict[str, Any]:
     data = path.read_bytes()
     if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
@@ -493,7 +520,7 @@ def capture_viewport_editor(
         editor,
     )
     take_screenshot(browser, result, output_dir, viewport_name, "viewport-editor", width, height)
-    browser.run("click", "button[aria-label='Edit browser viewport']")
+    click_visible(browser, "button[aria-label='Edit browser viewport']", "viewport editor toggle")
     browser.wait_for(
         "!document.querySelector('[aria-label=\"Viewport controls\"]')",
         "compact workspace after viewport editor",
@@ -552,14 +579,46 @@ def verify_live_viewport_controls(
       if (button.getAttribute('aria-pressed') !== 'true') button.click();
       return true;
     })()""")
-    add_check(result, "live viewport controls action available", bool(opened), {"clicked": opened})
+    add_check(result, "live profile viewport settings action available", bool(opened), {"clicked": opened})
     browser.wait_for(
         "!!document.querySelector('[aria-label=\"Viewport controls\"]')",
-        "live viewport controls",
+        "live profile viewport settings",
+        5,
+    )
+    editor = browser.eval(r"""(() => {
+      const root = document.querySelector('[aria-label="Viewport controls"]');
+      const inputs = [...(root?.querySelectorAll('input[type="number"]') ?? [])];
+      const apply = [...(root?.querySelectorAll('button') ?? [])]
+        .some((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+      return {visible: Boolean(root), inputCount: inputs.length, apply};
+    })()""")
+    add_check(
+        result,
+        "live profile viewport settings render width height and apply",
+        bool(editor.get("visible")) and editor.get("inputCount") == 2 and bool(editor.get("apply")),
+        editor,
+    )
+    click_visible(browser, "button[aria-label='Edit browser viewport']", "live viewport editor toggle")
+    browser.wait_for(
+        "!document.querySelector('[aria-label=\"Viewport controls\"]')",
+        "compact workspace after live profile viewport settings",
+        5,
+    )
+
+    live_controls_opened = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Toggle live view controls"]');
+      if (!button) return false;
+      if (button.getAttribute('aria-expanded') !== 'true') button.click();
+      return true;
+    })()""")
+    add_check(result, "live view tuning drawer action available", bool(live_controls_opened), {"clicked": live_controls_opened})
+    browser.wait_for(
+        "!!document.querySelector('#mobile-pane-size') && !!document.querySelector('#mobile-browser-zoom')",
+        "live view tuning drawer",
         5,
     )
     before = browser.eval(LIVE_VIEWER_GEOMETRY_SCRIPT)
-    add_check(result, "live viewport controls rendered", bool(before.get("ready")), before)
+    add_check(result, "live view tuning controls rendered", bool(before.get("ready")), before)
 
     pane_adjusted = browser.eval(r"""(() => {
       const setRange = (selector, value) => {
@@ -671,12 +730,12 @@ def verify_live_viewport_controls(
     })()""")
     add_check(result, "live viewport controls reset", bool(reset), {"clicked": reset})
     expected_default_pane = browser.eval(
-        "window.innerHeight <= 700 && window.innerHeight >= window.innerWidth ? '44%' : '50%'"
+        "window.innerHeight <= 700 && window.innerHeight >= window.innerWidth ? '49%' : '50%'"
     )
     add_check(
         result,
         "live viewport reset picks the device-appropriate default pane",
-        expected_default_pane in {"44%", "50%"},
+        expected_default_pane in {"49%", "50%"},
         {"expectedPane": expected_default_pane},
     )
     browser.wait_for(
@@ -687,14 +746,14 @@ def verify_live_viewport_controls(
         5,
     )
     closed = browser.eval(r"""(() => {
-      const button = document.querySelector('button[aria-label="Edit browser viewport"]');
+      const button = document.querySelector('button[aria-label="Toggle live view controls"]');
       if (!button) return false;
       if (button.getAttribute('aria-expanded') === 'true') button.click();
       return true;
     })()""")
     add_check(result, "live controls return to compact workspace", bool(closed), {"clicked": closed})
     browser.wait_for(
-        "!document.querySelector('[aria-label=\"Viewport controls\"]')",
+        "!document.querySelector('#mobile-pane-size') && !document.querySelector('#mobile-browser-zoom')",
         "compact workspace after live controls",
         5,
     )
@@ -957,7 +1016,20 @@ def manual_remote_paste(
 ) -> None:
     """Exercise the iOS-safe fallback that does not depend on navigator.clipboard."""
     marker = f"mobile-manual-paste-{int(time.time() * 1000)}"
-    browser.run("click", "button[aria-label='Paste text into remote browser']")
+    tools_opened = browser.eval(r"""(() => {
+      if (document.querySelector('button[aria-label="Paste text into remote browser"]')) return true;
+      const toggle = document.querySelector('button[aria-label="Open remote browser tools"]');
+      if (!toggle) return false;
+      toggle.click();
+      return true;
+    })()""")
+    add_check(result, "compact remote tools action available", bool(tools_opened), {"opened": tools_opened})
+    browser.wait_for(
+        "!!document.querySelector('button[aria-label=\"Paste text into remote browser\"]')",
+        "remote paste tool",
+        5,
+    )
+    click_visible(browser, "button[aria-label='Paste text into remote browser']", "remote paste tool")
     browser.wait_for(
         "!!document.querySelector('textarea[id^=remote-paste-]')",
         "manual remote paste field",
@@ -1177,7 +1249,7 @@ def run_viewport(
 
     unique_message = f"Mobile gate {name} {int(time.time() * 1000)}"
     browser.run("fill", "#mobile-task-input", unique_message)
-    browser.run("click", "button[aria-label='Run task']")
+    click_visible(browser, "button[aria-label='Run task']", "local agent task submit")
     chat = browser.wait_for(
         f"document.body.innerText.includes({json.dumps(unique_message)}) && document.body.innerText.includes('Agent reply queued locally')",
         "local agent chat response",
@@ -1185,7 +1257,7 @@ def run_viewport(
     )
     add_check(result, "local agent chat round-trip", bool(chat), {"message": unique_message})
 
-    browser.run("click", "button[aria-label='Run settings']")
+    click_visible(browser, "button[aria-label='Run settings']", "run settings open")
     settings = browser.wait_for("!!document.querySelector('[aria-label=\"Agent run settings\"]')", "run settings", 5)
     browser.run("select", "select.mobile-composer-select", "local-runner")
     selected_runner = browser.eval("document.querySelector('select.mobile-composer-select')?.value")
@@ -1195,14 +1267,21 @@ def run_viewport(
         bool(settings) and selected_runner == "local-runner",
         {"settings": bool(settings), "runner": selected_runner},
     )
-    browser.run("click", "button[aria-label='Run settings']")
+    click_visible(browser, "button[aria-label='Run settings']", "run settings close")
     take_screenshot(browser, result, output_dir, name, "workspace", width, height)
 
-    browser.run("click", "button[aria-label='Toggle grid view']")
+    click_visible(browser, "button[aria-label='Open mobile workspace tools']", "workspace tools open")
+    browser.wait_for(
+        "!!document.querySelector('[aria-label=\"Mobile workspace tools\"]')",
+        "workspace tools menu",
+        5,
+    )
+    click_visible(browser, "button[aria-label='Toggle grid view']", "grid view open")
     grid = browser.wait_for("!!document.querySelector('[aria-label=\"Running browser grid\"]')", "running browser grid", 5)
     add_check(result, "grid opens", bool(grid), {"visible": bool(grid)})
     take_screenshot(browser, result, output_dir, name, "grid", width, height)
-    browser.run("click", "button[aria-label='Toggle grid view']")
+    click_visible(browser, "button[aria-label='Open mobile workspace tools']", "workspace tools reopen")
+    click_visible(browser, "button[aria-label='Toggle grid view']", "grid view close")
 
     # Navigating between mobile viewport sizes closes the previous noVNC
     # websocket. The viewer deliberately reconnects in the background, so
@@ -1216,7 +1295,7 @@ def run_viewport(
             timeout,
         )
     pre_fullscreen_canvas = browser.eval(CANVAS_SCRIPT)
-    browser.run("click", "button[aria-label='Open fullscreen browser']")
+    click_visible(browser, "button[aria-label='Open fullscreen browser']", "fullscreen browser open")
     browser.wait_for("!!document.querySelector('[role=\"dialog\"][aria-label=\"Fullscreen browser viewer\"]')", "fullscreen dialog", 5)
     fullscreen = browser.eval(r"""(() => {
       const dialog = document.querySelector('[role="dialog"][aria-label="Fullscreen browser viewer"]');
@@ -1230,11 +1309,10 @@ def run_viewport(
         closeFocused: active?.getAttribute('aria-label') === 'Close fullscreen browser',
         backgroundInert: document.querySelector('.mobile-control-pane')?.hasAttribute('inert') ?? false,
         controlsStrip: Boolean(strip),
-        controlsZoom: Boolean(strip?.querySelector('#mobile-fullscreen-browser-zoom')),
-        controlsViewport: [...(strip?.querySelectorAll('button') ?? [])]
-          .some((candidate) => candidate.textContent?.trim() === 'Viewport'),
-        controlsExit: [...(strip?.querySelectorAll('button') ?? [])]
-          .some((candidate) => candidate.textContent?.trim() === 'Exit'),
+        controlsViewToggle: Boolean(strip?.querySelector('button[aria-label="Toggle fullscreen view controls"]')),
+        controlsViewport: Boolean(strip?.querySelector('button[aria-label="Edit fullscreen browser viewport"]')),
+        controlsExit: Boolean(strip?.querySelector('button[aria-label="Close fullscreen browser"]')),
+        remoteToolsOpen: Boolean(document.querySelector('[aria-label="Remote browser tools"]')),
       };
     })()""")
     full_rect = fullscreen.get("rect") or {}
@@ -1251,9 +1329,15 @@ def run_viewport(
             result,
             "fullscreen local controls available",
             bool(fullscreen.get("controlsStrip"))
-            and bool(fullscreen.get("controlsZoom"))
+            and bool(fullscreen.get("controlsViewToggle"))
             and bool(fullscreen.get("controlsViewport"))
             and bool(fullscreen.get("controlsExit")),
+            fullscreen,
+        )
+        add_check(
+            result,
+            "fullscreen starts with remote browser tools collapsed",
+            not bool(fullscreen.get("remoteToolsOpen")),
             fullscreen,
         )
         add_check(
@@ -1264,7 +1348,98 @@ def run_viewport(
         )
     take_screenshot(browser, result, output_dir, name, "fullscreen", width, height)
 
-    browser.run("press", "Escape")
+    if profile_id:
+        opened_fullscreen_tuning = browser.eval(r"""(() => {
+          const button = document.querySelector('button[aria-label="Toggle fullscreen view controls"]');
+          if (!button) return false;
+          button.click();
+          return true;
+        })()""")
+        add_check(
+            result,
+            "fullscreen view tuning action available",
+            bool(opened_fullscreen_tuning),
+            {"clicked": bool(opened_fullscreen_tuning)},
+        )
+        browser.wait_for(
+            "!!document.querySelector('[aria-label=\"Fullscreen view controls\"]')",
+            "fullscreen view tuning drawer",
+            5,
+        )
+        fullscreen_tuning = browser.eval(r"""(() => {
+          const root = document.querySelector('[aria-label="Fullscreen view controls"]');
+          const zoom = root?.querySelector('#mobile-fullscreen-browser-zoom');
+          return {
+            visible: Boolean(root),
+            zoom: Boolean(zoom),
+            zoomValue: zoom?.value ?? null,
+          };
+        })()""")
+        add_check(
+            result,
+            "fullscreen view tuning drawer exposes zoom",
+            bool(fullscreen_tuning.get("visible")) and bool(fullscreen_tuning.get("zoom")),
+            fullscreen_tuning,
+        )
+
+        opened_fullscreen_viewport = browser.eval(r"""(() => {
+          const button = document.querySelector('button[aria-label="Edit fullscreen browser viewport"]');
+          if (!button) return false;
+          button.click();
+          return true;
+        })()""")
+        add_check(
+            result,
+            "fullscreen viewport editor action available",
+            bool(opened_fullscreen_viewport),
+            {"clicked": bool(opened_fullscreen_viewport)},
+        )
+        browser.wait_for(
+            "!!document.querySelector('[aria-label=\"Fullscreen viewport controls\"]')",
+            "fullscreen viewport editor",
+            5,
+        )
+        fullscreen_editor = browser.eval(r"""(() => {
+          const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
+          const inputs = [...(root?.querySelectorAll('input[type="number"]') ?? [])];
+          const apply = [...(root?.querySelectorAll('button') ?? [])]
+            .find((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+          return {
+            visible: Boolean(root),
+            inputCount: inputs.length,
+            values: inputs.map((input) => input.value),
+            canApply: Boolean(apply),
+          };
+        })()""")
+        add_check(
+            result,
+            "fullscreen viewport editor renders editable width height and apply",
+            bool(fullscreen_editor.get("visible"))
+            and fullscreen_editor.get("inputCount") == 2
+            and bool(fullscreen_editor.get("canApply")),
+            fullscreen_editor,
+        )
+        applied = browser.eval(r"""(() => {
+          const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
+          const apply = [...(root?.querySelectorAll('button') ?? [])]
+            .find((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+          if (!apply) return false;
+          apply.click();
+          return true;
+        })()""")
+        add_check(result, "fullscreen viewport apply action available", bool(applied), {"clicked": applied})
+        browser.wait_for(
+            "document.querySelector('[aria-label=\"Fullscreen viewport controls\"]')?.innerText.includes('Saved')",
+            "fullscreen viewport save",
+            timeout,
+        )
+        take_screenshot(browser, result, output_dir, name, "fullscreen-viewport", width, height)
+
+    escaped = browser.eval(r"""(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+      return true;
+    })()""")
+    add_check(result, "fullscreen escape action available", bool(escaped), {"dispatched": bool(escaped)})
     browser.wait_for("!document.querySelector('[role=\"dialog\"]')", "fullscreen close", 5)
     after = browser.eval(r"""(() => ({
       overflow: (document.scrollingElement?.scrollWidth ?? 0) <= window.innerWidth + 1,

@@ -90,7 +90,7 @@
   }
 
   .mobile-live-header {
-    @apply flex shrink-0 items-center justify-between gap-3 border-b border-border/70 bg-surface-1 px-3 py-2;
+    @apply flex min-h-11 shrink-0 items-center justify-between gap-2 border-b border-border/70 bg-surface-1 px-2 py-0;
   }
 
   .mobile-live-pane .mobile-browser-wrap {
@@ -139,6 +139,28 @@
   .mobile-browser-content > .relative > div:first-child button {
     min-width: 44px;
     min-height: 44px;
+  }
+
+  .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar {
+    @apply min-h-11 gap-1 px-2 py-0;
+  }
+
+  .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar > div:first-child {
+    @apply min-w-0;
+  }
+
+  .mobile-vnc-tools-toggle {
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .profile-viewer-compact .mobile-vnc-tools-drawer {
+    @apply absolute right-2 top-11 z-40 grid gap-1 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
+    width: min(17rem, calc(100% - 1rem));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mobile-vnc-tool-button {
+    @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-2 px-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-3 disabled:cursor-not-allowed disabled:text-gray-600 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-browser-chrome {
@@ -200,7 +222,11 @@
   }
 
   .mobile-viewport-editor {
-    @apply space-y-3 border-b border-border px-3 py-3;
+    @apply space-y-3 border-b border-border px-2 py-2;
+  }
+
+  .mobile-viewport-editor-note {
+    @apply text-[11px] leading-4 text-gray-400;
   }
 
   .mobile-viewport-disclosure {
@@ -211,8 +237,8 @@
     @apply flex min-h-11 w-full items-center gap-2 rounded-md border border-border bg-surface-1 px-3 text-left text-sm font-medium text-gray-200 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
-  .mobile-live-control-rail {
-    @apply shrink-0 border-b border-border bg-surface-0 px-3 py-2;
+  .mobile-live-control-drawer {
+    @apply absolute inset-x-2 top-2 z-40 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
   }
 
   .mobile-live-control-cluster {
@@ -248,7 +274,19 @@
   }
 
   .mobile-fullscreen-strip {
-    @apply absolute left-3 right-3 top-3 z-[60] flex min-h-11 items-center gap-2 rounded-md border border-border bg-surface-0/95 px-2 py-1.5 shadow-lg backdrop-blur;
+    @apply absolute left-2 right-2 z-[60] grid grid-cols-3 items-stretch gap-1 rounded-md border border-border bg-surface-0/95 p-1 shadow-lg backdrop-blur;
+    top: max(0.5rem, env(safe-area-inset-top));
+  }
+
+  .mobile-fullscreen-tools-panel {
+    @apply absolute left-2 right-2 z-[60] grid grid-cols-[minmax(0,1fr)_auto] items-stretch gap-2 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
+    top: max(4rem, calc(env(safe-area-inset-top) + 3.5rem));
+  }
+
+  .mobile-fullscreen-viewport-editor {
+    @apply absolute left-2 right-2 z-[60] overflow-y-auto rounded-md border border-border bg-surface-0/95 shadow-lg backdrop-blur;
+    top: max(4rem, calc(env(safe-area-inset-top) + 3.5rem));
+    max-height: calc(100dvh - 5rem);
   }
 
   .mobile-fullscreen-zoom {
@@ -264,7 +302,15 @@
   }
 
   .mobile-fullscreen-action {
-    @apply inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 px-3 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-2 px-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-header-tools {
+    @apply flex shrink-0 gap-1 border-b border-border bg-surface-0 px-2 py-1;
+  }
+
+  .mobile-header-tool-button {
+    @apply inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-md border border-border bg-surface-1 px-3 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-grid {
@@ -435,7 +481,6 @@
   }
 
   .mobile-live-header,
-  .mobile-live-control-rail,
   .mobile-session-bar-live,
   .mobile-viewport-disclosure,
   .mobile-chat-header {

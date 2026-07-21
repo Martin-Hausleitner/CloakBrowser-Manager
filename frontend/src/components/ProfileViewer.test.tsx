@@ -460,6 +460,57 @@ describe("ProfileViewer", () => {
     ]);
   });
 
+  it("keeps low-frequency remote controls in a compact mobile tools drawer", async () => {
+    await renderProfileViewer(vi.fn(), {
+      compactControls: true,
+      cdpUrl: "/api/profiles/profile-1/cdp",
+    });
+
+    act(() => rfbMock.instances[0]?.emit("connect"));
+    expect(screen.queryByLabelText("Paste text into remote browser")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Open remote browser tools"));
+    expect(screen.getByLabelText("Remote browser tools")).toBeTruthy();
+    expect(screen.getByLabelText("Copy CDP endpoint URL")).toBeTruthy();
+    expect(screen.getByLabelText("Paste text into remote browser")).toBeTruthy();
+    expect(screen.getByLabelText("Disable clipboard sync")).toBeTruthy();
+    expect(screen.queryByLabelText("Native fullscreen")).toBeNull();
+  });
+
+  it("closes compact remote tools when the parent opens its mobile fullscreen viewer", async () => {
+    const onDisconnect = vi.fn();
+    const { rerender } = render(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl="/api/profiles/profile-1/cdp"
+        clipboardSync={true}
+        compactControls
+        layoutMode="inline"
+        onDisconnect={onDisconnect}
+      />,
+    );
+    await flushAsyncWork();
+    act(() => rfbMock.instances[0]?.emit("connect"));
+
+    fireEvent.click(screen.getByLabelText("Open remote browser tools"));
+    expect(screen.getByLabelText("Remote browser tools")).toBeTruthy();
+
+    rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl="/api/profiles/profile-1/cdp"
+        clipboardSync={true}
+        compactControls
+        layoutMode="fullscreen"
+        onDisconnect={onDisconnect}
+      />,
+    );
+    await flushAsyncWork();
+
+    expect(screen.queryByLabelText("Remote browser tools")).toBeNull();
+    expect(screen.queryByLabelText("Native fullscreen")).toBeNull();
+  });
+
   it("keeps manual paste available when the browser clipboard API is unavailable", async () => {
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,

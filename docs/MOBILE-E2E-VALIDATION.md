@@ -2,19 +2,21 @@
 
 Stand: 21. Juli 2026
 
-## Ergebnis (aktueller r38-Live-Gate)
+## Ergebnis (aktueller r44-Compact- und Fullscreen-Gate)
 
-Der aktuelle isolierte Source-Container und der echte KasmVNC/noVNC-Stream wurden mit dem reproduzierbaren Runner `scripts/mobile_ui_gate.py` geprüft. **195/195 Checks** bestanden ohne Fehler über fünf Ziel-Viewports:
+Der aktuelle isolierte Source-Container auf `127.0.0.1:18104` und der echte KasmVNC/noVNC-Stream wurden mit dem reproduzierbaren Runner `scripts/mobile_ui_gate.py` geprüft. **249/249 Checks** bestanden ohne Fehler über fünf Ziel-Viewports:
 
 | Viewport | Layout | Checks | Ergebnis |
 |---|---|---:|---|
-| iPhone 14, 390 × 844 | vertikaler Split | 41/41 | bestanden |
-| iPhone SE, 375 × 667 | kompakter vertikaler Split | 38/38 | bestanden |
-| iPhone Pro Max, 430 × 932 | vertikaler Split | 41/41 | bestanden |
-| iPhone 14 Landscape, 844 × 390 | Side-by-Side | 37/37 | bestanden |
-| Touch-Tablet, 768 × 1024 | vertikaler Split | 38/38 | bestanden |
+| iPhone 14, 390 × 844 | vertikaler Split | 51/51 | bestanden |
+| iPhone SE, 375 × 667 | kompakter vertikaler Split | 49/49 | bestanden |
+| iPhone Pro Max, 430 × 932 | vertikaler Split | 52/52 | bestanden |
+| iPhone 14 Landscape, 844 × 390 | Side-by-Side | 48/48 | bestanden |
+| Touch-Tablet, 768 × 1024 | vertikaler Split | 49/49 | bestanden |
 
-Der Lauf deckt genau einen verbundenen Canvas, VNC-/RFB-Remote-Eingabe mit CDP-Bestätigung, Ratio und Canvas-Zoom, Grid, Vollbild, 44-px-Touch-Ziele, Chat/Composer sowie den manuellen iOS-Paste-Fallback ab. Zusätzlich wurden der leere iPhone-14-Workspace und der editierbare Pro-Max-Viewport als Vision-Artefakte festgehalten. Die geschützte Access-Verwaltung wurde separat bei 390 px ohne horizontalen Overflow und mit mindestens 44 px hohen sichtbaren Controls geprüft.
+Die Dauerleisten wurden entfernt: Workspace-Aktionen, Pane-/Zoom-Regler und seltene VNC-Aktionen öffnen nur noch bei Bedarf. Die Remote-Tools schweben als kleines Zwei-Spalten-Menü über dem Stream, schließen nach erfolgreichem Paste und bleiben beim Öffnen des Vollbilds geschlossen. Auf einem kurzen iPhone bleibt die Standardaufteilung bei 49 % Live-Ansicht, damit Browser, sichtbarer Verlauf und Composer zugleich nutzbar bleiben.
+
+Der Vollbildmodus startet mit drei klaren 44-px-Aktionen (View, Viewport, Exit). Der Viewport-Dialog bietet im Vollbild Phone-fit und Presets, editierbare Breite/Höhe sowie `Apply`, ohne den VNC-Viewer verlassen zu müssen. Der Gate prüft dazu genau einen verbundenen Canvas, RFB-Remote-Eingabe mit CDP-Bestätigung, Ratio und Canvas-Zoom, Grid, den iOS-Paste-Fallback, Vollbild-Viewport-Persistenz, Fokus-Rückgabe, fehlenden horizontalen Overflow und alle sichtbaren Touch-Ziele. Es entstanden 22 lokale PNG-Artefakte; repräsentative iPhone-SE-, Vollbild- und Vollbild-Viewport-Screenshots wurden visuell kontrolliert.
 
 Die nachfolgenden Abschnitte bewahren ältere, enger abgegrenzte Läufe als Vergleichs- und Fehlerhistorie. Sie ersetzen nicht dieses aktuelle Ergebnis.
 
@@ -54,7 +56,7 @@ Für das Dashboard betrugen `scrollWidth` und `clientWidth` jeweils exakt 390 px
 
 Zum dokumentierten Endstand bestanden außerdem der Produktionsbuild, **63 Frontend-Tests** und **220 Backend-Tests** (eine bekannte Starlette-Deprecation-Warnung). Der spezifische Streaming-Runner-Test und die Python-Kompilationsprüfung des Mobile-Gate-Runners waren ebenfalls grün.
 
-## Aktueller Compact-Split-Nachtest (r38)
+## Historischer Compact-Split-Nachtest (r38)
 
 Die Live-Ansicht wurde anschließend auf einem iPhone-Viewport bewusst kompakter ausbalanciert: Der anfängliche laufende Browseranteil beträgt nun **50 %** statt 66 %. Er lässt sich weiterhin direkt von 42 % bis 82 % verstellen, aber hält bei 390 × 844 gleichzeitig den verbundenen VNC-Viewer, den sichtbaren Task-Verlauf und den Composer im selben Bildschirm. Das ist eine eigene, browser-agent-inspirierte Interaktion; es werden weder fremde Cloud-Logik noch Marken- oder UI-Assets übernommen.
 

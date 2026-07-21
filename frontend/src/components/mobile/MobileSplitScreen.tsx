@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Ellipsis,
   Expand,
   Gauge,
   Grid2X2,
@@ -68,7 +69,10 @@ const defaultPreviewPanePercent = 42;
 // Keep enough room for the visible task chat on an iPhone-sized viewport.
 // Operators can still expand the live pane at any time with the ratio control.
 const defaultLivePanePercent = 50;
-const compactLivePanePercent = 44;
+// On short portrait phones, preserve enough room for a usable chat history
+// and composer. The former always-visible control rail is now gone, so the
+// VNC surface stays legible at this balanced split.
+const compactLivePanePercent = 49;
 const compactLivePaneMaximumHeight = 700;
 const defaultBrowserZoom = 100;
 const minimumPhoneFitWidth = 320;
@@ -138,11 +142,15 @@ export function MobileSplitScreen({
   const [messages, setMessages] = useState(initialMessages);
   const [draft, setDraft] = useState("");
   const [gridOpen, setGridOpen] = useState(false);
+  const [headerToolsOpen, setHeaderToolsOpen] = useState(false);
+  const [liveControlsOpen, setLiveControlsOpen] = useState(false);
   const [viewportOpen, setViewportOpen] = useState(false);
   const [stepsExpanded, setStepsExpanded] = useState(false);
   const [viewportSaved, setViewportSaved] = useState(false);
   const [viewportSaveFailed, setViewportSaveFailed] = useState(false);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
+  const [fullscreenToolsOpen, setFullscreenToolsOpen] = useState(false);
+  const [fullscreenViewportOpen, setFullscreenViewportOpen] = useState(false);
   const [compactLivePane, setCompactLivePane] = useState(usesCompactLivePane);
   const [panePercent, setPanePercent] = useState(() =>
     defaultPanePercent(selected?.status === "running", usesCompactLivePane()),
@@ -150,7 +158,9 @@ export function MobileSplitScreen({
   const [runSettingsOpen, setRunSettingsOpen] = useState(false);
   const [agentRunner, setAgentRunner] = useState("browser-agent");
   const [attachmentName, setAttachmentName] = useState<string | null>(null);
-  const fullscreenButtonRef = useRef<HTMLButtonElement>(null);
+  const fullscreenOpenButtonRef = useRef<HTMLButtonElement>(null);
+  const fullscreenCloseButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreFullscreenFocusRef = useRef(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const viewportProfileIdRef = useRef(selected?.id);
   const paneAdjustedRef = useRef(false);
@@ -193,24 +203,49 @@ export function MobileSplitScreen({
   }, [preferredPanePercent, selected?.id, selected?.status]);
 
   useEffect(() => {
-    if (!fullscreenOpen) return;
+    if (!fullscreenOpen) {
+      if (restoreFullscreenFocusRef.current) {
+        fullscreenOpenButtonRef.current?.focus();
+        restoreFullscreenFocusRef.current = false;
+      }
+      return;
+    }
 
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    fullscreenButtonRef.current?.focus();
+    fullscreenCloseButtonRef.current?.focus();
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFullscreenOpen(false);
+      if (event.key === "Escape") {
+        setFullscreenOpen(false);
+        setFullscreenToolsOpen(false);
+        setFullscreenViewportOpen(false);
+      }
     };
     document.addEventListener("keydown", closeOnEscape);
 
     return () => {
       document.removeEventListener("keydown", closeOnEscape);
-      previouslyFocused?.focus();
     };
   }, [fullscreenOpen]);
 
   useEffect(() => {
     onFullscreenChange(fullscreenOpen);
   }, [fullscreenOpen, onFullscreenChange]);
+
+  const openFullscreen = () => {
+    restoreFullscreenFocusRef.current = true;
+    setGridOpen(false);
+    setHeaderToolsOpen(false);
+    setLiveControlsOpen(false);
+    setViewportOpen(false);
+    setFullscreenToolsOpen(false);
+    setFullscreenViewportOpen(false);
+    setFullscreenOpen(true);
+  };
+
+  const closeFullscreen = () => {
+    setFullscreenOpen(false);
+    setFullscreenToolsOpen(false);
+    setFullscreenViewportOpen(false);
+  };
 
   const sendMessage = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -264,6 +299,136 @@ export function MobileSplitScreen({
     const saved = await onViewportApply(nextViewport.width, nextViewport.height);
     setViewportSaved(saved);
     setViewportSaveFailed(!saved);
+  };
+
+  const applyViewport = async () => {
+    if (!selected || !canManageProfiles) return;
+
+    const saved = await onViewportApply(viewport.width, viewport.height);
+    setViewportSaved(saved);
+    setViewportSaveFailed(!saved);
+  };
+
+  const renderViewportEditor = (surface: "inline" | "fullscreen") => {
+    const fullscreen = surface === "fullscreen";
+    const editorId = fullscreen ? "mobile-fullscreen-viewport-settings" : "mobile-viewport-settings";
+    const widthInputId = fullscreen ? "mobile-fullscreen-viewport-width" : "mobile-viewport-width";
+    const heightInputId = fullscreen ? "mobile-fullscreen-viewport-height" : "mobile-viewport-height";
+
+    return (
+      <div
+        id={editorId}
+        className={`mobile-viewport-editor ${fullscreen ? "mobile-fullscreen-viewport-editor" : ""}`}
+        aria-label={fullscreen ? "Fullscreen viewport controls" : "Viewport controls"}
+      >
+        {fullscreen ? (
+          <p className="mobile-viewport-editor-note">
+            Test and save the next browser viewport without leaving the live viewer.
+          </p>
+        ) : null}
+        {!fullscreen && !isLiveBrowser ? (
+          <>
+            {renderLiveViewControls()}
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[11px] text-gray-500">Preview controls update this viewer immediately.</p>
+              <button type="button" className="btn-secondary min-h-11 shrink-0" onClick={resetLiveViewport}>
+                Reset view
+              </button>
+            </div>
+          </>
+        ) : null}
+        {canManageProfiles ? (
+          <>
+            <div className="flex gap-1 overflow-x-auto">
+              <button
+                type="button"
+                onClick={applyPhoneFitViewport}
+                className="mobile-preset-button mobile-phone-fit-button"
+              >
+                Phone fit
+              </button>
+              {presets.map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => {
+                    setViewport({ width: preset.width, height: preset.height });
+                    setViewportSaved(false);
+                    setViewportSaveFailed(false);
+                  }}
+                  className="mobile-preset-button"
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label htmlFor={widthInputId}>
+                <span className="label">Width</span>
+                <input
+                  id={widthInputId}
+                  aria-label={fullscreen ? "Fullscreen viewport width" : "Viewport width"}
+                  className="input no-spin"
+                  type="number"
+                  min={240}
+                  max={2560}
+                  value={viewport.width}
+                  onChange={(event) => {
+                    setViewport((current) => ({
+                      ...current,
+                      width: Number(event.target.value) || current.width,
+                    }));
+                    setViewportSaved(false);
+                    setViewportSaveFailed(false);
+                  }}
+                />
+              </label>
+              <label htmlFor={heightInputId}>
+                <span className="label">Height</span>
+                <input
+                  id={heightInputId}
+                  aria-label={fullscreen ? "Fullscreen viewport height" : "Viewport height"}
+                  className="input no-spin"
+                  type="number"
+                  min={320}
+                  max={1600}
+                  value={viewport.height}
+                  onChange={(event) => {
+                    setViewport((current) => ({
+                      ...current,
+                      height: Number(event.target.value) || current.height,
+                    }));
+                    setViewportSaved(false);
+                    setViewportSaveFailed(false);
+                  }}
+                />
+              </label>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[11px] text-gray-500">
+                {viewportSaveFailed
+                  ? "Could not save viewport"
+                  : viewportSaved
+                    ? "Saved"
+                    : selected?.status === "running"
+                      ? "Saves for the next launch; visual zoom changes now"
+                      : "Applied when this profile launches"}
+              </p>
+              <button
+                type="button"
+                className="btn-primary min-h-11 shrink-0"
+                disabled={!selected}
+                onClick={applyViewport}
+              >
+                Apply
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="mobile-viewport-editor-note">Viewport changes require profile management access.</p>
+        )}
+      </div>
+    );
   };
 
   const renderLiveViewControls = () => (
@@ -320,30 +485,76 @@ export function MobileSplitScreen({
   );
 
   const renderFullscreenControls = () => (
-    <div className="mobile-fullscreen-strip" aria-label="Fullscreen browser controls">
-      <label className="mobile-fullscreen-zoom" htmlFor="mobile-fullscreen-browser-zoom">
-        <span className="text-[11px] font-semibold uppercase text-gray-400">Zoom</span>
-        <input
-          id="mobile-fullscreen-browser-zoom"
-          type="range"
-          min={75}
-          max={150}
-          step={5}
-          value={browserZoom}
-          onChange={(event) => onBrowserZoomChange(Number(event.target.value))}
-          aria-valuetext={`${browserZoom}%`}
-        />
-        <output htmlFor="mobile-fullscreen-browser-zoom" aria-label="Fullscreen visual zoom level" aria-live="polite">
-          {browserZoom}%
-        </output>
-      </label>
-      <button type="button" className="mobile-fullscreen-action" onClick={applyPhoneFitViewport}>
-        Viewport
-      </button>
-      <button type="button" className="mobile-fullscreen-action" onClick={() => setFullscreenOpen(false)}>
-        Exit
-      </button>
-    </div>
+    <>
+      <div className="mobile-fullscreen-strip" aria-label="Fullscreen browser controls">
+        <button
+          type="button"
+          className="mobile-fullscreen-action"
+          aria-label="Toggle fullscreen view controls"
+          aria-expanded={fullscreenToolsOpen}
+          aria-controls="mobile-fullscreen-view-controls"
+          onClick={() => {
+            setFullscreenToolsOpen((open) => !open);
+            setFullscreenViewportOpen(false);
+          }}
+        >
+          <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+          <span>View {browserZoom}%</span>
+        </button>
+        <button
+          type="button"
+          className="mobile-fullscreen-action"
+          aria-label="Edit fullscreen browser viewport"
+          aria-expanded={fullscreenViewportOpen}
+          aria-controls="mobile-fullscreen-viewport-settings"
+          onClick={() => {
+            setFullscreenViewportOpen((open) => !open);
+            setFullscreenToolsOpen(false);
+          }}
+        >
+          <MonitorSmartphone className="h-4 w-4" aria-hidden="true" />
+          <span>Viewport</span>
+        </button>
+        <button
+          ref={fullscreenCloseButtonRef}
+          type="button"
+          className="mobile-fullscreen-action"
+          aria-label="Close fullscreen browser"
+          onClick={closeFullscreen}
+        >
+          <Shrink className="h-4 w-4" aria-hidden="true" />
+          <span>Exit</span>
+        </button>
+      </div>
+
+      {fullscreenToolsOpen ? (
+        <div id="mobile-fullscreen-view-controls" className="mobile-fullscreen-tools-panel" aria-label="Fullscreen view controls">
+          <label className="mobile-fullscreen-zoom" htmlFor="mobile-fullscreen-browser-zoom">
+            <span className="text-[11px] font-semibold uppercase text-gray-400">Zoom</span>
+            <input
+              id="mobile-fullscreen-browser-zoom"
+              type="range"
+              min={75}
+              max={150}
+              step={5}
+              value={browserZoom}
+              onChange={(event) => onBrowserZoomChange(Number(event.target.value))}
+              aria-label="Fullscreen visual zoom"
+              aria-valuetext={`${browserZoom}%`}
+            />
+            <output htmlFor="mobile-fullscreen-browser-zoom" aria-label="Fullscreen visual zoom level" aria-live="polite">
+              {browserZoom}%
+            </output>
+          </label>
+          <button type="button" className="mobile-fullscreen-action" onClick={resetLiveViewport}>
+            <RotateCcw className="h-4 w-4" aria-hidden="true" />
+            <span>Reset</span>
+          </button>
+        </div>
+      ) : null}
+
+      {fullscreenViewportOpen ? renderViewportEditor("fullscreen") : null}
+    </>
   );
 
   const renderBrowserSurface = () => (
@@ -390,73 +601,111 @@ export function MobileSplitScreen({
         aria-modal={fullscreenOpen ? true : undefined}
         aria-label={fullscreenOpen ? "Fullscreen browser viewer" : undefined}
       >
-        <div className="mobile-live-header">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              {selected ? <StatusIndicator status={selected.status} size="md" /> : null}
-              <h1 className="truncate text-sm font-semibold">
-                {selected?.name ?? "Mobile Browser"}
-              </h1>
+        {!fullscreenOpen ? (
+          <>
+            <div className="mobile-live-header">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  {selected ? <StatusIndicator status={selected.status} size="md" /> : null}
+                  <h1 className="truncate text-sm font-semibold">
+                    {selected?.name ?? "Mobile Browser"}
+                  </h1>
+                </div>
+                <p className="mt-0.5 truncate text-[11px] uppercase tracking-wide text-gray-500">
+                  {liveLabel} · {viewport.width} x {viewport.height}
+                  {!canInteract && selected?.status === "running" ? " · View only" : ""}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHeaderToolsOpen((open) => !open);
+                    setGridOpen(false);
+                    setViewportOpen(false);
+                  }}
+                  className="mobile-icon-button"
+                  aria-label="Open mobile workspace tools"
+                  aria-expanded={headerToolsOpen}
+                  aria-controls="mobile-workspace-tools"
+                  title="Workspace tools"
+                >
+                  <Ellipsis className="h-4 w-4" aria-hidden="true" />
+                </button>
+                {isLiveBrowser ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLiveControlsOpen((open) => !open);
+                      setHeaderToolsOpen(false);
+                      setGridOpen(false);
+                      setViewportOpen(false);
+                    }}
+                    className="mobile-icon-button"
+                    aria-label="Toggle live view controls"
+                    aria-expanded={liveControlsOpen}
+                    aria-controls="mobile-live-control-drawer"
+                    title={`View controls · Pane ${panePercent}% · Zoom ${browserZoom}%`}
+                  >
+                    <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                ) : null}
+                <button
+                  ref={fullscreenOpenButtonRef}
+                  type="button"
+                  onClick={openFullscreen}
+                  className="mobile-icon-button"
+                  aria-label="Open fullscreen browser"
+                  title="Open fullscreen browser"
+                >
+                  <Expand className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
             </div>
-            <p className="mt-0.5 text-[11px] uppercase tracking-wide text-gray-500">
-              {liveLabel} · {viewport.width} x {viewport.height} · Pane {panePercent}% · Zoom {browserZoom}%
-              {!canInteract && selected?.status === "running" ? " · View only" : ""}
-            </p>
-          </div>
-          <div className="flex items-center gap-1">
-            {!fullscreenOpen ? (
-              <>
+
+            {headerToolsOpen ? (
+              <div id="mobile-workspace-tools" className="mobile-header-tools" aria-label="Mobile workspace tools">
                 {onOpenBenchmarks ? (
                   <button
                     type="button"
                     onClick={onOpenBenchmarks}
-                    className="mobile-icon-button"
+                    className="mobile-header-tool-button"
                     aria-label="Streaming benchmark results"
-                    title="Streaming benchmark results"
                   >
-                    <Gauge className="h-4 w-4" />
+                    <Gauge className="h-4 w-4" aria-hidden="true" />
+                    <span>Benchmarks</span>
                   </button>
                 ) : null}
                 <button
                   type="button"
                   onClick={() => {
                     setGridOpen((open) => !open);
+                    setHeaderToolsOpen(false);
                     setViewportOpen(false);
                   }}
-                  className="mobile-icon-button"
+                  className="mobile-header-tool-button"
                   aria-pressed={gridOpen}
                   aria-expanded={gridOpen}
                   aria-controls="mobile-running-grid"
                   aria-label="Toggle grid view"
-                  title="Toggle grid view"
                 >
-                  <Grid2X2 className="h-4 w-4" />
+                  <Grid2X2 className="h-4 w-4" aria-hidden="true" />
+                  <span>Grid</span>
                 </button>
-              </>
+              </div>
             ) : null}
-            <button
-              ref={fullscreenButtonRef}
-              type="button"
-              onClick={() => setFullscreenOpen((open) => !open)}
-              className="mobile-icon-button"
-              aria-label={fullscreenOpen ? "Close fullscreen browser" : "Open fullscreen browser"}
-              title={fullscreenOpen ? "Close fullscreen browser" : "Open fullscreen browser"}
-            >
-              {fullscreenOpen ? <Shrink className="h-4 w-4" /> : <Expand className="h-4 w-4" />}
-            </button>
-          </div>
-        </div>
+          </>
+        ) : null}
 
         <div className={`mobile-browser-wrap ${isLiveBrowser ? "mobile-browser-wrap-live" : "px-3 pb-2"}`}>
           {isLiveBrowser && fullscreenOpen ? renderFullscreenControls() : null}
           {renderBrowserSurface()}
+          {isLiveBrowser && !fullscreenOpen && liveControlsOpen ? (
+            <div id="mobile-live-control-drawer" className="mobile-live-control-drawer" aria-label="Live view controls">
+              {renderLiveViewControls()}
+            </div>
+          ) : null}
         </div>
-
-        {isLiveBrowser && !fullscreenOpen ? (
-          <div className="mobile-live-control-rail" aria-label="Live view controls">
-            {renderLiveViewControls()}
-          </div>
-        ) : null}
       </section>
 
       <section
@@ -532,6 +781,8 @@ export function MobileSplitScreen({
             onClick={() => {
               setViewportOpen((open) => !open);
               setGridOpen(false);
+              setHeaderToolsOpen(false);
+              setLiveControlsOpen(false);
             }}
             className="mobile-disclosure-button"
             aria-label="Edit browser viewport"
@@ -545,109 +796,7 @@ export function MobileSplitScreen({
           </button>
         </div>
 
-        {viewportOpen ? (
-          <div id="mobile-viewport-settings" className="mobile-viewport-editor" aria-label="Viewport controls">
-            {!isLiveBrowser ? (
-              <>
-                {renderLiveViewControls()}
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-[11px] text-gray-500">Preview controls update this viewer immediately.</p>
-                  <button type="button" className="btn-secondary shrink-0" onClick={resetLiveViewport}>
-                    Reset view
-                  </button>
-                </div>
-              </>
-            ) : null}
-            {canManageProfiles ? (
-              <>
-                <div className="flex gap-1 overflow-x-auto">
-                  <button
-                    type="button"
-                    onClick={applyPhoneFitViewport}
-                    className="mobile-preset-button mobile-phone-fit-button"
-                  >
-                    Phone fit
-                  </button>
-                  {presets.map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      onClick={() => {
-                        setViewport({ width: preset.width, height: preset.height });
-                        setViewportSaved(false);
-                        setViewportSaveFailed(false);
-                      }}
-                      className="mobile-preset-button"
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <label>
-                    <span className="label">Width</span>
-                    <input
-                      className="input no-spin"
-                      type="number"
-                      min={240}
-                      max={2560}
-                      value={viewport.width}
-                      onChange={(event) => {
-                        setViewport((current) => ({
-                          ...current,
-                          width: Number(event.target.value) || current.width,
-                        }));
-                        setViewportSaved(false);
-                        setViewportSaveFailed(false);
-                      }}
-                    />
-                  </label>
-                  <label>
-                    <span className="label">Height</span>
-                    <input
-                      className="input no-spin"
-                      type="number"
-                      min={320}
-                      max={1600}
-                      value={viewport.height}
-                      onChange={(event) => {
-                        setViewport((current) => ({
-                          ...current,
-                          height: Number(event.target.value) || current.height,
-                        }));
-                        setViewportSaved(false);
-                        setViewportSaveFailed(false);
-                      }}
-                    />
-                  </label>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-[11px] text-gray-500">
-                    {viewportSaveFailed
-                      ? "Could not save viewport"
-                      : viewportSaved
-                      ? "Saved"
-                      : selected?.status === "running"
-                        ? "Remote viewport saves for the next launch; visual zoom changes now"
-                        : "Applied when this profile launches"}
-                  </p>
-                  <button
-                    type="button"
-                    className="btn-primary min-h-11 shrink-0"
-                    disabled={!selected}
-                    onClick={async () => {
-                      const saved = await onViewportApply(viewport.width, viewport.height);
-                      setViewportSaved(saved);
-                      setViewportSaveFailed(!saved);
-                    }}
-                  >
-                    Apply
-                  </button>
-                </div>
-              </>
-            ) : null}
-          </div>
-        ) : null}
+        {viewportOpen ? renderViewportEditor("inline") : null}
 
         {gridOpen ? (
           <div id="mobile-running-grid" className="mobile-grid" aria-label="Running browser grid">

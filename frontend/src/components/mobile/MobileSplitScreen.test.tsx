@@ -79,6 +79,14 @@ function renderMobileSplit(overrides: Partial<Parameters<typeof MobileSplitScree
   };
 }
 
+function openWorkspaceTools() {
+  fireEvent.click(screen.getByLabelText("Open mobile workspace tools"));
+}
+
+function openLiveViewControls() {
+  fireEvent.click(screen.getByLabelText("Toggle live view controls"));
+}
+
 describe("MobileSplitScreen", () => {
   it("renders the agent task and local chat input", () => {
     renderMobileSplit();
@@ -153,9 +161,11 @@ describe("MobileSplitScreen", () => {
     expect(screen.getByLabelText("Edit browser viewport").getAttribute("aria-controls")).toBe("mobile-viewport-settings");
   });
 
-  it("opens the benchmark results from the live header without covering the composer", () => {
+  it("keeps benchmark navigation in the compact workspace tools menu", () => {
     const { props } = renderMobileSplit();
 
+    openWorkspaceTools();
+    expect(screen.getByLabelText("Mobile workspace tools")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Streaming benchmark results"));
 
     expect(props.onOpenBenchmarks).toHaveBeenCalledTimes(1);
@@ -180,11 +190,11 @@ describe("MobileSplitScreen", () => {
   it("keeps the browser grid and viewport tool panels mutually exclusive", () => {
     renderMobileSplit();
 
-    const gridButton = screen.getByLabelText("Toggle grid view");
     const viewportButton = screen.getByLabelText("Edit browser viewport");
 
+    openWorkspaceTools();
+    const gridButton = screen.getByLabelText("Toggle grid view");
     fireEvent.click(gridButton);
-    expect(gridButton.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByLabelText("Running browser grid")).toBeTruthy();
     expect(screen.queryByLabelText("Viewport controls")).toBeNull();
 
@@ -193,8 +203,8 @@ describe("MobileSplitScreen", () => {
     expect(screen.getByLabelText("Viewport controls")).toBeTruthy();
     expect(screen.queryByLabelText("Running browser grid")).toBeNull();
 
-    fireEvent.click(gridButton);
-    expect(gridButton.getAttribute("aria-expanded")).toBe("true");
+    openWorkspaceTools();
+    fireEvent.click(screen.getByLabelText("Toggle grid view"));
     expect(screen.getByLabelText("Running browser grid")).toBeTruthy();
     expect(screen.queryByLabelText("Viewport controls")).toBeNull();
   });
@@ -202,10 +212,12 @@ describe("MobileSplitScreen", () => {
   it("live-adjusts browser pane ratio and requests noVNC visual zoom without remounting the stream", () => {
     const { props, rerender } = renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
 
-    expect(screen.getByLabelText("Live view controls")).toBeTruthy();
     const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
     expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("50%");
     expect(livePane.style.getPropertyValue("--mobile-browser-zoom")).toBe("");
+    expect(screen.queryByLabelText("Browser pane")).toBeNull();
+
+    openLiveViewControls();
 
     fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
     fireEvent.change(screen.getByLabelText("Visual zoom"), { target: { value: "135" } });
@@ -255,8 +267,9 @@ describe("MobileSplitScreen", () => {
       renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
 
       const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-      expect(screen.getByLabelText("Browser pane size").textContent).toBe("44%");
-      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("44%");
+      openLiveViewControls();
+      expect(screen.getByLabelText("Browser pane size").textContent).toBe("49%");
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("49%");
 
       fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
 
@@ -290,7 +303,7 @@ describe("MobileSplitScreen", () => {
   it("preserves a user-adjusted pane ratio across profile status changes", () => {
     const { rerender, props } = renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
 
-    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+    openLiveViewControls();
     fireEvent.change(screen.getByLabelText("Browser pane"), { target: { value: "64" } });
 
     rerender(
@@ -302,8 +315,9 @@ describe("MobileSplitScreen", () => {
     );
 
     const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-    expect(screen.getByLabelText("Browser pane size").textContent).toBe("64%");
     expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("64%");
+    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+    expect(screen.getByLabelText("Browser pane size").textContent).toBe("64%");
   });
 
   it("does not add fake browser chrome around the running operator surface", () => {
@@ -321,16 +335,21 @@ describe("MobileSplitScreen", () => {
 
     const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
     const browserWrap = livePane.querySelector(".mobile-browser-wrap") as HTMLElement;
-    const controls = screen.getByLabelText("Live view controls");
 
-    expect(browserWrap.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(browserWrap.querySelector(".mobile-live-control-drawer")).toBeNull();
     expect(container.querySelector(".mobile-live-control-header")).toBeNull();
+    expect(screen.queryByLabelText("Reset live view")).toBeNull();
+    openLiveViewControls();
+    expect(browserWrap.querySelector(".mobile-live-control-drawer")).toBeTruthy();
     expect(screen.getByLabelText("Reset live view").className).toContain("mobile-live-reset-button");
   });
 
-  it("keeps pane and zoom in one compact live control cluster", () => {
+  it("keeps pane and zoom inside an on-demand compact live control drawer", () => {
     renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
 
+    expect(screen.queryByLabelText("Live view controls")).toBeNull();
+    expect(screen.getByLabelText("Toggle live view controls").getAttribute("aria-expanded")).toBe("false");
+    openLiveViewControls();
     const controls = screen.getByLabelText("Live view controls");
     expect(controls.querySelector(".mobile-live-control-cluster")).toBeTruthy();
     expect(controls.querySelectorAll(".mobile-live-slider")).toHaveLength(2);
@@ -345,6 +364,7 @@ describe("MobileSplitScreen", () => {
       canManageProfiles: false,
     });
 
+    openLiveViewControls();
     expect(screen.getByLabelText("Live view controls")).toBeTruthy();
     expect(screen.getByLabelText("Browser pane")).toBeTruthy();
     expect(screen.getByLabelText("Visual zoom")).toBeTruthy();
@@ -378,7 +398,7 @@ describe("MobileSplitScreen", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows fullscreen-local zoom, viewport, and exit controls while background controls are inert", () => {
+  it("keeps editable viewport settings and zoom available in fullscreen while background controls are inert", async () => {
     const { props } = renderMobileSplit({ selected: runningProfile, selectedId: runningProfile.id });
 
     fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
@@ -388,13 +408,27 @@ describe("MobileSplitScreen", () => {
     const controlPane = document.querySelector(".mobile-control-pane") as HTMLElement;
     expect(controlPane.hasAttribute("inert")).toBe(true);
     expect(controlPane.getAttribute("aria-hidden")).toBe("true");
-    expect(screen.getByText("Viewport").className).toContain("mobile-fullscreen-action");
-    expect(screen.getByText("Exit").className).toContain("mobile-fullscreen-action");
-    fireEvent.change(screen.getByLabelText("Zoom"), { target: { value: "125" } });
+    expect(screen.getByLabelText("Edit fullscreen browser viewport").className).toContain("mobile-fullscreen-action");
+    expect(screen.getByLabelText("Close fullscreen browser").className).toContain("mobile-fullscreen-action");
+
+    fireEvent.click(screen.getByLabelText("Toggle fullscreen view controls"));
+    expect(screen.getByLabelText("Fullscreen view controls")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Fullscreen visual zoom"), { target: { value: "125" } });
     expect(props.onBrowserZoomChange).toHaveBeenCalledWith(125);
-    expect(screen.getByText("Viewport")).toBeTruthy();
-    fireEvent.click(screen.getByText("Exit"));
+
+    fireEvent.click(screen.getByLabelText("Edit fullscreen browser viewport"));
+    const editor = screen.getByLabelText("Fullscreen viewport controls");
+    expect(editor).toBeTruthy();
+    expect(screen.queryByLabelText("Fullscreen view controls")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Fullscreen viewport width"), { target: { value: "768" } });
+    fireEvent.change(screen.getByLabelText("Fullscreen viewport height"), { target: { value: "1024" } });
+    fireEvent.click(within(editor).getByText("Apply"));
+    await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(768, 1024));
+    expect(screen.getByRole("dialog", { name: "Fullscreen browser viewer" })).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Close fullscreen browser"));
     expect(screen.queryByRole("dialog", { name: "Fullscreen browser viewer" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByLabelText("Open fullscreen browser"));
   });
 
   it("shows a viewport save error when persistence fails", async () => {
@@ -410,6 +444,7 @@ describe("MobileSplitScreen", () => {
   it("shows the running session grid", () => {
     renderMobileSplit();
 
+    openWorkspaceTools();
     fireEvent.click(screen.getByLabelText("Toggle grid view"));
 
     const grid = screen.getByLabelText("Running browser grid");

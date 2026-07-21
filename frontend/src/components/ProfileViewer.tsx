@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
-import { ClipboardCopy, Code2, Maximize2, Minimize2 } from "lucide-react";
+import { ClipboardCopy, Code2, Ellipsis, Maximize2, Minimize2 } from "lucide-react";
 import { api } from "../lib/api";
 
 interface ProfileViewerProps {
@@ -7,6 +7,7 @@ interface ProfileViewerProps {
   cdpUrl: string | null;
   clipboardSync: boolean;
   canInteract?: boolean;
+  compactControls?: boolean;
   layoutMode?: "inline" | "fullscreen";
   viewportScale?: number;
   onDisconnect: () => void;
@@ -84,6 +85,7 @@ export function ProfileViewer({
   cdpUrl,
   clipboardSync: initialClipboardSync,
   canInteract = true,
+  compactControls = false,
   layoutMode = "inline",
   viewportScale = 1,
   onDisconnect,
@@ -100,6 +102,7 @@ export function ProfileViewer({
   );
   const [cdpCopied, setCdpCopied] = useState(false);
   const [pastePanelOpen, setPastePanelOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [pasteError, setPasteError] = useState<string | null>(null);
   const [pasting, setPasting] = useState(false);
@@ -159,7 +162,21 @@ export function ProfileViewer({
 
     setPasteText("");
     setPastePanelOpen(false);
+    // Compact mobile tools are deliberately transient. Once an action has
+    // completed, return the VNC surface to its unobstructed state.
+    setToolsOpen(false);
   }, [pasteText, sendTextToRemoteClipboard]);
+
+  useEffect(() => {
+    if (layoutMode !== "fullscreen") return;
+
+    // The parent mobile fullscreen surface owns its own compact controls.
+    // Do not carry an inline tools drawer into that surface, where it would
+    // cover the live browser before the operator explicitly asks for it.
+    setToolsOpen(false);
+    setPastePanelOpen(false);
+    setPasteError(null);
+  }, [layoutMode]);
 
   useEffect(() => {
     let rfb: any = null;
@@ -514,6 +531,63 @@ export function ProfileViewer({
     };
   }, [effectiveViewportScale, layoutMode, profileId]);
 
+  const remoteToolButtons = (
+    <>
+      {cdpUrl && (
+        <button
+          type="button"
+          onClick={() => {
+            const base = `${window.location.protocol}//${window.location.host}${cdpUrl}`;
+            navigator.clipboard?.writeText(base).then(() => {
+              setCdpCopied(true);
+              setTimeout(() => setCdpCopied(false), 2000);
+            }).catch((err) => console.warn("[cdp] copy failed:", err));
+          }}
+          className={compactControls ? "mobile-vnc-tool-button" : `p-1 ${cdpCopied ? "text-emerald-400" : "text-gray-500 hover:text-gray-300"}`}
+          aria-label="Copy CDP endpoint URL"
+          title={cdpCopied ? "Copied!" : "Copy CDP endpoint URL"}
+        >
+          <Code2 className="h-3.5 w-3.5" aria-hidden="true" />
+          {compactControls ? <span>{cdpCopied ? "Copied" : "CDP"}</span> : null}
+        </button>
+      )}
+      {canInteract ? (
+        <>
+          <button
+            type="button"
+            onClick={() => {
+              setPasteError(null);
+              setPastePanelOpen(true);
+            }}
+            className={compactControls ? "mobile-vnc-tool-button" : "rounded px-2 py-1 text-xs text-gray-300 hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-gray-600"}
+            title="Paste text from this device into the remote browser"
+            aria-label="Paste text into remote browser"
+            disabled={!connected}
+          >
+            Paste
+          </button>
+          <button
+            type="button"
+            onClick={() => setClipboardSync(!clipboardSync)}
+            className={compactControls ? "mobile-vnc-tool-button" : `p-1 ${clipboardSync ? "text-accent" : "text-gray-500 hover:text-gray-300"}`}
+            aria-label={clipboardSync ? "Disable clipboard sync" : "Enable clipboard sync"}
+            title={
+              clipboardSupported
+                ? clipboardSync
+                  ? "Disable clipboard sync"
+                  : "Enable clipboard sync"
+                : "Clipboard sync is unavailable in this browser"
+            }
+            disabled={!connected || !clipboardSupported}
+          >
+            <ClipboardCopy className="h-3.5 w-3.5" aria-hidden="true" />
+            {compactControls ? <span>Clipboard</span> : null}
+          </button>
+        </>
+      ) : null}
+    </>
+  );
+
   if (error) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -526,9 +600,8 @@ export function ProfileViewer({
   }
 
   return (
-    <div className="relative h-full flex flex-col">
-      {/* Toolbar */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-surface-1 border-b border-border">
+    <div className={`profile-viewer relative flex h-full flex-col ${compactControls ? "profile-viewer-compact" : ""}`}>
+      <div className="profile-viewer-toolbar flex items-center justify-between bg-surface-1 px-3 py-1.5 border-b border-border">
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-yellow-400 animate-pulse"}`} />
           <span className="text-xs text-gray-400">
@@ -545,65 +618,39 @@ export function ProfileViewer({
           )}
         </div>
         <div className="flex items-center gap-1">
-          {cdpUrl && (
+          {compactControls ? (
+            cdpUrl || canInteract ? (
+              <button
+                type="button"
+                className="mobile-vnc-tools-toggle"
+                aria-label={toolsOpen ? "Close remote browser tools" : "Open remote browser tools"}
+                aria-expanded={toolsOpen}
+                aria-controls="mobile-remote-browser-tools"
+                onClick={() => setToolsOpen((open) => !open)}
+              >
+                <Ellipsis className="h-4 w-4" aria-hidden="true" />
+              </button>
+            ) : null
+          ) : remoteToolButtons}
+          {!compactControls ? (
             <button
               type="button"
-              onClick={() => {
-                const base = `${window.location.protocol}//${window.location.host}${cdpUrl}`;
-                navigator.clipboard?.writeText(base).then(() => {
-                  setCdpCopied(true);
-                  setTimeout(() => setCdpCopied(false), 2000);
-                }).catch((err) => console.warn("[cdp] copy failed:", err));
-              }}
-              className={`p-1 ${cdpCopied ? "text-emerald-400" : "text-gray-500 hover:text-gray-300"}`}
-              title={cdpCopied ? "Copied!" : "Copy CDP endpoint URL"}
+              onClick={toggleFullscreen}
+              className="text-gray-500 hover:text-gray-300 p-1"
+              aria-label={fullscreen ? "Exit native fullscreen" : "Native fullscreen"}
+              title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
             >
-              <Code2 className="h-3.5 w-3.5" />
+              {fullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
             </button>
-          )}
-          {canInteract && (
-            <>
-              <button
-                type="button"
-                onClick={() => {
-                  setPasteError(null);
-                  setPastePanelOpen(true);
-                }}
-                className="rounded px-2 py-1 text-xs text-gray-300 hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-gray-600"
-                title="Paste text from this device into the remote browser"
-                aria-label="Paste text into remote browser"
-                disabled={!connected}
-              >
-                Paste
-              </button>
-              <button
-                type="button"
-                onClick={() => setClipboardSync(!clipboardSync)}
-                className={`p-1 ${clipboardSync ? "text-accent" : "text-gray-500 hover:text-gray-300"}`}
-                aria-label={clipboardSync ? "Disable clipboard sync" : "Enable clipboard sync"}
-                title={
-                  clipboardSupported
-                    ? clipboardSync
-                      ? "Disable clipboard sync"
-                      : "Enable clipboard sync"
-                    : "Clipboard sync is unavailable in this browser"
-                }
-                disabled={!connected || !clipboardSupported}
-              >
-                <ClipboardCopy className="h-3.5 w-3.5" />
-              </button>
-            </>
-          )}
-          <button
-            type="button"
-            onClick={toggleFullscreen}
-            className="text-gray-500 hover:text-gray-300 p-1"
-            title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
-          >
-            {fullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-          </button>
+          ) : null}
         </div>
       </div>
+
+      {compactControls && toolsOpen ? (
+        <div id="mobile-remote-browser-tools" className="mobile-vnc-tools-drawer" aria-label="Remote browser tools">
+          {remoteToolButtons}
+        </div>
+      ) : null}
 
       {pastePanelOpen && (
         <form

@@ -199,9 +199,21 @@ STRUCTURE_SCRIPT = r"""(() => {
   const controls = document.querySelector('.mobile-control-pane');
   const frame = document.querySelector('[data-testid="mobile-browser-frame"]');
   const chat = document.querySelector('[aria-label="Chat history"]');
+  const chatHeader = document.querySelector('.mobile-chat-header');
+  const composerForm = document.querySelector('.mobile-chat-form');
   const composer = document.querySelector('#mobile-task-input');
   const required = [root, live, controls, frame, chat, composer];
   const rect = (node) => node ? node.getBoundingClientRect().toJSON() : null;
+  const visibleHeight = (node) => {
+    if (!node) return 0;
+    const value = node.getBoundingClientRect();
+    return Math.max(0, Math.min(value.bottom, window.innerHeight) - Math.max(value.top, 0));
+  };
+  const fullyVisible = (node) => {
+    if (!node) return false;
+    const value = node.getBoundingClientRect();
+    return value.top >= -1 && value.bottom <= window.innerHeight + 1 && value.width > 1 && value.height > 1;
+  };
   return {
     ready: required.every(Boolean),
     innerWidth: window.innerWidth,
@@ -212,6 +224,11 @@ STRUCTURE_SCRIPT = r"""(() => {
     controls: rect(controls),
     frame: rect(frame),
     chat: rect(chat),
+    chatHeader: rect(chatHeader),
+    chatVisibleHeight: Math.round(visibleHeight(chat) * 10) / 10,
+    chatHeaderVisible: fullyVisible(chatHeader),
+    composerForm: rect(composerForm),
+    composerFormVisible: fullyVisible(composerForm),
     composer: rect(composer),
     hasAttach: !!document.querySelector('button[aria-label="Attach files"]'),
     hasRunSettings: !!document.querySelector('button[aria-label="Run settings"]'),
@@ -579,6 +596,18 @@ def verify_live_viewport_controls(
         "document.querySelector('[aria-label=\"Browser pane size\"]')?.textContent?.trim() === '50%' && "
         "document.querySelector('[aria-label=\"Visual zoom level\"]')?.textContent?.trim() === '100%'",
         "live viewport controls reset state",
+        5,
+    )
+    closed = browser.eval(r"""(() => {
+      const button = document.querySelector('button[aria-label="Edit browser viewport"]');
+      if (!button) return false;
+      if (button.getAttribute('aria-expanded') === 'true') button.click();
+      return true;
+    })()""")
+    add_check(result, "live controls return to compact workspace", bool(closed), {"clicked": closed})
+    browser.wait_for(
+        "!document.querySelector('[aria-label=\"Viewport controls\"]')",
+        "compact workspace after live controls",
         5,
     )
 
@@ -1013,6 +1042,16 @@ def run_viewport(
     if profile_id:
         select_and_connect(browser, result, profile_id, timeout)
         verify_live_viewport_controls(browser, result, base_url, profile_id, timeout, auth_token)
+        compact_structure = browser.eval(STRUCTURE_SCRIPT)
+        if expected_layout == "vertical":
+            add_check(
+                result,
+                "portrait keeps task history and composer visible beside live VNC",
+                bool(compact_structure.get("chatHeaderVisible"))
+                and (compact_structure.get("chatVisibleHeight") or 0) >= 80
+                and bool(compact_structure.get("composerFormVisible")),
+                compact_structure,
+            )
         manual_remote_paste(browser, result, base_url, profile_id, timeout, auth_token)
         if remote_probe_url:
             remote_keyboard_navigation(

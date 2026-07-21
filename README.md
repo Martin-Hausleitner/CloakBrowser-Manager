@@ -91,7 +91,7 @@ The administrator-only **Streaming benchmarks** view reads the configured report
 
 The latest verified warm local baseline used five runs: the Manager health endpoint reached a median first byte at **8.196 ms**, and the real KasmVNC/noVNC WebSocket upgrade reached a median **66.627 ms** handshake. Selkies was explicitly `not_installed`; Sunshine/Moonlight and Guacamole were explicitly `architecture_only`. The redacted report was rendered and refreshed in an iPhone-14-sized manager view with no horizontal overflow. These are loopback regression probes for the existing path, not a cross-technology winner claim; the full context and limits are in [docs/REMOTE-STREAMING-BENCHMARK.md](docs/REMOTE-STREAMING-BENCHMARK.md).
 
-The current compact mobile split has separately passed the live VNC gate across iPhone 14 portrait, iPhone Pro Max portrait, iPhone 14 landscape, and a touch tablet: **139/139 checks** passed with one connected canvas, no horizontal overflow, touch/keyboard input, fullscreen, grid, ratio/zoom adjustment, and a visible task chat/composer. The evidence and remaining physical-iPhone/Safari limits are in [docs/MOBILE-E2E-VALIDATION.md](docs/MOBILE-E2E-VALIDATION.md).
+The current compact mobile split has separately passed the live VNC gate across iPhone 14 portrait, iPhone Pro Max portrait, iPhone 14 landscape, and a touch tablet: **146/146 checks** passed with one connected canvas, no horizontal overflow, touch/keyboard input, fullscreen, grid, ratio/zoom adjustment, and a visible task chat/composer. The gate also guards against reopening the viewport tools leaving the task workspace hidden. The evidence and remaining physical-iPhone/Safari limits are in [docs/MOBILE-E2E-VALIDATION.md](docs/MOBILE-E2E-VALIDATION.md).
 
 ## Development
 

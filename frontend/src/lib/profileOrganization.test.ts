@@ -122,10 +122,10 @@ describe("compareOrganizedProfiles", () => {
     ];
 
     expect([...profiles].sort(compareOrganizedProfiles).map((sorted) => sorted.id)).toEqual([
+      "pinned-created-new",
+      "pinned-name-a",
       "pinned-created-old-a",
       "pinned-created-old-b",
-      "pinned-name-a",
-      "pinned-created-new",
       "pinned-folder-a",
       "pinned-project-a",
       "pinned-z",

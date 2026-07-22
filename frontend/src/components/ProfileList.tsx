@@ -46,10 +46,13 @@ export function ProfileList({
   const [search, setSearch] = useState("");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
 
-  const filtered = profiles.filter((p) =>
-    `${p.name} ${profileOrganizationLabel(p)}`.toLowerCase().includes(search.toLowerCase()),
-  );
-  const groups = useMemo(() => groupProfiles(filtered), [filtered]);
+  const { filtered, groups } = useMemo(() => {
+    const normalizedSearch = search.trim().toLowerCase();
+    const nextFiltered = profiles.filter((profile) =>
+      `${profile.name} ${profileOrganizationLabel(profile)}`.toLowerCase().includes(normalizedSearch),
+    );
+    return { filtered: nextFiltered, groups: groupProfiles(nextFiltered) };
+  }, [profiles, search]);
 
   const runningCount = profiles.filter((p) => p.status === "running").length;
   const toggleGroup = (key: string) => {
@@ -94,8 +97,9 @@ export function ProfileList({
             {profiles.length === 0 ? "No profiles yet" : "No matches"}
           </div>
         )}
-        {groups.map((group) => {
+        {groups.map((group, groupIndex) => {
           const collapsed = collapsedGroups.has(group.key);
+          const countId = `profile-group-count-${groupIndex}`;
           return (
             <section key={group.key} className="mb-2">
               <button
@@ -104,10 +108,11 @@ export function ProfileList({
                 className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500 hover:bg-surface-2"
                 aria-expanded={!collapsed}
                 aria-label={`Profile group: ${group.label}`}
+                aria-describedby={countId}
               >
                 {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                 <span className="min-w-0 flex-1 truncate">{group.label}</span>
-                <span>{group.profiles.length}</span>
+                <span id={countId}>{group.profiles.length}</span>
               </button>
               {!collapsed ? (
                 <div className="mt-1">
@@ -119,7 +124,10 @@ export function ProfileList({
                           ? "bg-surface-3 border-border-hover"
                           : "hover:bg-surface-2 border-transparent"
                       }`}
-                      style={profile.accent_color ? { borderLeftColor: profile.accent_color, borderLeftWidth: 3 } : undefined}
+                      style={{
+                        borderLeftWidth: 3,
+                        ...(profile.accent_color ? { borderLeftColor: profile.accent_color } : {}),
+                      }}
                     >
                       <div className="flex items-start gap-1.5">
                         <button

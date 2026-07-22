@@ -1,6 +1,9 @@
 import type { Profile } from "./api";
 
-const collator = new Intl.Collator(undefined, { sensitivity: "base" });
+function compareText(a: string, b: string) {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
 
 export function profileOrganizationLabel(profile: Profile) {
   const project = profile.project_id || "default";
@@ -10,17 +13,17 @@ export function profileOrganizationLabel(profile: Profile) {
 export function compareOrganizedProfiles(a: Profile, b: Profile) {
   if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
 
-  const project = collator.compare(a.project_id || "default", b.project_id || "default");
+  const project = compareText(a.project_id || "default", b.project_id || "default");
   if (project !== 0) return project;
 
-  const folder = collator.compare(a.folder_path || "", b.folder_path || "");
+  const folder = compareText(a.folder_path || "", b.folder_path || "");
   if (folder !== 0) return folder;
 
-  const name = collator.compare(a.name, b.name);
+  const name = compareText(a.name, b.name);
   if (name !== 0) return name;
 
-  const createdAt = collator.compare(a.created_at, b.created_at);
+  const createdAt = compareText(b.created_at, a.created_at);
   if (createdAt !== 0) return createdAt;
 
-  return collator.compare(a.id, b.id);
+  return compareText(a.id, b.id);
 }

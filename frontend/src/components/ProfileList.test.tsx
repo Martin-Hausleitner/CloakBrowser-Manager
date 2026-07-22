@@ -63,6 +63,9 @@ describe("ProfileList organization", () => {
 
     const commerce = screen.getByRole("button", { name: "Profile group: commerce / checkout" });
     expect(commerce).toBeTruthy();
+    const countId = commerce.getAttribute("aria-describedby");
+    expect(countId).toBeTruthy();
+    expect(document.getElementById(countId!)?.textContent).toBe("2");
     expect(screen.getByRole("button", { name: "Profile group: operations" })).toBeTruthy();
     const names = screen.getAllByRole("button")
       .map((button) => button.textContent ?? "")

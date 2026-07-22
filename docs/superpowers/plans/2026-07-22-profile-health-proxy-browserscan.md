@@ -10,7 +10,7 @@
 
 **Design source:** `docs/superpowers/specs/2026-07-22-profile-health-proxy-browserscan-design.md`
 
-**Execution record (22 July 2026):** The implementation landed in commits `e040b76` and `9e14ac8`. Tasks 1-7 are complete. The fresh full suites passed 343 backend, 132 frontend and 26 script tests plus the production build. The protected VCVM deployment on loopback port `18116` passed automatic first-launch health, manual rerun, refresh persistence, masked outbound IP, 100/100 fingerprint consistency and 100/100 BrowserScan authenticity. The authenticated mobile release passed 316 checks and 31 screenshots under the ignored local artifact directory `artifacts/mobile-ui-gate-health-20260722-rerun/`, and the redacted acceptance report passed. The Manager container reached the VCVM-local proxychecker health endpoint, but a real configured-proxy `/check` and live viewer-versus-operator health rerun remain explicit follow-up evidence. Safari Remote Automation is disabled, so WebKit and physical-device proof remain external blockers.
+**Execution record (22 July 2026):** The implementation landed in commits `e040b76` and `9e14ac8`, and the first documentation/evidence push was verified on GitHub at `1663f36`. Tasks 1-7 are complete. The fresh full suites passed 343 backend, 132 frontend and 26 script tests plus the production build. The protected VCVM deployment on loopback port `18116` passed automatic first-launch health, manual rerun, refresh persistence, masked outbound IP, 100/100 fingerprint consistency and 100/100 BrowserScan authenticity. The authenticated mobile release passed 316 checks and 31 screenshots under the ignored local artifact directory `artifacts/mobile-ui-gate-health-20260722-rerun/`, and the redacted acceptance report passed. The Manager container reached the VCVM-local proxychecker health endpoint, but a real configured-proxy `/check` and live viewer-versus-operator health rerun remain explicit follow-up evidence. Safari Remote Automation is disabled, so WebKit and physical-device proof remain external blockers. Local, `git ls-remote` and GitHub API commit SHAs matched, and GitHub bytes for README, continuation skill, acceptance matrix, plan and implementation were read back successfully.
 
 ---
 
@@ -273,18 +273,18 @@ Run: `git diff --cached --stat && git diff --cached`
 
 Expected: no generated `tsbuildinfo`, unrelated benchmark/Fintaro artifacts, credentials, or user-owned files are staged.
 
-- [ ] **Step 2: Commit the vertical slice**
+- [x] **Step 2: Commit the vertical slice**
 
 Use a focused message such as `feat(health): add redacted profile runtime checks`.
 
-- [ ] **Step 3: Push only the active fork branch**
+- [x] **Step 3: Push only the active fork branch**
 
 Push `integrate-pr-47-27-26` to the `fork` remote. Do not push to upstream or Fintaro.
 
-- [ ] **Step 4: Verify the remote SHA and GitHub files**
+- [x] **Step 4: Verify the remote SHA and GitHub files**
 
 Confirm `fork/integrate-pr-47-27-26` equals local `HEAD`, and read back the committed README, continuation skill, design, plan, and implementation files from the fork GitHub URLs.
 
-- [ ] **Step 5: Record execution evidence**
+- [x] **Step 5: Record execution evidence**
 
 Mark completed checkboxes, add commit SHA and fresh test/deployment evidence to this plan, and leave all unproven device/network requirements explicit.

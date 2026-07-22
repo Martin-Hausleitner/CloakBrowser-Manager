@@ -435,7 +435,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             evidence = f"{gate.get('measured_candidates', 0)} measured candidates"
         else:
             evidence = str(gate)
-        lines.append(f"| `{name}` | `{gate_status}` | {redact_text(evidence).replace('|', '\\|')} |")
+        safe_evidence = redact_text(evidence).replace("|", "\\|")
+        lines.append(f"| `{name}` | `{gate_status}` | {safe_evidence} |")
     if report.get("failures"):
         lines.extend(["", "## Failures", ""])
         for failure in report["failures"]:

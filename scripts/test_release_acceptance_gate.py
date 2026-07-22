@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -84,6 +85,26 @@ def streaming_report() -> dict[str, object]:
 
 
 class ReleaseAcceptanceGateTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("python3.11"), "Python 3.11 is not installed")
+    def test_release_gate_compiles_on_python_311(self) -> None:
+        python_311 = shutil.which("python3.11")
+        assert python_311
+        completed = subprocess.run(
+            [
+                python_311,
+                "-c",
+                "from pathlib import Path; "
+                "source = Path(__import__('sys').argv[1]).read_text(encoding='utf-8'); "
+                "compile(source, __import__('sys').argv[1], 'exec')",
+                str(RUNNER),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def run_gate(self, root: Path, *extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [

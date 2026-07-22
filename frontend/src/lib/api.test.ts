@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { api } from "./api";
+import { api, type ProfileCreateData, type ProfileHarness } from "./api";
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -85,6 +85,24 @@ describe("api.createProfile", () => {
     expect(url).toBe("/api/profiles");
     expect(options.method).toBe("POST");
     expect(JSON.parse(options.body)).toEqual({ name: "New" });
+  });
+
+  it("serializes profile organization and preferred harness metadata", async () => {
+    const harness: ProfileHarness = "browser-use";
+    const payload = {
+      name: "Buyer research",
+      project_id: "marketplace",
+      folder_path: "buyers/us",
+      pinned: true,
+      accent_color: "#06b6d4",
+      harness,
+    } satisfies ProfileCreateData;
+    mockFetch.mockResolvedValueOnce(jsonResponse({ id: "3", ...payload }));
+
+    await api.createProfile(payload);
+
+    const [, options] = mockFetch.mock.calls[0];
+    expect(JSON.parse(options.body)).toEqual(payload);
   });
 });
 

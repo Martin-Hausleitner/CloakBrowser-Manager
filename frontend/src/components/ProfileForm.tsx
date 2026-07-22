@@ -1,6 +1,6 @@
 import { Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { Profile, ProfileCreateData } from "../lib/api";
+import type { Profile, ProfileCreateData, ProfileHarness } from "../lib/api";
 
 interface ProfileFormProps {
   profile: Profile | null; // null = create mode
@@ -27,6 +27,14 @@ const TAG_COLORS = [
   "#a855f7", // purple
   "#f97316", // orange
   "#ec4899", // pink
+];
+
+const HARNESS_OPTIONS: Array<{ value: ProfileHarness; label: string }> = [
+  { value: "codex", label: "Codex" },
+  { value: "antigravity", label: "Antigravity" },
+  { value: "claude-code", label: "Claude Code" },
+  { value: "opencode", label: "OpenCode" },
+  { value: "browser-use", label: "Browser Use" },
 ];
 
 const GPU_PRESETS: Record<string, { vendor: string; renderer: string }> = {
@@ -58,6 +66,11 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
   const [form, setForm] = useState<ProfileCreateData>({
     name: "",
     sandbox_id: "default",
+    project_id: "default",
+    folder_path: "",
+    pinned: false,
+    accent_color: null,
+    harness: "codex",
     platform: "windows",
     screen_width: 1920,
     screen_height: 1080,
@@ -82,6 +95,11 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
       setForm({
         name: profile.name,
         sandbox_id: profile.sandbox_id,
+        project_id: profile.project_id,
+        folder_path: profile.folder_path,
+        pinned: profile.pinned,
+        accent_color: profile.accent_color,
+        harness: profile.harness,
         fingerprint_seed: profile.fingerprint_seed,
         proxy: profile.proxy,
         timezone: profile.timezone,
@@ -208,10 +226,11 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
         {/* Basic */}
         <section>
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Basic</h3>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="profile-form-grid">
             <div className="col-span-2">
-              <label className="label">Profile Name</label>
+              <label className="label" htmlFor="profile-name">Profile Name</label>
               <input
+                id="profile-name"
                 className="input"
                 value={form.name}
                 onChange={(e) => set("name", e.target.value)}
@@ -220,23 +239,9 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
               />
             </div>
             <div>
-              <label className="label">Access sandbox</label>
-              <input
-                className="input"
-                value={form.sandbox_id ?? "default"}
-                onChange={(e) => set("sandbox_id", e.target.value || "default")}
-                placeholder="e.g. research-team"
-                pattern="[A-Za-z0-9][A-Za-z0-9._-]*"
-                maxLength={80}
-                required
-              />
-              <p className="mt-1 text-[11px] text-gray-500">
-                People and Paperclip agents are granted access per sandbox.
-              </p>
-            </div>
-            <div>
-              <label className="label">Platform</label>
+              <label className="label" htmlFor="profile-platform">Platform</label>
               <select
+                id="profile-platform"
                 className="input"
                 value={form.platform}
                 onChange={(e) => set("platform", e.target.value)}
@@ -247,9 +252,10 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
               </select>
             </div>
             <div>
-              <label className="label">Fingerprint Seed</label>
+              <label className="label" htmlFor="profile-fingerprint-seed">Fingerprint Seed</label>
               <div className="flex gap-2">
                 <input
+                  id="profile-fingerprint-seed"
                   className="input flex-1 no-spin"
                   type="number"
                   value={form.fingerprint_seed ?? ""}
@@ -290,6 +296,100 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
               </div>
             </div>
           </div>
+        </section>
+
+        {/* Organization */}
+        <section>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Organization</h3>
+          <div className="profile-form-grid">
+            <div>
+              <label className="label" htmlFor="profile-project">Project</label>
+              <input
+                id="profile-project"
+                className="input"
+                value={form.project_id ?? "default"}
+                onChange={(e) => set("project_id", e.target.value || "default")}
+                placeholder="default"
+                pattern="[A-Za-z0-9][A-Za-z0-9._-]*"
+                maxLength={80}
+                required
+                title="Start with a letter or number; then use letters, numbers, dots, underscores, or hyphens."
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="profile-folder">Folder</label>
+              <input
+                id="profile-folder"
+                className="input"
+                value={form.folder_path ?? ""}
+                onChange={(e) => set("folder_path", e.target.value)}
+                placeholder="e.g. buyers/us"
+                pattern={"[A-Za-z0-9][A-Za-z0-9._ \\-]*(/[A-Za-z0-9][A-Za-z0-9._ \\-]*)*"}
+                maxLength={240}
+                aria-describedby="profile-folder-help"
+              />
+              <p id="profile-folder-help" className="mt-1 text-[11px] text-gray-500">
+                Nested folders use / between segments; no leading or trailing slash.
+              </p>
+            </div>
+            <div>
+              <label className="label" htmlFor="profile-accent-color">Accent color</label>
+              <input
+                id="profile-accent-color"
+                className="input h-9 p-1"
+                type="color"
+                value={form.accent_color ?? "#6366f1"}
+                onChange={(e) => set("accent_color", e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="profile-harness">Preferred harness</label>
+              <select
+                id="profile-harness"
+                className="input"
+                value={form.harness ?? "codex"}
+                onChange={(e) => set("harness", e.target.value as ProfileHarness)}
+              >
+                {HARNESS_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-[11px] text-gray-500">
+                Client label only. Execution still depends on the verified bridge.
+              </p>
+            </div>
+            <label className="col-span-2 flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.pinned ?? false}
+                onChange={(e) => set("pinned", e.target.checked)}
+                className="rounded border-border bg-surface-2"
+                aria-label="Pinned"
+              />
+              Pinned
+            </label>
+          </div>
+        </section>
+
+        {/* Access */}
+        <section>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Access</h3>
+          <div>
+            <label className="label" htmlFor="profile-access-sandbox">Access sandbox</label>
+            <input
+              id="profile-access-sandbox"
+              className="input"
+              value={form.sandbox_id ?? "default"}
+              onChange={(e) => set("sandbox_id", e.target.value || "default")}
+              placeholder="e.g. research-team"
+              pattern="[A-Za-z0-9][A-Za-z0-9._-]*"
+              maxLength={80}
+              required
+            />
+            <p className="mt-1 text-[11px] text-gray-500">
+              People and Paperclip agents are granted access per sandbox.
+            </p>
+            </div>
         </section>
 
         {/* Network */}

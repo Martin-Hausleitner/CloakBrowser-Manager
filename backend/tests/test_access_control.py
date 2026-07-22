@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import struct
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -111,6 +112,43 @@ def create_scoped_profiles():
     alpha = db.create_profile("Alpha browser", sandbox_id="alpha", proxy="http://secret-proxy:8080")
     beta = db.create_profile("Beta browser", sandbox_id="beta", proxy="http://other-proxy:8080")
     return alpha, beta
+
+
+def test_admin_access_sandbox_summary_includes_only_redacted_organization_context(
+    client_access: TestClient,
+):
+    db.create_profile(
+        "Checkout QA",
+        sandbox_id="research",
+        project_id="commerce",
+        folder_path="checkout/us",
+        proxy="http://secret-proxy-user:secret-password@example.invalid:8080",
+        fingerprint_seed=12345,
+        launch_args=["--private-diagnostic-flag"],
+    )
+    db.create_profile(
+        "Payments QA",
+        sandbox_id="research",
+        project_id="commerce",
+        folder_path="payments",
+    )
+
+    response = client_access.get("/api/access/sandboxes", headers=bootstrap_headers())
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "sandbox_id": "research",
+            "profile_count": 2,
+            "project_ids": ["commerce"],
+            "folder_paths": ["checkout/us", "payments"],
+            "profile_names": ["Checkout QA", "Payments QA"],
+        }
+    ]
+    serialized = json.dumps(response.json())
+    assert "secret-password" not in serialized
+    assert "private-diagnostic" not in serialized
+    assert "fingerprint_seed" not in serialized
 
 
 def test_password_hashing_is_salted_and_verifiable():

@@ -3,9 +3,30 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+FOLDER_SEGMENT_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._ -]*$"
+ACCENT_COLOR_PATTERN = r"^#[0-9A-Fa-f]{6}$"
+Harness = Literal["codex", "antigravity", "claude-code", "opencode", "browser-use"]
+
+
+def _validate_folder_path(value: str) -> str:
+    if value == "":
+        return value
+    if len(value) > 240:
+        raise ValueError("folder_path must be at most 240 characters")
+    if value.startswith("/") or value.endswith("/"):
+        raise ValueError("folder_path must not start or end with '/'")
+    segments = value.split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
+        raise ValueError("folder_path must contain friendly path segments")
+    if any(re.fullmatch(FOLDER_SEGMENT_PATTERN, segment) is None for segment in segments):
+        raise ValueError("folder_path must contain friendly path segments")
+    return value
 
 
 class ProfileCreate(BaseModel):
@@ -14,8 +35,13 @@ class ProfileCreate(BaseModel):
         default="default",
         min_length=1,
         max_length=80,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        pattern=SLUG_PATTERN,
     )
+    project_id: str = Field(default="default", min_length=1, max_length=80, pattern=SLUG_PATTERN)
+    folder_path: str = Field(default="", max_length=240)
+    pinned: bool = False
+    accent_color: str | None = Field(default=None, pattern=ACCENT_COLOR_PATTERN)
+    harness: Harness = "codex"
     fingerprint_seed: int | None = None  # random if not set
     proxy: str | None = None  # "http://user:pass@host:port" or null
     timezone: str | None = None  # "America/New_York"
@@ -39,6 +65,11 @@ class ProfileCreate(BaseModel):
     notes: str | None = None
     tags: list[TagCreate] | None = None
 
+    @field_validator("folder_path")
+    @classmethod
+    def validate_folder_path(cls, value: str) -> str:
+        return _validate_folder_path(value)
+
 
 class ProfileUpdate(BaseModel):
     name: str | None = None
@@ -46,8 +77,13 @@ class ProfileUpdate(BaseModel):
         default=None,
         min_length=1,
         max_length=80,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        pattern=SLUG_PATTERN,
     )
+    project_id: str | None = Field(default=None, min_length=1, max_length=80, pattern=SLUG_PATTERN)
+    folder_path: str | None = Field(default=None, max_length=240)
+    pinned: bool | None = None
+    accent_color: str | None = Field(default=None, pattern=ACCENT_COLOR_PATTERN)
+    harness: Harness | None = None
     fingerprint_seed: int | None = None
     proxy: str | None = Field(default=None)
     timezone: str | None = Field(default=None)
@@ -71,6 +107,13 @@ class ProfileUpdate(BaseModel):
     notes: str | None = Field(default=None)
     tags: list[TagCreate] | None = None
 
+    @field_validator("folder_path")
+    @classmethod
+    def validate_folder_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_folder_path(value)
+
 
 class TagCreate(BaseModel):
     tag: str
@@ -86,6 +129,11 @@ class ProfileResponse(BaseModel):
     id: str
     name: str
     sandbox_id: str = "default"
+    project_id: str = Field(default="default", min_length=1, max_length=80, pattern=SLUG_PATTERN)
+    folder_path: str = Field(default="", max_length=240)
+    pinned: bool = False
+    accent_color: str | None = Field(default=None, pattern=ACCENT_COLOR_PATTERN)
+    harness: Harness = "codex"
     fingerprint_seed: int
     proxy: str | None = None
     timezone: str | None = None
@@ -103,6 +151,11 @@ class ProfileResponse(BaseModel):
     geoip: bool = False
     clipboard_sync: bool = True
     auto_launch: bool = False
+
+    @field_validator("folder_path")
+    @classmethod
+    def validate_folder_path(cls, value: str) -> str:
+        return _validate_folder_path(value)
 
     @field_validator("clipboard_sync", mode="before")
     @classmethod

@@ -65,6 +65,11 @@ def init_db():
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 sandbox_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                folder_path TEXT NOT NULL DEFAULT '',
+                pinned BOOLEAN NOT NULL DEFAULT 0,
+                accent_color TEXT,
+                harness TEXT NOT NULL DEFAULT 'codex',
                 fingerprint_seed INTEGER NOT NULL,
                 proxy TEXT,
                 timezone TEXT,
@@ -229,6 +234,21 @@ def init_db():
         if "sandbox_id" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN sandbox_id TEXT NOT NULL DEFAULT 'default'")
             conn.commit()
+        if "project_id" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'")
+            conn.commit()
+        if "folder_path" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN folder_path TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+        if "pinned" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN pinned BOOLEAN NOT NULL DEFAULT 0")
+            conn.commit()
+        if "accent_color" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN accent_color TEXT")
+            conn.commit()
+        if "harness" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN harness TEXT NOT NULL DEFAULT 'codex'")
+            conn.commit()
 
 
 def _now() -> str:
@@ -249,14 +269,21 @@ def create_profile(
     with get_db() as conn:
         conn.execute(
             """INSERT INTO profiles (
-                id, name, sandbox_id, fingerprint_seed, proxy, timezone, locale, platform,
+                id, name, sandbox_id, project_id, folder_path, pinned, accent_color, harness,
+                fingerprint_seed, proxy, timezone, locale, platform,
                 user_agent, screen_width, screen_height, gpu_vendor, gpu_renderer,
                 hardware_concurrency, humanize, human_preset, headless, geoip,
                 clipboard_sync, auto_launch, color_scheme, search_engine, launch_args, notes,
                 user_data_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                profile_id, name, fields.get("sandbox_id", "default"), seed,
+                profile_id, name, fields.get("sandbox_id", "default"),
+                fields.get("project_id", "default"),
+                fields.get("folder_path", ""),
+                fields.get("pinned", False),
+                fields.get("accent_color"),
+                fields.get("harness", "codex"),
+                seed,
                 fields.get("proxy"),
                 fields.get("timezone"),
                 fields.get("locale"),
@@ -307,7 +334,10 @@ def get_profile(profile_id: str) -> dict[str, Any] | None:
 
 def list_profiles() -> list[dict[str, Any]]:
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM profiles ORDER BY created_at DESC").fetchall()
+        rows = conn.execute(
+            """SELECT * FROM profiles
+            ORDER BY pinned DESC, project_id ASC, folder_path ASC, name ASC, created_at DESC, id ASC"""
+        ).fetchall()
         profiles = []
         for row in rows:
             profile = dict(row)
@@ -336,7 +366,8 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
         fields["launch_args"] = json.dumps(fields["launch_args"] or [])
 
     for col in (
-        "name", "sandbox_id", "fingerprint_seed", "proxy", "timezone", "locale", "platform",
+        "name", "sandbox_id", "project_id", "folder_path", "pinned", "accent_color", "harness",
+        "fingerprint_seed", "proxy", "timezone", "locale", "platform",
         "user_agent", "screen_width", "screen_height", "gpu_vendor", "gpu_renderer",
         "hardware_concurrency", "humanize", "human_preset", "headless", "geoip",
         "clipboard_sync", "auto_launch", "color_scheme", "search_engine", "launch_args", "notes",

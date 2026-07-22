@@ -1846,11 +1846,35 @@ async def rotate_access_agent_key(agent_id: str, request: Request):
 @app.get("/api/access/sandboxes")
 async def list_access_sandboxes(request: Request):
     _require_admin(request.scope)
-    counts: dict[str, int] = {}
+    summaries: dict[str, dict[str, Any]] = {}
     for profile in db.list_profiles():
         sandbox_id = str(profile.get("sandbox_id") or "default")
-        counts[sandbox_id] = counts.get(sandbox_id, 0) + 1
-    return [{"sandbox_id": key, "profile_count": counts[key]} for key in sorted(counts)]
+        summary = summaries.setdefault(
+            sandbox_id,
+            {
+                "profile_count": 0,
+                "project_ids": set(),
+                "folder_paths": set(),
+                "profile_names": set(),
+            },
+        )
+        summary["profile_count"] += 1
+        summary["project_ids"].add(str(profile.get("project_id") or "default"))
+        folder_path = str(profile.get("folder_path") or "")
+        if folder_path:
+            summary["folder_paths"].add(folder_path)
+        summary["profile_names"].add(str(profile.get("name") or "Unnamed profile"))
+
+    return [
+        {
+            "sandbox_id": sandbox_id,
+            "profile_count": summaries[sandbox_id]["profile_count"],
+            "project_ids": sorted(summaries[sandbox_id]["project_ids"]),
+            "folder_paths": sorted(summaries[sandbox_id]["folder_paths"]),
+            "profile_names": sorted(summaries[sandbox_id]["profile_names"]),
+        }
+        for sandbox_id in sorted(summaries)
+    ]
 
 
 # ── Task sessions ───────────────────────────────────────────────────────────

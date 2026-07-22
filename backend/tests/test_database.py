@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+import sqlite3
 import time
 from pathlib import Path
 
@@ -47,6 +49,64 @@ def test_init_db_idempotent(tmp_db: Path):
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     assert len(tables) >= 2
+
+
+def test_init_db_migrates_profile_organization_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    db_file = tmp_path / "profiles.db"
+    monkeypatch.setattr(db, "DB_PATH", db_file)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute(
+            """CREATE TABLE profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                sandbox_id TEXT NOT NULL DEFAULT 'default',
+                fingerprint_seed INTEGER NOT NULL,
+                proxy TEXT,
+                timezone TEXT,
+                locale TEXT,
+                platform TEXT DEFAULT 'windows',
+                user_agent TEXT,
+                screen_width INTEGER DEFAULT 1920,
+                screen_height INTEGER DEFAULT 1080,
+                gpu_vendor TEXT,
+                gpu_renderer TEXT,
+                hardware_concurrency INTEGER,
+                humanize BOOLEAN DEFAULT 0,
+                human_preset TEXT DEFAULT 'default',
+                headless BOOLEAN DEFAULT 0,
+                geoip BOOLEAN DEFAULT 0,
+                clipboard_sync BOOLEAN DEFAULT 1,
+                auto_launch BOOLEAN DEFAULT 0,
+                color_scheme TEXT,
+                search_engine TEXT,
+                launch_args TEXT DEFAULT '[]',
+                notes TEXT,
+                user_data_dir TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO profiles (
+                id, name, sandbox_id, fingerprint_seed, user_data_dir, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ("old-profile", "Old", "secure-sandbox", 12345, str(tmp_path / "profiles" / "old-profile"), now, now),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    migrated = db.get_profile("old-profile")
+    assert migrated["sandbox_id"] == "secure-sandbox"
+    assert migrated["project_id"] == "default"
+    assert migrated["folder_path"] == ""
+    assert migrated["pinned"] == 0
+    assert migrated["accent_color"] is None
+    assert migrated["harness"] == "codex"
 
 
 # ── create_profile ───────────────────────────────────────────────────────────
@@ -114,6 +174,11 @@ def test_create_profile_with_tags(tmp_db: Path):
 
 def test_create_profile_defaults(tmp_db: Path):
     p = db.create_profile("Defaults")
+    assert p["project_id"] == "default"
+    assert p["folder_path"] == ""
+    assert p["pinned"] == 0
+    assert p["accent_color"] is None
+    assert p["harness"] == "codex"
     assert p["platform"] == "windows"
     assert p["screen_width"] == 1920
     assert p["screen_height"] == 1080
@@ -127,6 +192,25 @@ def test_create_profile_defaults(tmp_db: Path):
 def test_create_profile_with_launch_args(tmp_db: Path):
     p = db.create_profile("WithArgs", launch_args=["--load-extension=/tmp/ext", "--disable-features=Foo"])
     assert p["launch_args"] == ["--load-extension=/tmp/ext", "--disable-features=Foo"]
+
+
+def test_create_profile_with_organization_fields(tmp_db: Path):
+    p = db.create_profile(
+        "Organized",
+        sandbox_id="secure-alpha",
+        project_id="project-alpha",
+        folder_path="research/phase-1",
+        pinned=True,
+        accent_color="#1A2B3C",
+        harness="claude-code",
+    )
+
+    assert p["sandbox_id"] == "secure-alpha"
+    assert p["project_id"] == "project-alpha"
+    assert p["folder_path"] == "research/phase-1"
+    assert p["pinned"] == 1
+    assert p["accent_color"] == "#1A2B3C"
+    assert p["harness"] == "claude-code"
 
 
 def test_get_profile_launch_args_roundtrip(tmp_db: Path):
@@ -191,7 +275,52 @@ def test_list_profiles_ordered(tmp_db: Path):
     db.create_profile("Second")
     profiles = db.list_profiles()
     assert len(profiles) == 2
-    assert profiles[0]["name"] == "Second"  # newest first
+    assert [profile["name"] for profile in profiles] == ["First", "Second"]
+
+
+def test_list_profiles_orders_by_pin_project_folder_name(tmp_db: Path):
+    db.create_profile("Zulu", project_id="beta", folder_path="")
+    db.create_profile("Alpha", project_id="alpha", folder_path="z")
+    db.create_profile("Bravo", project_id="alpha", folder_path="a", pinned=True)
+    db.create_profile("Alpha", project_id="alpha", folder_path="a", pinned=True)
+    db.create_profile("Charlie", project_id="alpha", folder_path="a")
+
+    profiles = db.list_profiles()
+
+    assert [p["name"] for p in profiles] == ["Alpha", "Bravo", "Charlie", "Alpha", "Zulu"]
+
+
+def test_list_profiles_orders_identical_visible_keys_by_id(tmp_db: Path):
+    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    base_values = {
+        "name": "Same",
+        "sandbox_id": "same-sandbox",
+        "project_id": "same-project",
+        "folder_path": "same-folder",
+        "pinned": 1,
+        "fingerprint_seed": 12345,
+        "user_data_dir": str(tmp_db / "profiles" / "placeholder"),
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    with db.get_db() as conn:
+        for profile_id in ("b-profile", "a-profile"):
+            values = dict(base_values, id=profile_id, user_data_dir=str(tmp_db / "profiles" / profile_id))
+            conn.execute(
+                """INSERT INTO profiles (
+                    id, name, sandbox_id, project_id, folder_path, pinned,
+                    fingerprint_seed, user_data_dir, created_at, updated_at
+                ) VALUES (
+                    :id, :name, :sandbox_id, :project_id, :folder_path, :pinned,
+                    :fingerprint_seed, :user_data_dir, :created_at, :updated_at
+                )""",
+                values,
+            )
+        conn.commit()
+
+    profiles = db.list_profiles()
+
+    assert [profile["id"] for profile in profiles] == ["a-profile", "b-profile"]
 
 
 def test_list_profiles_includes_tags(tmp_db: Path):
@@ -261,6 +390,23 @@ def test_update_profile_partial(sample_profile: dict):
     updated = db.update_profile(sample_profile["id"], name="Renamed")
     assert updated["name"] == "Renamed"
     assert updated["fingerprint_seed"] == 12345  # unchanged
+
+
+def test_update_profile_organization_fields(sample_profile: dict):
+    updated = db.update_profile(
+        sample_profile["id"],
+        project_id="project-2",
+        folder_path="ops/on-call",
+        pinned=True,
+        accent_color="#ABCDEF",
+        harness="antigravity",
+    )
+
+    assert updated["project_id"] == "project-2"
+    assert updated["folder_path"] == "ops/on-call"
+    assert updated["pinned"] == 1
+    assert updated["accent_color"] == "#ABCDEF"
+    assert updated["harness"] == "antigravity"
 
 
 def test_update_profile_tags_replace(tmp_db: Path):

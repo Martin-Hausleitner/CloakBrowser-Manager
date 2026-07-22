@@ -2,10 +2,17 @@
  * API client for CloakBrowser Manager backend.
  */
 
+export type ProfileHarness = "codex" | "antigravity" | "claude-code" | "opencode" | "browser-use";
+
 export interface Profile {
   id: string;
   name: string;
   sandbox_id: string;
+  project_id: string;
+  folder_path: string;
+  pinned: boolean;
+  accent_color: string | null;
+  harness: ProfileHarness;
   fingerprint_seed: number;
   proxy: string | null;
   timezone: string | null;
@@ -39,6 +46,11 @@ export interface Profile {
 export interface ProfileCreateData {
   name: string;
   sandbox_id?: string;
+  project_id?: string;
+  folder_path?: string;
+  pinned?: boolean;
+  accent_color?: string | null;
+  harness?: ProfileHarness;
   fingerprint_seed?: number | null;
   proxy?: string | null;
   timezone?: string | null;
@@ -268,6 +280,9 @@ export interface TaskHarnessEvent {
 export interface AccessSandbox {
   sandbox_id: string;
   profile_count: number;
+  project_ids: string[];
+  folder_paths: string[];
+  profile_names: string[];
 }
 
 export type LoginCredentials =

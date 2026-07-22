@@ -26,6 +26,11 @@ def test_create_profile(app_client: TestClient):
     assert resp.status_code == 201
     data = resp.json()
     assert data["name"] == "Test"
+    assert data["project_id"] == "default"
+    assert data["folder_path"] == ""
+    assert data["pinned"] is False
+    assert data["accent_color"] is None
+    assert data["harness"] == "codex"
     assert data["status"] == "stopped"
     assert "id" in data
     assert len(data["id"]) == 36  # UUID
@@ -41,12 +46,22 @@ def test_create_profile_with_all_fields(app_client: TestClient):
         "screen_height": 1440,
         "humanize": True,
         "human_preset": "careful",
+        "project_id": "project-alpha",
+        "folder_path": "research/phase-1",
+        "pinned": True,
+        "accent_color": "#1A2B3C",
+        "harness": "opencode",
         "tags": [{"tag": "work", "color": "#ff0000"}],
     })
     assert resp.status_code == 201
     data = resp.json()
     assert data["fingerprint_seed"] == 42
     assert data["platform"] == "macos"
+    assert data["project_id"] == "project-alpha"
+    assert data["folder_path"] == "research/phase-1"
+    assert data["pinned"] is True
+    assert data["accent_color"] == "#1A2B3C"
+    assert data["harness"] == "opencode"
     assert len(data["tags"]) == 1
 
 
@@ -71,9 +86,46 @@ def test_get_profile_not_found(app_client: TestClient):
 def test_update_profile(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "Original"})
     pid = create.json()["id"]
-    resp = app_client.put(f"/api/profiles/{pid}", json={"name": "Renamed"})
+    resp = app_client.put(
+        f"/api/profiles/{pid}",
+        json={
+            "name": "Renamed",
+            "project_id": "project-2",
+            "folder_path": "ops/on-call",
+            "pinned": True,
+            "accent_color": "#ABCDEF",
+            "harness": "browser-use",
+        },
+    )
     assert resp.status_code == 200
-    assert resp.json()["name"] == "Renamed"
+    data = resp.json()
+    assert data["name"] == "Renamed"
+    assert data["project_id"] == "project-2"
+    assert data["folder_path"] == "ops/on-call"
+    assert data["pinned"] is True
+    assert data["accent_color"] == "#ABCDEF"
+    assert data["harness"] == "browser-use"
+
+
+def test_list_profiles_orders_and_returns_organization_fields(app_client: TestClient):
+    app_client.post("/api/profiles", json={"name": "Zulu", "project_id": "beta"})
+    app_client.post(
+        "/api/profiles",
+        json={"name": "Bravo", "project_id": "alpha", "folder_path": "a", "pinned": True},
+    )
+    app_client.post(
+        "/api/profiles",
+        json={"name": "Alpha", "project_id": "alpha", "folder_path": "a", "pinned": True},
+    )
+
+    resp = app_client.get("/api/profiles")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [p["name"] for p in data] == ["Alpha", "Bravo", "Zulu"]
+    assert data[0]["project_id"] == "alpha"
+    assert data[0]["folder_path"] == "a"
+    assert data[0]["pinned"] is True
 
 
 def test_update_profile_not_found(app_client: TestClient):

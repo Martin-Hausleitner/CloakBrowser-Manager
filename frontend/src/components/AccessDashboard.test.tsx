@@ -62,20 +62,36 @@ describe("AccessDashboard", () => {
       },
     ]);
     apiMock.listAccessSandboxes.mockResolvedValue([
-      { sandbox_id: "research", profile_count: 2 },
-      { sandbox_id: "private", profile_count: 1 },
+      {
+        sandbox_id: "research",
+        profile_count: 2,
+        project_ids: ["commerce"],
+        folder_paths: ["checkout", "payments"],
+        profile_names: ["Research browser", "Research reports"],
+      },
+      {
+        sandbox_id: "private",
+        profile_count: 1,
+        project_ids: ["security"],
+        folder_paths: ["audit"],
+        profile_names: ["Private browser"],
+      },
     ]);
     apiMock.listProfiles.mockResolvedValue([
       {
         id: "profile-1",
         name: "Research browser",
         sandbox_id: "research",
+        project_id: "commerce",
+        folder_path: "checkout",
         status: "running",
       },
       {
         id: "profile-2",
         name: "Private browser",
         sandbox_id: "private",
+        project_id: "security",
+        folder_path: "audit",
         status: "stopped",
       },
     ]);
@@ -273,7 +289,21 @@ describe("AccessDashboard", () => {
     const preview = screen.getByLabelText("Effective browser access for alice");
     expect(preview.textContent).toContain("Research browser");
     expect(preview.textContent).toContain("Private browser");
+    expect(preview.textContent).toContain("commerce / checkout");
+    expect(preview.textContent).toContain("security / audit");
     expect(preview.textContent).toContain("Operate");
     expect(within(screen.getByLabelText("Groups for alice")).getByText("Research team")).toBeTruthy();
+  });
+
+  it("shows redacted project and folder context beside sandbox grants", async () => {
+    render(<AccessDashboard onClose={vi.fn()} />);
+
+    expect(await screen.findByText("alice")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add person" }));
+
+    const researchGrant = screen.getByLabelText("Browser control for research").closest("div");
+    expect(researchGrant?.textContent).toContain("Projects: commerce");
+    expect(researchGrant?.textContent).toContain("Folders: checkout, payments");
+    expect(researchGrant?.textContent).not.toContain("proxy");
   });
 });

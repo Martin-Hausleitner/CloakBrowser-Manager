@@ -23,6 +23,7 @@ import {
   type Profile,
 } from "../lib/api";
 import { hasAccessPermission } from "../lib/accessPermissions";
+import { profileOrganizationLabel } from "../lib/profileOrganization";
 
 interface AccessDashboardProps {
   onClose: () => void;
@@ -203,7 +204,9 @@ function EffectiveAccessPreview({
               <li key={profile.id} className="flex min-w-0 items-start justify-between gap-2">
                 <span className="min-w-0">
                   <span className="block truncate text-gray-300">{profile.name}</span>
-                  <span className="block truncate font-mono text-[10px] text-gray-600">{profile.sandbox_id}</span>
+                  <span className="block truncate font-mono text-[10px] text-gray-600">
+                    {profile.sandbox_id} · {profileOrganizationLabel(profile)}
+                  </span>
                 </span>
                 <span className="shrink-0 text-right text-[10px] text-gray-500">
                   {administrator ? "Administrator" : effectiveCapabilityLabel(grants, profile.sandbox_id)}
@@ -232,7 +235,13 @@ function GrantEditor({
     const known = new Map(sandboxes.map((sandbox) => [sandbox.sandbox_id, sandbox]));
     for (const grant of grants) {
       if (!known.has(grant.sandbox_id)) {
-        known.set(grant.sandbox_id, { sandbox_id: grant.sandbox_id, profile_count: 0 });
+        known.set(grant.sandbox_id, {
+          sandbox_id: grant.sandbox_id,
+          profile_count: 0,
+          project_ids: [],
+          folder_paths: [],
+          profile_names: [],
+        });
       }
     }
     return [...known.values()].sort((left, right) => left.sandbox_id.localeCompare(right.sandbox_id));
@@ -255,10 +264,19 @@ function GrantEditor({
             ));
             return (
               <div key={sandbox.sandbox_id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] items-center gap-x-3 gap-y-1 text-sm sm:grid-cols-[minmax(0,1fr)_8rem_8rem]">
-                <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-300">
-                  {sandbox.sandbox_id}
-                  <span className="ml-1 font-sans text-gray-500">({sandbox.profile_count} browser{sandbox.profile_count === 1 ? "" : "s"})</span>
-                </span>
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-xs text-gray-300">
+                    {sandbox.sandbox_id}
+                    <span className="ml-1 font-sans text-gray-500">({sandbox.profile_count} browser{sandbox.profile_count === 1 ? "" : "s"})</span>
+                  </p>
+                  {(sandbox.project_ids?.length || sandbox.folder_paths?.length) ? (
+                    <p className="mt-0.5 truncate text-[10px] text-gray-500" title={(sandbox.profile_names ?? []).join(", ")}>
+                      {(sandbox.project_ids ?? []).length ? `Projects: ${sandbox.project_ids.join(", ")}` : ""}
+                      {(sandbox.project_ids ?? []).length && (sandbox.folder_paths ?? []).length ? " · " : ""}
+                      {(sandbox.folder_paths ?? []).length ? `Folders: ${sandbox.folder_paths.join(", ")}` : ""}
+                    </p>
+                  ) : null}
+                </div>
                 <select
                   className="input h-11 w-32 shrink-0 py-1 text-xs"
                   value={controlPermission}

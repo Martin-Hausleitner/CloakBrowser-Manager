@@ -1,11 +1,18 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { applyProfileViewport } from "./App";
+import { applyProfileViewport, toggleProfilePin } from "./App";
+import { ProfileForm } from "./components/ProfileForm";
 import type { Profile } from "./lib/api";
 
 const stoppedProfile: Profile = {
   id: "profile-1",
   name: "Checkout QA",
   sandbox_id: "default",
+  project_id: "commerce",
+  folder_path: "checkout",
+  pinned: false,
+  accent_color: null,
+  harness: "codex",
   fingerprint_seed: 12345,
   proxy: null,
   timezone: null,
@@ -152,5 +159,79 @@ describe("applyProfileViewport", () => {
     expect(result).toBe(false);
     expect(stop).toHaveBeenCalledWith(runningProfile.id);
     expect(launch).toHaveBeenCalledWith(runningProfile.id);
+  });
+});
+
+describe("toggleProfilePin", () => {
+  it("persists the inverse pinned state through profile update for admins", async () => {
+    const update = vi.fn().mockResolvedValue({ ...stoppedProfile, pinned: true });
+
+    const result = await toggleProfilePin({
+      profile: stoppedProfile,
+      canManageProfiles: true,
+      update,
+    });
+
+    expect(result).toBe(true);
+    expect(update).toHaveBeenCalledWith(stoppedProfile.id, { pinned: true });
+  });
+
+  it("does not update pin state without profile management access", async () => {
+    const update = vi.fn();
+
+    const result = await toggleProfilePin({
+      profile: stoppedProfile,
+      canManageProfiles: false,
+      update,
+    });
+
+    expect(result).toBe(false);
+    expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe("ProfileForm profile organization", () => {
+  it("roundtrips organization fields while keeping sandbox as a separate access boundary", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProfileForm
+        profile={null}
+        onSave={onSave}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    const projectInput = screen.getByLabelText("Project") as HTMLInputElement;
+    const folderInput = screen.getByLabelText("Folder") as HTMLInputElement;
+    expect(projectInput.pattern).toBe("[A-Za-z0-9][A-Za-z0-9._-]*");
+    expect(projectInput.maxLength).toBe(80);
+    expect(projectInput.required).toBe(true);
+    expect(folderInput.maxLength).toBe(240);
+    fireEvent.change(folderInput, { target: { value: "/unsafe" } });
+    expect(folderInput.checkValidity()).toBe(false);
+    expect(screen.getByText(/no leading or trailing slash/i)).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Profile Name"), { target: { value: "Client QA" } });
+    fireEvent.change(screen.getByLabelText("Project"), { target: { value: "marketplace" } });
+    fireEvent.change(screen.getByLabelText("Folder"), { target: { value: "buyers/us" } });
+    fireEvent.click(screen.getByLabelText("Pinned"));
+    fireEvent.change(screen.getByLabelText("Accent color"), { target: { value: "#22c55e" } });
+    fireEvent.change(screen.getByLabelText("Preferred harness"), { target: { value: "opencode" } });
+    fireEvent.change(screen.getByLabelText("Access sandbox"), { target: { value: "research-team" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      name: "Client QA",
+      project_id: "marketplace",
+      folder_path: "buyers/us",
+      pinned: true,
+      accent_color: "#22c55e",
+      harness: "opencode",
+      sandbox_id: "research-team",
+    }));
+    expect(screen.getByText("Organization")).toBeTruthy();
+    expect(screen.getByText("Access sandbox")).toBeTruthy();
+    expect(screen.getByText(/access per sandbox/i)).toBeTruthy();
   });
 });

@@ -59,6 +59,22 @@ export async function applyProfileViewport({
   return !!result;
 }
 
+interface ToggleProfilePinOptions {
+  profile: Profile | null;
+  canManageProfiles: boolean;
+  update: (id: string, data: Partial<ProfileCreateData>) => Promise<Profile | undefined>;
+}
+
+export async function toggleProfilePin({
+  profile,
+  canManageProfiles,
+  update,
+}: ToggleProfilePinOptions) {
+  if (!profile || !canManageProfiles) return false;
+  const updated = await update(profile.id, { pinned: !profile.pinned });
+  return Boolean(updated);
+}
+
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [authRequired, setAuthRequired] = useState(false);
@@ -234,6 +250,15 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     });
   }, [canManageProfiles, canOperateSelected, launch, selected, stop, update]);
 
+  const handleTogglePin = useCallback(async (id: string) => {
+    const profile = profiles.find((candidate) => candidate.id === id) ?? null;
+    await toggleProfilePin({
+      profile,
+      canManageProfiles,
+      update,
+    });
+  }, [canManageProfiles, profiles, update]);
+
   if (view === "access" && canManageProfiles && accessControlEnabled) {
     return <AccessDashboard onClose={() => setView(selected ? "view" : "empty")} />;
   }
@@ -354,6 +379,8 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             onSelect={handleSelect}
             onNew={handleNew}
             canCreate={canManageProfiles}
+            canManage={canManageProfiles}
+            onTogglePin={handleTogglePin}
           />
         </div>
       )}

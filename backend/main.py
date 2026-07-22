@@ -32,6 +32,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 if __package__:
     from . import access_control as access
     from . import database as db
+    from . import extensions
     from .browser_manager import BrowserManager
     from .profile_health import ProfileHealthProbe
     from .models import (
@@ -47,6 +48,8 @@ if __package__:
         AccessUserCreate,
         AccessUserResponse,
         AccessUserUpdate,
+        ExtensionInventoryResponse,
+        ExtensionItem,
         LaunchResponse,
         LoginRequest,
         ProfileCreate,
@@ -66,6 +69,7 @@ if __package__:
 else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
     import database as db
+    import extensions
     from browser_manager import BrowserManager
     from profile_health import ProfileHealthProbe
     from models import (
@@ -81,6 +85,8 @@ else:  # Support `uvicorn main:app` from the backend directory.
         AccessUserCreate,
         AccessUserResponse,
         AccessUserUpdate,
+        ExtensionInventoryResponse,
+        ExtensionItem,
         LaunchResponse,
         LoginRequest,
         ProfileCreate,
@@ -2292,6 +2298,14 @@ async def get_profile_health(profile_id: str, request: Request):
             proxy_configured=bool(profile.get("proxy")),
         )
     return ProfileHealthResponse(**stored)
+
+
+@app.get("/api/profiles/{profile_id}/extensions", response_model=ExtensionInventoryResponse)
+async def get_profile_extensions(profile_id: str, request: Request):
+    profile, _identity = _require_profile_permission(request.scope, profile_id, "view")
+    ext_list = extensions.inspect_profile_extensions(profile)
+    return ExtensionInventoryResponse(profile_id=profile_id, extensions=ext_list)
+
 
 
 @app.post(

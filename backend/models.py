@@ -474,3 +474,21 @@ class AccessIdentityResponse(BaseModel):
     grants: list[AccessGrant] = Field(default_factory=list)
     group_ids: list[str] = Field(default_factory=list)
     effective_grants: list[AccessGrant] = Field(default_factory=list)
+
+
+class ExtensionItem(BaseModel):
+    id: str
+    path: str
+    name: str
+    version: str
+    manifest_version: int
+    description: str
+    permissions: list[str] = Field(default_factory=list)
+    trust_state: Literal["valid", "untrusted_manifest", "missing_manifest", "invalid_path"]
+    error: str | None = None
+
+
+class ExtensionInventoryResponse(BaseModel):
+    profile_id: str
+    extensions: list[ExtensionItem] = Field(default_factory=list)
+

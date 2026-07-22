@@ -59,6 +59,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 ### What is complete
 
 - **Selected upstream changes are integrated** — PR #47 constrains the browser window to the VNC framebuffer, PR #27 makes the documented local backend start work, and PR #26 adds a per-profile search engine.
+- **Read-only extension inventory and agent CLI** — safe extension manifest parser, trust/error state calculation (`valid`, `untrusted_manifest`, `missing_manifest`, `invalid_path`), GET `/api/profiles/{profile_id}/extensions` endpoint, and operator CLI `scripts/inspect_extensions.py`.
 - **Compact mobile VNC workspace** — browser-first portrait/landscape layout, fullscreen preview, session grid/switcher, Fit/Width/Height/Phone modes, live viewer zoom, persisted framebuffer viewport changes, collapsible chat, typed Capture/Copy/Paste actions, and `visualViewport` keyboard adaptation.
 - **Scoped access foundation** — administrator bootstrap, people and agent identities, access groups, sandbox-scoped grants, separate view/interact/operate/automate capabilities, revocation, audit metadata, VNC input filtering, and scoped REST/CDP/VNC enforcement.
 - **Profile organization and preferred harness metadata** — persistent projects, nested folders, pins, color accents, deterministic ordering, compact desktop/mobile presentation, and saved preferences for Codex, Antigravity, Claude Code, OpenCode, and Browser Use.
@@ -70,7 +71,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Area | State | Fresh or historical evidence |
 | --- | --- | --- |
-| Profile schema, migration, API, organization, access and health persistence | Implemented; full local suite passed | **343/343 backend tests passed** on 22 July 2026. |
+| Profile schema, migration, API, organization, access, health & extension inventory | Implemented; full local suite passed | **351/351 backend tests passed** on 22 July 2026. |
 | Desktop/mobile organization, form, access dashboard, harness boundary and compact health UI | Implemented; full local suite passed | **132/132 frontend tests passed** and the production build passed on 22 July 2026. |
 | Release, mobile, streaming and deployment scripts | Full local script suite passed | **26/26 script tests passed**, including an explicit Python 3.11 compilation regression check. |
 | Compact mobile workspace and scoped live browser control | Proven on the current automated VCVM Chromium surface | The authenticated release run passed **316 checks** across five viewports plus the access dashboard and captured **31 screenshots**. |
@@ -83,7 +84,6 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Priority | Feature | Required completion evidence |
 | --- | --- | --- |
-| P0 | Read-only extension inventory and agent-facing CLI attachment flow | Safe manifest parser, trust/error state, no install control in mobile UI, authorization/redaction tests, and CLI integration tests. |
 | P0 | Admin-only live diagnostics | Launch/VNC timestamps and counters, explicit `unavailable` values for unmeasured metrics, redaction tests, and no benchmark clutter in the mobile workspace. |
 | P0 | Credentialed proxy health acceptance | Run the optional VCVM-local proxychecker against an authorized configured proxy without exposing credentials; prove normalized risk/authenticity, failure behavior and source state. |
 | P0 | Finish the release handoff | Push only the fork branch, verify its SHA and GitHub files, then retain the green release report and screenshot paths as local evidence. |
@@ -95,8 +95,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 - **20 July 2026** — mobile VNC workspace, iOS-safe paste, initial E2E gates, scoped Paperclip access, protected mobile login, and private Tailnet fail-closed helper landed.
 - **21 July 2026** — mobile controls were progressively simplified; short-iPhone, keyboard, access-dashboard, Safari/WebKit, Codex Computer Use, live viewport, VCVM, streaming, and policy gates were added or hardened.
-- **22 July 2026** — compact mobile/access-group work was consolidated; profile project/folder/pin/color/harness metadata, deterministic desktop/mobile organization, and redacted access context were implemented and scoped-tested. A redacted profile-health service, persistence, access-controlled API, desktop disclosure and optional VCVM-local proxychecker boundary were then implemented and deployed. The fresh release ladder passed 343 backend, 132 frontend and 26 script tests, the production build, 316 live mobile checks and 31 screenshots.
-- **Next release checkpoint** — finish extension inventory and admin-only live diagnostics, prove the optional proxychecker against an authorized configured proxy, complete physical Safari/private Tailnet evidence when the external prerequisites exist, and keep the acceptance matrix synchronized with fresh artifacts.
+- **22 July 2026** — compact mobile/access-group work was consolidated; profile project/folder/pin/color/harness metadata, deterministic desktop/mobile organization, and redacted access context were implemented and scoped-tested. A redacted profile-health service, persistence, access-controlled API, desktop disclosure and optional VCVM-local proxychecker boundary were implemented and deployed. PR #47 (VNC window bounds), PR #27 (local backend startup), PR #26 (search engine selection), and a read-only extension inventory with agent CLI (`scripts/inspect_extensions.py`) were integrated and verified across 351 backend tests, 132 frontend tests, 26 script tests, and production build.
 
 Historical benchmark numbers below remain useful baselines, but they are not a substitute for the fresh release checkpoint above.
 

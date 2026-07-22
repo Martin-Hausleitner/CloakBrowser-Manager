@@ -307,7 +307,15 @@ def classify_browserscan_text(text: object) -> BrowserScanClassification:
 
     warnings: list[str] = []
     for category, terms in (
-        ("automation_detected", ("automation detected", "webdriver")),
+        (
+            "automation_detected",
+            (
+                "automation detected",
+                "webdriver detected",
+                "webdriver: true",
+                "webdriver true",
+            ),
+        ),
         ("network_mismatch", ("network mismatch", "webrtc mismatch", "dns mismatch", "timezone mismatch")),
         ("fingerprint_warning", ("canvas fingerprint warning", "webgl warning", "audio fingerprint warning")),
         ("profile_warning", ("incognito warning", "profile warning")),

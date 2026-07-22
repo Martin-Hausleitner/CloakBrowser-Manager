@@ -213,6 +213,26 @@ def test_classify_browserscan_text_extracts_only_score_and_whitelisted_warnings(
     assert "private-12345" not in repr(result)
 
 
+def test_classify_browserscan_text_does_not_treat_field_labels_as_detection():
+    result = classify_browserscan_text(
+        "BrowserScan report Authenticity 100% WebDriver WebRTC Canvas WebGL Audio"
+    )
+
+    assert result.score == 100
+    assert result.warnings == ()
+    assert result.blockers == ()
+
+
+def test_classify_browserscan_text_requires_an_explicit_automation_failure():
+    result = classify_browserscan_text(
+        "BrowserScan report Authenticity 72% WebDriver detected"
+    )
+
+    assert result.score == 72
+    assert result.warnings == ("automation_detected",)
+    assert result.blockers == ()
+
+
 @pytest.mark.parametrize(
     ("text", "blocker"),
     [

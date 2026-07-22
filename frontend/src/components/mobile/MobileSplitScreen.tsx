@@ -22,7 +22,8 @@ import {
   Shrink,
   Square,
 } from "lucide-react";
-import type { Profile } from "../../lib/api";
+import type { Profile, ProfileHarness } from "../../lib/api";
+import { compareOrganizedProfiles, profileOrganizationLabel } from "../../lib/profileOrganization";
 import {
   cloakServerProvider,
   codexComputerUseProvider,
@@ -89,6 +90,14 @@ const minimumPhoneFitWidth = 320;
 const minimumPhoneFitHeight = 480;
 
 type FullscreenFitMode = "contain" | "width" | "height";
+
+const harnessNames: Record<ProfileHarness, string> = {
+  codex: "Codex",
+  antigravity: "Antigravity",
+  "claude-code": "Claude Code",
+  opencode: "OpenCode",
+  "browser-use": "Browser Use",
+};
 
 type PinnedHarnessAction = Omit<TaskHarnessAction, "kind"> & {
   kind: "screenshot" | "copy" | "paste";
@@ -279,9 +288,13 @@ export function MobileSplitScreen({
   const keyboardBaselineHeightRef = useRef(liveViewportSize.height);
   const keyboardEntryFocusedRef = useRef(false);
 
-  const runningProfiles = useMemo(
-    () => profiles.filter((profile) => profile.status === "running"),
+  const organizedProfiles = useMemo(
+    () => [...profiles].sort(compareOrganizedProfiles),
     [profiles],
+  );
+  const runningProfiles = useMemo(
+    () => organizedProfiles.filter((profile) => profile.status === "running"),
+    [organizedProfiles],
   );
   const liveLabel = selected?.status === "running" ? "Live browser" : "Preview";
   const browserUrl = selected?.cdp_url ?? "Browser preview";
@@ -331,12 +344,17 @@ export function MobileSplitScreen({
   );
   const harnessReady = codexHostReady || serverHistoryReady;
   const composerReady = Boolean(harnessReady && canInteract && selected);
+  const selectedHarnessName = selected ? harnessNames[selected.harness] : "Codex";
   const harnessLabel = harnessCapabilities === null
     ? "Task connection · checking"
     : codexHostReady
-      ? "Codex Computer Use · connected"
+      ? selected?.harness === "codex"
+        ? "Codex Computer Use"
+        : `${selectedHarnessName} · via Codex Computer Use`
       : serverHistoryReady
-        ? "Server history · save only"
+        ? selected?.harness === "codex"
+          ? "Server history · save only"
+          : `${selectedHarnessName} · saved only`
         : "Task connection · unavailable";
   const harnessPlaceholder = harnessCapabilities === null
     ? "Checking task connection..."
@@ -345,7 +363,9 @@ export function MobileSplitScreen({
       : !canInteract
         ? "View-only access"
         : codexHostReady
-          ? "Ask Codex Computer Use..."
+          ? selected?.harness === "codex"
+            ? "Ask Codex Computer Use..."
+            : `Ask ${selectedHarnessName} via Codex Computer Use...`
           : serverHistoryReady
             ? "Save task to server history..."
             : "Task connection unavailable";
@@ -634,6 +654,12 @@ export function MobileSplitScreen({
         ...(conversationId ? { conversation_id: conversationId } : {}),
         metadata: {
           runner: codexHostReady ? codexComputerUseProvider : cloakServerProvider,
+          selected_runner: codexHostReady ? codexComputerUseProvider : cloakServerProvider,
+          selected_profile_id: selected?.id ?? null,
+          selected_profile_name: selected?.name ?? null,
+          preferred_harness: selected?.harness ?? null,
+          execution_provider: codexHostReady ? codexComputerUseProvider : cloakServerProvider,
+          execution_bridge: codexHostReady ? codexComputerUseProvider : null,
           execution: codexHostReady ? "host" : "persist-only",
           browser_visible: true,
           ...(commands ? { source: "pinned-action" } : {}),
@@ -1006,24 +1032,28 @@ export function MobileSplitScreen({
 
   const renderFullscreenSessions = () => (
     <div id="mobile-fullscreen-sessions" className="mobile-fullscreen-sessions-panel" aria-label="Fullscreen running sessions">
-      {(runningProfiles.length > 0 ? runningProfiles : profiles.slice(0, 4)).map((profile) => (
+      {(runningProfiles.length > 0 ? runningProfiles : organizedProfiles.slice(0, 4)).map((profile) => (
         <button
           key={profile.id}
           type="button"
           onClick={() => selectFullscreenSession(profile.id)}
           className={`mobile-fullscreen-session ${profile.id === selectedId ? "mobile-fullscreen-session-active" : ""}`}
+          style={{ "--profile-accent": profile.accent_color ?? "transparent" } as CSSProperties}
         >
           <span className="mobile-fullscreen-session-main">
             <StatusIndicator status={profile.status} />
             <span className="min-w-0">
               <span className="block truncate text-xs font-semibold text-gray-100">{profile.name}</span>
               <span className="block truncate text-[11px] text-gray-500">
+                {profileOrganizationLabel(profile)}
+              </span>
+              <span className="block truncate text-[10px] text-gray-600">
                 {profile.screen_width} x {profile.screen_height}
               </span>
             </span>
           </span>
           <span className="mobile-fullscreen-session-state">
-            {profile.status === "running" ? "Live" : profile.status}
+            {profile.pinned ? "Pinned · " : ""}{profile.status === "running" ? "Live" : profile.status}
           </span>
         </button>
       ))}
@@ -1181,9 +1211,9 @@ export function MobileSplitScreen({
                       <option value="" disabled>
                         Select profile
                       </option>
-                      {profiles.map((profile) => (
+                      {organizedProfiles.map((profile) => (
                         <option key={profile.id} value={profile.id}>
-                          {profile.name}
+                          {profile.name} · {profileOrganizationLabel(profile)}
                         </option>
                       ))}
                     </select>
@@ -1358,24 +1388,25 @@ export function MobileSplitScreen({
 
             {gridOpen ? (
               <div id="mobile-running-grid" className="mobile-grid" aria-label="Running browser grid">
-                {(runningProfiles.length > 0 ? runningProfiles : profiles.slice(0, 4)).map((profile) => (
+                {(runningProfiles.length > 0 ? runningProfiles : organizedProfiles.slice(0, 4)).map((profile) => (
                   <button
                     key={profile.id}
                     type="button"
                     onClick={() => onSelect(profile.id)}
                     className={`mobile-grid-tile ${profile.id === selectedId ? "mobile-grid-tile-active" : ""}`}
+                    style={{ "--profile-accent": profile.accent_color ?? "transparent" } as CSSProperties}
                   >
                     <span className="mobile-grid-card-main">
                       <StatusIndicator status={profile.status} />
                       <span className="min-w-0">
                         <span className="block truncate text-xs font-semibold text-gray-100">{profile.name}</span>
                         <span className="block truncate text-[11px] text-gray-500">
-                          {profile.platform} · {profile.screen_width} x {profile.screen_height}
+                          {profileOrganizationLabel(profile)} · {profile.screen_width} x {profile.screen_height}
                         </span>
                       </span>
                     </span>
                     <span className="mobile-grid-card-state">
-                      {profile.status === "running" ? "Live" : profile.status}
+                      {profile.pinned ? "Pinned · " : ""}{profile.status === "running" ? "Live" : profile.status}
                     </span>
                   </button>
                 ))}
@@ -1534,9 +1565,11 @@ export function MobileSplitScreen({
             disabled={harnessPending || !composerReady}
           />
           <div className="mobile-composer-toolbar">
-            <span className="sr-only" aria-live="polite">
-              {codexHostReady ? "Codex Computer Use" : harnessLabel}
-            </span>
+            {chatCollapsed ? (
+              <span className="sr-only" aria-live="polite">
+                {harnessLabel}
+              </span>
+            ) : null}
             <button type="submit" className="mobile-send-button" aria-label="Run task" disabled={harnessPending || !composerReady || !draft.trim()}>
               <Send className="h-4 w-4" />
             </button>

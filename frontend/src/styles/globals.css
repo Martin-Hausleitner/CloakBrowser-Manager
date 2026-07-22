@@ -388,6 +388,7 @@
 
   .mobile-fullscreen-session {
     @apply grid min-h-11 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded border border-border bg-surface-1 px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    box-shadow: inset 3px 0 0 var(--profile-accent, transparent);
   }
 
   .mobile-fullscreen-session-active {
@@ -481,6 +482,7 @@
 
   .mobile-grid-tile {
     @apply grid min-h-10 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded border border-border bg-surface-1 px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    box-shadow: inset 3px 0 0 var(--profile-accent, transparent);
   }
 
   .mobile-grid-tile-active {

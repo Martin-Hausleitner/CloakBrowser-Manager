@@ -9,6 +9,11 @@ const stoppedProfile: Profile = {
   id: "profile-1",
   name: "Checkout QA",
   sandbox_id: "default",
+  project_id: "commerce",
+  folder_path: "checkout",
+  pinned: false,
+  accent_color: null,
+  harness: "codex",
   fingerprint_seed: 12345,
   proxy: null,
   timezone: null,
@@ -43,6 +48,7 @@ const runningProfile: Profile = {
   ...stoppedProfile,
   id: "profile-2",
   name: "Live Checkout QA",
+  pinned: false,
   status: "running",
   vnc_ws_port: 5901,
 };
@@ -51,6 +57,11 @@ const secondRunningProfile: Profile = {
   ...runningProfile,
   id: "profile-3",
   name: "Payments QA",
+  project_id: "commerce",
+  folder_path: "payments",
+  pinned: true,
+  accent_color: "#22c55e",
+  harness: "opencode",
 };
 
 function installTaskHarness() {
@@ -172,6 +183,88 @@ describe("MobileSplitScreen", () => {
     expect(screen.queryByText("Task chat")).toBeNull();
     expect(screen.queryByLabelText("Select harness runner")).toBeNull();
     await waitFor(() => expect(window.cloakBrowserHarness?.send).toBeTruthy());
+  });
+
+  it("shows compact organization context in the profile selector", async () => {
+    renderMobileSplit();
+
+    const option = await screen.findByRole("option", { name: "Checkout QA · commerce / checkout" });
+    expect(option).toBeTruthy();
+    expect(screen.queryByLabelText("Select harness runner")).toBeNull();
+  });
+
+  it("orders pinned sessions first in the tools grid and shows organization accents", async () => {
+    runningSplit();
+    openBrowserTools();
+    fireEvent.click(screen.getByLabelText("Toggle grid view"));
+
+    const grid = screen.getByLabelText("Running browser grid");
+    const tiles = within(grid).getAllByRole("button");
+    expect(tiles[0].textContent).toContain("Payments QA");
+    expect(tiles[0].textContent).toContain("commerce / payments");
+    expect(tiles[0].textContent).toContain("Pinned");
+    expect((tiles[0] as HTMLElement).style.getPropertyValue("--profile-accent")).toBe("#22c55e");
+  });
+
+  it("orders pinned sessions first in fullscreen session switching", () => {
+    runningSplit();
+
+    fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
+    fireEvent.click(screen.getByLabelText("Switch fullscreen browser session"));
+
+    const sessions = screen.getByLabelText("Fullscreen running sessions");
+    const tiles = within(sessions).getAllByRole("button");
+    expect(tiles[0].textContent).toContain("Payments QA");
+    expect(tiles[0].textContent).toContain("commerce / payments");
+    expect(tiles[0].textContent).toContain("Pinned");
+  });
+
+  it("labels a non-Codex preferred harness as bridged only when the Codex host is verified", async () => {
+    runningSplit({ selected: secondRunningProfile, selectedId: secondRunningProfile.id });
+
+    expect(await screen.findByText("OpenCode · via Codex Computer Use")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Open browser tools"));
+    expect(screen.getByText("OpenCode · via Codex Computer Use")).toBeTruthy();
+  });
+
+  it("labels a non-Codex preferred harness as saved only when no verified Codex host is attached", async () => {
+    delete window.cloakBrowserHarness;
+    renderMobileSplit({ selected: secondRunningProfile, selectedId: secondRunningProfile.id });
+
+    expect(await screen.findByText("OpenCode · saved only")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Open browser tools"));
+    expect(screen.getByText("OpenCode · saved only")).toBeTruthy();
+  });
+
+  it("includes preferred harness and bridge metadata when sending tasks", async () => {
+    const { send } = installTaskHarness();
+    renderMobileSplit({ selected: secondRunningProfile, selectedId: secondRunningProfile.id });
+
+    fireEvent.change(await screen.findByPlaceholderText("Ask OpenCode via Codex Computer Use..."), {
+      target: { value: "Open the deployment log" },
+    });
+    fireEvent.click(screen.getByLabelText("Run task"));
+
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        {
+          text: "Open the deployment log",
+          profile_id: secondRunningProfile.id,
+          metadata: {
+            runner: "codex-computer-use",
+            selected_runner: "codex-computer-use",
+            selected_profile_id: secondRunningProfile.id,
+            selected_profile_name: "Payments QA",
+            preferred_harness: "opencode",
+            execution_provider: "codex-computer-use",
+            execution_bridge: "codex-computer-use",
+            execution: "host",
+            browser_visible: true,
+          },
+        },
+        undefined,
+      ),
+    );
   });
 
   it("labels the server fallback as save-only and never fabricates an assistant reply", async () => {
@@ -305,6 +398,12 @@ describe("MobileSplitScreen", () => {
           profile_id: stoppedProfile.id,
           metadata: {
             runner: "codex-computer-use",
+            selected_runner: "codex-computer-use",
+            selected_profile_id: stoppedProfile.id,
+            selected_profile_name: "Checkout QA",
+            preferred_harness: "codex",
+            execution_provider: "codex-computer-use",
+            execution_bridge: "codex-computer-use",
             execution: "host",
             browser_visible: true,
           },
@@ -331,6 +430,12 @@ describe("MobileSplitScreen", () => {
           profile_id: stoppedProfile.id,
           metadata: {
             runner: "codex-computer-use",
+            selected_runner: "codex-computer-use",
+            selected_profile_id: stoppedProfile.id,
+            selected_profile_name: "Checkout QA",
+            preferred_harness: "codex",
+            execution_provider: "codex-computer-use",
+            execution_bridge: "codex-computer-use",
             execution: "host",
             browser_visible: true,
           },
@@ -613,6 +718,12 @@ describe("MobileSplitScreen", () => {
           profile_id: runningProfile.id,
           metadata: {
             runner: "codex-computer-use",
+            selected_runner: "codex-computer-use",
+            selected_profile_id: runningProfile.id,
+            selected_profile_name: "Live Checkout QA",
+            preferred_harness: "codex",
+            execution_provider: "codex-computer-use",
+            execution_bridge: "codex-computer-use",
             execution: "host",
             browser_visible: true,
             source: "pinned-action",

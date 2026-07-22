@@ -18,6 +18,7 @@ import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
 import { MobileSplitScreen } from "./components/mobile/MobileSplitScreen";
 import { AccessDashboard } from "./components/AccessDashboard";
+import { ProfileHealthSummary } from "./components/ProfileHealthSummary";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "empty" | "create" | "edit" | "view" | "access";
@@ -402,6 +403,11 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                 <StatusIndicator status={selected.status} size="md" />
                 <span className="text-sm font-medium">{selected.name}</span>
                 <span className="text-xs text-gray-500 capitalize">{selected.platform}</span>
+                <ProfileHealthSummary
+                  profileId={selected.id}
+                  canRun={canOperateSelected}
+                  running={selected.status === "running"}
+                />
               </div>
             )}
           </div>

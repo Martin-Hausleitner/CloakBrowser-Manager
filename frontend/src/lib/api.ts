@@ -89,6 +89,27 @@ export interface SystemStatus {
   profiles_total: number;
 }
 
+export type ProfileHealthState = "pending" | "running" | "passed" | "warning" | "failed" | "unavailable";
+export type ProfileHealthSourceState = "missing" | "measured" | "derived" | "unavailable" | "skipped";
+
+export interface ProfileHealth {
+  profile_id: string;
+  state: ProfileHealthState;
+  checked_at: string | null;
+  proxy_configured: boolean;
+  proxy_reachable: boolean | null;
+  outbound_ip_masked: string | null;
+  proxy_latency_ms: number | null;
+  proxy_risk_score: number | null;
+  proxy_authenticity_score: number | null;
+  fingerprint_consistency_score: number | null;
+  browser_scan_score: number | null;
+  warnings: string[];
+  blockers: string[];
+  error_code: string | null;
+  sources: Record<string, ProfileHealthSourceState>;
+}
+
 export interface BenchmarkMetricSet {
   p50_latency_ms?: number | null;
   p95_latency_ms?: number | null;
@@ -366,6 +387,12 @@ export const api = {
 
   stopProfile: (id: string) =>
     request<{ ok: boolean }>(`/api/profiles/${id}/stop`, { method: "POST" }),
+
+  getProfileHealth: (id: string) =>
+    request<ProfileHealth>(`/api/profiles/${encodeURIComponent(id)}/health`),
+
+  runProfileHealth: (id: string) =>
+    request<ProfileHealth>(`/api/profiles/${encodeURIComponent(id)}/health/run`, { method: "POST" }),
 
   getStatus: () => request<SystemStatus>("/api/status"),
 

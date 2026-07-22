@@ -39,6 +39,8 @@ def compose_config() -> dict:
         env_file.write("VCVM_CPUS=16.0\n")
         env_file.write("VCVM_MEMORY_LIMIT=32g\n")
         env_file.write("VCVM_SHM_SIZE=2gb\n")
+        env_file.write("PROXYCHECKER_URL=http://host.docker.internal:8899\n")
+        env_file.write("PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal\n")
         env_path = pathlib.Path(env_file.name)
     try:
         result = run(
@@ -100,6 +102,18 @@ def main() -> None:
     assert_true(manager.get("healthcheck") is not None, "missing healthcheck")
     assert_true(env.get("ACCESS_CONTROL_ENABLED") == "1", "access control must be forced on")
     assert_true(env.get("AUTH_TOKEN") == "unit-test-token-with-safe-length", "AUTH_TOKEN must come from env")
+    assert_true(
+        env.get("PROXYCHECKER_URL") == "http://host.docker.internal:8899",
+        "proxychecker URL must remain explicit and environment-controlled",
+    )
+    assert_true(
+        env.get("PROXYCHECKER_ALLOWED_HOSTS") == "host.docker.internal",
+        "proxychecker allow-list must stay narrow",
+    )
+    assert_true(
+        "host.docker.internal=host-gateway" in manager.get("extra_hosts", []),
+        "manager must use the explicit Docker host gateway",
+    )
     assert_true("cloakbrowser-manager-vcvm-data" in volumes, "missing named data volume")
     assert_true(str(manager.get("mem_limit")) == str(32 * 1024 * 1024 * 1024), "unexpected memory limit default")
     assert_true(str(manager.get("cpus")) in {"16.0", "16"}, "unexpected CPU limit default")
@@ -107,10 +121,18 @@ def main() -> None:
     port_json = json.dumps(ports)
     assert_true("127.0.0.1" in port_json, "manager must bind to loopback")
     assert_true("0.0.0.0" not in port_json, "manager must not bind to all interfaces")
+    healthcheck_json = json.dumps(manager.get("healthcheck"))
+    assert_true("/health" in healthcheck_json, "manager healthcheck must remain local liveness")
+    assert_true("proxychecker" not in healthcheck_json.lower(), "manager healthcheck must not depend on proxychecker")
 
     deploy_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     dockerignore_text = DOCKERIGNORE_FILE.read_text(encoding="utf-8")
     assert_true("ACCESS_CONTROL_ENABLED=1" in deploy_text, "deploy script must force access control")
+    assert_true("PROXYCHECKER_URL" in deploy_text, "deploy script must support optional proxychecker configuration")
+    assert_true(
+        "host.docker.internal" in deploy_text,
+        "deploy script must restrict the proxychecker boundary to the Docker host gateway",
+    )
     assert_true("tailscale serve --bg --https" in deploy_text, "deploy script must use private HTTPS Serve")
     assert_true("timeout 30s tailscale serve" in deploy_text, "Tailscale Serve must not hang indefinitely")
     assert_true("<tailscale-admin-enable-url>" in deploy_text, "Tailscale admin URLs must be scrubbed")

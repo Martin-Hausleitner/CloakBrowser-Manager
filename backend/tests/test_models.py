@@ -7,6 +7,7 @@ from backend.models import (
     ClipboardRequest,
     LaunchResponse,
     ProfileCreate,
+    ProfileHealthResponse,
     ProfileResponse,
     ProfileStatusResponse,
     ProfileUpdate,
@@ -14,6 +15,53 @@ from backend.models import (
     TagCreate,
     TagResponse,
 )
+
+
+# ── ProfileHealthResponse ───────────────────────────────────────────────────
+
+
+def test_profile_health_response_defaults_are_explicitly_unavailable():
+    health = ProfileHealthResponse(profile_id="profile-1")
+
+    assert health.state == "unavailable"
+    assert health.checked_at is None
+    assert health.proxy_configured is False
+    assert health.proxy_reachable is None
+    assert health.outbound_ip_masked is None
+    assert health.proxy_latency_ms is None
+    assert health.proxy_risk_score is None
+    assert health.proxy_authenticity_score is None
+    assert health.fingerprint_consistency_score is None
+    assert health.browser_scan_score is None
+    assert health.warnings == []
+    assert health.blockers == []
+    assert health.error_code is None
+    assert health.sources == {}
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["pending", "running", "passed", "warning", "failed", "unavailable"],
+)
+def test_profile_health_response_accepts_documented_states(state: str):
+    health = ProfileHealthResponse(profile_id="profile-1", state=state)
+
+    assert health.state == state
+
+
+def test_profile_health_response_rejects_unknown_state():
+    with pytest.raises(ValidationError):
+        ProfileHealthResponse(profile_id="profile-1", state="healthy")
+
+
+def test_profile_health_response_rejects_out_of_range_scores():
+    with pytest.raises(ValidationError):
+        ProfileHealthResponse(profile_id="profile-1", proxy_risk_score=101)
+
+
+def test_profile_health_response_rejects_unknown_source_state():
+    with pytest.raises(ValidationError):
+        ProfileHealthResponse(profile_id="profile-1", sources={"browser_scan": "trusted"})
 
 
 # ── ProfileCreate ────────────────────────────────────────────────────────────

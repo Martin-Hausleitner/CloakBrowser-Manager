@@ -656,6 +656,9 @@ describe("MobileSplitScreen", () => {
     expect(screen.queryByText("Task chat")).toBeNull();
     expect(screen.queryByText("Benchmarks")).toBeNull();
     expect(screen.queryByLabelText("Streaming benchmark results")).toBeNull();
+    expect(screen.queryByText("Profile health")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Run health check" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Proxy check" })).toBeNull();
   });
 
   it("lets the browser consume unused workspace until chat or tools are opened", () => {

@@ -22,6 +22,10 @@ Manager, browser profile, database or VNC server on the Mac for this deployment.
 The compose file does not publish any raw VNC port. Browser viewing remains
 behind the authenticated Manager proxy.
 
+Profile health can optionally enrich its browser-path observation with the
+existing VCVM proxychecker. This dependency is not part of `/health`, and a
+stopped or unavailable proxychecker does not make the Manager unhealthy.
+
 The current acceptance deployment uses custom loopback port `18116` to avoid a
 legacy preview on `18115`; the documented default remains `18115`. Use the same
 port consistently for deploy, smoke checks and an SSH tunnel.
@@ -45,6 +49,27 @@ the VCVM, starts the stack and checks:
 1. `/health` answers locally on the VCVM.
 2. `/api/auth/status` reports required auth.
 3. `/api/auth/status` reports access control enabled.
+
+### Optional VCVM-local proxychecker
+
+First ensure the already-authorized proxychecker listens only on the VCVM's
+Docker bridge host address, not on a public or Tailnet-wide socket. The Manager
+container reaches that boundary through the explicit `host.docker.internal`
+host-gateway mapping.
+
+Then deploy with the fixed local service URL:
+
+```bash
+PROXYCHECKER_URL=http://host.docker.internal:8899 \
+  ./scripts/deploy_vcvm.sh --auth-token-file ~/.config/cloakbrowser/vcvm-auth-token
+```
+
+The deploy script rejects credentials, public hosts, arbitrary paths and ports
+outside the valid unprivileged range. It writes only the validated URL and the
+single `host.docker.internal` allow-list entry into the mode-600 VCVM env file.
+If the variable is omitted, proxychecker enrichment is explicitly disabled and
+browser reachability, fingerprint consistency and conservative BrowserScan
+classification continue independently.
 
 ## Private Tailscale HTTPS
 

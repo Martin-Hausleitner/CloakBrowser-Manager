@@ -39,6 +39,7 @@ def test_init_db_creates_tables(tmp_db: Path):
         names = {r["name"] for r in tables}
     assert "profiles" in names
     assert "profile_tags" in names
+    assert "profile_health" in names
 
 
 def test_init_db_idempotent(tmp_db: Path):
@@ -49,6 +50,34 @@ def test_init_db_idempotent(tmp_db: Path):
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     assert len(tables) >= 2
+
+
+def test_init_db_adds_profile_health_to_existing_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    db_file = tmp_path / "profiles.db"
+    monkeypatch.setattr(db, "DB_PATH", db_file)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute(
+            """CREATE TABLE profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                fingerprint_seed INTEGER NOT NULL,
+                user_data_dir TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        conn.commit()
+
+    db.init_db()
+
+    with db.get_db() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='profile_health'"
+        ).fetchone()
+    assert table is not None
 
 
 def test_init_db_migrates_profile_organization_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -327,6 +356,111 @@ def test_list_profiles_includes_tags(tmp_db: Path):
     db.create_profile("Tagged", tags=[{"tag": "x"}])
     profiles = db.list_profiles()
     assert len(profiles[0]["tags"]) == 1
+
+
+# ── profile health ──────────────────────────────────────────────────────────
+
+
+def test_profile_health_upsert_roundtrip_and_replace(tmp_db: Path):
+    profile = db.create_profile("Health")
+
+    first = db.upsert_profile_health(
+        profile["id"],
+        state="warning",
+        checked_at="2026-07-22T12:00:00+00:00",
+        proxy_configured=True,
+        proxy_reachable=True,
+        outbound_ip_masked="203.0.113.x",
+        proxy_latency_ms=42.5,
+        proxy_risk_score=12,
+        proxy_authenticity_score=88,
+        fingerprint_consistency_score=90,
+        browser_scan_score=None,
+        warnings=["fingerprint_mismatch"],
+        blockers=["browser_scan_consent"],
+        error_code=None,
+        sources={
+            "browser_network": "measured",
+            "proxy_authenticity": "derived",
+            "browser_scan": "unavailable",
+        },
+    )
+
+    assert first["profile_id"] == profile["id"]
+    assert first["proxy_configured"] is True
+    assert first["proxy_reachable"] is True
+    assert first["warnings"] == ["fingerprint_mismatch"]
+    assert first["blockers"] == ["browser_scan_consent"]
+    assert first["sources"]["proxy_authenticity"] == "derived"
+
+    replaced = db.upsert_profile_health(
+        profile["id"],
+        state="passed",
+        checked_at="2026-07-22T12:05:00+00:00",
+        proxy_configured=False,
+        proxy_reachable=True,
+        outbound_ip_masked="2001:db8:abcd:…",
+        proxy_latency_ms=18.0,
+        proxy_risk_score=None,
+        proxy_authenticity_score=None,
+        fingerprint_consistency_score=100,
+        browser_scan_score=99,
+        warnings=[],
+        blockers=[],
+        error_code=None,
+        sources={"browser_network": "measured", "browser_scan": "measured"},
+    )
+
+    with db.get_db() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM profile_health WHERE profile_id = ?",
+            (profile["id"],),
+        ).fetchone()["count"]
+
+    assert count == 1
+    assert replaced["state"] == "passed"
+    assert replaced["proxy_configured"] is False
+    assert replaced["warnings"] == []
+    assert db.get_profile_health(profile["id"]) == replaced
+
+
+def test_profile_health_defensively_normalizes_corrupt_json(tmp_db: Path):
+    profile = db.create_profile("Corrupt health")
+    with db.get_db() as conn:
+        conn.execute(
+            """INSERT INTO profile_health (
+                profile_id, state, proxy_configured, warnings_json, blockers_json, sources_json
+            ) VALUES (?, 'unavailable', 0, ?, ?, ?)""",
+            (profile["id"], '{"not":"a-list"}', '["ok", 42, null]', '["not-an-object"]'),
+        )
+        conn.commit()
+
+    health = db.get_profile_health(profile["id"])
+
+    assert health["warnings"] == []
+    assert health["blockers"] == ["ok"]
+    assert health["sources"] == {}
+
+
+def test_profile_health_missing_returns_none(tmp_db: Path):
+    profile = db.create_profile("No health")
+
+    assert db.get_profile_health(profile["id"]) is None
+
+
+def test_profile_health_is_deleted_with_profile(tmp_db: Path):
+    profile = db.create_profile("Cascade health")
+    db.upsert_profile_health(
+        profile["id"],
+        state="unavailable",
+        proxy_configured=False,
+        warnings=[],
+        blockers=[],
+        sources={},
+    )
+
+    assert db.delete_profile(profile["id"]) is True
+    assert db.get_profile_health(profile["id"]) is None
 
 
 # ── task sessions ────────────────────────────────────────────────────────────

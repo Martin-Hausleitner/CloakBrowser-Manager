@@ -33,6 +33,7 @@ if __package__:
     from . import access_control as access
     from . import database as db
     from .browser_manager import BrowserManager
+    from .profile_health import ProfileHealthProbe
     from .models import (
         ClipboardRequest,
         AccessAgentCreate,
@@ -49,6 +50,7 @@ if __package__:
         LaunchResponse,
         LoginRequest,
         ProfileCreate,
+        ProfileHealthResponse,
         ProfileResponse,
         ProfileStatusResponse,
         ProfileUpdate,
@@ -65,6 +67,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
     import database as db
     from browser_manager import BrowserManager
+    from profile_health import ProfileHealthProbe
     from models import (
         ClipboardRequest,
         AccessAgentCreate,
@@ -81,6 +84,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
         LaunchResponse,
         LoginRequest,
         ProfileCreate,
+        ProfileHealthResponse,
         ProfileResponse,
         ProfileStatusResponse,
         ProfileUpdate,
@@ -706,6 +710,20 @@ async def _reject_unauthenticated(scope: Scope, receive: Receive, send: Send) ->
 
 # Singleton browser manager
 browser_mgr = BrowserManager()
+_profile_health_allowed_hosts = {
+    host.strip()
+    for host in os.environ.get("PROXYCHECKER_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+}
+try:
+    profile_health_probe = ProfileHealthProbe(
+        proxychecker_url=os.environ.get("PROXYCHECKER_URL", ""),
+        allowed_proxychecker_hosts=_profile_health_allowed_hosts,
+    )
+except ValueError:
+    logger.error("Ignoring invalid PROXYCHECKER_URL; profile health enrichment is disabled")
+    profile_health_probe = ProfileHealthProbe()
+_profile_health_tasks: dict[str, asyncio.Task[None]] = {}
 
 # Frontend build directory (React production build)
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
@@ -1265,6 +1283,94 @@ class _RfbClientStreamFilter:
         return bytes(result)
 
 
+async def _run_profile_health_probe(profile: dict[str, object], running: Any) -> None:
+    """Run and persist one normalized probe without exposing provider errors."""
+    profile_id = str(profile["id"])
+    if db.get_profile(profile_id) is None:
+        return
+    db.upsert_profile_health(
+        profile_id,
+        state="running",
+        proxy_configured=bool(profile.get("proxy")),
+        warnings=[],
+        blockers=[],
+        sources={},
+    )
+    try:
+        result = await profile_health_probe.run(profile, running)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error("Profile health probe failed for %s (%s)", profile_id, type(exc).__name__)
+        if db.get_profile(profile_id) is not None:
+            db.upsert_profile_health(
+                profile_id,
+                state="failed",
+                proxy_configured=bool(profile.get("proxy")),
+                warnings=[],
+                blockers=["profile_health_probe_failed"],
+                error_code="profile_health_probe_failed",
+                sources={},
+            )
+        return
+
+    if db.get_profile(profile_id) is not None:
+        db.upsert_profile_health(profile_id, **result.as_record())
+
+
+def _schedule_profile_health(
+    profile: dict[str, object],
+    running: Any,
+    *,
+    force: bool,
+) -> asyncio.Task[None] | None:
+    """Schedule at most one probe per profile and persist the pending state."""
+    profile_id = str(profile["id"])
+    existing_task = _profile_health_tasks.get(profile_id)
+    if existing_task is not None and not existing_task.done():
+        return existing_task
+    if existing_task is not None:
+        _profile_health_tasks.pop(profile_id, None)
+    if not force and db.get_profile_health(profile_id) is not None:
+        return None
+
+    db.upsert_profile_health(
+        profile_id,
+        state="pending",
+        proxy_configured=bool(profile.get("proxy")),
+        warnings=[],
+        blockers=[],
+        sources={},
+    )
+    task = asyncio.create_task(_run_profile_health_probe(profile, running))
+    _profile_health_tasks[profile_id] = task
+
+    def _forget(completed: asyncio.Task[None]) -> None:
+        if _profile_health_tasks.get(profile_id) is completed:
+            _profile_health_tasks.pop(profile_id, None)
+
+    task.add_done_callback(_forget)
+    return task
+
+
+async def _cancel_profile_health_task(profile_id: str) -> None:
+    task = _profile_health_tasks.pop(profile_id, None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def _cancel_all_profile_health_tasks() -> None:
+    tasks = list(_profile_health_tasks.values())
+    _profile_health_tasks.clear()
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
@@ -1276,6 +1382,7 @@ async def lifespan(app: FastAPI):
     if browser_mgr._auto_launch_task and not browser_mgr._auto_launch_task.done():
         browser_mgr._auto_launch_task.cancel()
         await asyncio.gather(browser_mgr._auto_launch_task, return_exceptions=True)
+    await _cancel_all_profile_health_tasks()
     await browser_mgr.cleanup_all()
 
 
@@ -2112,6 +2219,7 @@ async def delete_profile(profile_id: str, request: Request):
     # Stop browser if running
     if profile_id in browser_mgr.running:
         await browser_mgr.stop(profile_id)
+    await _cancel_profile_health_task(profile_id)
 
     profile = db.get_profile(profile_id)
     if not profile:
@@ -2157,6 +2265,10 @@ async def launch_profile(profile_id: str, request: Request):
     db.record_access_audit_event(
         identity.kind, identity.id, "profile.launch", "allowed", str(profile.get("sandbox_id") or "default"), profile_id
     )
+    try:
+        _schedule_profile_health(profile, running, force=False)
+    except Exception as exc:
+        logger.error("Could not schedule profile health for %s (%s)", profile_id, type(exc).__name__)
     return LaunchResponse(
         profile_id=profile_id,
         status="running",
@@ -2167,6 +2279,51 @@ async def launch_profile(profile_id: str, request: Request):
             if access.can_access_profile(identity, profile, "automate")
             else None
         ),
+    )
+
+
+@app.get("/api/profiles/{profile_id}/health", response_model=ProfileHealthResponse)
+async def get_profile_health(profile_id: str, request: Request):
+    profile, _identity = _require_profile_permission(request.scope, profile_id, "view")
+    stored = db.get_profile_health(profile_id)
+    if stored is None:
+        return ProfileHealthResponse(
+            profile_id=profile_id,
+            proxy_configured=bool(profile.get("proxy")),
+        )
+    return ProfileHealthResponse(**stored)
+
+
+@app.post(
+    "/api/profiles/{profile_id}/health/run",
+    response_model=ProfileHealthResponse,
+    status_code=202,
+)
+async def run_profile_health(profile_id: str, request: Request):
+    profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
+    running = browser_mgr.running.get(profile_id)
+    if running is None:
+        raise HTTPException(status_code=409, detail="Profile is not running")
+
+    _schedule_profile_health(profile, running, force=True)
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "profile.health.run",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        profile_id,
+    )
+    stored = db.get_profile_health(profile_id)
+    return ProfileHealthResponse(
+        **(
+            stored
+            or {
+                "profile_id": profile_id,
+                "state": "pending",
+                "proxy_configured": bool(profile.get("proxy")),
+            }
+        )
     )
 
 

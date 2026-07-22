@@ -33,6 +33,7 @@ manager_port="${MANAGER_PORT:-$DEFAULT_MANAGER_PORT}"
 auth_token_file="${AUTH_TOKEN_FILE:-}"
 serve_private=0
 tailscale_https_port="${TAILSCALE_HTTPS_PORT:-$DEFAULT_TAILSCALE_HTTPS_PORT}"
+proxychecker_url="${PROXYCHECKER_URL:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -86,6 +87,18 @@ fi
 if [[ ! "$tailscale_https_port" =~ ^[0-9]{2,5}$ ]] || (( tailscale_https_port < 1024 && tailscale_https_port != 443 )) || (( tailscale_https_port > 65535 )); then
   echo "Refusing invalid Tailscale HTTPS port: $tailscale_https_port" >&2
   exit 64
+fi
+
+if [[ -n "$proxychecker_url" ]]; then
+  if [[ ! "$proxychecker_url" =~ ^http://host\.docker\.internal:([0-9]{2,5})$ ]]; then
+    echo "Refusing PROXYCHECKER_URL outside the VCVM Docker host gateway." >&2
+    exit 64
+  fi
+  proxychecker_port="${BASH_REMATCH[1]}"
+  if (( proxychecker_port < 1024 || proxychecker_port > 65535 )); then
+    echo "Refusing invalid proxychecker port." >&2
+    exit 64
+  fi
 fi
 
 for command in ssh rsync; do
@@ -174,6 +187,8 @@ rsync -az --delete \
   printf 'MANAGER_PORT=%s\n' "$manager_port"
   printf 'ACCESS_CONTROL_ENABLED=1\n'
   printf 'AUTH_TOKEN=%s\n' "$auth_token"
+  printf 'PROXYCHECKER_URL=%s\n' "$proxychecker_url"
+  printf 'PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal\n'
 } | ssh "$target_host" "umask 077; cat > '$remote_path/.env.vcvm'"
 
 ssh "$target_host" "cd '$remote_path' && docker compose --env-file .env.vcvm -p '$PROJECT_NAME' -f '$COMPOSE_FILE' up -d --build --remove-orphans"

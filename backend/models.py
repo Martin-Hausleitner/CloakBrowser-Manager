@@ -12,6 +12,8 @@ SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 FOLDER_SEGMENT_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._ -]*$"
 ACCENT_COLOR_PATTERN = r"^#[0-9A-Fa-f]{6}$"
 Harness = Literal["codex", "antigravity", "claude-code", "opencode", "browser-use"]
+ProfileHealthState = Literal["pending", "running", "passed", "warning", "failed", "unavailable"]
+ProfileHealthSourceState = Literal["missing", "measured", "derived", "unavailable", "skipped"]
 
 
 def _validate_folder_path(value: str) -> str:
@@ -194,6 +196,24 @@ class ProfileStatusResponse(BaseModel):
     vnc_ws_port: int | None = None
     display: str | None = None
     cdp_url: str | None = None
+
+
+class ProfileHealthResponse(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=120)
+    state: ProfileHealthState = "unavailable"
+    checked_at: str | None = None
+    proxy_configured: bool = False
+    proxy_reachable: bool | None = None
+    outbound_ip_masked: str | None = Field(default=None, max_length=64)
+    proxy_latency_ms: float | None = Field(default=None, ge=0)
+    proxy_risk_score: int | None = Field(default=None, ge=0, le=100)
+    proxy_authenticity_score: int | None = Field(default=None, ge=0, le=100)
+    fingerprint_consistency_score: int | None = Field(default=None, ge=0, le=100)
+    browser_scan_score: int | None = Field(default=None, ge=0, le=100)
+    warnings: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    error_code: str | None = Field(default=None, max_length=64)
+    sources: dict[str, ProfileHealthSourceState] = Field(default_factory=dict)
 
 
 class ClipboardRequest(BaseModel):

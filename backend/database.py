@@ -15,6 +15,7 @@ from typing import Any
 ENV_DATA_DIR = "CLOAKBROWSER_MANAGER_DATA_DIR"
 DOCKER_DATA_DIR = Path("/data")
 LOCAL_DATA_DIR = Path(__file__).resolve().parent / ".data"
+PROFILE_HEALTH_SOURCE_STATES = {"missing", "measured", "derived", "unavailable", "skipped"}
 
 
 def _is_usable_data_dir(path: Path) -> bool:
@@ -100,6 +101,25 @@ def init_db():
                 tag TEXT NOT NULL,
                 color TEXT,
                 PRIMARY KEY (profile_id, tag)
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_health (
+                profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+                state TEXT NOT NULL DEFAULT 'unavailable'
+                    CHECK (state IN ('pending', 'running', 'passed', 'warning', 'failed', 'unavailable')),
+                checked_at TEXT,
+                proxy_configured BOOLEAN NOT NULL DEFAULT 0,
+                proxy_reachable BOOLEAN,
+                outbound_ip_masked TEXT,
+                proxy_latency_ms REAL,
+                proxy_risk_score INTEGER,
+                proxy_authenticity_score INTEGER,
+                fingerprint_consistency_score INTEGER,
+                browser_scan_score INTEGER,
+                warnings_json TEXT NOT NULL DEFAULT '[]',
+                blockers_json TEXT NOT NULL DEFAULT '[]',
+                error_code TEXT,
+                sources_json TEXT NOT NULL DEFAULT '{}'
             );
 
             CREATE TABLE IF NOT EXISTS access_users (
@@ -413,9 +433,6 @@ def delete_profile(profile_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-# ── Task session persistence ────────────────────────────────────────────────
-
-
 def _json_object(value: str | None) -> dict[str, Any]:
     if not value:
         return {}
@@ -424,6 +441,142 @@ def _json_object(value: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def _bounded_string_list(value: object, *, max_length: int = 64) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and len(item) <= max_length]
+
+
+def _json_string_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return _bounded_string_list(decoded)
+
+
+def _bounded_string_map(value: object, *, max_length: int = 64) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: item
+        for key, item in value.items()
+        if isinstance(key, str)
+        and isinstance(item, str)
+        and len(key) <= max_length
+        and len(item) <= max_length
+    }
+
+
+def _profile_health_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    health = dict(row)
+    health["proxy_configured"] = bool(health.get("proxy_configured"))
+    if health.get("proxy_reachable") is not None:
+        health["proxy_reachable"] = bool(health["proxy_reachable"])
+    health["warnings"] = _json_string_list(health.pop("warnings_json", None))
+    health["blockers"] = _json_string_list(health.pop("blockers_json", None))
+    sources = _bounded_string_map(_json_object(health.pop("sources_json", None)))
+    health["sources"] = {
+        key: value for key, value in sources.items() if value in PROFILE_HEALTH_SOURCE_STATES
+    }
+    return health
+
+
+def get_profile_health(profile_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM profile_health WHERE profile_id = ?",
+            (profile_id,),
+        ).fetchone()
+    return _profile_health_from_row(row) if row else None
+
+
+def upsert_profile_health(
+    profile_id: str,
+    *,
+    state: str,
+    checked_at: str | None = None,
+    proxy_configured: bool = False,
+    proxy_reachable: bool | None = None,
+    outbound_ip_masked: str | None = None,
+    proxy_latency_ms: float | None = None,
+    proxy_risk_score: int | None = None,
+    proxy_authenticity_score: int | None = None,
+    fingerprint_consistency_score: int | None = None,
+    browser_scan_score: int | None = None,
+    warnings: list[str] | None = None,
+    blockers: list[str] | None = None,
+    error_code: str | None = None,
+    sources: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    normalized_warnings = _bounded_string_list(warnings or [])
+    normalized_blockers = _bounded_string_list(blockers or [])
+    normalized_sources = {
+        key: value
+        for key, value in _bounded_string_map(sources or {}).items()
+        if value in PROFILE_HEALTH_SOURCE_STATES
+    }
+    safe_error_code = error_code if isinstance(error_code, str) and len(error_code) <= 64 else None
+    safe_masked_ip = (
+        outbound_ip_masked
+        if isinstance(outbound_ip_masked, str) and len(outbound_ip_masked) <= 64
+        else None
+    )
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO profile_health (
+                profile_id, state, checked_at, proxy_configured, proxy_reachable,
+                outbound_ip_masked, proxy_latency_ms, proxy_risk_score,
+                proxy_authenticity_score, fingerprint_consistency_score,
+                browser_scan_score, warnings_json, blockers_json, error_code, sources_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(profile_id) DO UPDATE SET
+                state = excluded.state,
+                checked_at = excluded.checked_at,
+                proxy_configured = excluded.proxy_configured,
+                proxy_reachable = excluded.proxy_reachable,
+                outbound_ip_masked = excluded.outbound_ip_masked,
+                proxy_latency_ms = excluded.proxy_latency_ms,
+                proxy_risk_score = excluded.proxy_risk_score,
+                proxy_authenticity_score = excluded.proxy_authenticity_score,
+                fingerprint_consistency_score = excluded.fingerprint_consistency_score,
+                browser_scan_score = excluded.browser_scan_score,
+                warnings_json = excluded.warnings_json,
+                blockers_json = excluded.blockers_json,
+                error_code = excluded.error_code,
+                sources_json = excluded.sources_json""",
+            (
+                profile_id,
+                state,
+                checked_at,
+                proxy_configured,
+                proxy_reachable,
+                safe_masked_ip,
+                proxy_latency_ms,
+                proxy_risk_score,
+                proxy_authenticity_score,
+                fingerprint_consistency_score,
+                browser_scan_score,
+                json.dumps(normalized_warnings, separators=(",", ":")),
+                json.dumps(normalized_blockers, separators=(",", ":")),
+                safe_error_code,
+                json.dumps(normalized_sources, separators=(",", ":"), sort_keys=True),
+            ),
+        )
+        conn.commit()
+
+    health = get_profile_health(profile_id)
+    if health is None:  # pragma: no cover - the successful upsert always creates the row
+        raise RuntimeError("profile health upsert did not create a row")
+    return health
+
+
+# ── Task session persistence ────────────────────────────────────────────────
 
 
 def _task_session_from_row(row: sqlite3.Row) -> dict[str, Any]:

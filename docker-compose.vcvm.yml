@@ -15,6 +15,10 @@ services:
     environment:
       AUTH_TOKEN: ${AUTH_TOKEN:?AUTH_TOKEN is required for VCVM deployments}
       ACCESS_CONTROL_ENABLED: "1"
+      PROXYCHECKER_URL: ${PROXYCHECKER_URL:-}
+      PROXYCHECKER_ALLOWED_HOSTS: ${PROXYCHECKER_ALLOWED_HOSTS:-host.docker.internal}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - cloakbrowser-manager-vcvm-data:/data
     shm_size: "${VCVM_SHM_SIZE:-2gb}"

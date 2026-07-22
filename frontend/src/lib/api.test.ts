@@ -153,6 +153,45 @@ describe("api.stopProfile", () => {
   });
 });
 
+describe("profile health API", () => {
+  it("fetches the latest redacted health summary", async () => {
+    const health = {
+      profile_id: "profile/1",
+      state: "unavailable",
+      checked_at: null,
+      proxy_configured: false,
+      proxy_reachable: null,
+      outbound_ip_masked: null,
+      proxy_latency_ms: null,
+      proxy_risk_score: null,
+      proxy_authenticity_score: null,
+      fingerprint_consistency_score: null,
+      browser_scan_score: null,
+      warnings: [],
+      blockers: [],
+      error_code: null,
+      sources: {},
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse(health));
+
+    await expect(api.getProfileHealth("profile/1")).resolves.toEqual(health);
+    expect(mockFetch).toHaveBeenCalledWith("/api/profiles/profile%2F1/health", {
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+
+  it("requests an asynchronous health rerun without a client supplied target", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ profile_id: "profile-1", state: "pending" }, 202));
+
+    await api.runProfileHealth("profile-1");
+
+    expect(mockFetch).toHaveBeenCalledWith("/api/profiles/profile-1/health/run", {
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+  });
+});
+
 // ── setClipboard ────────────────────────────────────────────────────────────
 
 describe("api.setClipboard", () => {

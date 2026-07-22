@@ -41,6 +41,62 @@ Open [http://localhost:8080](http://localhost:8080) in your browser. Create a pr
 
 > **Early alpha** — this project is under active development. Expect bugs. If you find one, please [open an issue](https://github.com/CloakHQ/CloakBrowser-Manager/issues).
 
+## Fork development status
+
+Status date: **22 July 2026**. This section describes the active development branch `integrate-pr-47-27-26` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
+
+### Repository boundaries
+
+| Role | Exact repository | Write policy |
+| --- | --- | --- |
+| Active product fork | [Martin-Hausleitner/CloakBrowser-Manager](https://github.com/Martin-Hausleitner/CloakBrowser-Manager) | Development branch and documentation are pushed here. |
+| Read-only upstream | [CloakHQ/CloakBrowser-Manager](https://github.com/CloakHQ/CloakBrowser-Manager) | Used for upstream comparison and future rebases; no push from this workflow. |
+| Browser engine | [CloakHQ/CloakBrowser](https://github.com/CloakHQ/CloakBrowser) | External runtime dependency; not modified by Manager changes. |
+| Explicitly out of scope | [fintaro-ai/Fintaro-Agent](https://github.com/fintaro-ai/Fintaro-Agent) | Never receive CloakBrowser code, reports, commits, or generated artifacts. |
+
+The repo-local continuation workflow for the next developer is [`.agents/skills/cloakbrowser-manager-development/SKILL.md`](.agents/skills/cloakbrowser-manager-development/SKILL.md). The authoritative row-by-row status is [docs/GOAL-ACCEPTANCE-MATRIX-2026-07-22.md](docs/GOAL-ACCEPTANCE-MATRIX-2026-07-22.md).
+
+### What is complete
+
+- **Selected upstream changes are integrated** — PR #47 constrains the browser window to the VNC framebuffer, PR #27 makes the documented local backend start work, and PR #26 adds a per-profile search engine.
+- **Compact mobile VNC workspace** — browser-first portrait/landscape layout, fullscreen preview, session grid/switcher, Fit/Width/Height/Phone modes, live viewer zoom, persisted framebuffer viewport changes, collapsible chat, typed Capture/Copy/Paste actions, and `visualViewport` keyboard adaptation.
+- **Scoped access foundation** — administrator bootstrap, people and agent identities, access groups, sandbox-scoped grants, separate view/interact/operate/automate capabilities, revocation, audit metadata, VNC input filtering, and scoped REST/CDP/VNC enforcement.
+- **Profile organization and preferred harness metadata** — persistent projects, nested folders, pins, color accents, deterministic ordering, compact desktop/mobile presentation, and saved preferences for Codex, Antigravity, Claude Code, OpenCode, and Browser Use.
+- **Fail-closed execution boundary** — a saved harness preference never grants execution. Browser-visible host actions still require a capability-verified `codex-computer-use` bridge; server task history remains persistence only.
+- **Streaming and competitor research** — reproducible redacted benchmark tooling, a VCVM/Tailscale latency audit, a Safari/WebKit gate that reports missing prerequisites honestly, and an official-source competitor feature matrix.
+
+### Current verified state
+
+| Area | State | Fresh or historical evidence |
+| --- | --- | --- |
+| Profile schema, migration, API, organization and access summaries | Implemented; full local suite passed | **286/286 backend tests passed** on 22 July 2026. |
+| Desktop/mobile organization, form, access dashboard and harness boundary | Implemented; full local suite passed | **126/126 frontend tests passed** and the production build passed on 22 July 2026. |
+| Release, mobile, streaming and deployment scripts | Full local script suite passed | **26/26 script tests passed**, including an explicit Python 3.11 compilation regression check. |
+| Compact mobile workspace and scoped live browser control | Proven on the prior automated VCVM Chromium surface | The last published run passed 318 checks and captured 31 screenshots; the new profile-organization slice still needs a fresh live VCVM rerun. |
+| Physical iPhone Safari and private Tailnet HTTPS | Not yet proven | Chromium emulation is not relabeled as Safari evidence; Safari Remote Automation and a physical-device run remain external prerequisites. |
+| Direct Tailnet latency | Not achieved in the last measurement | The recorded Mac route used `DERP(nue)`; direct-path proof must be rerun rather than inferred. |
+
+### What is being worked on next
+
+| Priority | Feature | Required completion evidence |
+| --- | --- | --- |
+| P0 | Read-only extension inventory and agent-facing CLI attachment flow | Safe manifest parser, trust/error state, no install control in mobile UI, authorization/redaction tests, and CLI integration tests. |
+| P0 | Stored profile health probe | Proxy reachability, redacted outbound IP, runtime fingerprint consistency result, first-successful-launch scheduling, failure cases, and VCVM proof. |
+| P0 | Admin-only live diagnostics | Launch/VNC timestamps and counters, explicit `unavailable` values for unmeasured metrics, redaction tests, and no benchmark clutter in the mobile workspace. |
+| P0 | Fresh full release run | Complete backend/frontend suites, production build, script/release gates, VCVM deployment, authenticated mobile E2E, screenshots, viewport restore, and remote-branch verification. |
+| P1 | Direct Tailnet route and real iPhone Safari acceptance | Private HTTPS, physical keyboard behavior, touch interaction, direct-versus-DERP route evidence, and honest latency definitions. |
+| P1 | Profile organization refinements | Search/filter, explicit project/folder management, safe bulk movement, and refresh-stable live E2E after the MVP metadata model is proven. |
+| P2 | Operational polish | Extension templates, health history, recordings/metrics, reusable browser templates, and bulk/API/CLI flows after the security and release gates are stable. |
+
+### Development timeline
+
+- **20 July 2026** — mobile VNC workspace, iOS-safe paste, initial E2E gates, scoped Paperclip access, protected mobile login, and private Tailnet fail-closed helper landed.
+- **21 July 2026** — mobile controls were progressively simplified; short-iPhone, keyboard, access-dashboard, Safari/WebKit, Codex Computer Use, live viewport, VCVM, streaming, and policy gates were added or hardened.
+- **22 July 2026** — compact mobile/access-group work was consolidated; profile project/folder/pin/color/harness metadata, deterministic desktop/mobile organization, and redacted access context were implemented and scoped-tested.
+- **Next release checkpoint** — implement the three remaining P0 runtime capabilities, run the entire local and VCVM release ladder, update the acceptance matrix from fresh artifacts, then push and verify the fork branch.
+
+Historical benchmark numbers below remain useful baselines, but they are not a substitute for the fresh release checkpoint above.
+
 ## Why Not Just Use a VPN?
 
 A VPN only changes your IP. Incognito only clears cookies. Chrome profiles share the same hardware fingerprint underneath. Platforms use 50+ signals to link your accounts — canvas, WebGL, audio, GPU, fonts, screen size, timezone.
@@ -109,7 +165,7 @@ The current mobile implementation is browser-first and compact: chat starts coll
 
 Tools uses progressive disclosure for Quick actions, View, Sessions, Admin and account controls. Quick actions are not URL bookmarks; Capture, Copy and Paste are typed, host-scoped commands enabled only when a verified `codex-computer-use` bridge reports the matching capability. Unknown command kinds are dropped at the boundary, while a missing, generic or mislabeled harness fails closed. The browser gate injects a deterministic test bridge for this contract; it does not claim that the Codex CLI/IDE on the VCVM supplies a production Computer Use browser runtime. Server-backed task history is persistence only and does not execute an agent by itself.
 
-The current suites pass **261 backend tests**, **111 frontend tests** and **22 release/mobile gate tests**, plus the frontend production build and VCVM deployment-surface gate. The final VCVM-backed Chromium run passed **318/318 checks** with **31 screenshots** across iPhone 14, iPhone SE, iPhone Pro Max, iPhone landscape, touch tablet and the access dashboard. It explicitly emulated the open software keyboard, checked VNC/composer non-overlap, exercised the fullscreen session grid, applied Phone fit and restored the live profile to its original **665×1114** framebuffer. A separate group-only operator login saw exactly one assigned live profile, exposed no administration and received HTTP 403 for the group-management API. The Safari/WebKit gate records an explicit `blocked` result while Safari Remote Automation remains disabled; Chromium evidence is not relabeled as Safari evidence. The complete UI/UX rationale and ten next input improvements are in [docs/MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md](docs/MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md); the current official-source competitor matrix is in [docs/COMPETITOR-UI-FEATURE-MATRIX-2026-07-22.md](docs/COMPETITOR-UI-FEATURE-MATRIX-2026-07-22.md), and streaming, auth and Tailnet limits remain documented in [docs/MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md](docs/MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md).
+The last published pre-organization baseline passed **261 backend tests**, **111 frontend tests** and **22 release/mobile gate tests**, plus the frontend production build and VCVM deployment-surface gate. Its VCVM-backed Chromium run passed **318/318 checks** with **31 screenshots** across iPhone 14, iPhone SE, iPhone Pro Max, iPhone landscape, touch tablet and the access dashboard. It explicitly emulated the open software keyboard, checked VNC/composer non-overlap, exercised the fullscreen session grid, applied Phone fit and restored the live profile to its original **665×1114** framebuffer. A separate group-only operator login saw exactly one assigned live profile, exposed no administration and received HTTP 403 for the group-management API. The Safari/WebKit gate records an explicit `blocked` result while Safari Remote Automation remains disabled; Chromium evidence is not relabeled as Safari evidence. The complete UI/UX rationale and ten next input improvements are in [docs/MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md](docs/MOBILE-UI-UX-HARNESS-AUDIT-2026-07-21.md); the current official-source competitor matrix is in [docs/COMPETITOR-UI-FEATURE-MATRIX-2026-07-22.md](docs/COMPETITOR-UI-FEATURE-MATRIX-2026-07-22.md), and streaming, auth and Tailnet limits remain documented in [docs/MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md](docs/MOBILE-STREAMING-AUTH-LATENCY-AUDIT-2026-07-21.md).
 
 ## Development
 
@@ -235,7 +291,7 @@ environment:
 4. Create groups of people, assign sandbox grants once, and review each person's effective union of direct and group access.
 5. Rotate or deactivate a person or agent immediately when access changes.
 
-The access-control implementation and backend test matrix cover profile discovery, VNC, clipboard, launch/stop, CDP HTTP and CDP WebSockets. Direct grants and active group grants are combined server-side into one effective policy; agents remain direct identities and are not group members. The dashboard can persist two complementary grants on one sandbox, such as `operate + automate`, and its effective-access disclosure lists the profiles and resulting capabilities before a key is used. The authenticated acceptance runs proved both a scoped agent and a group-only person saw only their assigned sandbox; the person received HTTP 403 for group administration, while the agent reached scoped CDP and received HTTP 404 for a profile outside its scope. Active VNC/CDP leases are revoked as soon as a user, group membership, group grant, agent, key or direct grant changes. Viewer-only RFB filtering is stateful, restricts negotiated encodings and discards pointer, keyboard and clipboard input before KasmVNC. Denied REST and WebSocket policy decisions are recorded as metadata-only audit events without credentials or browser content. The full suite currently passes **261 backend tests** and **111 frontend tests**. A profile outside a caller's scope still returns the same `404` response as a missing profile. The dashboard is a convenience layer; it is not the security boundary.
+The access-control implementation and backend test matrix cover profile discovery, VNC, clipboard, launch/stop, CDP HTTP and CDP WebSockets. Direct grants and active group grants are combined server-side into one effective policy; agents remain direct identities and are not group members. The dashboard can persist two complementary grants on one sandbox, such as `operate + automate`, and its effective-access disclosure lists the profiles and resulting capabilities before a key is used. The authenticated acceptance runs proved both a scoped agent and a group-only person saw only their assigned sandbox; the person received HTTP 403 for group administration, while the agent reached scoped CDP and received HTTP 404 for a profile outside its scope. Active VNC/CDP leases are revoked as soon as a user, group membership, group grant, agent, key or direct grant changes. Viewer-only RFB filtering is stateful, restricts negotiated encodings and discards pointer, keyboard and clipboard input before KasmVNC. Denied REST and WebSocket policy decisions are recorded as metadata-only audit events without credentials or browser content. The current local full suites pass **286 backend tests** and **126 frontend tests**, plus the production build; live VCVM evidence is tracked separately above. A profile outside a caller's scope still returns the same `404` response as a missing profile. The dashboard is a convenience layer; it is not the security boundary.
 
 | Grant | What it allows |
 | --- | --- |

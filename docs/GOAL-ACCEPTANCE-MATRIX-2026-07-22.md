@@ -22,29 +22,32 @@ The inherent network and streaming dependency makes this a high-risk mobile surf
 | Phone fit persists the real VCVM framebuffer and restores it after the gate | Proven | `App.applyProfileViewport`, live gate apply/restore checks | Runtime mobile identity consistency is still required |
 | Compact browser-first mobile UI and keyboard-safe composer | Proven on automated VCVM surface | Five viewport runs, 31 screenshots, independent visual PASS | Physical iPhone keyboard and private HTTPS proof |
 | Existing profiles, colored tags and scoped access groups | Proven | Profile/tag persistence, groups CRUD/effective grants, authenticated E2E | None for the current MVP |
-| Persistent profile pinning, projects and collapsible folders | Implemented; full local suites passed | Additive SQLite migration, model/API persistence, deterministic desktop/mobile organization, form/access summaries; 286 backend and 126 frontend tests plus production build pass | Fresh authenticated VCVM refresh-stable E2E and screenshots |
+| Persistent profile pinning, projects and collapsible folders | Proven on automated VCVM surface | Additive SQLite migration, deterministic desktop/mobile organization and form/access summaries; the validation project/folder survived redeploy and appeared in fresh desktop/mobile screenshots; 343 backend and 132 frontend tests plus production build pass | Explicit bulk move and richer project/folder management remain roadmap work |
 | Harness choice for Codex, Antigravity, Claude Code, OpenCode and Browser Use clients | Implemented; full local suites passed | Preference persists, capability state and task metadata are visible, execution remains fail-closed behind the verified Codex Computer Use bridge, and full local suites pass | Fresh live VCVM round-trip for each label/state; non-Codex preferences remain metadata, not execution providers |
-| Proxy reachability, outbound IP and fingerprint consistency score | Missing | Proxy syntax validation and fingerprint launch arguments only | Runtime probe, stored redacted result, automatic first-launch scheduling and failure cases |
+| Proxy reachability, outbound IP, fingerprint consistency and BrowserScan score | Implemented; live browser path proven | Stored asynchronous first-launch result, manual rerun, refresh persistence, masked outbound IP, 100/100 fingerprint consistency, 100/100 BrowserScan, compact redacted desktop disclosure, scoped API tests and live Manager-to-proxychecker health reachability | Run the optional proxychecker `/check` against an authorized configured proxy; the fresh no-proxy E2E correctly reported the source as `skipped` |
 | Read-only extension inventory managed from CLI | Missing | Raw `--load-extension` launch arguments only | Manifest parsing, trust/error state, icon/source endpoint, agent CLI and no mobile install control |
 | Live latency and developer diagnostics | Partial | Offline benchmark reports and VNC logs | Admin-only live launch/VNC counters, honest unavailable metrics and redaction tests |
 | Competitor research | Proven | `COMPETITOR-UI-FEATURE-MATRIX-2026-07-22.md` | Keep facts and design inferences separated |
-| End-to-end mobile release | Partial | Prior authenticated Chromium/VCVM gate passed 318 checks with 31 screenshots | Rerun after profile-organization changes; Safari Remote Automation and physical Tailnet HTTPS are not yet proven |
+| End-to-end mobile release | Proven on automated VCVM Chromium surface | Current authenticated gate passed 316 checks across five viewports plus access dashboard, produced 31 screenshots, and the redacted release acceptance gate passed | Safari Remote Automation, physical iPhone and private Tailnet HTTPS remain external/device proof |
 
 ## Fresh verification snapshot
 
-- Complete backend suite: **286 passed**.
-- Complete frontend suite: **126 passed**.
+- Complete backend suite: **343 passed**.
+- Complete frontend suite: **132 passed**.
 - Complete script suite: **26 passed**, including Python 3.11 release-gate compilation.
 - Frontend production build: **passed**.
-- Release-gate, redeploy and browser evidence: **not rerun after the latest slice yet**.
-- Prior automated VCVM Chromium evidence remains historical until that rerun is complete.
+- Redacted release acceptance gate: **passed**.
+- VCVM deployment: **healthy and protected**, with the optional local proxychecker reachable from the Manager container.
+- Authenticated VCVM Chromium gate: **316 checks passed**, **31 screenshots**, five mobile/tablet viewports plus access dashboard.
+- Live profile health: first-launch persistence, manual rerun, masked outbound IP, 100/100 fingerprint consistency and 100/100 BrowserScan passed.
+- Safari/WebKit gate: **blocked externally** because Safari Remote Automation is disabled; no WebKit or physical-iPhone claim is made.
 
 ## Delivery order and stop conditions
 
-1. **Implemented; live rerun pending:** additive profile organization and harness metadata, with schema migration and grouped compact UI.
-2. **Next:** read-only extension inventory plus agent-facing CLI attachment flow.
-3. **Next:** stored profile health probe for proxy/IP/runtime fingerprint consistency, scheduled after first successful launch.
+1. **Proven on automated VCVM surface:** additive profile organization, compact grouped UI and current mobile release ladder.
+2. **Implemented; one live input still required:** redacted profile health and BrowserScan are live; credentialed proxychecker scoring still needs an authorized configured proxy.
+3. **Next:** read-only extension inventory plus agent-facing CLI attachment flow.
 4. **Next:** admin-only live diagnostics that do not execute benchmarks or expose secrets.
-5. **Release checkpoint:** full unit, integration, build, release-gate, VCVM deploy and authenticated mobile E2E verification.
+5. **External/device checkpoint:** Safari Remote Automation, physical iPhone and private Tailnet HTTPS/direct-route evidence.
 
 The goal is accepted only when every row above is proven or an external-only proof is explicitly completed. A blocked Safari or physical-device row cannot be relabeled as a pass.

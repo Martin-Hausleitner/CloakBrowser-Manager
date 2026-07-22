@@ -1,6 +1,6 @@
 ---
 name: cloakbrowser-manager-development
-description: Use when continuing, reviewing, testing, deploying, or documenting the CloakBrowser Manager fork, especially its mobile VNC workspace, profile organization, scoped access, harness bridge, VCVM deployment, or release evidence.
+description: Use when continuing, reviewing, testing, deploying, or documenting the CloakBrowser Manager fork, especially its mobile VNC workspace, profile organization, scoped access, harness bridge, redacted profile health, VCVM deployment, or release evidence.
 metadata:
   category: integration-documentation
   triggers:
@@ -9,6 +9,9 @@ metadata:
     - VCVM
     - Codex Computer Use
     - profile organization
+    - profile health
+    - BrowserScan
+    - proxychecker
     - scoped browser access
 ---
 
@@ -25,6 +28,8 @@ Use this repository-local workflow to continue the fork without losing its secur
 - Never expose administrator tokens, user passwords, proxy credentials, agent keys, cookies, browser content, raw launch arguments, or host paths in logs, reports, screenshots, commits, or chat.
 - Preserve unrelated dirty files. Stage explicit paths and review the staged diff before every commit.
 - A preferred harness is metadata, not an execution authority. Host-scoped browser actions must continue to require the verified `codex-computer-use` bridge and fail closed otherwise.
+- Profile health is an observation, not an undetectability guarantee. Persist only masked IPs, numeric scores, source states and whitelisted warning/blocker codes; never provider HTML, raw responses or exception text.
+- Keep the optional proxychecker on a trusted VCVM-local boundary. Manager `/health` must not depend on it, and an unavailable proxychecker must degrade to an explicit source state rather than block profile launch.
 
 ## Start every continuation
 
@@ -75,6 +80,30 @@ If the repository's `bd` issue tool is unavailable, record that limitation in th
 - Saved preferences for Antigravity, Claude Code, OpenCode, or Browser Use may be displayed and propagated as metadata, but must not bypass bridge verification.
 - Keep quick actions typed and capability-checked. Reject unknown commands.
 - Server-side task history is persistence and conversation state; it is not proof that an agent executed a browser task.
+
+### Profile health and external observations
+
+- Schedule the automatic probe only after the first successful launch and never await it in the launch response.
+- Keep manual reruns behind `operate`; keep stored reads behind `view`; preserve indistinguishable `404` behavior outside scope.
+- Mask IPv4 and IPv6 before persistence. Never store or return the raw outbound address.
+- Treat saved-versus-runtime fingerprint consistency, proxy risk/authenticity and BrowserScan authenticity as separate measurements. Never substitute one score for another.
+- BrowserScan challenge, consent, timeout or unsupported markup returns an unavailable score with a whitelisted blocker. Do not click consent or CAPTCHA controls.
+- Do not interpret labels such as `WebDriver` as a detection by themselves; require an explicit negative result.
+- Keep health disclosure off the persistent mobile workspace. A compact desktop summary with progressive detail is sufficient.
+
+## Current verified checkpoint
+
+Snapshot from 22 July 2026 on `integrate-pr-47-27-26`:
+
+- 343 backend tests, 132 frontend tests, 26 script tests and the production build passed.
+- The protected VCVM deployment passed first-launch health scheduling, manual rerun and refresh persistence on a 390×844 test profile.
+- The stored result exposed a masked IP, 100/100 fingerprint consistency and 100/100 BrowserScan authenticity with no warning or blocker.
+- The authenticated mobile gate passed 316 checks over five viewports plus the access dashboard and captured 31 screenshots.
+- The Manager container reached the separately bound VCVM-local proxychecker health endpoint; a real configured-proxy `/check` remains required before proxy enrichment is called live-proven.
+- Safari Remote Automation is disabled, so WebKit and physical-iPhone evidence remain external blockers.
+- The next vertical slices are read-only extension inventory/CLI attachment and admin-only live diagnostics.
+
+Refresh these numbers and claims after any relevant change; this is a dated handoff, not permanent proof.
 
 ## Evidence rules
 

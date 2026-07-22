@@ -37,7 +37,10 @@ def mobile_report() -> dict[str, object]:
             {
                 "name": "iphone-14-portrait",
                 "passed": True,
-                "checks": [{"name": "no overflow", "passed": True}],
+                "checks": [
+                    {"name": name, "passed": True}
+                    for name in sorted(release_gate.REQUIRED_MOBILE_CHECKS)
+                ],
                 "screenshots": [{"path": "/Users/example/private/screen.png"}],
             },
             {
@@ -120,7 +123,10 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
             report = json.loads((root / "release.json").read_text(encoding="utf-8"))
             markdown = (root / "release.md").read_text(encoding="utf-8")
             self.assertTrue(report["passed"])
-            self.assertEqual(report["gates"]["mobile_ui_ux"]["total_checks"], 2)
+            self.assertEqual(
+                report["gates"]["mobile_ui_ux"]["total_checks"],
+                len(release_gate.REQUIRED_MOBILE_CHECKS) + 1,
+            )
             self.assertEqual(report["gates"]["mobile_ui_ux"]["total_screenshots"], 2)
             self.assertEqual(report["gates"]["streaming"]["measured_candidates"], 1)
             combined = json.dumps(report) + markdown + completed.stdout
@@ -249,7 +255,10 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
         report["authenticated_run"] = True
         report["access_dashboard"] = {
             "passed": True,
-            "checks": [{"name": "access controls", "passed": True}],
+            "checks": [
+                {"name": name, "passed": True}
+                for name in sorted(release_gate.REQUIRED_ACCESS_DASHBOARD_CHECKS)
+            ],
             "screenshots": [{"path": "/Users/example/private/access.png"}],
         }
 
@@ -259,12 +268,35 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
             24,
         )
 
-        self.assertEqual(summary["total_checks"], 3)
+        self.assertEqual(
+            summary["total_checks"],
+            len(release_gate.REQUIRED_MOBILE_CHECKS)
+            + len(release_gate.REQUIRED_ACCESS_DASHBOARD_CHECKS)
+            + 1,
+        )
         self.assertEqual(summary["total_screenshots"], 3)
         self.assertTrue(summary["authenticated_run"])
         assert isinstance(report["access_dashboard"], dict)
         report["access_dashboard"]["passed"] = False  # type: ignore[index]
         with self.assertRaises(release_gate.GateError):
+            release_gate.summarize_mobile(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
+    def test_mobile_summary_requires_critical_mobile_regression_checks(self) -> None:
+        report = mobile_report()
+        first_viewport = report["viewports"][0]  # type: ignore[index]
+        assert isinstance(first_viewport, dict)
+        checks = first_viewport["checks"]
+        assert isinstance(checks, list)
+        checks.pop()
+
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "mobile UI/UX gate is missing required checks",
+        ):
             release_gate.summarize_mobile(
                 report,
                 release_gate.parse_time(NOW, "now"),

@@ -91,6 +91,33 @@ class MobileUiGateTest(unittest.TestCase):
                 if "Browser access controls" in script and "button.click" in script:
                     self.events.append("click:access-controls")
                     return True
+                if "textContent?.trim() === 'Groups'" in script and "tab.click" in script:
+                    self.events.append("click:groups-tab")
+                    return True
+                if "configuredGroups" in script:
+                    return {
+                        "visible": True,
+                        "selected": True,
+                        "configuredGroups": True,
+                        "editorHidden": True,
+                        "overflowFree": True,
+                        "addTouchSafe": True,
+                    }
+                if "textContent?.trim() === 'Add group'" in script and "add.click" in script:
+                    self.events.append("click:add-group")
+                    return True
+                if "hasName" in script and "hasPermissions" in script:
+                    return {
+                        "visible": True,
+                        "hasName": True,
+                        "hasDescription": True,
+                        "hasActive": True,
+                        "hasMembers": True,
+                        "hasPermissions": True,
+                        "hasSave": True,
+                        "overflowFree": True,
+                        "offenders": [],
+                    }
                 if "ACCESS_DASHBOARD_SCRIPT" in script:
                     raise AssertionError("script constant name should not be passed to eval")
                 self.events.append("eval:access-dashboard")

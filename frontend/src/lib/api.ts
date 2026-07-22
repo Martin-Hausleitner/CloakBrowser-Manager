@@ -204,6 +204,18 @@ export interface AccessUser {
   active: boolean;
   created_at: string;
   grants: AccessGrant[];
+  group_ids: string[];
+  effective_grants: AccessGrant[];
+}
+
+export interface AccessGroup {
+  id: string;
+  name: string;
+  description: string | null;
+  active: boolean;
+  created_at: string;
+  member_user_ids: string[];
+  grants: AccessGrant[];
 }
 
 export interface AccessAgent {
@@ -363,6 +375,7 @@ export const api = {
     password: string;
     role: AccessRole;
     grants: AccessGrant[];
+    group_ids?: string[];
   }) =>
     request<AccessUser>("/api/access/users", {
       method: "POST",
@@ -374,8 +387,35 @@ export const api = {
     role: AccessRole;
     active: boolean;
     grants: AccessGrant[];
+    group_ids: string[];
   }>) =>
     request<AccessUser>(`/api/access/users/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  listAccessGroups: () => request<AccessGroup[]>("/api/access/groups"),
+
+  createAccessGroup: (data: {
+    name: string;
+    description: string | null;
+    active: boolean;
+    member_user_ids: string[];
+    grants: AccessGrant[];
+  }) =>
+    request<AccessGroup>("/api/access/groups", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateAccessGroup: (id: string, data: Partial<{
+    name: string;
+    description: string | null;
+    active: boolean;
+    member_user_ids: string[];
+    grants: AccessGrant[];
+  }>) =>
+    request<AccessGroup>(`/api/access/groups/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),

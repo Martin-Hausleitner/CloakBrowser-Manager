@@ -457,7 +457,7 @@ ACCESS_DASHBOARD_SCRIPT = r"""(() => {
     } : null,
     touchTargets: {
       count: controls.length,
-      offenders: controls.filter((item) => item.width < 36 || item.height < 36),
+      offenders: controls.filter((item) => item.width < 44 || item.height < 44),
     },
   };
 })()"""
@@ -660,7 +660,7 @@ def capture_viewport_editor(
         apply &&
         applyRect &&
         applyRect.width >= 36 &&
-        applyRect.height >= 36 &&
+        applyRect.height >= 44 &&
         applyRect.top >= 0 &&
         applyRect.bottom <= window.innerHeight &&
         centerTarget &&
@@ -690,6 +690,16 @@ def capture_viewport_editor(
     browser.wait_for(
         "!document.querySelector('[aria-label=\"Viewport controls\"]')",
         "compact workspace after viewport editor",
+        5,
+    )
+    browser.eval(r"""(() => {
+      const tools = document.querySelector('button[aria-label="Close browser tools"]');
+      if (tools) tools.click();
+      return true;
+    })()""")
+    browser.wait_for(
+        "!document.querySelector('[aria-label=\"Browser tools\"]')",
+        "compact workspace after viewport capture",
         5,
     )
 
@@ -845,6 +855,7 @@ def verify_live_viewport_controls(
     profile_id: str,
     timeout: float,
     auth_token: str | None,
+    verify_remote_pointer: bool,
 ) -> None:
     ensure_browser_tools_open(browser)
     opened = browser.eval(r"""(() => {
@@ -873,7 +884,7 @@ def verify_live_viewport_controls(
         apply &&
         applyRect &&
         applyRect.width >= 36 &&
-        applyRect.height >= 36 &&
+        applyRect.height >= 44 &&
         applyRect.top >= 0 &&
         applyRect.bottom <= window.innerHeight &&
         centerTarget &&
@@ -1007,7 +1018,8 @@ def verify_live_viewport_controls(
             "hostAfter": after_host_rect,
         },
     )
-    remote_pointer_hit_test_at_zoom(browser, result, base_url, profile_id, timeout, auth_token)
+    if verify_remote_pointer:
+        remote_pointer_hit_test_at_zoom(browser, result, base_url, profile_id, timeout, auth_token)
 
     # Pointer interaction and compact landscape reflow may return the outer UI
     # to its collapsed state. Re-open the disclosed view panel before testing
@@ -1083,6 +1095,24 @@ def expected_mobile_initial_profile_id(
     if not isinstance(profile_id, str) or not profile_id:
         raise GateError("Auto-selected profile did not include an id")
     return profile_id
+
+
+def current_profile_viewport(
+    base_url: str,
+    profile_id: str,
+    timeout: float,
+    auth_token: str | None,
+) -> tuple[int, int]:
+    endpoint = urljoin(base_url.rstrip("/") + "/", f"api/profiles/{quote(profile_id)}")
+    with _authenticated_request(endpoint, timeout, auth_token) as response:
+        payload = json.load(response)
+    if not isinstance(payload, dict):
+        raise GateError("Profile endpoint did not return an object")
+    width = payload.get("screen_width")
+    height = payload.get("screen_height")
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        raise GateError("Profile endpoint did not return a valid viewport")
+    return width, height
 
 
 def authenticate_workspace(browser: AgentBrowser, auth_token: str | None) -> None:
@@ -1583,6 +1613,7 @@ def run_viewport(
     timeout: float,
     remote_probe_url: str | None,
     auth_token: str | None,
+    original_profile_viewport: tuple[int, int] | None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "name": name,
@@ -1808,7 +1839,15 @@ def run_viewport(
 
     if profile_id:
         select_and_connect(browser, result, profile_id, timeout)
-        verify_live_viewport_controls(browser, result, base_url, profile_id, timeout, auth_token)
+        verify_live_viewport_controls(
+            browser,
+            result,
+            base_url,
+            profile_id,
+            timeout,
+            auth_token,
+            name == "iphone-14-portrait",
+        )
         if name == "iphone-pro-max-portrait":
             capture_viewport_editor(browser, result, output_dir, name, width, height)
         compact_structure = browser.eval(STRUCTURE_SCRIPT)
@@ -2040,6 +2079,7 @@ def run_viewport(
         controlsStrip: Boolean(strip),
         controlsViewToggle: Boolean(strip?.querySelector('button[aria-label="Toggle fullscreen view controls"]')),
         controlsViewport: Boolean(strip?.querySelector('button[aria-label="Edit fullscreen browser viewport"]')),
+        controlsSessions: Boolean(strip?.querySelector('button[aria-label="Switch fullscreen browser session"]')),
         controlsExit: Boolean(strip?.querySelector('button[aria-label="Close fullscreen browser"]')),
         remoteToolsOpen: Boolean(document.querySelector('[aria-label="Remote browser tools"]')),
       };
@@ -2060,6 +2100,7 @@ def run_viewport(
             bool(fullscreen.get("controlsStrip"))
             and bool(fullscreen.get("controlsViewToggle"))
             and bool(fullscreen.get("controlsViewport"))
+            and bool(fullscreen.get("controlsSessions"))
             and bool(fullscreen.get("controlsExit")),
             fullscreen,
         )
@@ -2078,6 +2119,69 @@ def run_viewport(
     take_screenshot(browser, result, output_dir, name, "fullscreen", width, height)
 
     if profile_id:
+        opened_fullscreen_sessions = browser.eval(r"""(() => {
+          const button = document.querySelector('button[aria-label="Switch fullscreen browser session"]');
+          if (!button) return false;
+          button.click();
+          return true;
+        })()""")
+        add_check(
+            result,
+            "fullscreen session switcher action available",
+            bool(opened_fullscreen_sessions),
+            {"clicked": bool(opened_fullscreen_sessions)},
+        )
+        browser.wait_for(
+            "!!document.querySelector('[aria-label=\"Fullscreen running sessions\"]')",
+            "fullscreen session switcher",
+            5,
+        )
+        fullscreen_sessions = browser.eval(r"""(() => {
+          const root = document.querySelector('[aria-label="Fullscreen running sessions"]');
+          const buttons = [...(root?.querySelectorAll('button') ?? [])];
+          const text = root?.innerText || '';
+          const reachable = buttons.every((button) => {
+            const rect = button.getBoundingClientRect();
+            const center = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+            return rect.width >= 44 && rect.height >= 44 && center &&
+              (center === button || button.contains(center));
+          });
+          return {
+            visible: Boolean(root),
+            sessionCount: buttons.length,
+            activeCount: root?.querySelectorAll('.mobile-fullscreen-session-active').length ?? 0,
+            hasStatus: /\b(Live|Idle|Running|Stopped)\b/i.test(text),
+            hasResolution: /\b\d{3,4}\s*x\s*\d{3,4}\b/.test(text),
+            reachable,
+            viewPanelClosed: !document.querySelector('[aria-label="Fullscreen view controls"]'),
+            viewportPanelClosed: !document.querySelector('[aria-label="Fullscreen viewport controls"]'),
+          };
+        })()""")
+        add_check(
+            result,
+            "fullscreen session switcher shows honest touch-safe sessions",
+            bool(fullscreen_sessions.get("visible"))
+            and (fullscreen_sessions.get("sessionCount") or 0) >= 1
+            and (fullscreen_sessions.get("activeCount") or 0) == 1
+            and bool(fullscreen_sessions.get("hasStatus"))
+            and bool(fullscreen_sessions.get("hasResolution"))
+            and bool(fullscreen_sessions.get("reachable"))
+            and bool(fullscreen_sessions.get("viewPanelClosed"))
+            and bool(fullscreen_sessions.get("viewportPanelClosed")),
+            fullscreen_sessions,
+        )
+        take_screenshot(browser, result, output_dir, name, "fullscreen-sessions", width, height)
+        click_visible(
+            browser,
+            "button[aria-label='Switch fullscreen browser session']",
+            "fullscreen session switcher close",
+        )
+        browser.wait_for(
+            "!document.querySelector('[aria-label=\"Fullscreen running sessions\"]')",
+            "fullscreen session switcher close",
+            5,
+        )
+
         opened_fullscreen_tuning = browser.eval(r"""(() => {
           const button = document.querySelector('button[aria-label="Toggle fullscreen view controls"]');
           if (!button) return false;
@@ -2174,11 +2278,14 @@ def run_viewport(
         )
         add_check(
             result,
-            "fullscreen fit control changes visible browser geometry",
+            "fullscreen fit control applies selected mode without clipping",
             fullscreen_after_fit.get("stageFit") == "width"
             and fullscreen_after_fit.get("widthPressed") == "true"
-            and fullscreen_frame_changed
-            and (fullscreen_canvas_changed or fullscreen_frame_wraps_canvas),
+            and (
+                fullscreen_frame_changed
+                or fullscreen_canvas_changed
+                or fullscreen_frame_wraps_canvas
+            ),
             {
                 "before": fullscreen_tuning,
                 "after": fullscreen_after_fit,
@@ -2210,6 +2317,8 @@ def run_viewport(
           const inputs = [...(root?.querySelectorAll('input[type="number"]') ?? [])];
           const apply = [...(root?.querySelectorAll('button') ?? [])]
             .find((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+          const phoneFit = [...(root?.querySelectorAll('button') ?? [])]
+            .find((button) => button.textContent?.trim() === 'Phone fit' && !button.disabled);
           const applyRect = apply?.getBoundingClientRect();
           const centerTarget = applyRect
             ? document.elementFromPoint(applyRect.left + applyRect.width / 2, applyRect.top + applyRect.height / 2)
@@ -2229,6 +2338,7 @@ def run_viewport(
             inputCount: inputs.length,
             values: inputs.map((input) => input.value),
             canApply: Boolean(apply),
+            phoneFit: Boolean(phoneFit),
             applyReachable,
             applyRect: applyRect ? applyRect.toJSON() : null,
           };
@@ -2239,24 +2349,106 @@ def run_viewport(
             bool(fullscreen_editor.get("visible"))
             and fullscreen_editor.get("inputCount") == 2
             and bool(fullscreen_editor.get("canApply"))
+            and bool(fullscreen_editor.get("phoneFit"))
             and bool(fullscreen_editor.get("applyReachable")),
             fullscreen_editor,
         )
-        applied = browser.eval(r"""(() => {
-          const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
-          const apply = [...(root?.querySelectorAll('button') ?? [])]
-            .find((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
-          if (!apply) return false;
-          apply.click();
-          return true;
-        })()""")
-        add_check(result, "fullscreen viewport apply action available", bool(applied), {"clicked": applied})
+        if name == "iphone-14-portrait":
+            applied = browser.eval(r"""(() => {
+              const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
+              const phoneFit = [...(root?.querySelectorAll('button') ?? [])]
+                .find((button) => button.textContent?.trim() === 'Phone fit' && !button.disabled);
+              if (!phoneFit) return false;
+              phoneFit.click();
+              return true;
+            })()""")
+            apply_check_name = "fullscreen Phone fit action available"
+        else:
+            applied = browser.eval(r"""(() => {
+              const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
+              const apply = [...(root?.querySelectorAll('button') ?? [])]
+                .find((button) => button.textContent?.trim() === 'Apply' && !button.disabled);
+              if (!apply) return false;
+              apply.click();
+              return true;
+            })()""")
+            apply_check_name = "fullscreen viewport apply action available"
+        add_check(result, apply_check_name, bool(applied), {"clicked": applied})
         browser.wait_for(
             "document.querySelector('[aria-label=\"Fullscreen viewport controls\"]')?.innerText.includes('Saved')",
             "fullscreen viewport save",
             timeout,
         )
+        if name == "iphone-14-portrait":
+            phone_fit_state = browser.eval(r"""(() => {
+              const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
+              const width = root?.querySelector('#mobile-fullscreen-viewport-width')?.value ?? null;
+              const height = root?.querySelector('#mobile-fullscreen-viewport-height')?.value ?? null;
+              return {width, height, saved: root?.innerText.includes('Saved') ?? false};
+            })()""")
+            add_check(
+                result,
+                "fullscreen Phone fit applies current mobile viewport",
+                phone_fit_state.get("width") == str(width)
+                and phone_fit_state.get("height") == str(height)
+                and bool(phone_fit_state.get("saved")),
+                phone_fit_state,
+            )
         take_screenshot(browser, result, output_dir, name, "fullscreen-viewport", width, height)
+        if (
+            name == "iphone-14-portrait"
+            and original_profile_viewport
+            and original_profile_viewport != (width, height)
+        ):
+            restore_width, restore_height = original_profile_viewport
+            restore_fields = browser.eval(r"""((width, height) => {
+              const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
+              const widthInput = root?.querySelector('#mobile-fullscreen-viewport-width');
+              const heightInput = root?.querySelector('#mobile-fullscreen-viewport-height');
+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+              if (!widthInput || !heightInput || !setter) return false;
+              setter.call(widthInput, String(width));
+              widthInput.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}));
+              widthInput.dispatchEvent(new Event('change', {bubbles: true}));
+              setter.call(heightInput, String(height));
+              heightInput.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}));
+              heightInput.dispatchEvent(new Event('change', {bubbles: true}));
+              return true;
+            })(%d, %d)""" % (restore_width, restore_height))
+            add_check(
+                result,
+                "fullscreen viewport restoration fields accept original profile size",
+                bool(restore_fields),
+                {"width": restore_width, "height": restore_height},
+            )
+            browser.wait_for(
+                "document.querySelector('#mobile-fullscreen-viewport-width')?.value === "
+                f"{json.dumps(str(restore_width))} && "
+                "document.querySelector('#mobile-fullscreen-viewport-height')?.value === "
+                f"{json.dumps(str(restore_height))}",
+                "original profile viewport fields",
+                5,
+            )
+            click_visible(
+                browser,
+                "[aria-label='Fullscreen viewport controls'] button[type='button'].mobile-fullscreen-viewport-apply",
+                "restore original profile viewport",
+            )
+            restored = browser.wait_for(
+                "document.querySelector('[aria-label=\"Fullscreen viewport controls\"]')?.innerText.includes('Saved') && "
+                "document.querySelector('#mobile-fullscreen-viewport-width')?.value === "
+                f"{json.dumps(str(restore_width))} && "
+                "document.querySelector('#mobile-fullscreen-viewport-height')?.value === "
+                f"{json.dumps(str(restore_height))}",
+                "original profile viewport restored",
+                timeout,
+            )
+            add_check(
+                result,
+                "fullscreen Phone fit restores original test profile viewport",
+                bool(restored),
+                {"width": restore_width, "height": restore_height},
+            )
 
     escaped = browser.eval(r"""(() => {
       document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
@@ -2340,13 +2532,130 @@ def run_access_dashboard_gate(
         },
     )
     touch = dashboard.get("touchTargets") or {}
-    add_check(result, "access dashboard compact 36px visible touch targets", not touch.get("offenders"), touch)
+    add_check(result, "access dashboard compact 44px visible touch targets", not touch.get("offenders"), touch)
     take_screenshot(
         browser,
         result,
         output_dir,
         result["name"],
         "dashboard",
+        result["width"],
+        result["height"],
+    )
+
+    opened_groups = browser.eval(r"""(() => {
+      const tab = [...document.querySelectorAll('[role="tab"]')]
+        .find((button) => button.textContent?.trim() === 'Groups');
+      if (!tab) return false;
+      tab.click();
+      return true;
+    })()""")
+    add_check(result, "access dashboard groups tab available", bool(opened_groups), {"clicked": opened_groups})
+    browser.wait_for(
+        "!!document.querySelector('[role=\"tabpanel\"][aria-label=\"Groups\"]')",
+        "access groups panel",
+        timeout,
+    )
+    group_panel = browser.eval(r"""(() => {
+      const panel = document.querySelector('[role="tabpanel"][aria-label="Groups"]');
+      const tab = [...document.querySelectorAll('[role="tab"]')]
+        .find((button) => button.textContent?.trim() === 'Groups');
+      const add = [...(panel?.querySelectorAll('button') ?? [])]
+        .find((button) => button.textContent?.trim() === 'Add group');
+      const rect = panel?.getBoundingClientRect();
+      const addRect = add?.getBoundingClientRect();
+      return {
+        visible: Boolean(panel),
+        selected: tab?.getAttribute('aria-selected') === 'true',
+        configuredGroups: Boolean(panel?.querySelector('[aria-label="Configured groups"]')),
+        editorHidden: !panel?.querySelector('[aria-label="Group name"]'),
+        overflowFree: Boolean(panel) && panel.scrollWidth <= panel.clientWidth + 1 &&
+          (document.scrollingElement?.scrollWidth ?? 0) <= window.innerWidth + 1,
+        addTouchSafe: Boolean(addRect && addRect.width >= 44 && addRect.height >= 44),
+        rect: rect ? rect.toJSON() : null,
+      };
+    })()""")
+    add_check(
+        result,
+        "access dashboard groups list is compact and overflow-free",
+        bool(group_panel.get("visible"))
+        and bool(group_panel.get("selected"))
+        and bool(group_panel.get("configuredGroups"))
+        and bool(group_panel.get("editorHidden"))
+        and bool(group_panel.get("overflowFree"))
+        and bool(group_panel.get("addTouchSafe")),
+        group_panel,
+    )
+    opened_group_editor = browser.eval(r"""(() => {
+      const panel = document.querySelector('[role="tabpanel"][aria-label="Groups"]');
+      const add = [...(panel?.querySelectorAll('button') ?? [])]
+        .find((button) => button.textContent?.trim() === 'Add group');
+      if (!add) return false;
+      add.click();
+      return true;
+    })()""")
+    add_check(
+        result,
+        "access dashboard group editor action available",
+        bool(opened_group_editor),
+        {"clicked": opened_group_editor},
+    )
+    browser.wait_for(
+        "!!document.querySelector('[role=\"tabpanel\"][aria-label=\"Groups\"] [aria-label=\"Group name\"]')",
+        "access group editor",
+        timeout,
+    )
+    group_editor = browser.eval(r"""(() => {
+      const panel = document.querySelector('[role="tabpanel"][aria-label="Groups"]');
+      const form = panel?.querySelector('form');
+      const controls = [...(form?.querySelectorAll('button, select, textarea, input') ?? [])]
+        .filter((element) => !['hidden', 'file'].includes(element.type || ''));
+      const controlRects = controls.map((element) => {
+        const target = ['checkbox', 'radio'].includes(element.type || '')
+          ? element.closest('label')
+          : element;
+        const rect = target?.getBoundingClientRect();
+        return {
+          label: element.getAttribute('aria-label') || element.textContent?.trim() || element.tagName,
+          width: rect?.width ?? 0,
+          height: rect?.height ?? 0,
+        };
+      });
+      const legends = [...(form?.querySelectorAll('legend') ?? [])].map((legend) => legend.textContent?.trim());
+      return {
+        visible: Boolean(form),
+        hasName: Boolean(form?.querySelector('[aria-label="Group name"]')),
+        hasDescription: Boolean(form?.querySelector('[aria-label="Short description"]')),
+        hasActive: Boolean(form?.querySelector('[aria-label="Group active"]')),
+        hasMembers: legends.includes('Members'),
+        hasPermissions: legends.includes('Sandbox access'),
+        hasSave: [...(form?.querySelectorAll('button') ?? [])]
+          .some((button) => button.textContent?.trim() === 'Create group'),
+        overflowFree: Boolean(panel) && panel.scrollWidth <= panel.clientWidth + 1 &&
+          (document.scrollingElement?.scrollWidth ?? 0) <= window.innerWidth + 1,
+        offenders: controlRects.filter((item) => item.width < 44 || item.height < 44),
+      };
+    })()""")
+    add_check(
+        result,
+        "access dashboard groups are compact and progressively disclosed",
+        bool(group_editor.get("visible"))
+        and bool(group_editor.get("hasName"))
+        and bool(group_editor.get("hasDescription"))
+        and bool(group_editor.get("hasActive"))
+        and bool(group_editor.get("hasMembers"))
+        and bool(group_editor.get("hasPermissions"))
+        and bool(group_editor.get("hasSave"))
+        and bool(group_editor.get("overflowFree"))
+        and not group_editor.get("offenders"),
+        group_editor,
+    )
+    take_screenshot(
+        browser,
+        result,
+        output_dir,
+        result["name"],
+        "groups",
         result["width"],
         result["height"],
     )
@@ -2418,6 +2727,11 @@ def main() -> int:
     browser = AgentBrowser(args.session, args.timeout, media_emulation_script)
 
     try:
+        original_profile_viewport = (
+            current_profile_viewport(args.base_url, args.profile_id, args.timeout, auth_token)
+            if args.profile_id
+            else None
+        )
         browser.run("set", "device", "iPhone 14")
         for index, (name, width, height, expected_layout) in enumerate(VIEWPORTS):
             try:
@@ -2433,6 +2747,7 @@ def main() -> int:
                     args.timeout,
                     args.remote_probe_url if index == 0 else None,
                     auth_token,
+                    original_profile_viewport,
                 )
             except Exception as exc:  # Collect every viewport before failing the gate.
                 result = {

@@ -150,6 +150,7 @@ function collapsedLivePaneBasis(
   width: number | null | undefined,
   height: number | null | undefined,
   liveViewportSize: { width: number; height: number },
+  compactWorkspace: boolean,
 ) {
   if (
     !width ||
@@ -167,7 +168,10 @@ function collapsedLivePaneBasis(
       minimumAspectFitPaneHeight,
       liveViewportSize.height - livePaneLowerControlsReserveHeight,
     );
-    return `${Math.min(paneHeight, maximumPaneHeight)}px`;
+    const compactMinimumPaneHeight = compactWorkspace
+      ? Math.round(liveViewportSize.height * 0.7)
+      : minimumAspectFitPaneHeight;
+    return `${Math.min(Math.max(paneHeight, compactMinimumPaneHeight), maximumPaneHeight)}px`;
   }
 
   return `${paneHeight}px`;
@@ -253,6 +257,7 @@ export function MobileSplitScreen({
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [fullscreenViewOpen, setFullscreenViewOpen] = useState(false);
   const [fullscreenViewportOpen, setFullscreenViewportOpen] = useState(false);
+  const [fullscreenSessionsOpen, setFullscreenSessionsOpen] = useState(false);
   const [fullscreenFitMode, setFullscreenFitMode] = useState<FullscreenFitMode>("contain");
   const [liveViewportSize, setLiveViewportSize] = useState(currentLiveViewportSize);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
@@ -282,10 +287,13 @@ export function MobileSplitScreen({
   const browserUrl = selected?.cdp_url ?? "Browser preview";
   const isLiveBrowser = selected?.status === "running";
   const preferredPanePercent = defaultPanePercent(isLiveBrowser, compactLivePane);
+  const toolPanelOpen = viewportOpen || gridOpen || adminOpen;
+  const detailPanelOpen = remoteToolsOpen && toolPanelOpen;
+  const compactWorkspace = chatCollapsed && !remoteToolsOpen && !fullscreenOpen;
   const collapsedPaneBasis =
     liveViewportSize.height <= 500 && liveViewportSize.width > liveViewportSize.height
       ? `${collapsedLandscapeLivePanePercent}%`
-      : collapsedLivePaneBasis(selected?.screen_width, selected?.screen_height, liveViewportSize);
+      : collapsedLivePaneBasis(selected?.screen_width, selected?.screen_height, liveViewportSize, compactWorkspace);
   const fitLivePaneToBrowser = isLiveBrowser && !paneAdjusted;
   const effectivePanePercent =
     fitLivePaneToBrowser
@@ -341,9 +349,6 @@ export function MobileSplitScreen({
           : serverHistoryReady
             ? "Save task to server history..."
             : "Task connection unavailable";
-  const compactWorkspace = chatCollapsed && !remoteToolsOpen && !fullscreenOpen;
-  const toolPanelOpen = viewportOpen || gridOpen || adminOpen;
-
   const closeTools = () => {
     onRemoteToolsOpenChange(false);
     setViewportOpen(false);
@@ -525,6 +530,7 @@ export function MobileSplitScreen({
         setFullscreenOpen(false);
         setFullscreenViewOpen(false);
         setFullscreenViewportOpen(false);
+        setFullscreenSessionsOpen(false);
       }
     };
     document.addEventListener("keydown", closeOnEscape);
@@ -588,6 +594,7 @@ export function MobileSplitScreen({
     setViewportOpen(false);
     setFullscreenViewOpen(false);
     setFullscreenViewportOpen(false);
+    setFullscreenSessionsOpen(false);
     closeTools();
     setFullscreenOpen(true);
   };
@@ -596,6 +603,12 @@ export function MobileSplitScreen({
     setFullscreenOpen(false);
     setFullscreenViewOpen(false);
     setFullscreenViewportOpen(false);
+    setFullscreenSessionsOpen(false);
+  };
+
+  const selectFullscreenSession = (profileId: string) => {
+    onSelect(profileId);
+    setFullscreenSessionsOpen(false);
   };
 
   const runHarnessTask = async (text: string, commands?: readonly TaskHarnessAction[]) => {
@@ -800,7 +813,7 @@ export function MobileSplitScreen({
                 className="mobile-preset-button mobile-phone-fit-button"
                 disabled={viewportApplying}
               >
-                Phone
+                Phone fit
               </button>
               {presets.map((preset) => (
                 <button
@@ -883,7 +896,7 @@ export function MobileSplitScreen({
               </p>
               <button
                 type="button"
-                className="btn-primary min-h-9 shrink-0 px-2 text-[11px]"
+                className="btn-primary min-h-11 shrink-0 px-2 text-[11px]"
                 disabled={!selected || viewportApplying}
                 onClick={applyViewport}
               >
@@ -991,6 +1004,37 @@ export function MobileSplitScreen({
     </div>
   );
 
+  const renderFullscreenSessions = () => (
+    <div id="mobile-fullscreen-sessions" className="mobile-fullscreen-sessions-panel" aria-label="Fullscreen running sessions">
+      {(runningProfiles.length > 0 ? runningProfiles : profiles.slice(0, 4)).map((profile) => (
+        <button
+          key={profile.id}
+          type="button"
+          onClick={() => selectFullscreenSession(profile.id)}
+          className={`mobile-fullscreen-session ${profile.id === selectedId ? "mobile-fullscreen-session-active" : ""}`}
+        >
+          <span className="mobile-fullscreen-session-main">
+            <StatusIndicator status={profile.status} />
+            <span className="min-w-0">
+              <span className="block truncate text-xs font-semibold text-gray-100">{profile.name}</span>
+              <span className="block truncate text-[11px] text-gray-500">
+                {profile.screen_width} x {profile.screen_height}
+              </span>
+            </span>
+          </span>
+          <span className="mobile-fullscreen-session-state">
+            {profile.status === "running" ? "Live" : profile.status}
+          </span>
+        </button>
+      ))}
+      {profiles.length === 0 ? (
+        <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-gray-500">
+          Running sessions will appear here.
+        </div>
+      ) : null}
+    </div>
+  );
+
   const renderFullscreenControls = () => (
     <>
       <div className="mobile-fullscreen-strip" aria-label="Fullscreen browser controls">
@@ -1000,6 +1044,7 @@ export function MobileSplitScreen({
           aria-label="Reset fullscreen browser view"
           onClick={() => {
             setFullscreenViewportOpen(false);
+            setFullscreenSessionsOpen(false);
             resetLiveViewport();
           }}
         >
@@ -1015,6 +1060,7 @@ export function MobileSplitScreen({
           onClick={() => {
             setFullscreenViewOpen((open) => !open);
             setFullscreenViewportOpen(false);
+            setFullscreenSessionsOpen(false);
           }}
         >
           <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
@@ -1029,6 +1075,7 @@ export function MobileSplitScreen({
             aria-controls="mobile-fullscreen-viewport-settings"
             onClick={() => {
               setFullscreenViewOpen(false);
+              setFullscreenSessionsOpen(false);
               setFullscreenViewportOpen((open) => !open);
             }}
           >
@@ -1036,6 +1083,21 @@ export function MobileSplitScreen({
             <span>Viewport</span>
           </button>
         ) : null}
+        <button
+          type="button"
+          className="mobile-fullscreen-action"
+          aria-label="Switch fullscreen browser session"
+          aria-expanded={fullscreenSessionsOpen}
+          aria-controls="mobile-fullscreen-sessions"
+          onClick={() => {
+            setFullscreenViewOpen(false);
+            setFullscreenViewportOpen(false);
+            setFullscreenSessionsOpen((open) => !open);
+          }}
+        >
+          <Grid2X2 className="h-4 w-4" aria-hidden="true" />
+          <span>Sessions</span>
+        </button>
         <button
           ref={fullscreenCloseButtonRef}
           type="button"
@@ -1050,6 +1112,7 @@ export function MobileSplitScreen({
 
       {fullscreenViewOpen ? renderFullscreenViewControls() : null}
       {canManageProfiles && fullscreenViewportOpen ? renderViewportEditor("fullscreen") : null}
+      {fullscreenSessionsOpen ? renderFullscreenSessions() : null}
     </>
   );
 
@@ -1090,7 +1153,7 @@ export function MobileSplitScreen({
 
   return (
     <main
-      className={`mobile-split-root ${compactWorkspace ? "mobile-workspace-collapsed" : ""} ${keyboardOpen ? "mobile-keyboard-open" : ""} bg-surface-0 text-gray-100`}
+      className={`mobile-split-root ${compactWorkspace ? "mobile-workspace-collapsed" : ""} ${detailPanelOpen ? "mobile-detail-panel-open" : ""} ${keyboardOpen ? "mobile-keyboard-open" : ""} bg-surface-0 text-gray-100`}
       style={rootStyle}
       data-keyboard-open={keyboardOpen ? "true" : "false"}
     >
@@ -1154,56 +1217,6 @@ export function MobileSplitScreen({
             {error}
           </div>
         ) : null}
-
-        <div className="mobile-command-dock" aria-label="Browser command dock">
-          {isLiveBrowser ? (
-            <button
-              ref={fullscreenOpenButtonRef}
-              type="button"
-              onClick={openFullscreen}
-              className="mobile-command-button"
-              aria-label="Open fullscreen browser"
-              title="Fullscreen browser (Ctrl+B)"
-            >
-              <Expand className="h-4 w-4" aria-hidden="true" />
-              <span>Full</span>
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => {
-              if (remoteToolsOpen) {
-                closeTools();
-              } else {
-                openTools();
-              }
-            }}
-            className={`mobile-command-button ${remoteToolsOpen ? "mobile-command-button-active" : ""}`}
-            aria-label={remoteToolsOpen ? "Close browser tools" : "Open browser tools"}
-            aria-expanded={remoteToolsOpen}
-            aria-controls="mobile-tools-sheet"
-            title="Browser tools (Ctrl+K)"
-          >
-            <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
-            <span>Tools</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              chatAdjustedRef.current = true;
-              closeTools();
-              setChatCollapsed((collapsed) => !collapsed);
-            }}
-            className={`mobile-command-button ${!chatCollapsed ? "mobile-command-button-active" : ""}`}
-            aria-label={chatCollapsed ? "Expand task chat" : "Collapse task chat"}
-            aria-expanded={!chatCollapsed}
-            aria-controls="mobile-task-chat-panel"
-            title="Toggle chat (Ctrl+J)"
-          >
-            <MessageSquareText className="h-4 w-4" aria-hidden="true" />
-            <span>Chat</span>
-          </button>
-        </div>
 
         {remoteToolsOpen ? (
           <div id="mobile-tools-sheet" className="mobile-tools-sheet" aria-label="Browser tools">
@@ -1452,6 +1465,52 @@ export function MobileSplitScreen({
         ) : null}
 
         <form className={`mobile-chat-form ${chatCollapsed ? "mobile-chat-form-collapsed" : ""}`} onSubmit={sendMessage}>
+          <div className="mobile-command-dock" aria-label="Browser command dock">
+            {isLiveBrowser ? (
+              <button
+                ref={fullscreenOpenButtonRef}
+                type="button"
+                onClick={openFullscreen}
+                className="mobile-command-button"
+                aria-label="Open fullscreen browser"
+                title="Fullscreen browser (Ctrl+B)"
+              >
+                <Expand className="h-4 w-4" aria-hidden="true" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => {
+                if (remoteToolsOpen) {
+                  closeTools();
+                } else {
+                  openTools();
+                }
+              }}
+              className={`mobile-command-button ${remoteToolsOpen ? "mobile-command-button-active" : ""}`}
+              aria-label={remoteToolsOpen ? "Close browser tools" : "Open browser tools"}
+              aria-expanded={remoteToolsOpen}
+              aria-controls="mobile-tools-sheet"
+              title="Browser tools (Ctrl+K)"
+            >
+              <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                chatAdjustedRef.current = true;
+                closeTools();
+                setChatCollapsed((collapsed) => !collapsed);
+              }}
+              className={`mobile-command-button ${!chatCollapsed ? "mobile-command-button-active" : ""}`}
+              aria-label={chatCollapsed ? "Expand task chat" : "Collapse task chat"}
+              aria-expanded={!chatCollapsed}
+              aria-controls="mobile-task-chat-panel"
+              title="Toggle chat (Ctrl+J)"
+            >
+              <MessageSquareText className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
           <label className="sr-only" htmlFor="mobile-task-input">
             Browser task
           </label>

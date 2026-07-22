@@ -39,6 +39,9 @@ if __package__:
         AccessAgentCreatedResponse,
         AccessAgentResponse,
         AccessAgentUpdate,
+        AccessGroupCreate,
+        AccessGroupResponse,
+        AccessGroupUpdate,
         AccessIdentityResponse,
         AccessUserCreate,
         AccessUserResponse,
@@ -68,6 +71,9 @@ else:  # Support `uvicorn main:app` from the backend directory.
         AccessAgentCreatedResponse,
         AccessAgentResponse,
         AccessAgentUpdate,
+        AccessGroupCreate,
+        AccessGroupResponse,
+        AccessGroupUpdate,
         AccessIdentityResponse,
         AccessUserCreate,
         AccessUserResponse,
@@ -1469,7 +1475,21 @@ def _access_user_response(user: dict[str, object]) -> AccessUserResponse:
         role=str(user["role"]),
         active=bool(user["active"]),
         created_at=str(user["created_at"]),
+        group_ids=[str(group_id) for group_id in user.get("group_ids", [])],
         grants=user.get("grants", []),
+        effective_grants=user.get("effective_grants", user.get("grants", [])),
+    )
+
+
+def _access_group_response(group: dict[str, object]) -> AccessGroupResponse:
+    return AccessGroupResponse(
+        id=str(group["id"]),
+        name=str(group["name"]),
+        description=group.get("description") or None,
+        active=bool(group["active"]),
+        created_at=str(group["created_at"]),
+        member_user_ids=[str(user_id) for user_id in group.get("member_user_ids", [])],
+        grants=group.get("grants", []),
     )
 
 
@@ -1482,6 +1502,51 @@ def _access_agent_response(agent: dict[str, object]) -> AccessAgentResponse:
         created_at=str(agent["created_at"]),
         grants=agent.get("grants", []),
     )
+
+
+def _normalize_access_grants(grants: list[object]) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    seen: set[tuple[object, object]] = set()
+    for grant in grants:
+        value = grant.model_dump() if hasattr(grant, "model_dump") else grant
+        if isinstance(value, dict):
+            key = (value.get("sandbox_id"), value.get("permission"))
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+    return normalized
+
+
+def _validate_access_group_member_ids(member_user_ids: list[str]) -> list[str]:
+    seen: set[str] = set()
+    valid_ids: list[str] = []
+    for user_id in member_user_ids:
+        if user_id in seen:
+            continue
+        if not db.get_access_user(user_id):
+            raise HTTPException(status_code=404, detail=f"User not found: {user_id}")
+        seen.add(user_id)
+        valid_ids.append(user_id)
+    return valid_ids
+
+
+def _validate_access_group_ids(group_ids: list[str]) -> list[str]:
+    seen: set[str] = set()
+    valid_ids: list[str] = []
+    for group_id in group_ids:
+        if group_id in seen:
+            continue
+        if not db.get_access_group(group_id):
+            raise HTTPException(status_code=404, detail=f"Group not found: {group_id}")
+        seen.add(group_id)
+        valid_ids.append(group_id)
+    return valid_ids
+
+
+def _revoke_user_websocket_access(user_ids: list[str]) -> None:
+    for user_id in set(user_ids):
+        _revoke_websocket_access(identity_kind="user", identity_id=user_id)
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
@@ -1580,7 +1645,8 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
             id=str(user["id"]),
             display_name=str(user["username"]),
             role=str(user["role"]),
-            grants=tuple(user.get("grants", [])),
+            grants=tuple(user.get("effective_grants", user.get("grants", []))),
+            group_ids=tuple(user.get("group_ids", [])),
         ).public(),
     }
 
@@ -1614,18 +1680,24 @@ async def list_access_users(request: Request):
 @app.post("/api/access/users", response_model=AccessUserResponse, status_code=201)
 async def create_access_user(body: AccessUserCreate, request: Request):
     actor = _require_admin(request.scope)
+    group_ids = _validate_access_group_ids(body.group_ids)
     try:
         user = db.create_access_user(
             body.username,
             access.hash_password(body.password),
             body.role,
             [grant.model_dump() for grant in body.grants],
+            group_ids,
         )
     except Exception as exc:
         if "UNIQUE constraint failed" in str(exc):
             raise HTTPException(status_code=409, detail="Username already exists") from exc
         raise
     db.record_access_audit_event(actor.kind, actor.id, "access_user.create", "allowed")
+    if group_ids:
+        db.record_access_audit_event(
+            actor.kind, actor.id, "access_user.groups.update", "allowed"
+        )
     return _access_user_response(user)
 
 
@@ -1644,13 +1716,81 @@ async def update_access_user(user_id: str, body: AccessUserUpdate, request: Requ
             grant.model_dump() if hasattr(grant, "model_dump") else grant
             for grant in data["grants"]
         ]
+    if "group_ids" in data and data["group_ids"] is not None:
+        data["group_ids"] = _validate_access_group_ids(data["group_ids"])
     user = db.update_access_user(user_id, **data)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if {"password_hash", "role", "active", "grants"}.intersection(data):
+    if {"password_hash", "role", "active", "grants", "group_ids"}.intersection(data):
         _revoke_websocket_access(identity_kind="user", identity_id=user_id)
+    if "group_ids" in data:
+        db.record_access_audit_event(
+            actor.kind, actor.id, "access_user.groups.update", "allowed"
+        )
     db.record_access_audit_event(actor.kind, actor.id, "access_user.update", "allowed")
     return _access_user_response(user)
+
+
+@app.get("/api/access/groups", response_model=list[AccessGroupResponse])
+async def list_access_groups(request: Request):
+    _require_admin(request.scope)
+    return [_access_group_response(group) for group in db.list_access_groups()]
+
+
+@app.post("/api/access/groups", response_model=AccessGroupResponse, status_code=201)
+async def create_access_group(body: AccessGroupCreate, request: Request):
+    actor = _require_admin(request.scope)
+    member_user_ids = _validate_access_group_member_ids(body.member_user_ids)
+    try:
+        group = db.create_access_group(
+            body.name,
+            body.description,
+            body.active,
+            member_user_ids,
+            _normalize_access_grants(body.grants),
+        )
+    except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(status_code=409, detail="Group name already exists") from exc
+        raise
+    _revoke_user_websocket_access(member_user_ids)
+    db.record_access_audit_event(actor.kind, actor.id, "access_group.create", "allowed")
+    return _access_group_response(group)
+
+
+@app.put("/api/access/groups/{group_id}", response_model=AccessGroupResponse)
+async def update_access_group(group_id: str, body: AccessGroupUpdate, request: Request):
+    actor = _require_admin(request.scope)
+    existing = db.get_access_group(group_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Group not found")
+    data = body.model_dump(exclude_unset=True)
+    prior_member_ids = [str(user_id) for user_id in existing.get("member_user_ids", [])]
+    if "member_user_ids" in data and data["member_user_ids"] is not None:
+        data["member_user_ids"] = _validate_access_group_member_ids(data["member_user_ids"])
+    if "grants" in data and data["grants"] is not None:
+        data["grants"] = _normalize_access_grants(data["grants"])
+    try:
+        group = db.update_access_group(group_id, **data)
+    except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(status_code=409, detail="Group name already exists") from exc
+        raise
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    current_member_ids = [str(user_id) for user_id in group.get("member_user_ids", [])]
+    if {"active", "member_user_ids", "grants"}.intersection(data):
+        _revoke_user_websocket_access(prior_member_ids + current_member_ids)
+    if "member_user_ids" in data:
+        db.record_access_audit_event(
+            actor.kind, actor.id, "access_group.members.update", "allowed"
+        )
+    if "grants" in data:
+        db.record_access_audit_event(
+            actor.kind, actor.id, "access_group.grants.update", "allowed"
+        )
+    db.record_access_audit_event(actor.kind, actor.id, "access_group.update", "allowed")
+    return _access_group_response(group)
 
 
 @app.get("/api/access/agents", response_model=list[AccessAgentResponse])

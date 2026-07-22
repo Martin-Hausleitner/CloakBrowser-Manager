@@ -368,7 +368,7 @@ describe("MobileSplitScreen", () => {
       });
 
       const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("263px");
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("591px");
       expect(livePane.classList.contains("mobile-live-pane-fit")).toBe(true);
       expect(screen.queryByLabelText("Chat history")).toBeNull();
       expect(screen.getByLabelText("Expand task chat").getAttribute("aria-expanded")).toBe("false");
@@ -441,11 +441,13 @@ describe("MobileSplitScreen", () => {
         selected: { ...runningProfile, screen_width: 1024, screen_height: 576 },
       });
       const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("263px");
+      expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("591px");
 
       Object.defineProperty(window, "innerWidth", { configurable: true, value: 430 });
-      fireEvent(window, new Event("resize"));
-      await waitFor(() => expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("286px"));
+      await act(async () => {
+        fireEvent(window, new Event("resize"));
+      });
+      await waitFor(() => expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("591px"));
     } finally {
       Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
       Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
@@ -469,14 +471,14 @@ describe("MobileSplitScreen", () => {
     });
 
     const livePane = screen.getByTestId("mobile-browser-frame").closest("section") as HTMLElement;
-    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("263px");
+    expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("591px");
 
     Object.assign(window.visualViewport!, { width: 420, height: 844 });
     await act(async () => {
       resizeHandler?.();
     });
 
-    await waitFor(() => expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("280px"));
+    await waitFor(() => expect(livePane.style.getPropertyValue("--mobile-live-pane-basis")).toBe("591px"));
   });
 
   it("shrinks the workspace to the visual viewport while the mobile keyboard is open", async () => {
@@ -514,6 +516,8 @@ describe("MobileSplitScreen", () => {
         expect(workspace.style.getPropertyValue("--mobile-visual-viewport-height")).toBe("420px");
         expect(workspace.classList.contains("mobile-keyboard-open")).toBe(true);
       });
+      expect(screen.getByRole("textbox", { name: "Browser task" })).toBeTruthy();
+      expect(screen.getByLabelText("Run task")).toBeTruthy();
 
       await act(async () => input.blur());
       await waitFor(() => expect(workspace.classList.contains("mobile-keyboard-open")).toBe(true));
@@ -530,12 +534,19 @@ describe("MobileSplitScreen", () => {
     }
   });
 
-  it("keeps only Full Tools Chat and Send visible as persistent primary actions", () => {
+  it("combines icon-only Full Tools Chat controls with the task composer", () => {
     const { container } = runningSplit();
 
     const dock = container.querySelector(".mobile-command-dock");
     expect(dock).toBeTruthy();
+    expect(dock?.closest("form")).toBe(screen.getByRole("textbox", { name: "Browser task" }).closest("form"));
     expect(dock?.querySelectorAll("button")).toHaveLength(3);
+    expect(within(dock as HTMLElement).getByTitle("Fullscreen browser (Ctrl+B)")).toBeTruthy();
+    expect(within(dock as HTMLElement).getByTitle("Browser tools (Ctrl+K)")).toBeTruthy();
+    expect(within(dock as HTMLElement).getByTitle("Toggle chat (Ctrl+J)")).toBeTruthy();
+    expect(within(dock as HTMLElement).queryByText("Full")).toBeNull();
+    expect(within(dock as HTMLElement).queryByText("Tools")).toBeNull();
+    expect(within(dock as HTMLElement).queryByText("Chat")).toBeNull();
     expect(screen.getByLabelText("Run task")).toBeTruthy();
     expect(screen.queryByText("Task chat")).toBeNull();
     expect(screen.queryByText("Benchmarks")).toBeNull();
@@ -617,16 +628,21 @@ describe("MobileSplitScreen", () => {
 
   it("keeps viewport and grid panels mutually exclusive inside browser tools", async () => {
     const { props } = renderMobileSplit();
+    const workspace = document.querySelector(".mobile-split-root") as HTMLElement;
     openBrowserTools();
+    expect(workspace.classList.contains("mobile-detail-panel-open")).toBe(false);
 
     fireEvent.click(screen.getByLabelText("Toggle grid view"));
     expect(screen.getByLabelText("Running browser grid")).toBeTruthy();
     expect(screen.queryByLabelText("Viewport controls")).toBeNull();
+    expect(workspace.classList.contains("mobile-detail-panel-open")).toBe(true);
 
     fireEvent.click(screen.getByLabelText("Edit browser viewport"));
     expect(screen.getByLabelText("Viewport controls")).toBeTruthy();
     expect(screen.queryByLabelText("Running browser grid")).toBeNull();
     expect(screen.queryByLabelText("Pinned browser actions")).toBeNull();
+    expect(workspace.classList.contains("mobile-detail-panel-open")).toBe(true);
+    expect(screen.getByRole("button", { name: "Apply" }).classList.contains("min-h-11")).toBe(true);
 
     fireEvent.click(screen.getByText("Tablet"));
     fireEvent.click(screen.getByText("Apply"));
@@ -783,6 +799,43 @@ describe("MobileSplitScreen", () => {
     fireEvent.click(screen.getByLabelText("Close fullscreen browser"));
     expect(screen.queryByRole("dialog", { name: "Fullscreen browser viewer" })).toBeNull();
     expect(document.activeElement).toBe(screen.getByLabelText("Open fullscreen browser"));
+  });
+
+  it("switches running sessions from fullscreen and keeps fullscreen panels mutually exclusive", async () => {
+    const { props } = runningSplit();
+
+    fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
+    fireEvent.click(screen.getByLabelText("Toggle fullscreen view controls"));
+    expect(screen.getByLabelText("Fullscreen view controls")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Switch fullscreen browser session"));
+    const sessions = screen.getByLabelText("Fullscreen running sessions");
+    expect(sessions).toBeTruthy();
+    expect(screen.queryByLabelText("Fullscreen view controls")).toBeNull();
+    expect(within(sessions).getByText("Live Checkout QA")).toBeTruthy();
+    expect(within(sessions).getByText("Payments QA")).toBeTruthy();
+    expect(within(sessions).getAllByText("390 x 844").length).toBeGreaterThan(0);
+    expect(within(sessions).getAllByText("Live").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByLabelText("Edit fullscreen browser viewport"));
+    expect(screen.getByLabelText("Fullscreen viewport controls")).toBeTruthy();
+    expect(screen.queryByLabelText("Fullscreen running sessions")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Switch fullscreen browser session"));
+    fireEvent.click(within(screen.getByLabelText("Fullscreen running sessions")).getByText("Payments QA"));
+    expect(props.onSelect).toHaveBeenCalledWith(secondRunningProfile.id);
+    await waitFor(() => expect(screen.queryByLabelText("Fullscreen running sessions")).toBeNull());
+  });
+
+  it("applies fullscreen Phone fit through the current visual viewport", async () => {
+    const { props } = runningSplit();
+    vi.stubGlobal("visualViewport", { width: 412.4, height: 891.6 });
+
+    fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
+    fireEvent.click(screen.getByLabelText("Edit fullscreen browser viewport"));
+    fireEvent.click(within(screen.getByLabelText("Fullscreen viewport controls")).getByText("Phone fit"));
+
+    await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(412, 892));
   });
 
   it("does not offer fullscreen when no browser is live", () => {

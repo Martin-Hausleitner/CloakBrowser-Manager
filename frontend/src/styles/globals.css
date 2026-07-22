@@ -145,6 +145,18 @@
     flex: 0 0 auto;
   }
 
+  /*
+   * When a real tool panel is open, reserve enough visible space for its
+   * primary action instead of leaving the editor below the fold. The live
+   * browser remains visible above it and returns to its dominant size as soon
+   * as the detail panel closes.
+   */
+  .mobile-detail-panel-open .mobile-live-pane:not(.mobile-live-pane-fullscreen) {
+    flex: 0 0 min(var(--mobile-live-pane-basis, 52%), 52%);
+    min-height: 0;
+    max-height: 52%;
+  }
+
   .mobile-browser-frame {
     @apply flex h-full min-h-48 flex-col overflow-hidden rounded-md border border-border bg-black;
     touch-action: manipulation;
@@ -279,7 +291,7 @@
   .mobile-viewport-editor .input,
   .mobile-run-settings .input,
   .mobile-chat-form textarea {
-    min-height: 36px;
+    min-height: 44px;
   }
 
   .mobile-split-root input,
@@ -302,12 +314,12 @@
   }
 
   .mobile-command-dock {
-    @apply grid shrink-0 gap-1 border-b border-border bg-surface-0 px-1.5 py-1;
-    grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
+    @apply grid shrink-0 gap-1;
+    grid-template-columns: repeat(auto-fit, minmax(2.75rem, 1fr));
   }
 
   .mobile-command-button {
-    @apply inline-flex min-h-9 min-w-0 items-center justify-center gap-1 rounded border border-border bg-surface-1 px-1 text-[10px] font-medium text-gray-300 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-11 w-11 min-w-11 items-center justify-center rounded border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-command-button-active {
@@ -343,7 +355,7 @@
   }
 
   .mobile-preset-button {
-    @apply min-h-9 shrink-0 rounded border border-border bg-surface-2 px-2 py-1 text-[11px] text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply min-h-11 shrink-0 rounded border border-border bg-surface-2 px-2 py-1 text-[11px] text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-phone-fit-button {
@@ -353,7 +365,7 @@
   .mobile-fullscreen-strip {
     @apply absolute right-1.5 z-[60] grid w-auto items-stretch gap-0.5 rounded border border-border bg-surface-0/90 p-0.5 shadow-lg backdrop-blur;
     grid-auto-flow: column;
-    grid-auto-columns: 2.25rem;
+    grid-auto-columns: 2.75rem;
     bottom: max(0.25rem, env(safe-area-inset-bottom));
   }
 
@@ -368,12 +380,34 @@
     max-height: min(8.5rem, calc(var(--mobile-visual-viewport-height, 100dvh) - 4.25rem));
   }
 
+  .mobile-fullscreen-sessions-panel {
+    @apply absolute left-1.5 right-1.5 z-[60] grid gap-1 overflow-y-auto rounded border border-border bg-surface-0/95 p-1 shadow-lg backdrop-blur;
+    bottom: max(3rem, calc(env(safe-area-inset-bottom) + 2.75rem));
+    max-height: min(12rem, calc(var(--mobile-visual-viewport-height, 100dvh) - 4.25rem));
+  }
+
+  .mobile-fullscreen-session {
+    @apply grid min-h-11 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded border border-border bg-surface-1 px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-fullscreen-session-active {
+    @apply border-accent/50 bg-accent/10;
+  }
+
+  .mobile-fullscreen-session-main {
+    @apply flex min-w-0 items-center gap-2;
+  }
+
+  .mobile-fullscreen-session-state {
+    @apply rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-gray-400;
+  }
+
   .mobile-fullscreen-fit-row {
     @apply grid grid-cols-3 gap-1;
   }
 
   .mobile-fullscreen-fit-button {
-    @apply inline-flex min-h-9 items-center justify-center rounded border border-border bg-surface-2 px-1.5 text-[11px] font-medium text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex min-h-11 items-center justify-center rounded border border-border bg-surface-2 px-1.5 text-[11px] font-medium text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-fullscreen-fit-button[aria-pressed="true"] {
@@ -390,7 +424,7 @@
   }
 
   .mobile-fullscreen-viewport-fields .input {
-    @apply min-h-9 min-w-0 px-1.5 text-center text-base;
+    @apply min-h-11 min-w-0 px-1.5 text-center text-base;
   }
 
   .mobile-fullscreen-viewport-times {
@@ -398,7 +432,7 @@
   }
 
   .mobile-fullscreen-viewport-apply {
-    @apply min-h-9 shrink-0 px-2 text-[11px];
+    @apply min-h-11 shrink-0 px-2 text-[11px];
   }
 
   .mobile-fullscreen-preset-row {
@@ -406,7 +440,7 @@
   }
 
   .mobile-fullscreen-preset-row .mobile-preset-button {
-    @apply min-h-9 px-2;
+    @apply min-h-11 px-2;
   }
 
   .mobile-fullscreen-viewport-status {
@@ -426,7 +460,7 @@
   }
 
   .mobile-fullscreen-action {
-    @apply inline-flex h-9 w-9 min-w-0 items-center justify-center rounded border border-border bg-surface-2 text-[11px] font-medium text-gray-200 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-11 w-11 min-w-0 items-center justify-center rounded border border-border bg-surface-2 text-[11px] font-medium text-gray-200 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-fullscreen-action > span {
@@ -523,18 +557,18 @@
   }
 
   .mobile-chat-form {
-    @apply relative z-10 grid w-full max-w-full shrink-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-1 border-t border-border bg-surface-1 px-1.5 py-1;
+    @apply relative z-10 grid w-full max-w-full shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-1 border-t border-border bg-surface-1 px-1.5 py-1;
     padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
   }
 
   .mobile-chat-form textarea {
-    @apply min-h-9;
-    height: 2.25rem;
+    @apply min-h-11;
+    height: 2.75rem;
   }
 
   .mobile-composer-toolbar {
     @apply grid w-auto items-center gap-1;
-    grid-template-columns: 2.25rem;
+    grid-template-columns: 2.75rem;
   }
 
   .mobile-composer-toolbar label {
@@ -558,7 +592,7 @@
   }
 
   .mobile-send-button {
-    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded bg-accent text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded bg-accent text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-tools-sheet {

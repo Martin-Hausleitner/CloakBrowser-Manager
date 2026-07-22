@@ -126,6 +126,30 @@ def init_db():
                 PRIMARY KEY (principal_type, principal_id, sandbox_id, permission)
             );
 
+            CREATE TABLE IF NOT EXISTS access_groups (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                description TEXT,
+                active BOOLEAN NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS access_group_members (
+                group_id TEXT NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL REFERENCES access_users(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (group_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS access_group_grants (
+                group_id TEXT NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
+                sandbox_id TEXT NOT NULL,
+                permission TEXT NOT NULL CHECK (permission IN ('view', 'interact', 'operate', 'automate')),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (group_id, sandbox_id, permission)
+            );
+
             CREATE TABLE IF NOT EXISTS access_audit_events (
                 id TEXT PRIMARY KEY,
                 actor_type TEXT NOT NULL,
@@ -550,6 +574,67 @@ def _access_grants(conn: sqlite3.Connection, principal_type: str, principal_id: 
     return [dict(row) for row in rows]
 
 
+def _access_group_grants(conn: sqlite3.Connection, group_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT sandbox_id, permission FROM access_group_grants
+        WHERE group_id = ?
+        ORDER BY sandbox_id, permission""",
+        (group_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _access_group_member_ids(conn: sqlite3.Connection, group_id: str) -> list[str]:
+    rows = conn.execute(
+        """SELECT user_id FROM access_group_members
+        WHERE group_id = ?
+        ORDER BY user_id""",
+        (group_id,),
+    ).fetchall()
+    return [str(row["user_id"]) for row in rows]
+
+
+def _access_user_group_ids(conn: sqlite3.Connection, user_id: str, *, active_only: bool = False) -> list[str]:
+    where = "m.user_id = ?"
+    if active_only:
+        where += " AND g.active = 1"
+    rows = conn.execute(
+        f"""SELECT g.id FROM access_groups g
+        JOIN access_group_members m ON m.group_id = g.id
+        WHERE {where}
+        ORDER BY g.name COLLATE NOCASE""",
+        (user_id,),
+    ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
+def _dedupe_grants(grants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for grant in grants:
+        key = (str(grant["sandbox_id"]), str(grant["permission"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append({"sandbox_id": key[0], "permission": key[1]})
+    return sorted(deduped, key=lambda item: (item["sandbox_id"], item["permission"]))
+
+
+def _access_user_effective_grants(conn: sqlite3.Connection, user_id: str) -> list[dict[str, Any]]:
+    grants = _access_grants(conn, "user", user_id)
+    rows = conn.execute(
+        """SELECT gg.sandbox_id, gg.permission
+        FROM access_group_grants gg
+        JOIN access_groups g ON g.id = gg.group_id
+        JOIN access_group_members m ON m.group_id = g.id
+        WHERE m.user_id = ? AND g.active = 1
+        ORDER BY gg.sandbox_id, gg.permission""",
+        (user_id,),
+    ).fetchall()
+    grants.extend(dict(row) for row in rows)
+    return _dedupe_grants(grants)
+
+
 def set_access_grants(principal_type: str, principal_id: str, grants: list[dict[str, Any]]) -> None:
     if principal_type not in {"user", "agent"}:
         raise ValueError("Unsupported access principal type")
@@ -569,7 +654,33 @@ def set_access_grants(principal_type: str, principal_id: str, grants: list[dict[
         conn.commit()
 
 
-def create_access_user(username: str, password_hash: str, role: str = "viewer", grants: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _set_access_user_group_memberships(conn: sqlite3.Connection, user_id: str, group_ids: list[str]) -> None:
+    now = _now()
+    conn.execute("DELETE FROM access_group_members WHERE user_id = ?", (user_id,))
+    for group_id in group_ids:
+        conn.execute(
+            """INSERT INTO access_group_members (group_id, user_id, created_at)
+            VALUES (?, ?, ?)""",
+            (group_id, user_id, now),
+        )
+
+
+def set_access_user_groups(user_id: str, group_ids: list[str]) -> dict[str, Any] | None:
+    if not get_access_user(user_id):
+        return None
+    with get_db() as conn:
+        _set_access_user_group_memberships(conn, user_id, group_ids)
+        conn.commit()
+    return get_access_user(user_id)
+
+
+def create_access_user(
+    username: str,
+    password_hash: str,
+    role: str = "viewer",
+    grants: list[dict[str, Any]] | None = None,
+    group_ids: list[str] | None = None,
+) -> dict[str, Any]:
     user_id = str(uuid.uuid4())
     now = _now()
     with get_db() as conn:
@@ -581,6 +692,8 @@ def create_access_user(username: str, password_hash: str, role: str = "viewer", 
         )
         conn.commit()
     set_access_grants("user", user_id, grants or [])
+    if group_ids is not None:
+        set_access_user_groups(user_id, group_ids)
     return get_access_user(user_id)  # type: ignore[return-value]
 
 
@@ -591,6 +704,8 @@ def get_access_user(user_id: str) -> dict[str, Any] | None:
             return None
         user = dict(row)
         user["grants"] = _access_grants(conn, "user", user_id)
+        user["group_ids"] = _access_user_group_ids(conn, user_id)
+        user["effective_grants"] = _access_user_effective_grants(conn, user_id)
         return user
 
 
@@ -603,6 +718,8 @@ def get_access_user_by_username(username: str) -> dict[str, Any] | None:
             return None
         user = dict(row)
         user["grants"] = _access_grants(conn, "user", user["id"])
+        user["group_ids"] = _access_user_group_ids(conn, user["id"])
+        user["effective_grants"] = _access_user_effective_grants(conn, user["id"])
         return user
 
 
@@ -613,6 +730,8 @@ def list_access_users() -> list[dict[str, Any]]:
         for row in rows:
             user = dict(row)
             user["grants"] = _access_grants(conn, "user", user["id"])
+            user["group_ids"] = _access_user_group_ids(conn, user["id"])
+            user["effective_grants"] = _access_user_effective_grants(conn, user["id"])
             users.append(user)
         return users
 
@@ -622,6 +741,7 @@ def update_access_user(user_id: str, **fields: Any) -> dict[str, Any] | None:
     if not existing:
         return None
     grants = fields.pop("grants", None)
+    group_ids = fields.pop("group_ids", None)
     update_cols: list[str] = []
     values: list[Any] = []
     for col in ("password_hash", "role", "active"):
@@ -637,7 +757,102 @@ def update_access_user(user_id: str, **fields: Any) -> dict[str, Any] | None:
             conn.commit()
     if grants is not None:
         set_access_grants("user", user_id, grants)
+    if group_ids is not None:
+        set_access_user_groups(user_id, group_ids)
     return get_access_user(user_id)
+
+
+def _set_access_group_members(conn: sqlite3.Connection, group_id: str, member_user_ids: list[str]) -> None:
+    now = _now()
+    conn.execute("DELETE FROM access_group_members WHERE group_id = ?", (group_id,))
+    for user_id in member_user_ids:
+        conn.execute(
+            """INSERT INTO access_group_members (group_id, user_id, created_at)
+            VALUES (?, ?, ?)""",
+            (group_id, user_id, now),
+        )
+
+
+def _set_access_group_grants(conn: sqlite3.Connection, group_id: str, grants: list[dict[str, Any]]) -> None:
+    now = _now()
+    conn.execute("DELETE FROM access_group_grants WHERE group_id = ?", (group_id,))
+    for grant in grants:
+        conn.execute(
+            """INSERT INTO access_group_grants (group_id, sandbox_id, permission, created_at)
+            VALUES (?, ?, ?, ?)""",
+            (group_id, grant["sandbox_id"], grant["permission"], now),
+        )
+
+
+def create_access_group(
+    name: str,
+    description: str | None = None,
+    active: bool = True,
+    member_user_ids: list[str] | None = None,
+    grants: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    group_id = str(uuid.uuid4())
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO access_groups
+            (id, name, description, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (group_id, name, description, active, now, now),
+        )
+        _set_access_group_members(conn, group_id, member_user_ids or [])
+        _set_access_group_grants(conn, group_id, grants or [])
+        conn.commit()
+    return get_access_group(group_id)  # type: ignore[return-value]
+
+
+def get_access_group(group_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM access_groups WHERE id = ?", (group_id,)).fetchone()
+        if not row:
+            return None
+        group = dict(row)
+        group["member_user_ids"] = _access_group_member_ids(conn, group_id)
+        group["grants"] = _access_group_grants(conn, group_id)
+        return group
+
+
+def list_access_groups() -> list[dict[str, Any]]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM access_groups ORDER BY name COLLATE NOCASE").fetchall()
+        groups: list[dict[str, Any]] = []
+        for row in rows:
+            group = dict(row)
+            group["member_user_ids"] = _access_group_member_ids(conn, group["id"])
+            group["grants"] = _access_group_grants(conn, group["id"])
+            groups.append(group)
+        return groups
+
+
+def update_access_group(group_id: str, **fields: Any) -> dict[str, Any] | None:
+    existing = get_access_group(group_id)
+    if not existing:
+        return None
+    member_user_ids = fields.pop("member_user_ids", None)
+    grants = fields.pop("grants", None)
+    update_cols: list[str] = []
+    values: list[Any] = []
+    for col in ("name", "description", "active"):
+        if col in fields:
+            update_cols.append(f"{col} = ?")
+            values.append(fields[col])
+    with get_db() as conn:
+        if update_cols:
+            update_cols.append("updated_at = ?")
+            values.append(_now())
+            values.append(group_id)
+            conn.execute(f"UPDATE access_groups SET {', '.join(update_cols)} WHERE id = ?", values)
+        if member_user_ids is not None:
+            _set_access_group_members(conn, group_id, member_user_ids)
+        if grants is not None:
+            _set_access_group_grants(conn, group_id, grants)
+        conn.commit()
+    return get_access_group(group_id)
 
 
 def create_access_agent(

@@ -296,6 +296,7 @@ class AccessUserCreate(BaseModel):
     password: str = Field(min_length=12, max_length=4096)
     role: AccessRole = "viewer"
     grants: list[AccessGrant] = Field(default_factory=list)
+    group_ids: list[str] = Field(default_factory=list)
 
 
 class AccessUserUpdate(BaseModel):
@@ -303,6 +304,7 @@ class AccessUserUpdate(BaseModel):
     role: AccessRole | None = None
     active: bool | None = None
     grants: list[AccessGrant] | None = None
+    group_ids: list[str] | None = None
 
 
 class AccessUserResponse(BaseModel):
@@ -311,6 +313,57 @@ class AccessUserResponse(BaseModel):
     role: AccessRole
     active: bool
     created_at: str
+    group_ids: list[str] = Field(default_factory=list)
+    grants: list[AccessGrant] = Field(default_factory=list)
+    effective_grants: list[AccessGrant] = Field(default_factory=list)
+
+
+class AccessGroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    active: bool = True
+    member_user_ids: list[str] = Field(default_factory=list)
+    grants: list[AccessGrant] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Group name cannot be blank")
+        return value
+
+
+class AccessGroupUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    active: bool | None = None
+    member_user_ids: list[str] | None = None
+    grants: list[AccessGrant] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        if value is None:
+            raise ValueError("Group name cannot be null")
+        if not value.strip():
+            raise ValueError("Group name cannot be blank")
+        return value
+
+    @field_validator("active")
+    @classmethod
+    def validate_active(cls, value: bool | None) -> bool | None:
+        if value is None:
+            raise ValueError("Group active state cannot be null")
+        return value
+
+
+class AccessGroupResponse(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    active: bool
+    created_at: str
+    member_user_ids: list[str] = Field(default_factory=list)
     grants: list[AccessGrant] = Field(default_factory=list)
 
 
@@ -346,3 +399,5 @@ class AccessIdentityResponse(BaseModel):
     display_name: str
     role: str
     grants: list[AccessGrant] = Field(default_factory=list)
+    group_ids: list[str] = Field(default_factory=list)
+    effective_grants: list[AccessGrant] = Field(default_factory=list)

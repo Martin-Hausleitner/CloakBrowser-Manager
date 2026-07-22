@@ -52,6 +52,7 @@ def realistic_png() -> bytes:
 class FakeSafariDriver(http.server.BaseHTTPRequestHandler):
     screenshot = base64.b64encode(realistic_png()).decode("ascii")
     harness_available = True
+    fullscreen_sessions_available = True
 
     def respond(self, status: int, value: object) -> None:
         payload = json.dumps({"value": value}).encode("utf-8")
@@ -167,6 +168,7 @@ class FakeSafariDriver(http.server.BaseHTTPRequestHandler):
                             "fullscreenControls": True,
                             "viewControlsButton": True,
                             "viewportButton": True,
+                            "sessionsButton": self.fullscreen_sessions_available,
                             "closeButton": True,
                             "width": 390,
                             "height": 844,
@@ -186,6 +188,10 @@ class FakeSafariDriver(http.server.BaseHTTPRequestHandler):
 
 class FakeUnavailableHarnessSafariDriver(FakeSafariDriver):
     harness_available = False
+
+
+class FakeMissingFullscreenSessionsSafariDriver(FakeSafariDriver):
+    fullscreen_sessions_available = False
 
 
 class MobileWebKitGateTest(unittest.TestCase):
@@ -252,6 +258,29 @@ class MobileWebKitGateTest(unittest.TestCase):
                 self.assertFalse(report["passed"])
                 self.assertEqual(report["status"], "failed")
                 self.assertIn("task chat starts collapsed", report["error"])
+            server.shutdown()
+
+    def test_gate_fails_when_fullscreen_session_switcher_is_missing(self) -> None:
+        with socketserver.ThreadingTCPServer(("127.0.0.1", 0), FakeMissingFullscreenSessionsSafariDriver) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            with tempfile.TemporaryDirectory() as temp_dir:
+                args = argparse.Namespace(
+                    base_url="http://127.0.0.1:18095/",
+                    output_dir=Path(temp_dir) / "webkit-report",
+                    driver_url=f"http://127.0.0.1:{server.server_address[1]}",
+                    start_driver=False,
+                    safaridriver="unused",
+                    width=390,
+                    height=844,
+                    timeout=2.0,
+                    settle_seconds=0.0,
+                )
+                report, code = webkit_gate.run_gate(args)
+                self.assertEqual(code, 1)
+                self.assertFalse(report["passed"])
+                self.assertEqual(report["status"], "failed")
+                self.assertIn("fullscreen browser keeps view and viewport controls reachable", report["error"])
             server.shutdown()
 
 

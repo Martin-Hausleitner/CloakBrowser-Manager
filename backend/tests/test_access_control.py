@@ -278,6 +278,382 @@ def test_scoped_viewer_only_sees_granted_sandbox_and_no_sensitive_config(client_
     assert ("profile.permission.interact", "alpha", alpha["id"], "denied") in denied_events
 
 
+def test_admin_can_create_list_and_update_access_group(client_access: TestClient):
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "group-member",
+            "password": "group-member-password-123",
+            "grants": [],
+        },
+    ).json()
+
+    created = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Alpha viewers",
+            "description": "Alpha sandbox access",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    )
+    assert created.status_code == 201
+    group = created.json()
+    assert group["name"] == "Alpha viewers"
+    assert group["member_user_ids"] == [user["id"]]
+    assert group["grants"] == [{"sandbox_id": "alpha", "permission": "view"}]
+
+    listed = client_access.get("/api/access/groups", headers=bootstrap_headers())
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [group["id"]]
+
+    updated = client_access.put(
+        f"/api/access/groups/{group['id']}",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Beta operators",
+            "description": None,
+            "active": False,
+            "member_user_ids": [],
+            "grants": [{"sandbox_id": "beta", "permission": "operate"}],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Beta operators"
+    assert updated.json()["description"] is None
+    assert updated.json()["active"] is False
+    assert updated.json()["member_user_ids"] == []
+    assert updated.json()["grants"] == [{"sandbox_id": "beta", "permission": "operate"}]
+
+
+def test_group_only_access_allows_granted_sandbox_and_hides_other(client_access: TestClient):
+    alpha, beta = create_scoped_profiles()
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "group-only",
+            "password": "group-only-password-123",
+            "grants": [],
+        },
+    ).json()
+    client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Alpha group only",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    )
+
+    client_access.cookies.clear()
+    login = client_access.post(
+        "/api/auth/login",
+        json={"username": "group-only", "password": "group-only-password-123"},
+    )
+    assert login.status_code == 200
+    assert login.json()["identity"]["grants"] == [{"sandbox_id": "alpha", "permission": "view"}]
+    listed = client_access.get("/api/profiles")
+    assert listed.status_code == 200
+    assert [profile["id"] for profile in listed.json()] == [alpha["id"]]
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 200
+    assert client_access.get(f"/api/profiles/{beta['id']}").status_code == 404
+
+
+@pytest.mark.parametrize("payload", [{"name": None}, {"active": None}])
+def test_group_update_rejects_null_required_fields(
+    client_access: TestClient,
+    payload: dict[str, object],
+):
+    group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={"name": "Required group fields"},
+    ).json()
+
+    response = client_access.put(
+        f"/api/access/groups/{group['id']}",
+        headers=bootstrap_headers(),
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
+def test_group_create_deduplicates_duplicate_grants(client_access: TestClient):
+    response = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Deduplicated grants",
+            "grants": [
+                {"sandbox_id": "alpha", "permission": "operate"},
+                {"sandbox_id": "alpha", "permission": "operate"},
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["grants"] == [
+        {"sandbox_id": "alpha", "permission": "operate"}
+    ]
+
+
+def test_user_create_payload_group_ids_updates_effective_access(client_access: TestClient):
+    alpha, beta = create_scoped_profiles()
+    group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Frontend create group",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+
+    created = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "frontend-create-member",
+            "password": "frontend-create-member-password-123",
+            "grants": [],
+            "group_ids": [group["id"]],
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["group_ids"] == [group["id"]]
+    assert created.json()["grants"] == []
+    assert created.json()["effective_grants"] == [
+        {"sandbox_id": "alpha", "permission": "view"}
+    ]
+
+    listed_group = client_access.get("/api/access/groups", headers=bootstrap_headers()).json()[0]
+    assert listed_group["member_user_ids"] == [created.json()["id"]]
+
+    client_access.cookies.clear()
+    login = client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "frontend-create-member",
+            "password": "frontend-create-member-password-123",
+        },
+    )
+    assert login.status_code == 200
+    assert login.json()["identity"]["group_ids"] == [group["id"]]
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 200
+    assert client_access.get(f"/api/profiles/{beta['id']}").status_code == 404
+
+
+def test_user_update_payload_group_ids_replaces_effective_access_and_audits(
+    client_access: TestClient,
+):
+    alpha, beta = create_scoped_profiles()
+    alpha_group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Frontend update alpha",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    beta_group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Frontend update beta",
+            "grants": [{"sandbox_id": "beta", "permission": "view"}],
+        },
+    ).json()
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "frontend-update-member",
+            "password": "frontend-update-member-password-123",
+            "grants": [],
+            "group_ids": [alpha_group["id"]],
+        },
+    ).json()
+
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "frontend-update-member",
+            "password": "frontend-update-member-password-123",
+        },
+    ).status_code == 200
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 200
+    assert client_access.get(f"/api/profiles/{beta['id']}").status_code == 404
+
+    updated = client_access.put(
+        f"/api/access/users/{user['id']}",
+        headers=bootstrap_headers(),
+        json={"group_ids": [beta_group["id"]]},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["group_ids"] == [beta_group["id"]]
+    assert updated.json()["effective_grants"] == [
+        {"sandbox_id": "beta", "permission": "view"}
+    ]
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 404
+    assert client_access.get(f"/api/profiles/{beta['id']}").status_code == 200
+
+    with db.get_db() as conn:
+        group_update_count = conn.execute(
+            """SELECT COUNT(*) AS count FROM access_audit_events
+            WHERE action = 'access_user.groups.update' AND outcome = 'allowed'"""
+        ).fetchone()["count"]
+    assert group_update_count == 2
+
+
+def test_inactive_group_removes_user_access(client_access: TestClient):
+    alpha, _beta = create_scoped_profiles()
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "inactive-group-user",
+            "password": "inactive-group-user-password-123",
+            "grants": [],
+        },
+    ).json()
+    group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Temporarily active",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "inactive-group-user", "password": "inactive-group-user-password-123"},
+    ).status_code == 200
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 200
+
+    updated = client_access.put(
+        f"/api/access/groups/{group['id']}",
+        headers=bootstrap_headers(),
+        json={"active": False},
+    )
+    assert updated.status_code == 200
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 404
+
+
+def test_direct_and_multiple_group_grants_are_deduplicated_union(client_access: TestClient):
+    alpha, beta = create_scoped_profiles()
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "grant-union",
+            "password": "grant-union-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    first_group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Alpha interactors",
+            "member_user_ids": [user["id"]],
+            "grants": [
+                {"sandbox_id": "alpha", "permission": "view"},
+                {"sandbox_id": "alpha", "permission": "interact"},
+            ],
+        },
+    ).json()
+    second_group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Beta automators",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "beta", "permission": "automate"}],
+        },
+    ).json()
+
+    users = client_access.get("/api/access/users", headers=bootstrap_headers()).json()
+    listed_user = next(item for item in users if item["id"] == user["id"])
+    assert listed_user["group_ids"] == [first_group["id"], second_group["id"]]
+    assert listed_user["grants"] == [{"sandbox_id": "alpha", "permission": "view"}]
+    assert listed_user["effective_grants"] == [
+        {"sandbox_id": "alpha", "permission": "interact"},
+        {"sandbox_id": "alpha", "permission": "view"},
+        {"sandbox_id": "beta", "permission": "automate"},
+    ]
+
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login", json={"username": "grant-union", "password": "grant-union-password-123"}
+    ).status_code == 200
+    assert client_access.post(
+        "/api/task-sessions",
+        json={"profile_id": alpha["id"], "title": "group interact"},
+    ).status_code == 201
+    assert client_access.get(f"/api/profiles/{beta['id']}/cdp").status_code in {404, 409}
+
+
+def test_access_group_management_is_admin_only_and_validates_members(client_access: TestClient):
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "group-non-admin",
+            "password": "group-non-admin-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "group-non-admin", "password": "group-non-admin-password-123"},
+    ).status_code == 200
+    assert client_access.get("/api/access/groups").status_code == 403
+    assert client_access.post(
+        "/api/access/groups",
+        json={"name": "Forbidden group", "member_user_ids": [user["id"]], "grants": []},
+    ).status_code == 403
+
+    blank_name = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={"name": "   ", "member_user_ids": [], "grants": []},
+    )
+    assert blank_name.status_code == 422
+
+    missing_group = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "missing-group-member",
+            "password": "missing-group-member-password-123",
+            "group_ids": ["missing-group-id"],
+        },
+    )
+    assert missing_group.status_code == 404
+    assert missing_group.json()["detail"] == "Group not found: missing-group-id"
+
+    missing_member = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Bad members",
+            "member_user_ids": ["missing-user-id"],
+            "grants": [],
+        },
+    )
+    assert missing_member.status_code == 404
+    assert missing_member.json()["detail"] == "User not found: missing-user-id"
+
+
 def test_operator_can_operate_only_its_scoped_profile(
     client_access: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -739,6 +1115,75 @@ def test_open_vnc_closes_immediately_after_user_deactivation(
             }
     finally:
         main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_open_vnc_closes_after_access_group_grant_revoked_and_audits_update(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Group revocable VNC", sandbox_id="alpha")
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "group-revocable-viewer",
+            "password": "group-revocable-viewer-password-123",
+            "grants": [],
+        },
+    ).json()
+    group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Revocable group viewers",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "group-revocable-viewer",
+            "password": "group-revocable-viewer-password-123",
+        },
+    ).status_code == 200
+    upstream = _BlockingWebSocketUpstream(subprotocol="binary")
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6105, cdp_port=5105, display=105
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/vnc"
+        ) as websocket:
+            updated = client_access.put(
+                f"/api/access/groups/{group['id']}",
+                headers=bootstrap_headers(),
+                json={"grants": []},
+            )
+            assert updated.status_code == 200
+            message = _receive_websocket_message(websocket)
+            assert message == {
+                "type": "websocket.close",
+                "code": 4403,
+                "reason": "Access revoked",
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+    with db.get_db() as conn:
+        actions = {
+            row["action"]
+            for row in conn.execute(
+                "SELECT action FROM access_audit_events WHERE outcome = 'allowed'"
+            ).fetchall()
+        }
+    assert "access_group.create" in actions
+    assert "access_group.grants.update" in actions
+    assert "access_group.update" in actions
 
 
 def test_scoped_user_cannot_reach_out_of_scope_vnc_upstream(client_access: TestClient, monkeypatch):

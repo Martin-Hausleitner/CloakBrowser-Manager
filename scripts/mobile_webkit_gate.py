@@ -335,7 +335,8 @@ return JSON.stringify({
   fullscreenViewer: isVisible(document.querySelector('[aria-label="Fullscreen browser viewer"]')),
   fullscreenControls: isVisible(document.querySelector('[aria-label="Fullscreen browser controls"]')),
   viewControlsButton: isVisible(document.querySelector('button[aria-label="Toggle fullscreen view controls"]')),
-  viewportButton: Boolean(document.querySelector('button[aria-label="Edit fullscreen browser viewport"]')),
+  viewportButton: isVisible(document.querySelector('button[aria-label="Edit fullscreen browser viewport"]')),
+  sessionsButton: isVisible(document.querySelector('button[aria-label="Switch fullscreen browser session"]')),
   closeButton: isVisible(document.querySelector('button[aria-label="Close fullscreen browser"]')),
   width: window.innerWidth,
   height: window.innerHeight,
@@ -488,6 +489,8 @@ def run_gate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             bool(fullscreen.get("fullscreenViewer"))
             and bool(fullscreen.get("fullscreenControls"))
             and bool(fullscreen.get("viewControlsButton"))
+            and bool(fullscreen.get("viewportButton"))
+            and bool(fullscreen.get("sessionsButton"))
             and bool(fullscreen.get("closeButton")),
             fullscreen,
         )

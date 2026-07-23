@@ -69,6 +69,18 @@ export interface ProfileOpenLinks {
   cloud_url?: string | null;
 }
 
+export interface LiveMetrics {
+  profile_id: string;
+  transport?: "cdp" | "vnc" | null;
+  connection_state?: "connecting" | "connected" | "reconnecting" | "failed" | "idle";
+  fps?: number | null;
+  rtt_ms?: number | null;
+  frames_received?: number | null;
+  reconnect_count?: number | null;
+  dropped_frames?: number | null;
+  updated_at?: string | null;
+}
+
 export interface ProxyInventoryItem {
   id: string;
   label: string;
@@ -564,6 +576,9 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
     request<ProfileOpenLinks>(
       `/api/profiles/${encodeURIComponent(id)}/open-links?prefer=${encodeURIComponent(prefer)}&mode=${encodeURIComponent(mode)}`,
     ),
+
+  getLiveMetrics: (id: string) =>
+    request<LiveMetrics>(`/api/profiles/${encodeURIComponent(id)}/live-metrics`),
 
   getBenchmarkReport: (url = DEFAULT_BENCHMARK_REPORT_URL) =>
     request<BenchmarkReport>(url),

@@ -17,6 +17,7 @@ services:
       ACCESS_CONTROL_ENABLED: "1"
       PROXYCHECKER_URL: ${PROXYCHECKER_URL:-}
       PROXYCHECKER_ALLOWED_HOSTS: ${PROXYCHECKER_ALLOWED_HOSTS:-host.docker.internal}
+      EXTENSION_CATALOG_DIR: ${EXTENSION_CATALOG_DIR:-/data/extension-catalog}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

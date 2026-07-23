@@ -189,6 +189,7 @@ rsync -az --delete \
   printf 'AUTH_TOKEN=%s\n' "$auth_token"
   printf 'PROXYCHECKER_URL=%s\n' "$proxychecker_url"
   printf 'PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal\n'
+  printf 'EXTENSION_CATALOG_DIR=/data/extension-catalog\n'
 } | ssh "$target_host" "umask 077; cat > '$remote_path/.env.vcvm'"
 
 ssh "$target_host" "cd '$remote_path' && docker compose --env-file .env.vcvm -p '$PROJECT_NAME' -f '$COMPOSE_FILE' up -d --build --remove-orphans"

@@ -48,6 +48,9 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 # Backend code
 COPY backend/ /app/backend/
 
+# Extension catalog metadata (Comet-derived selectable defaults)
+COPY config/ /app/config/
+
 # Frontend build from stage 1
 COPY --from=frontend-builder /build/dist /app/frontend/dist
 

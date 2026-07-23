@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Activity, Gauge } from "lucide-react";
-import { api, type ProfileOpenLinks } from "../lib/api";
+import { api, type LiveMetrics, type ProfileOpenLinks } from "../lib/api";
 
 interface LiveDevPanelProps {
   profileId: string | null;
@@ -8,34 +8,39 @@ interface LiveDevPanelProps {
   connectionStatus?: string | null;
 }
 
-/** Compact live developer view driven by `/api/profiles/{id}/open-links`. */
+/** Compact live developer view driven by open-links + live-metrics. */
 export function LiveDevPanel({ profileId, running, connectionStatus }: LiveDevPanelProps) {
   const [links, setLinks] = useState<ProfileOpenLinks | null>(null);
-  const [rttMs, setRttMs] = useState<number | null>(null);
+  const [apiRttMs, setApiRttMs] = useState<number | null>(null);
+  const [metrics, setMetrics] = useState<LiveMetrics | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!profileId || !running) {
       setLinks(null);
-      setRttMs(null);
+      setApiRttMs(null);
+      setMetrics(null);
       return;
     }
     let cancelled = false;
     const load = async () => {
       try {
         const started = performance.now();
-        // mode=cdp prefers live_url /session/<id>/live as open_url; fields still include VNC.
-        const next = await api.getProfileOpenLinks(profileId, "local", "cdp");
+        const [nextLinks, nextMetrics] = await Promise.all([
+          api.getProfileOpenLinks(profileId, "local", "cdp"),
+          api.getLiveMetrics(profileId).catch(() => null),
+        ]);
         if (cancelled) return;
-        setLinks(next);
-        setRttMs(Math.round(performance.now() - started));
+        setLinks(nextLinks);
+        setApiRttMs(Math.round(performance.now() - started));
+        setMetrics(nextMetrics);
         setError(null);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "metrics unavailable");
       }
     };
     void load();
-    const timer = window.setInterval(() => void load(), 4000);
+    const timer = window.setInterval(() => void load(), 2000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -46,6 +51,8 @@ export function LiveDevPanel({ profileId, running, connectionStatus }: LiveDevPa
 
   const cdpUrl = links?.live_url || links?.cdp_fullscreen_url || null;
   const vncUrl = links?.vnc_fullscreen_url || null;
+  const streamFps = metrics?.fps ?? null;
+  const streamRtt = metrics?.rtt_ms ?? null;
 
   return (
     <div
@@ -57,11 +64,17 @@ export function LiveDevPanel({ profileId, running, connectionStatus }: LiveDevPa
         Live Dev
       </span>
       <span className="rounded bg-surface-3 px-1.5 py-0.5 uppercase tracking-wide">
-        {connectionStatus || "connected"}
+        {metrics?.connection_state || connectionStatus || "connected"}
       </span>
       <span className="inline-flex items-center gap-1">
         <Gauge className="h-3 w-3" />
-        API {rttMs != null ? `${rttMs} ms` : "…"}
+        API {apiRttMs != null ? `${apiRttMs} ms` : "…"}
+      </span>
+      <span title="CDP screencast FPS from /live-metrics">
+        CDP {streamFps != null ? `${streamFps.toFixed(0)} fps` : "fps —"}
+      </span>
+      <span title="CDP RTT from /live-metrics">
+        RTT {streamRtt != null ? `${Math.round(streamRtt)} ms` : "—"}
       </span>
       {cdpUrl ? (
         <a

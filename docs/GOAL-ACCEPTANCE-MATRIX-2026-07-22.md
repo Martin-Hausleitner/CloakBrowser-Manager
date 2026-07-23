@@ -1,6 +1,6 @@
 # Goal acceptance matrix
 
-Stand: 22. Juli 2026
+Stand: 23. Juli 2026
 
 This document keeps the full mobile browser-manager objective intact and separates proven behavior from partial or missing work. A green narrow test is not used as evidence for a broader requirement. Future developers must start with the repo-local [continuation skill](../.agents/skills/cloakbrowser-manager-development/SKILL.md) and keep this matrix synchronized with fresh evidence.
 
@@ -26,7 +26,7 @@ The inherent network and streaming dependency makes this a high-risk mobile surf
 | Harness choice for Codex, Antigravity, Claude Code, OpenCode and Browser Use clients | Implemented; full local suites passed | Preference persists, capability state and task metadata are visible, execution remains fail-closed behind the verified Codex Computer Use bridge, and full local suites pass | Fresh live VCVM round-trip for each label/state; non-Codex preferences remain metadata, not execution providers |
 | Proxy reachability, outbound IP, fingerprint consistency and BrowserScan score | Implemented; live browser path proven | Stored asynchronous first-launch result, manual rerun, refresh persistence, masked outbound IP, 100/100 fingerprint consistency, 100/100 BrowserScan, compact redacted desktop disclosure, scoped API tests and live Manager-to-proxychecker health reachability | Run the optional proxychecker `/check` against an authorized configured proxy; the fresh no-proxy E2E correctly reported the source as `skipped` |
 | Read-only extension inventory managed from CLI | Implemented; full local suites passed | Safe manifest parser, trust/error state calculation, GET `/api/profiles/{profile_id}/extensions` endpoint, CLI tool `scripts/inspect_extensions.py`, and unit test suites (9 new tests passed; 351 total backend tests) | None for MVP extension inventory |
-| Live latency and developer diagnostics | Partial | Offline benchmark reports and VNC logs | Admin-only live launch/VNC counters, honest unavailable metrics and redaction tests |
+| Live latency and developer diagnostics | Implemented; full local suites passed | Admin-only `GET /api/admin/live-diagnostics` with launch/VNC counters, measured-or-unavailable timings, redaction tests and non-admin 403 | Fresh VCVM live connection counters after deploy; still no encoded FPS or touch-to-pixel claim |
 | Competitor research | Proven | `COMPETITOR-UI-FEATURE-MATRIX-2026-07-22.md` | Keep facts and design inferences separated |
 | End-to-end mobile release | Proven on automated VCVM Chromium surface | Current authenticated gate passed 316 checks across five viewports plus access dashboard, produced 31 screenshots, and the redacted release acceptance gate passed | Safari Remote Automation, physical iPhone and private Tailnet HTTPS remain external/device proof |
 
@@ -46,8 +46,8 @@ The inherent network and streaming dependency makes this a high-risk mobile surf
 
 1. **Proven on automated VCVM surface:** additive profile organization, compact grouped UI and current mobile release ladder.
 2. **Implemented; one live input still required:** redacted profile health and BrowserScan are live; credentialed proxychecker scoring still needs an authorized configured proxy.
-3. **Next:** read-only extension inventory plus agent-facing CLI attachment flow.
-4. **Next:** admin-only live diagnostics that do not execute benchmarks or expose secrets.
+3. **Proven locally:** read-only extension inventory plus admin-only live diagnostics.
+4. **Next:** credentialed proxychecker `/check` against an authorized configured proxy.
 5. **External/device checkpoint:** Safari Remote Automation, physical iPhone and private Tailnet HTTPS/direct-route evidence.
 
 The goal is accepted only when every row above is proven or an external-only proof is explicitly completed. A blocked Safari or physical-device row cannot be relabeled as a pass.

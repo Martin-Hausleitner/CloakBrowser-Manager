@@ -43,7 +43,7 @@ Open [http://localhost:8080](http://localhost:8080) in your browser. Create a pr
 
 ## Fork development status
 
-Status date: **22 July 2026**. This section describes the active development branch `integrate-pr-47-27-26` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
+Status date: **23 July 2026**. This section describes the active development branch `integrate-pr-47-27-26` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
 
 ### Repository boundaries
 
@@ -71,11 +71,12 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Area | State | Fresh or historical evidence |
 | --- | --- | --- |
-| Profile schema, migration, API, organization, access, health & extension inventory | Implemented; full local suite passed | **351/351 backend tests passed** on 22 July 2026. |
+| Profile schema, migration, API, organization, access, health & extension inventory | Implemented; full local suite passed | **359/359 backend tests passed** on 23 July 2026 (includes 8 live-diagnostics tests). |
 | Desktop/mobile organization, form, access dashboard, harness boundary and compact health UI | Implemented; full local suite passed | **132/132 frontend tests passed** and the production build passed on 22 July 2026. |
 | Release, mobile, streaming and deployment scripts | Full local script suite passed | **26/26 script tests passed**, including an explicit Python 3.11 compilation regression check. |
 | Compact mobile workspace and scoped live browser control | Proven on the current automated VCVM Chromium surface | The authenticated release run passed **316 checks** across five viewports plus the access dashboard and captured **31 screenshots**. |
 | Browser-path profile health | Proven on a live no-proxy VCVM profile | First-launch scheduling, manual rerun, refresh persistence, masked outbound IP, **100/100 fingerprint consistency**, **100/100 BrowserScan authenticity**, and a redacted desktop panel passed. The Manager container also reached the separately bound VCVM-local proxychecker health endpoint. |
+| Admin-only live diagnostics | Implemented; full local suite passed | `GET /api/admin/live-diagnostics` returns launch/VNC counters with measured-or-unavailable metrics, strips ports/paths/URLs/proxy/secrets, rejects non-admin callers with HTTP 403, and leaves the mobile workspace unchanged. |
 | Credentialed proxychecker enrichment | Implemented; live proxy sample still required | Deployment, allow-list, normalization, failure, redaction and authorization tests pass; the live E2E profile had no configured proxy, so the proxychecker source correctly reported `Skipped`. |
 | Physical iPhone Safari and private Tailnet HTTPS | Not yet proven | Chromium emulation is not relabeled as Safari evidence; Safari Remote Automation and a physical-device run remain external prerequisites. |
 | Direct Tailnet latency | Not achieved in the last measurement | The recorded Mac route used `DERP(nue)`; direct-path proof must be rerun rather than inferred. |
@@ -84,7 +85,6 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Priority | Feature | Required completion evidence |
 | --- | --- | --- |
-| P0 | Admin-only live diagnostics | Launch/VNC timestamps and counters, explicit `unavailable` values for unmeasured metrics, redaction tests, and no benchmark clutter in the mobile workspace. |
 | P0 | Credentialed proxy health acceptance | Run the optional VCVM-local proxychecker against an authorized configured proxy without exposing credentials; prove normalized risk/authenticity, failure behavior and source state. |
 | P0 | Finish the release handoff | Push only the fork branch, verify its SHA and GitHub files, then retain the green release report and screenshot paths as local evidence. |
 | P1 | Direct Tailnet route and real iPhone Safari acceptance | Private HTTPS, physical keyboard behavior, touch interaction, direct-versus-DERP route evidence, and honest latency definitions. |
@@ -93,6 +93,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 ### Development timeline
 
+- **23 July 2026** — admin-only live diagnostics landed: launch/VNC counters, honest unavailable metrics, redaction tests, and `GET /api/admin/live-diagnostics` without mobile UI clutter.
 - **20 July 2026** — mobile VNC workspace, iOS-safe paste, initial E2E gates, scoped Paperclip access, protected mobile login, and private Tailnet fail-closed helper landed.
 - **21 July 2026** — mobile controls were progressively simplified; short-iPhone, keyboard, access-dashboard, Safari/WebKit, Codex Computer Use, live viewport, VCVM, streaming, and policy gates were added or hardened.
 - **22 July 2026** — compact mobile/access-group work was consolidated; profile project/folder/pin/color/harness metadata, deterministic desktop/mobile organization, and redacted access context were implemented and scoped-tested. A redacted profile-health service, persistence, access-controlled API, desktop disclosure and optional VCVM-local proxychecker boundary were implemented and deployed. PR #47 (VNC window bounds), PR #27 (local backend startup), PR #26 (search engine selection), and a read-only extension inventory with agent CLI (`scripts/inspect_extensions.py`) were integrated and verified across 351 backend tests, 132 frontend tests, 26 script tests, and production build.

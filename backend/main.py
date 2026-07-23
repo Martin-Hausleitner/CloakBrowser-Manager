@@ -33,6 +33,7 @@ if __package__:
     from . import access_control as access
     from . import database as db
     from . import extensions
+    from . import live_diagnostics
     from .browser_manager import BrowserManager
     from .profile_health import ProfileHealthProbe
     from .models import (
@@ -70,6 +71,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
     import database as db
     import extensions
+    import live_diagnostics
     from browser_manager import BrowserManager
     from profile_health import ProfileHealthProbe
     from models import (
@@ -819,6 +821,7 @@ class _RfbServerStreamFilter:
         self._pixel_size = 4
         self._buffer = bytearray()
         self.last_dropped_clipboard = False
+        self.last_saw_framebuffer = False
 
     @staticmethod
     def _bounded_length(length: int, label: str) -> int:
@@ -981,6 +984,7 @@ class _RfbServerStreamFilter:
 
     def filter(self, data: bytes) -> bytes:
         self.last_dropped_clipboard = False
+        self.last_saw_framebuffer = False
         if self.can_interact:
             filtered = _filter_vnc_server_message(data, can_interact=True)
             return filtered or b""
@@ -1013,6 +1017,8 @@ class _RfbServerStreamFilter:
             if self._buffer[0] == 3:
                 self.last_dropped_clipboard = True
             else:
+                if self._buffer[0] == 0:
+                    self.last_saw_framebuffer = True
                 result.extend(self._buffer[:message_length])
             del self._buffer[:message_length]
 
@@ -2389,6 +2395,20 @@ async def get_system_status(request: Request):
     )
 
 
+@app.get("/api/admin/live-diagnostics")
+async def get_live_diagnostics(request: Request) -> dict[str, Any]:
+    """Return administrator-only live launch and VNC counters.
+
+    Unmeasured timings are explicit ``unavailable`` values. The payload never
+    includes ports, display numbers, filesystem paths, URLs, proxy data, or
+    browser content. This endpoint does not start benchmarks or mutate runtime.
+    """
+    _require_admin(request.scope)
+    return live_diagnostics.live_diagnostics.snapshot(
+        running_profile_ids=set(browser_mgr.running.keys())
+    )
+
+
 @app.get("/api/benchmarks/latest")
 async def get_latest_benchmark_report(request: Request) -> dict[str, Any]:
     """Serve a redacted, administrator-only benchmark summary.
@@ -2524,12 +2544,15 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
     import websockets
 
     access_lease = _register_websocket_access(identity, profile_id)
+    diagnostics_session_id: int | None = None
     try:
         await websocket.accept(subprotocol=subprotocol)
     except BaseException:
         _unregister_websocket_access(access_lease)
         raise
 
+    diagnostics_session_id = live_diagnostics.live_diagnostics.begin_vnc_session(profile_id)
+    framebuffer_detector = live_diagnostics.FirstFramebufferDetector()
     vnc_url = f"ws://127.0.0.1:{running.ws_port}/websockify"
 
     try:
@@ -2542,6 +2565,9 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
             ping_timeout=None,
             compression=None,  # KasmVNC can't handle permessage-deflate
         ) as vnc_ws:
+            live_diagnostics.live_diagnostics.mark_vnc_websocket_open(
+                profile_id, diagnostics_session_id
+            )
             logger.info(
                 "VNC proxy: connected to KasmVNC for %s (subprotocol=%s)",
                 profile_id, vnc_ws.subprotocol,
@@ -2612,6 +2638,16 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
                         count += 1
                         if isinstance(msg, bytes):
                             filtered = rfb_filter.filter(msg)
+                            saw_framebuffer = False
+                            if diagnostics_session_id is not None and not framebuffer_detector.seen:
+                                saw_framebuffer = framebuffer_detector.observe(msg)
+                                if rfb_filter.last_saw_framebuffer:
+                                    saw_framebuffer = True
+                                    framebuffer_detector.seen = True
+                                if saw_framebuffer:
+                                    live_diagnostics.live_diagnostics.mark_vnc_first_framebuffer(
+                                        profile_id, diagnostics_session_id
+                                    )
                             if rfb_filter.last_dropped_clipboard:
                                 dropped += 1
                                 logger.info(
@@ -2679,6 +2715,10 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
     except Exception as exc:
         logger.error("VNC proxy connect error for %s: %s: %s", profile_id, type(exc).__name__, exc)
     finally:
+        if diagnostics_session_id is not None:
+            live_diagnostics.live_diagnostics.end_vnc_session(
+                profile_id, diagnostics_session_id
+            )
         _unregister_websocket_access(access_lease)
         try:
             await websocket.close()

@@ -93,15 +93,14 @@ If the repository's `bd` issue tool is unavailable, record that limitation in th
 
 ## Current verified checkpoint
 
-Snapshot from 22 July 2026 on `integrate-pr-47-27-26`:
+Snapshot from 23 July 2026 on `integrate-pr-47-27-26`:
 
-- 343 backend tests, 132 frontend tests, 26 script tests and the production build passed.
-- The protected VCVM deployment passed first-launch health scheduling, manual rerun and refresh persistence on a 390×844 test profile.
-- The stored result exposed a masked IP, 100/100 fingerprint consistency and 100/100 BrowserScan authenticity with no warning or blocker.
-- The authenticated mobile gate passed 316 checks over five viewports plus the access dashboard and captured 31 screenshots.
+- Live diagnostics unit/API tests passed (8/8); full backend suite should be re-counted after this slice.
+- Admin-only `GET /api/admin/live-diagnostics` records launch/VNC counters with explicit unavailable timings and redacts ports/paths/URLs/proxy/secrets.
+- Prior 22 July checkpoint still holds for profile health, mobile gate, and proxychecker health reachability.
 - The Manager container reached the separately bound VCVM-local proxychecker health endpoint; a real configured-proxy `/check` remains required before proxy enrichment is called live-proven.
 - Safari Remote Automation is disabled, so WebKit and physical-iPhone evidence remain external blockers.
-- The next vertical slices are read-only extension inventory/CLI attachment and admin-only live diagnostics.
+- The next vertical slices are credentialed proxy health acceptance and the release handoff.
 
 Refresh these numbers and claims after any relevant change; this is a dated handoff, not permanent proof.
 

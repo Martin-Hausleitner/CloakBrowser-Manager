@@ -209,6 +209,7 @@ class BrowserManager:
             if profile_id in self.running or profile_id in self._launching:
                 raise RuntimeError(f"Profile {profile_id} is already running")
             self._launching.add(profile_id)
+            live_diagnostics.live_diagnostics.mark_launch_started(profile_id)
 
         display, ws_port = await self.vnc.allocate()
 
@@ -217,6 +218,7 @@ class BrowserManager:
         except ValueError:
             async with self._lock:
                 self._launching.discard(profile_id)
+            live_diagnostics.live_diagnostics.mark_launch_failed(profile_id)
             await self.vnc.stop_vnc(display)
             raise
 
@@ -325,6 +327,7 @@ class BrowserManager:
             async with self._lock:
                 self.running[profile_id] = running
                 self._launching.discard(profile_id)
+            live_diagnostics.live_diagnostics.mark_launch_succeeded(profile_id)
 
             logger.info(
                 "Launched profile %s on display :%d (ws_port=%d, cdp_port=%d)",
@@ -336,6 +339,7 @@ class BrowserManager:
         except BaseException:
             async with self._lock:
                 self._launching.discard(profile_id)
+            live_diagnostics.live_diagnostics.mark_launch_failed(profile_id)
             await self.vnc.stop_vnc(display)
             raise
 
@@ -346,6 +350,7 @@ class BrowserManager:
 
         if running:
             logger.info("Browser closed for profile %s, cleaning up", profile_id)
+            live_diagnostics.live_diagnostics.mark_stopped(profile_id)
             await self.vnc.stop_vnc(running.display)
 
     async def stop(self, profile_id: str):
@@ -358,6 +363,7 @@ class BrowserManager:
             return
 
         logger.info("Stopping profile %s", profile_id)
+        live_diagnostics.live_diagnostics.mark_stopped(profile_id)
 
         try:
             await running.context.close()

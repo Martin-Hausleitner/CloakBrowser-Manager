@@ -86,6 +86,12 @@ def test_extension_open_session_launches_and_returns_links(admin_client, sample_
     assert payload["status"] == "running"
     assert payload["mode"] == "cdp"
     assert payload["open_url"] == f"http://127.0.0.1:18117/session/{sample_profile['id']}/live"
+    assert payload["cdp_fullscreen_url"] == payload["open_url"]
+    assert payload["live_url"] == payload["open_url"]
+    assert payload["vnc_fullscreen_url"].endswith("&view=vnc&fullscreen=1")
+    assert payload["session_viewer_url"].endswith(f"?profile={sample_profile['id']}")
+    assert payload["links"]["cdp_fullscreen_url"] == payload["cdp_fullscreen_url"]
+    assert payload["links"]["vnc_fullscreen_url"] == payload["vnc_fullscreen_url"]
     assert payload["links"]["local"]["vnc_ws_url"].endswith(f"/api/profiles/{sample_profile['id']}/vnc")
     assert payload["links"]["local"]["vnc_fullscreen_url"].endswith("&view=vnc&fullscreen=1")
     assert payload["links"]["cloud"]["session_viewer_url"].startswith("https://cloud.example/?profile=")

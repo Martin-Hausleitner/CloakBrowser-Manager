@@ -33,7 +33,7 @@ manager_port="${MANAGER_PORT:-$DEFAULT_MANAGER_PORT}"
 auth_token_file="${AUTH_TOKEN_FILE:-}"
 serve_private=0
 tailscale_https_port="${TAILSCALE_HTTPS_PORT:-$DEFAULT_TAILSCALE_HTTPS_PORT}"
-proxychecker_url="${PROXYCHECKER_URL:-}"
+proxychecker_url="${PROXYCHECKER_URL-http://host.docker.internal:18899}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

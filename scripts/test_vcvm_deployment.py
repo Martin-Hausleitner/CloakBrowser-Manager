@@ -39,7 +39,7 @@ def compose_config() -> dict:
         env_file.write("VCVM_CPUS=16.0\n")
         env_file.write("VCVM_MEMORY_LIMIT=32g\n")
         env_file.write("VCVM_SHM_SIZE=2gb\n")
-        env_file.write("PROXYCHECKER_URL=http://host.docker.internal:8899\n")
+        env_file.write("PROXYCHECKER_URL=http://host.docker.internal:18899\n")
         env_file.write("PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal\n")
         env_path = pathlib.Path(env_file.name)
     try:
@@ -103,7 +103,7 @@ def main() -> None:
     assert_true(env.get("ACCESS_CONTROL_ENABLED") == "1", "access control must be forced on")
     assert_true(env.get("AUTH_TOKEN") == "unit-test-token-with-safe-length", "AUTH_TOKEN must come from env")
     assert_true(
-        env.get("PROXYCHECKER_URL") == "http://host.docker.internal:8899",
+        env.get("PROXYCHECKER_URL") == "http://host.docker.internal:18899",
         "proxychecker URL must remain explicit and environment-controlled",
     )
     assert_true(

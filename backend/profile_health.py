@@ -30,6 +30,7 @@ class NormalizedProxyCheckerResult:
     authenticity_score: int | None
     warnings: tuple[str, ...] = ()
     blockers: tuple[str, ...] = ()
+    authenticity_source: str | None = None  # "measured" | "derived" | None
 
 
 @dataclass(frozen=True)
@@ -144,14 +145,37 @@ def is_trusted_proxychecker_url(
         return False
 
 
+def _reason_haystack(reasons: object) -> str:
+    """Flatten string or structured proxychecker reasons into searchable text."""
+    if not isinstance(reasons, list):
+        return ""
+    parts: list[str] = []
+    for item in reasons:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if isinstance(item, Mapping):
+            for key in ("code", "message", "rule_id", "feature"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    parts.append(value)
+    return " ".join(parts).lower()
+
+
 def _safe_proxy_warnings(reasons: object, risk_score: int | None) -> tuple[str, ...]:
-    haystack = " ".join(item for item in reasons if isinstance(item, str)).lower() if isinstance(reasons, list) else ""
+    haystack = _reason_haystack(reasons)
     warnings: list[str] = []
     for category, terms in (
-        ("tor_detected", ("tor exit", "tor network")),
-        ("vpn_detected", ("vpn",)),
-        ("datacenter_network", ("datacenter", "data center", "hosting")),
-        ("proxy_detected", ("open proxy", "anonymous proxy", "proxy signal")),
+        ("tor_detected", ("tor exit", "tor network", "tor_detected", "active_tor", "is_tor")),
+        ("vpn_detected", ("vpn", "active_vpn", "is_vpn")),
+        (
+            "datacenter_network",
+            ("datacenter", "data center", "hosting", "is_datacenter", "is_hosting"),
+        ),
+        (
+            "proxy_detected",
+            ("open proxy", "anonymous proxy", "proxy signal", "is_proxy", "proxy_detected"),
+        ),
     ):
         if any(term in haystack for term in terms):
             warnings.append(category)
@@ -190,12 +214,24 @@ def normalize_proxychecker_response(payload: object) -> NormalizedProxyCheckerRe
             latency_ms = round(candidate, 3)
 
     risk_score = _clamp_score(scoring.get("risk_score"))
+    # Prefer an explicit authenticity field when the checker provides one; otherwise
+    # derive the inverse of risk. Never invent a 0 when risk itself is missing.
+    explicit_authenticity = _clamp_score(
+        scoring.get("authenticity_score", scoring.get("authenticity"))
+    )
+    if explicit_authenticity is not None:
+        authenticity_score = explicit_authenticity
+        authenticity_source = "measured"
+    else:
+        authenticity_score = derive_authenticity_score(risk_score)
+        authenticity_source = "derived" if authenticity_score is not None else None
     return NormalizedProxyCheckerResult(
         reachable=reachable,
         latency_ms=latency_ms,
         risk_score=risk_score,
-        authenticity_score=derive_authenticity_score(risk_score),
+        authenticity_score=authenticity_score,
         warnings=_safe_proxy_warnings(scoring.get("reasons"), risk_score),
+        authenticity_source=authenticity_source,
     )
 
 
@@ -604,7 +640,7 @@ class ProfileHealthProbe:
             blockers.extend(checker.blockers)
             sources["proxychecker"] = "unavailable" if checker.blockers else "measured"
             if authenticity_score is not None:
-                sources["proxy_authenticity"] = "derived"
+                sources["proxy_authenticity"] = checker.authenticity_source or "derived"
         else:
             sources["proxychecker"] = "skipped"
 

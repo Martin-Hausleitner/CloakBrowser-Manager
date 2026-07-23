@@ -1172,6 +1172,21 @@ def update_access_agent(agent_id: str, **fields: Any) -> dict[str, Any] | None:
     return get_access_agent(agent_id)
 
 
+def delete_access_agent(agent_id: str) -> bool:
+    """Permanently revoke an agent key and remove its sandbox grants."""
+    existing = get_access_agent(agent_id)
+    if not existing:
+        return False
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM access_grants WHERE principal_type = ? AND principal_id = ?",
+            ("agent", agent_id),
+        )
+        conn.execute("DELETE FROM access_agents WHERE id = ?", (agent_id,))
+        conn.commit()
+    return True
+
+
 def record_access_audit_event(
     actor_type: str,
     actor_id: str | None,

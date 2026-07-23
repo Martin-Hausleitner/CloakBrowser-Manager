@@ -2073,6 +2073,18 @@ async def update_access_agent(agent_id: str, body: AccessAgentUpdate, request: R
     return _access_agent_response(agent)
 
 
+@app.delete("/api/access/agents/{agent_id}", status_code=204)
+async def delete_access_agent(agent_id: str, request: Request):
+    """Revoke an agent immediately: drop key/grants and close live WS leases."""
+    actor = _require_admin(request.scope)
+    deleted = db.delete_access_agent(agent_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
+    db.record_access_audit_event(actor.kind, actor.id, "access_agent.delete", "allowed")
+    return Response(status_code=204)
+
+
 @app.post("/api/access/agents/{agent_id}/rotate-key", response_model=AccessAgentCreatedResponse)
 async def rotate_access_agent_key(agent_id: str, request: Request):
     actor = _require_admin(request.scope)
@@ -3034,6 +3046,10 @@ async def extension_open_session(req: ExtensionOpenSessionRequest, request: Requ
         mode=links.mode,
         open_url=links.open_url,
         links=links,
+        session_viewer_url=links.session_viewer_url,
+        vnc_fullscreen_url=links.vnc_fullscreen_url,
+        cdp_fullscreen_url=links.cdp_fullscreen_url,
+        live_url=links.live_url,
         cdp_url=(f"/api/profiles/{req.profile_id}/cdp" if include_cdp and status == "running" else None),
         vnc_ws_port=(
             None

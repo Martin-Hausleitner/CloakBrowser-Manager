@@ -78,12 +78,22 @@ Also: `sandboxes`, `catalog`, `profiles health`, `profiles extensions`, `open-se
 
 Admin-only (not agent): access users/agents/grants management, proxy inventory ingest, live diagnostics.
 
+Agent lifecycle (admin):
+
+| Action | Method + path |
+| --- | --- |
+| Create | `POST /api/access/agents` (returns one-time `api_key`) |
+| Update / deactivate | `PUT /api/access/agents/{id}` (`active=false` revokes WS) |
+| Rotate key | `POST /api/access/agents/{id}/rotate-key` |
+| Delete / revoke | `DELETE /api/access/agents/{id}` (drops key+grants, revokes WS immediately) |
+
 ## VNC vs CDP open (handoff)
 
-- **CDP / Browser-Use snappy live:** `links.cdp_fullscreen_url` or `links.live_url` → `/session/{id}/live`
-- **VNC fullscreen:** `links.vnc_fullscreen_url` → `/?profile={id}&view=vnc&fullscreen=1`
+- **CDP / Browser-Use snappy live:** top-level or `links.cdp_fullscreen_url` / `links.live_url` → `/session/{id}/live`
+- **VNC fullscreen:** top-level or `links.vnc_fullscreen_url` → `/?profile={id}&view=vnc&fullscreen=1`
 - **Raw sockets:** `links.websocket_url` (VNC WS), `links.cdp_url` / `local.cdp_ws_url` (CDP)
 - Prefer `mode=cdp` when the agent has `automate`; otherwise `mode=vnc`
+- `POST /api/extension/sessions/open` returns the same top-level flat URLs as `GET /api/profiles/{id}/open-links`
 
 Never print agent keys, proxy credentials, cookies, or host paths in logs/chat.
 

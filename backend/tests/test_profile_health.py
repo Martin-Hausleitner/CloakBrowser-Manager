@@ -119,6 +119,7 @@ def test_normalize_proxychecker_response_keeps_only_safe_fields():
     assert result.latency_ms == 41.25
     assert result.risk_score == 23
     assert result.authenticity_score == 77
+    assert result.authenticity_source == "derived"
     assert result.warnings == ("vpn_detected",)
     assert result.blockers == ()
     assert "secret" not in repr(result)
@@ -126,11 +127,42 @@ def test_normalize_proxychecker_response_keeps_only_safe_fields():
     assert "proxy.example" not in repr(result)
 
 
+def test_normalize_proxychecker_structured_reasons_and_explicit_authenticity():
+    raw = {
+        "results": [{"ok": True, "latency_ms": 120}],
+        "scoring": {
+            "risk_score": 80,
+            "authenticity_score": 55,
+            "verdict_final": "block",
+            "reasons": [
+                {
+                    "code": "IPQS_PROXY_DETECTED",
+                    "message": "IP is a known proxy server (IPQS).",
+                    "feature": "ipqs_is_proxy",
+                },
+                {
+                    "code": "IPAPI_IS_DATACENTER",
+                    "message": "IP is in a datacenter (ipapi.is).",
+                    "feature": "ipapi_is_datacenter",
+                },
+            ],
+        },
+    }
+
+    result = normalize_proxychecker_response(raw)
+
+    assert result.risk_score == 80
+    assert result.authenticity_score == 55
+    assert result.authenticity_source == "measured"
+    assert result.warnings == ("datacenter_network", "proxy_detected", "proxy_risk_high")
+
+
 def test_normalize_proxychecker_response_marks_malformed_payload_unavailable():
     result = normalize_proxychecker_response({"results": "not-a-list", "scoring": []})
 
     assert result.reachable is None
     assert result.risk_score is None
+    assert result.authenticity_score is None
     assert result.blockers == ("proxychecker_invalid_response",)
 
 

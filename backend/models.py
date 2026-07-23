@@ -249,6 +249,22 @@ class SessionOpenLinks(BaseModel):
     local: SessionLinkSet
     cloud: SessionLinkSet | None = None
     bases: dict[str, str | None] = Field(default_factory=dict)
+    # Flat preferred-origin fields (same shape as ProfileOpenLinksResponse).
+    session_viewer_url: str | None = None
+    vnc_fullscreen_url: str | None = None
+    cdp_fullscreen_url: str | None = None
+    live_url: str | None = None
+    debug_url: str | None = None
+    debugger_url: str | None = None
+    websocket_url: str | None = None
+    cdp_url: str | None = None
+    live_metrics_url: str | None = None
+    local_url: str | None = None
+    cloud_url: str | None = None
+    local_vnc_fullscreen_url: str | None = None
+    local_cdp_fullscreen_url: str | None = None
+    cloud_vnc_fullscreen_url: str | None = None
+    cloud_cdp_fullscreen_url: str | None = None
 
 
 class LaunchResponse(BaseModel):
@@ -659,6 +675,12 @@ class ExtensionOpenSessionResponse(BaseModel):
     mode: Literal["cdp", "vnc", "shell"] = "cdp"
     open_url: str
     links: SessionOpenLinks
+    # Top-level flat URLs matching GET /api/profiles/{id}/open-links.
+    session_viewer_url: str | None = None
+    vnc_fullscreen_url: str | None = None
+    cdp_fullscreen_url: str | None = None
+    live_url: str | None = None
+    # Relative CDP proxy path for automation (not the absolute open-links cdp_url).
     cdp_url: str | None = None
     vnc_ws_port: int | None = None
     display: str | None = None

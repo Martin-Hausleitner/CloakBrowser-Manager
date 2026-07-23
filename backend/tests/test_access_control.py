@@ -965,6 +965,36 @@ def test_paperclip_agent_key_is_scoped_and_rotation_revokes_old_key(client_acces
     assert client_access.get("/api/profiles", headers=agent_headers).status_code == 401
 
 
+def test_delete_access_agent_revokes_key_immediately(client_access: TestClient):
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Disposable Paperclip agent",
+            "paperclip_agent_id": "paperclip-agent-delete",
+            "grants": [{"sandbox_id": "beta", "permission": "view"}],
+        },
+    )
+    assert created.status_code == 201
+    agent = created.json()
+    agent_headers = {"Authorization": f"Bearer {agent['api_key']}"}
+    assert client_access.get("/api/access/me", headers=agent_headers).status_code == 200
+
+    deleted = client_access.delete(
+        f"/api/access/agents/{agent['id']}", headers=bootstrap_headers()
+    )
+    assert deleted.status_code == 204
+    assert client_access.get("/api/access/me", headers=agent_headers).status_code == 401
+    assert (
+        client_access.get(f"/api/access/agents/{agent['id']}", headers=bootstrap_headers()).status_code
+        in {404, 405}
+    )
+    missing = client_access.delete(
+        f"/api/access/agents/{agent['id']}", headers=bootstrap_headers()
+    )
+    assert missing.status_code == 404
+
+
 def test_open_vnc_closes_immediately_after_agent_key_rotation(
     client_access: TestClient, monkeypatch
 ):

@@ -60,15 +60,16 @@ host-gateway mapping.
 Then deploy with the fixed local service URL:
 
 ```bash
-PROXYCHECKER_URL=http://host.docker.internal:8899 \
+PROXYCHECKER_URL=http://host.docker.internal:18899 \
   ./scripts/deploy_vcvm.sh --auth-token-file ~/.config/cloakbrowser/vcvm-auth-token
 ```
 
-The deploy script rejects credentials, public hosts, arbitrary paths and ports
-outside the valid unprivileged range. It writes only the validated URL and the
-single `host.docker.internal` allow-list entry into the mode-600 VCVM env file.
-If the variable is omitted, proxychecker enrichment is explicitly disabled and
-browser reachability, fingerprint consistency and conservative BrowserScan
+The deploy script defaults to `http://host.docker.internal:18899` when
+`PROXYCHECKER_URL` is unset, rejects credentials/public hosts/arbitrary paths,
+and writes only the validated URL plus the single `host.docker.internal`
+allow-list entry into the mode-600 VCVM env file. Export
+`PROXYCHECKER_URL=` (empty) to disable enrichment explicitly; browser
+reachability, fingerprint consistency and conservative BrowserScan
 classification continue independently.
 
 ## Private Tailscale HTTPS

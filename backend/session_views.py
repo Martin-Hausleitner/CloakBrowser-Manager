@@ -31,6 +31,7 @@ def render_cdp_live_html(
     cdp_ws_url: str,
     metrics_url: str,
     interactive: bool,
+    cdp_list_url: str | None = None,
 ) -> str:
     """Self-contained low-latency CDP screencast page. No secrets embedded."""
     safe_name = html.escape(profile_name or profile_id)
@@ -39,11 +40,12 @@ def render_cdp_live_html(
         {
             "profileId": profile_id,
             "cdpWsUrl": cdp_ws_url,
+            "cdpListUrl": cdp_list_url,
             "metricsUrl": metrics_url,
             "interactive": bool(interactive),
             "screencast": {
                 "format": "jpeg",
-                "quality": 35,
+                "quality": 40,
                 "maxWidth": 1280,
                 "maxHeight": 800,
                 "everyNthFrame": 1,
@@ -98,39 +100,183 @@ def render_cdp_live_html(
   let rttMs = null;
   let reconnectCount = 0;
   let metricsTimer = null;
+  // Prefer page-target WS; browser WS uses flattened pageSessionId for Page.*/Input.*.
+  let pageSessionId = null;
+  let usingBrowserRoot = false;
+  let streamMode = 'screencast'; // screencast | screenshot
+  let screenshotLoop = null;
+  let lastFrameAt = 0;
+  let stallTimer = null;
 
   function setStatus(text) {{ statusEl.textContent = text; }}
   function setMetrics() {{
     const parts = [];
     if (fps) parts.push(fps.toFixed(0) + ' fps');
     if (rttMs != null) parts.push(Math.round(rttMs) + ' ms rtt');
+    if (streamMode === 'screenshot') parts.push('shot');
     if (reconnectCount) parts.push('reconn ' + reconnectCount);
     metricsEl.textContent = parts.join(' · ');
   }}
 
-  function send(method, params = {{}}) {{
+  function noteFrame() {{
+    lastFrameAt = performance.now();
+    frames += 1;
+    const now = lastFrameAt;
+    if (now - lastFpsAt >= 1000) {{
+      fps = frames * 1000 / (now - lastFpsAt);
+      frames = 0;
+      lastFpsAt = now;
+      setMetrics();
+    }}
+  }}
+
+  function paintJpegBase64(data) {{
+    if (drawing) {{ dropped += 1; return; }}
+    drawing = true;
+    const img = new Image();
+    img.onload = () => {{
+      if (canvas.width !== img.width || canvas.height !== img.height) {{
+        canvas.width = img.width;
+        canvas.height = img.height;
+      }}
+      ctx.drawImage(img, 0, 0);
+      drawing = false;
+      noteFrame();
+    }};
+    img.onerror = () => {{ drawing = false; dropped += 1; }};
+    img.src = 'data:image/jpeg;base64,' + data;
+  }}
+
+  function send(method, params = {{}}, opts = {{}}) {{
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('offline'));
     const id = msgId++;
-    ws.send(JSON.stringify({{ id, method, params }}));
+    const payload = {{ id, method, params }};
+    const sessionId = opts.sessionId !== undefined ? opts.sessionId : pageSessionId;
+    // Target.* / Browser.* talk to the browser root; Page/Input need the page session.
+    if (sessionId && !method.startsWith('Target.') && !method.startsWith('Browser.')) {{
+      payload.sessionId = sessionId;
+    }}
+    ws.send(JSON.stringify(payload));
+    if (opts.noWait) return Promise.resolve({{}});
     return new Promise((resolve, reject) => {{
       const timer = setTimeout(() => {{ pending.delete(id); reject(new Error('timeout ' + method)); }}, 8000);
       pending.set(id, {{ resolve, reject, timer }});
     }});
   }}
 
+  function ackScreencastFrame(frameSessionId) {{
+    if (frameSessionId == null || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const id = msgId++;
+    const payload = {{
+      id,
+      method: 'Page.screencastFrameAck',
+      params: {{ sessionId: frameSessionId }},
+    }};
+    if (pageSessionId) payload.sessionId = pageSessionId;
+    try {{ ws.send(JSON.stringify(payload)); }} catch (_) {{}}
+  }}
+
+  async function resolvePageWsUrl() {{
+    if (!CONFIG.cdpListUrl) return null;
+    try {{
+      const resp = await fetch(CONFIG.cdpListUrl, {{ credentials: 'include', headers: {{ Accept: 'application/json' }} }});
+      if (!resp.ok) return null;
+      const list = await resp.json();
+      const page = (Array.isArray(list) ? list : []).find((t) => t && t.type === 'page' && t.webSocketDebuggerUrl);
+      return page ? page.webSocketDebuggerUrl : null;
+    }} catch (_) {{
+      return null;
+    }}
+  }}
+
+  async function attachPageSession() {{
+    pageSessionId = null;
+    await send('Target.setDiscoverTargets', {{ discover: true }});
+    const {{ targetInfos }} = await send('Target.getTargets');
+    let page = (targetInfos || []).find((t) => t.type === 'page' && !t.attached);
+    if (!page) {{
+      page = (targetInfos || []).find((t) => t.type === 'page');
+    }}
+    if (!page) {{
+      const created = await send('Target.createTarget', {{ url: 'about:blank' }});
+      page = {{ targetId: created.targetId }};
+    }}
+    const attached = await send('Target.attachToTarget', {{
+      targetId: page.targetId,
+      flatten: true,
+    }});
+    pageSessionId = attached.sessionId;
+    return pageSessionId;
+  }}
+
+  function stopScreenshotLoop() {{
+    if (screenshotLoop) {{
+      clearTimeout(screenshotLoop);
+      screenshotLoop = null;
+    }}
+  }}
+
+  async function screenshotTick() {{
+    if (!ws || ws.readyState !== WebSocket.OPEN || streamMode !== 'screenshot') return;
+    const t0 = performance.now();
+    try {{
+      const result = await send('Page.captureScreenshot', {{
+        format: 'jpeg',
+        quality: CONFIG.screencast.quality || 40,
+      }});
+      rttMs = performance.now() - t0;
+      if (result && result.data) paintJpegBase64(result.data);
+      setMetrics();
+    }} catch (_) {{}}
+    screenshotLoop = setTimeout(() => {{ screenshotTick(); }}, 50);
+  }}
+
+  function startScreenshotFallback(reason) {{
+    if (streamMode === 'screenshot') return;
+    streamMode = 'screenshot';
+    stopScreenshotLoop();
+    send('Page.stopScreencast').catch(() => {{}});
+    setStatus('live · CDP shot');
+    screenshotTick();
+  }}
+
+  function watchScreencastStall() {{
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {{
+      // Cloak Chromium often emits a single screencast frame then stalls.
+      if (streamMode === 'screencast' && performance.now() - lastFrameAt > 1200) {{
+        startScreenshotFallback('stall');
+      }}
+    }}, 1400);
+  }}
+
   async function startScreencast() {{
+    streamMode = 'screencast';
+    stopScreenshotLoop();
+    if (usingBrowserRoot) {{
+      await attachPageSession();
+    }} else {{
+      pageSessionId = null;
+    }}
     await send('Page.enable');
+    lastFrameAt = performance.now();
     await send('Page.startScreencast', CONFIG.screencast);
     setStatus('live · CDP');
     reconnectAttempt = 0;
+    watchScreencastStall();
     pingLoop();
   }}
 
   async function pingLoop() {{
     while (ws && ws.readyState === WebSocket.OPEN) {{
+      if (streamMode === 'screenshot') {{
+        // RTT sampled inside screenshotTick.
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }}
       const t0 = performance.now();
       try {{
-        await send('Browser.getVersion');
+        await send('Page.getLayoutMetrics');
         rttMs = performance.now() - t0;
         setMetrics();
       }} catch (_) {{}}
@@ -149,20 +295,22 @@ def render_cdp_live_html(
     }}, delay);
   }}
 
-  function connect() {{
-    if (ws) {{
-      try {{ ws.close(); }} catch (_) {{}}
-    }}
+  function bindSocket(url, browserRoot) {{
+    usingBrowserRoot = !!browserRoot;
+    pageSessionId = null;
+    streamMode = 'screencast';
+    stopScreenshotLoop();
     setStatus('connecting…');
-    ws = new WebSocket(CONFIG.cdpWsUrl);
+    ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     ws.addEventListener('open', () => {{
       startScreencast().catch((err) => {{
-        setStatus('start failed');
+        setStatus('start failed: ' + (err && err.message ? err.message : 'error'));
         scheduleReconnect();
       }});
     }});
     ws.addEventListener('close', () => {{
+      stopScreenshotLoop();
       setStatus('disconnected');
       scheduleReconnect();
     }});
@@ -181,33 +329,27 @@ def render_cdp_live_html(
       }}
       if (msg.method === 'Page.screencastFrame') {{
         const params = msg.params || {{}};
-        // Ack immediately for lowest pipeline latency.
-        if (params.sessionId != null) {{
-          send('Page.screencastFrameAck', {{ sessionId: params.sessionId }}).catch(() => {{}});
-        }}
-        if (drawing) {{ dropped += 1; return; }}
-        drawing = true;
-        const img = new Image();
-        img.onload = () => {{
-          if (canvas.width !== img.width || canvas.height !== img.height) {{
-            canvas.width = img.width;
-            canvas.height = img.height;
-          }}
-          ctx.drawImage(img, 0, 0);
-          drawing = false;
-          frames += 1;
-          const now = performance.now();
-          if (now - lastFpsAt >= 1000) {{
-            fps = frames * 1000 / (now - lastFpsAt);
-            frames = 0;
-            lastFpsAt = now;
-            setMetrics();
-          }}
-        }};
-        img.onerror = () => {{ drawing = false; dropped += 1; }};
-        img.src = 'data:image/jpeg;base64,' + params.data;
+        ackScreencastFrame(params.sessionId);
+        lastFrameAt = performance.now();
+        paintJpegBase64(params.data);
       }}
     }});
+  }}
+
+  async function connect() {{
+    if (ws) {{
+      try {{ ws.close(); }} catch (_) {{}}
+      ws = null;
+    }}
+    if (reconnectTimer) {{ clearTimeout(reconnectTimer); reconnectTimer = null; }}
+    if (stallTimer) {{ clearTimeout(stallTimer); stallTimer = null; }}
+    stopScreenshotLoop();
+    const pageUrl = await resolvePageWsUrl();
+    if (pageUrl) {{
+      bindSocket(pageUrl, false);
+      return;
+    }}
+    bindSocket(CONFIG.cdpWsUrl, true);
   }}
 
   function canvasPoint(ev) {{

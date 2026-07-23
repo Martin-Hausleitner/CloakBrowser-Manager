@@ -194,6 +194,9 @@ rsync -az --delete \
 
 ssh "$target_host" "cd '$remote_path' && docker compose --env-file .env.vcvm -p '$PROJECT_NAME' -f '$COMPOSE_FILE' up -d --build --remove-orphans"
 
+# Ensure Comet/harvested extension binaries can land on the data volume.
+ssh "$target_host" "docker exec cloakbrowser-manager-vcvm mkdir -p /data/extension-catalog" >/dev/null 2>&1 || true
+
 ssh "$target_host" "bash -s" <<REMOTE_CHECK
 set -euo pipefail
 target='http://127.0.0.1:$manager_port'

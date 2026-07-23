@@ -2951,6 +2951,7 @@ async def cdp_live_session(profile_id: str, request: Request):
     local_base = _request_local_base(request)
     ws_base = f"{session_links.ws_scheme_for(local_base)}://{local_base.split('://', 1)[-1]}"
     cdp_ws = f"{ws_base}/api/profiles/{profile_id}/cdp"
+    cdp_list = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/cdp/json/list"
     metrics = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/live-metrics"
     interactive = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
         identity, profile, "interact"
@@ -2959,6 +2960,7 @@ async def cdp_live_session(profile_id: str, request: Request):
         profile_id=profile_id,
         profile_name=str(profile.get("name") or profile_id),
         cdp_ws_url=cdp_ws,
+        cdp_list_url=cdp_list,
         metrics_url=metrics,
         interactive=interactive,
     )

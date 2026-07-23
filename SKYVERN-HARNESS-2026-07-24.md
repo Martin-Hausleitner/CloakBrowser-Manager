@@ -1,4 +1,4 @@
-[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T01:35+02:00
+[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T01:38+02:00
 > 🧠 NotebookLM: n/a (kein IDR-Auftrag in dieser Lane; Architektur aus Skyvern README + CloakBrowser-Manager CDP API)
 
 # SKYVERN-HARNESS — CloakBrowser × Skyvern (2026-07-24)
@@ -66,14 +66,15 @@ Docking-Punkt ist bewusst **CDP**, nicht ein zweiter Chromium-Launch: Skyvern st
 
 ![Skyvern harness through CloakBrowser CDP — example.com](.proof/2026-07-24-skyvern-harness.png)
 
-Live-Lauf (re-verified 2026-07-24T01:35+02:00):
+Live-Lauf (re-verified 2026-07-24T01:38+02:00, this lane):
 
-- Manager: `http://127.0.0.1:18115`
-- Profile: `a8b99a1f-bd77-4249-917f-0ad681ea5519` (VCVM Mobile Demo)
+- Manager: `http://127.0.0.1:18115` (container `cloakbrowser-manager-vcvm`)
+- Profile: `a8b99a1f-bd77-4249-917f-0ad681ea5519` (VCVM Mobile Demo, fingerprint seed 12695)
 - Mode: `Skyvern.local+SkyvernBrowser.connect_over_cdp`
 - URL: `https://example.com/` · Title: `Example Domain`
 - `headers_applied: true` (Bearer durch Manager-CDP)
 - Capability status: `degraded` (`skyvern_installed=true`, `llm_configured=false`)
+- Harness API on **running** VCVM image: still `404` until image is rebuilt from this branch (proof uses host-side Skyvern adapter → Manager CDP, which is the cloak docking path)
 
 JSON: `.proof/2026-07-24-skyvern-harness.json`  
 VCVM-Spiegel: `~/cloakbrowser-manager-vcvm/.proof/2026-07-24-skyvern-harness.png`
@@ -82,8 +83,8 @@ VCVM-Spiegel: `~/cloakbrowser-manager-vcvm/.proof/2026-07-24-skyvern-harness.png
 
 - Vollständiger Vision-Agent-`run_task`-Loop braucht LLM-Keys (`OPENAI_*` / Skyvern cloud). Capability meldet dann `run_task: true`; ohne Keys → `blocked`/`degraded`, kein Fake.
 - PyPI-`Skyvern.connect_to_browser_over_cdp` ohne Header scheitert an Manager-Auth; der Harness bridged deshalb Skyverns Playwright-Driver **mit** Headers und wrappt `SkyvernBrowser`.
-- Docker-Image des Managers enthält Skyvern noch nicht; Opt-in per Extra/Venv.
-- „1:1 kopieren“ der gesamten Skyvern-Codebasis wäre AGPL-Kontamination des MIT-Trees — bewusst vermieden zugunsten Adapter + optionalem Dependency.
+- Laufendes VCVM-Docker-Image ist noch ohne `/api/harnesses/skyvern/*` (vor-PR Build). Adapter + Routes sind im Branch; Skyvern-Runtime bleibt Opt-in (`pip install "skyvern[local]"`), nicht im Core-Image.
+- „1:1 kopieren“ der gesamten Skyvern-Codebasis wäre AGPL-Kontamination des MIT-Trees — bewusst vermieden zugunsten Adapter + optionalem Dependency (Skyvern-Kernfähigkeiten CDP-Attach / Browser-Wrap / optional `run_task` über die public API).
 
 ## NEXT
 

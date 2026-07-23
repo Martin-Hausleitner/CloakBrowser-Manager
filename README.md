@@ -43,7 +43,7 @@ Open [http://localhost:8080](http://localhost:8080) in your browser. Create a pr
 
 ## Fork development status
 
-Status date: **23 July 2026** (evening). This section describes the active development branch `integrate-pr-47-27-26` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
+Status date: **23 July 2026** (late night). This section describes the active development branch `integrate-pr-47-27-26` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
 
 ### Repository boundaries
 
@@ -81,6 +81,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 | Admin-only live diagnostics | Implemented; full local suite passed | `GET /api/admin/live-diagnostics` returns launch/VNC counters with measured-or-unavailable metrics, strips ports/paths/URLs/proxy/secrets, rejects non-admin callers with HTTP 403, and leaves the mobile workspace unchanged. |
 | Credentialed proxychecker enrichment | Live-proven on VCVM | Restored VCVM-local proxychecker; Manager launched a disposable credentialed-proxy profile; health sources reported `proxychecker: measured` with risk/authenticity scores, masked outbound IP, and no credentials in the API payload. Local Basic-auth forward proxy is intentionally low-authenticity (`warning`). |
 | Proxy inventory + auto geo-aligned profiles | Live-proven on VCVM | Admin ingest of **11** inventory entries (credentials never returned), Proxy-Checker check produced redacted scores, auto profile created under `proxied/auto` with `geoip` + locale/timezone defaults; Browser-Use/Proxies UI verified via headless Chromium screenshots. |
+| CDP `/session/{id}/live` screencast | Live-proven on VCVM tunnel | Root cause: Chromium emits one frame on static pages. Fix: canvas/rAF compositor pulse + immediate `screencastFrameAck` + 2s pulse keepalive. After redeploy: **about:blank avg ~12 / min ~8 fps** (cast), **example.com avg ~21 / min ~14 fps**, RTT p50 **~139–175 ms**, Live Dev **CDP 22 fps**. Before: **~5.7–7 fps** screenshot-poll. |
 | Physical iPhone Safari and private Tailnet HTTPS | Not yet proven | Chromium emulation is not relabeled as Safari evidence; Safari Remote Automation and a physical-device run remain external prerequisites. |
 | Direct Tailnet latency | Not achieved in the last measurement | The recorded Mac route used `DERP(nue)`; direct-path proof must be rerun rather than inferred. |
 
@@ -96,6 +97,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 ### Development timeline
 
+- **23 July 2026 (late night)** — CDP live stream hardened: canvas/rAF compositor dirty-pulse + ack-first cast + pulse keepalive so `Page.startScreencast` sustains frames on static Cloak pages; screenshot-poll remains stall fallback only. VCVM redeploy proof: blank **~12 fps cast**, example.com **~21 fps**, Live Dev synced via `/live-metrics`.
 - **23 July 2026 (night)** — Browser Use home gained first-class preference cards for Browser Harness, Unbrowse, and Stagehand (metadata only); sidebar tabs for Proxies, Profiles, and Accounts & 2FA (redacted session/auth badges + planned Bitwarden/Keypad sync). Focused harness/account tests passed; host execution boundary unchanged.
 - **23 July 2026 (late)** — Browser-Use desktop shell, redacted proxy inventory, Proxy-Checker overview, and auto geo-aligned profile creation landed and redeployed to VCVM; 371 backend / 133 frontend tests and production build passed; inventory ingest + checker + auto-profile proven live without leaking credentials into API payloads.
 - **23 July 2026** — admin-only live diagnostics landed; bulk profile organization API/UI added; VCVM proxychecker service restored and credentialed `/check` proven against a local Basic-auth proxy; live-diagnostics import fix prepared for redeploy:

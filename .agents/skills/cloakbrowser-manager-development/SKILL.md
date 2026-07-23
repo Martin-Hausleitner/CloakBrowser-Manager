@@ -99,9 +99,11 @@ Snapshot from 23 July 2026 (late night) on `integrate-pr-47-27-26`:
 
 - Agent/extension control plane: `GET/POST /api/extension/catalog`, `POST /api/extension/sessions/open`, `GET/PUT /api/extension/defaults`, templates, open-links (`mode=cdp|vnc|shell`), CDP live `/session/{id}/live`, and live-metrics.
 - Reuse `GET /api/profiles/{id}/open-links` for VNC/CDP fullscreen URLs — do not invent parallel link builders in UI/extension.
-- Backend suites for session links / extension sessions / defaults are green locally; refresh VCVM verify after deploy.
-- Prior 23 July evening checkpoints still hold for proxy inventory, Browser-Use shell, and profile health.
+- CDP live root cause + fix: Cloak/Chromium screencast stalls after one frame on static pages; `/session/{id}/live` injects a canvas/rAF compositor pulse (2s keepalive) and keeps real `Page.startScreencast` (screenshot-poll is stall fallback only). VCVM tunnel proof: **blank ~12 fps cast**, **example.com ~21 fps**, Live Dev **~22 fps**.
+- Backend suites for session links / extension sessions / defaults / session_views are green locally; VCVM redeployed after this fix.
+- Prior 23 July evening checkpoints still hold for proxy inventory, Browser-Use shell, and profile health (fingerprint scores not re-probed in this stream-only slice).
 - Safari Remote Automation remains an external blocker.
+- Note: Mac tunnel for Manager must forward to VCVM `MANAGER_PORT` (currently **18115**); a stale forward to 18116 breaks client checks.
 
 Refresh these numbers and claims after any relevant change; this is a dated handoff, not permanent proof.
 

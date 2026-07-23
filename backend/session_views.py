@@ -4,8 +4,10 @@ The CDP live viewer is oriented after steel-browser's cast/debug streamer and
 Browser-Use ``liveUrl``: one absolute URL that opens a snappy fullscreen feed
 via CDP ``Page.startScreencast`` rather than RFB/VNC.
 
-Tuned for ultra-low latency: low JPEG quality, immediate frame ack, skip-busy
-draws, and stable reconnect with backoff. Posts live metrics to the Manager.
+Cloak/Chromium only emits screencast frames when the compositor dirties. A
+tiny page-side CSS/rAF pulse keeps the feed alive on static pages so the
+viewer sustains high FPS instead of stalling after the first frame and falling
+back to slow ``Page.captureScreenshot`` polling.
 """
 
 from __future__ import annotations
@@ -45,9 +47,9 @@ def render_cdp_live_html(
             "interactive": bool(interactive),
             "screencast": {
                 "format": "jpeg",
-                "quality": 40,
+                "quality": 35,
                 "maxWidth": 1280,
-                "maxHeight": 800,
+                "maxHeight": 720,
                 "everyNthFrame": 1,
             },
         }
@@ -93,6 +95,7 @@ def render_cdp_live_html(
   let reconnectAttempt = 0;
   let reconnectTimer = null;
   let drawing = false;
+  let pendingJpeg = null;
   let frames = 0;
   let dropped = 0;
   let lastFpsAt = performance.now();
@@ -107,6 +110,47 @@ def render_cdp_live_html(
   let screenshotLoop = null;
   let lastFrameAt = 0;
   let stallTimer = null;
+  let pulseTimer = null;
+  let totalFrames = 0;
+
+  // Canvas pixel writes dirty the compositor more reliably than CSS-only pulses
+  // on static about:blank pages (Cloak/Chromium otherwise stalls after 1 frame).
+  const PULSE_JS = `(() => {{
+  try {{
+    const root = document.documentElement || document.body;
+    if (!root) return 'no-root';
+    let canvas = document.getElementById('__cbm_live_pulse');
+    if (!canvas) {{
+      canvas = document.createElement('canvas');
+      canvas.id = '__cbm_live_pulse';
+      canvas.width = 2;
+      canvas.height = 2;
+      canvas.setAttribute('aria-hidden', 'true');
+      canvas.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.02;pointer-events:none;z-index:2147483647;';
+      root.appendChild(canvas);
+    }}
+    if (!window.__cbmLiveRaf) {{
+      window.__cbmLiveRaf = true;
+      const ctx = canvas.getContext('2d', {{ alpha: true }});
+      let n = 0;
+      const tick = () => {{
+        n = (n + 1) & 255;
+        if (ctx) {{
+          ctx.clearRect(0, 0, 2, 2);
+          ctx.fillStyle = 'rgba(' + n + ',0,0,0.04)';
+          ctx.fillRect(0, 0, 2, 2);
+        }}
+        // Also nudge a CSS transform so layer damage stays hot.
+        canvas.style.transform = 'translate3d(' + (n % 2) + 'px,0,0)';
+        requestAnimationFrame(tick);
+      }};
+      requestAnimationFrame(tick);
+    }}
+    return 'ok';
+  }} catch (e) {{
+    return 'err:' + (e && e.message ? e.message : 'fail');
+  }}
+}})()`;
 
   function setStatus(text) {{ statusEl.textContent = text; }}
   function setMetrics() {{
@@ -114,6 +158,7 @@ def render_cdp_live_html(
     if (fps) parts.push(fps.toFixed(0) + ' fps');
     if (rttMs != null) parts.push(Math.round(rttMs) + ' ms rtt');
     if (streamMode === 'screenshot') parts.push('shot');
+    else parts.push('cast');
     if (reconnectCount) parts.push('reconn ' + reconnectCount);
     metricsEl.textContent = parts.join(' · ');
   }}
@@ -121,6 +166,7 @@ def render_cdp_live_html(
   function noteFrame() {{
     lastFrameAt = performance.now();
     frames += 1;
+    totalFrames += 1;
     const now = lastFrameAt;
     if (now - lastFpsAt >= 1000) {{
       fps = frames * 1000 / (now - lastFpsAt);
@@ -130,21 +176,54 @@ def render_cdp_live_html(
     }}
   }}
 
-  function paintJpegBase64(data) {{
-    if (drawing) {{ dropped += 1; return; }}
+  function b64ToUint8(b64) {{
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }}
+
+  async function paintJpegBase64(data) {{
+    if (drawing) {{
+      pendingJpeg = data;
+      dropped += 1;
+      return;
+    }}
     drawing = true;
-    const img = new Image();
-    img.onload = () => {{
-      if (canvas.width !== img.width || canvas.height !== img.height) {{
-        canvas.width = img.width;
-        canvas.height = img.height;
+    try {{
+      const bytes = b64ToUint8(data);
+      const bitmap = await createImageBitmap(new Blob([bytes], {{ type: 'image/jpeg' }}));
+      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {{
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
       }}
-      ctx.drawImage(img, 0, 0);
-      drawing = false;
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
       noteFrame();
-    }};
-    img.onerror = () => {{ drawing = false; dropped += 1; }};
-    img.src = 'data:image/jpeg;base64,' + data;
+    }} catch (_) {{
+      // Fallback decode path for older engines.
+      await new Promise((resolve) => {{
+        const img = new Image();
+        img.onload = () => {{
+          if (canvas.width !== img.width || canvas.height !== img.height) {{
+            canvas.width = img.width;
+            canvas.height = img.height;
+          }}
+          ctx.drawImage(img, 0, 0);
+          noteFrame();
+          resolve();
+        }};
+        img.onerror = () => {{ dropped += 1; resolve(); }};
+        img.src = 'data:image/jpeg;base64,' + data;
+      }});
+    }} finally {{
+      drawing = false;
+      if (pendingJpeg) {{
+        const next = pendingJpeg;
+        pendingJpeg = null;
+        paintJpegBase64(next);
+      }}
+    }}
   }}
 
   function send(method, params = {{}}, opts = {{}}) {{
@@ -152,7 +231,7 @@ def render_cdp_live_html(
     const id = msgId++;
     const payload = {{ id, method, params }};
     const sessionId = opts.sessionId !== undefined ? opts.sessionId : pageSessionId;
-    // Target.* / Browser.* talk to the browser root; Page/Input need the page session.
+    // Target.* / Browser.* talk to the browser root; Page/Input/Runtime need the page session.
     if (sessionId && !method.startsWith('Target.') && !method.startsWith('Browser.')) {{
       payload.sessionId = sessionId;
     }}
@@ -209,6 +288,19 @@ def render_cdp_live_html(
     return pageSessionId;
   }}
 
+  async function injectCompositorPulse() {{
+    try {{
+      await send('Runtime.enable');
+      const result = await send('Runtime.evaluate', {{
+        expression: PULSE_JS,
+        returnByValue: true,
+      }});
+      return result && result.result ? result.result.value : null;
+    }} catch (_) {{
+      return null;
+    }}
+  }}
+
   function stopScreenshotLoop() {{
     if (screenshotLoop) {{
       clearTimeout(screenshotLoop);
@@ -222,32 +314,37 @@ def render_cdp_live_html(
     try {{
       const result = await send('Page.captureScreenshot', {{
         format: 'jpeg',
-        quality: CONFIG.screencast.quality || 40,
+        quality: CONFIG.screencast.quality || 35,
       }});
       rttMs = performance.now() - t0;
       if (result && result.data) paintJpegBase64(result.data);
       setMetrics();
     }} catch (_) {{}}
-    screenshotLoop = setTimeout(() => {{ screenshotTick(); }}, 50);
+    // Keep a small gap; serial captureScreenshot cannot beat ~RTT.
+    screenshotLoop = setTimeout(() => {{ screenshotTick(); }}, 16);
   }}
 
   function startScreenshotFallback(reason) {{
     if (streamMode === 'screenshot') return;
     streamMode = 'screenshot';
     stopScreenshotLoop();
-    send('Page.stopScreencast').catch(() => {{}});
-    setStatus('live · CDP shot');
+    send('Page.stopScreencast', {{}}, {{ noWait: true }}).catch(() => {{}});
+    setStatus('live · CDP shot (' + (reason || 'fallback') + ')');
     screenshotTick();
   }}
 
   function watchScreencastStall() {{
-    if (stallTimer) clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => {{
-      // Cloak Chromium often emits a single screencast frame then stalls.
-      if (streamMode === 'screencast' && performance.now() - lastFrameAt > 1200) {{
+    if (stallTimer) clearInterval(stallTimer);
+    // Chromium emits one frame on a static page; the compositor pulse should
+    // keep frames flowing. Only fall back if the cast truly dies.
+    stallTimer = setInterval(() => {{
+      if (streamMode !== 'screencast') return;
+      if (!lastFrameAt) return;
+      const idle = performance.now() - lastFrameAt;
+      if (idle > 2500) {{
         startScreenshotFallback('stall');
       }}
-    }}, 1400);
+    }}, 500);
   }}
 
   async function startScreencast() {{
@@ -259,9 +356,15 @@ def render_cdp_live_html(
       pageSessionId = null;
     }}
     await send('Page.enable');
+    await injectCompositorPulse();
     lastFrameAt = performance.now();
     await send('Page.startScreencast', CONFIG.screencast);
-    setStatus('live · CDP');
+    // Re-arm pulse after navigations so cast keeps dirtying.
+    try {{ await send('Page.setLifecycleEventsEnabled', {{ enabled: true }}); }} catch (_) {{}}
+    if (pulseTimer) clearInterval(pulseTimer);
+    // Belt-and-suspenders: document swaps can drop the pulse node.
+    pulseTimer = setInterval(() => {{ injectCompositorPulse().catch(() => {{}}); }}, 2000);
+    setStatus('live · CDP cast');
     reconnectAttempt = 0;
     watchScreencastStall();
     pingLoop();
@@ -270,7 +373,6 @@ def render_cdp_live_html(
   async function pingLoop() {{
     while (ws && ws.readyState === WebSocket.OPEN) {{
       if (streamMode === 'screenshot') {{
-        // RTT sampled inside screenshotTick.
         await new Promise((r) => setTimeout(r, 2000));
         continue;
       }}
@@ -280,7 +382,7 @@ def render_cdp_live_html(
         rttMs = performance.now() - t0;
         setMetrics();
       }} catch (_) {{}}
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 3000));
     }}
   }}
 
@@ -299,6 +401,7 @@ def render_cdp_live_html(
     usingBrowserRoot = !!browserRoot;
     pageSessionId = null;
     streamMode = 'screencast';
+    totalFrames = 0;
     stopScreenshotLoop();
     setStatus('connecting…');
     ws = new WebSocket(url);
@@ -311,6 +414,8 @@ def render_cdp_live_html(
     }});
     ws.addEventListener('close', () => {{
       stopScreenshotLoop();
+      if (stallTimer) {{ clearInterval(stallTimer); stallTimer = null; }}
+      if (pulseTimer) {{ clearInterval(pulseTimer); pulseTimer = null; }}
       setStatus('disconnected');
       scheduleReconnect();
     }});
@@ -327,11 +432,23 @@ def render_cdp_live_html(
         else entry.resolve(msg.result || {{}});
         return;
       }}
-      if (msg.method === 'Page.screencastFrame') {{
+      const method = msg.method;
+      if (method === 'Page.screencastFrame') {{
         const params = msg.params || {{}};
+        // Ack first — Chrome will not emit the next frame until ack'd.
         ackScreencastFrame(params.sessionId);
         lastFrameAt = performance.now();
         paintJpegBase64(params.data);
+        return;
+      }}
+      if (method === 'Page.lifecycleEvent') {{
+        const name = msg.params && msg.params.name;
+        if (name === 'load' || name === 'DOMContentLoaded') {{
+          injectCompositorPulse().catch(() => {{}});
+        }}
+      }}
+      if (method === 'Page.frameNavigated') {{
+        injectCompositorPulse().catch(() => {{}});
       }}
     }});
   }}
@@ -342,7 +459,8 @@ def render_cdp_live_html(
       ws = null;
     }}
     if (reconnectTimer) {{ clearTimeout(reconnectTimer); reconnectTimer = null; }}
-    if (stallTimer) {{ clearTimeout(stallTimer); stallTimer = null; }}
+    if (stallTimer) {{ clearInterval(stallTimer); stallTimer = null; }}
+    if (pulseTimer) {{ clearInterval(pulseTimer); pulseTimer = null; }}
     stopScreenshotLoop();
     const pageUrl = await resolvePageWsUrl();
     if (pageUrl) {{
@@ -397,7 +515,7 @@ def render_cdp_live_html(
           connection_state: state,
           fps,
           rtt_ms: rttMs,
-          frames_received: frames,
+          frames_received: totalFrames,
           reconnect_count: reconnectCount,
           dropped_frames: dropped,
         }}),

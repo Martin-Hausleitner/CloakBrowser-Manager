@@ -1,15 +1,15 @@
 {
   "capabilities": {
     "harness": "skyvern",
-    "status": "ready",
+    "status": "degraded",
     "skyvern_installed": true,
-    "llm_configured": true,
+    "llm_configured": false,
     "cdp_routing": "cloakbrowser-manager",
     "skyvern_license": "AGPL-3.0",
     "skyvern_repo": "https://github.com/Skyvern-AI/skyvern",
     "capabilities": {
       "connect_over_cdp": true,
-      "run_task": true,
+      "run_task": false,
       "navigate_screenshot": true
     },
     "notes": "Skyvern remains an optional AGPL-3.0 dependency. Automation attaches to CloakBrowser profiles via Manager CDP; do not launch vanilla Chromium for harness runs."

@@ -1,4 +1,4 @@
-[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T01:26+02:00
+[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T01:35+02:00
 > 🧠 NotebookLM: n/a (kein IDR-Auftrag in dieser Lane; Architektur aus Skyvern README + CloakBrowser-Manager CDP API)
 
 # SKYVERN-HARNESS — CloakBrowser × Skyvern (2026-07-24)
@@ -6,6 +6,7 @@
 Lane: `cloak-skyvern-harness` (cursor grok-4.5)  
 OpenSpec: `openspec validate skyvern-harness --strict` → **PASS**  
 Branch: `feat/skyvern-harness`  
+PR: https://github.com/Martin-Hausleitner/CloakBrowser-Manager/pull/2  
 Proof: `.proof/2026-07-24-skyvern-harness.png`
 
 ## Verdict
@@ -16,9 +17,10 @@ Skyvern ist als **optionaler AGPL-Harness** an CloakBrowser Manager angedockt. A
 |---|---|
 | OpenSpec `skyvern-harness --strict` | PASS |
 | Unit tests `test_skyvern_harness.py` | **6/6** |
-| Backend suite (ohne AUTH_TOKEN-Pollution) | PASS (geaenderte Teile + bestehende Suite) |
+| Backend suite (`AUTH_TOKEN=` clean) | **228 passed** |
 | Live CDP proof via `Skyvern.local` + `SkyvernBrowser` | **PASS** → example.com |
 | Screenshot non-empty | **17487 bytes**, 664×992 PNG |
+| LLM agent `run_task` | **ehrlich blocked/degraded** (keine LLM-Keys in diesem Lauf) |
 
 ## Was integriert wurde
 
@@ -58,29 +60,33 @@ Skyvern.local()  ──CDP + Bearer──►  Manager CDP Proxy
                                  (fingerprint, proxy, cookies)
 ```
 
-Docking-Punkt ist bewusst **CDP**, nicht ein zweiter Chromium-Launch: Skyvern steuert denselben Cloak-Prozess, den noVNC bereits zeigt.
+Docking-Punkt ist bewusst **CDP**, nicht ein zweiter Chromium-Launch: Skyvern steuert denselben Cloak-Prozess, den noVNC bereits zeigt. Skyvern-Kernfähigkeiten (CDP-Attach, Browser-Wrap, optional `run_task`) werden über den Adapter genutzt — kein 1:1-Vendoring des AGPL-Trees in den MIT-Manager.
 
 ## Proof R040 (inline)
 
 ![Skyvern harness through CloakBrowser CDP — example.com](.proof/2026-07-24-skyvern-harness.png)
 
-Live-Lauf (Auszug):
+Live-Lauf (re-verified 2026-07-24T01:35+02:00):
 
 - Manager: `http://127.0.0.1:18115`
 - Profile: `a8b99a1f-bd77-4249-917f-0ad681ea5519` (VCVM Mobile Demo)
 - Mode: `Skyvern.local+SkyvernBrowser.connect_over_cdp`
 - URL: `https://example.com/` · Title: `Example Domain`
 - `headers_applied: true` (Bearer durch Manager-CDP)
+- Capability status: `degraded` (`skyvern_installed=true`, `llm_configured=false`)
 
-JSON: `.proof/2026-07-24-skyvern-harness.json`
+JSON: `.proof/2026-07-24-skyvern-harness.json`  
+VCVM-Spiegel: `~/cloakbrowser-manager-vcvm/.proof/2026-07-24-skyvern-harness.png`
 
 ## Limits / ehrlich
 
-- Vollständiger Vision-Agent-`run_task`-Loop braucht LLM-Keys (`OPENAI_*` / Skyvern cloud). Capability meldet dann `run_task: true`; ohne Keys → `blocked`, kein Fake.
+- Vollständiger Vision-Agent-`run_task`-Loop braucht LLM-Keys (`OPENAI_*` / Skyvern cloud). Capability meldet dann `run_task: true`; ohne Keys → `blocked`/`degraded`, kein Fake.
 - PyPI-`Skyvern.connect_to_browser_over_cdp` ohne Header scheitert an Manager-Auth; der Harness bridged deshalb Skyverns Playwright-Driver **mit** Headers und wrappt `SkyvernBrowser`.
 - Docker-Image des Managers enthält Skyvern noch nicht; Opt-in per Extra/Venv.
+- „1:1 kopieren“ der gesamten Skyvern-Codebasis wäre AGPL-Kontamination des MIT-Trees — bewusst vermieden zugunsten Adapter + optionalem Dependency.
 
 ## NEXT
 
 - Optional: Compose-Sidecar für Skyvern-Server-Mode
 - Optional: Frontend-Toggle „Run with Skyvern“ im Mobile Task Workspace
+- Optional: LLM-Keys setzen und echten `run_task`-Agent-Loop durch denselben CDP-Pfad beweisen

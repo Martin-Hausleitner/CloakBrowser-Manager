@@ -77,7 +77,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 | Compact mobile workspace and scoped live browser control | Proven on the current automated VCVM Chromium surface | The authenticated release run passed **316 checks** across five viewports plus the access dashboard and captured **31 screenshots**. |
 | Browser-path profile health | Proven on a live no-proxy VCVM profile | First-launch scheduling, manual rerun, refresh persistence, masked outbound IP, **100/100 fingerprint consistency**, **100/100 BrowserScan authenticity**, and a redacted desktop panel passed. The Manager container also reached the separately bound VCVM-local proxychecker health endpoint. |
 | Admin-only live diagnostics | Implemented; full local suite passed | `GET /api/admin/live-diagnostics` returns launch/VNC counters with measured-or-unavailable metrics, strips ports/paths/URLs/proxy/secrets, rejects non-admin callers with HTTP 403, and leaves the mobile workspace unchanged. |
-| Credentialed proxychecker enrichment | Partial live proof | VCVM-local proxychecker restored; credentialed `/check` against an ephemeral loopback Basic-auth proxy returned `ok` with scoring. Manager browser-path enrichment awaits redeploy of the live-diagnostics import fix. |
+| Credentialed proxychecker enrichment | Live-proven on VCVM | Restored VCVM-local proxychecker; Manager launched a disposable credentialed-proxy profile; health sources reported `proxychecker: measured` with risk/authenticity scores, masked outbound IP, and no credentials in the API payload. Local Basic-auth forward proxy is intentionally low-authenticity (`warning`). |
 | Physical iPhone Safari and private Tailnet HTTPS | Not yet proven | Chromium emulation is not relabeled as Safari evidence; Safari Remote Automation and a physical-device run remain external prerequisites. |
 | Direct Tailnet latency | Not achieved in the last measurement | The recorded Mac route used `DERP(nue)`; direct-path proof must be rerun rather than inferred. |
 
@@ -85,7 +85,6 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Priority | Feature | Required completion evidence |
 | --- | --- | --- |
-| P0 | Credentialed proxy health acceptance | Run the optional VCVM-local proxychecker against an authorized configured proxy without exposing credentials; prove normalized risk/authenticity, failure behavior and source state. |
 | P0 | Finish the release handoff | Push only the fork branch, verify its SHA and GitHub files, then retain the green release report and screenshot paths as local evidence. |
 | P1 | Direct Tailnet route and real iPhone Safari acceptance | Private HTTPS, physical keyboard behavior, touch interaction, direct-versus-DERP route evidence, and honest latency definitions. |
 | P1 | Profile organization refinements | Search/filter and safe bulk movement implemented; refresh-stable live E2E after redeploy remains. |

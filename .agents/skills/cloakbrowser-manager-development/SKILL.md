@@ -93,14 +93,14 @@ If the repository's `bd` issue tool is unavailable, record that limitation in th
 
 ## Current verified checkpoint
 
-Snapshot from 23 July 2026 on `integrate-pr-47-27-26`:
+Snapshot from 23 July 2026 (evening) on `integrate-pr-47-27-26`:
 
-- Live diagnostics unit/API tests passed (8/8); full backend suite should be re-counted after this slice.
-- Admin-only `GET /api/admin/live-diagnostics` records launch/VNC counters with explicit unavailable timings and redacts ports/paths/URLs/proxy/secrets.
-- Prior 22 July checkpoint still holds for profile health, mobile gate, and proxychecker health reachability.
-- The Manager container reached the separately bound VCVM-local proxychecker health endpoint; a real configured-proxy `/check` remains required before proxy enrichment is called live-proven.
+- Backend suite **371/371**; frontend suite **133/133**; production build passed.
+- Browser-Use desktop shell, compact sidebar, project/harness selectors, proxy overview, and auto geo-aligned profile creation deployed on VCVM.
+- Proxy inventory ingest of 11 entries live-proven; Proxy-Checker check returns redacted scores; credentials stay server-side.
+- Prior 22–23 July checkpoints still hold for profile health, mobile gate, live diagnostics, and proxychecker health reachability.
 - Safari Remote Automation is disabled, so WebKit and physical-iPhone evidence remain external blockers.
-- The next vertical slices are credentialed proxy health acceptance and the release handoff.
+- The next vertical slices are batch proxy checks with better geo enrichment and the release handoff pack.
 
 Refresh these numbers and claims after any relevant change; this is a dated handoff, not permanent proof.
 

@@ -63,6 +63,8 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 - **Compact mobile VNC workspace** — browser-first portrait/landscape layout, fullscreen preview, session grid/switcher, Fit/Width/Height/Phone modes, live viewer zoom, persisted framebuffer viewport changes, collapsible chat, typed Capture/Copy/Paste actions, and `visualViewport` keyboard adaptation.
 - **Scoped access foundation** — administrator bootstrap, people and agent identities, access groups, sandbox-scoped grants, separate view/interact/operate/automate capabilities, revocation, audit metadata, VNC input filtering, and scoped REST/CDP/VNC enforcement.
 - **Profile organization and preferred harness metadata** — persistent projects, nested folders, pins, color accents, deterministic ordering, compact desktop/mobile presentation, and saved preferences for Codex, Antigravity, Claude Code, OpenCode, and Browser Use.
+- **Browser-Use-style desktop shell** — compact sidebar, fixed project choices, harness selector, task home, nicer pin affordances, and a mobile-parity settings overview without weakening the Codex Computer Use execution boundary.
+- **VCVM proxy inventory** — admin ingest of `host:port:user:pass` lines, redacted overview UI, Proxy-Checker checks through the trusted VCVM-local boundary, and auto geo-aligned anti-stealth profile creation (`geoip`, timezone/locale defaults) without hand-tuning stealth basics.
 - **Redacted profile health foundation** — asynchronous first-launch checks, masked outbound IP, saved-versus-runtime fingerprint consistency, conservative BrowserScan authenticity, optional VCVM-local proxychecker enrichment, access-controlled reruns, and a compact desktop disclosure that does not add mobile clutter.
 - **Fail-closed execution boundary** — a saved harness preference never grants execution. Browser-visible host actions still require a capability-verified `codex-computer-use` bridge; server task history remains persistence only.
 - **Streaming and competitor research** — reproducible redacted benchmark tooling, a VCVM/Tailscale latency audit, a Safari/WebKit gate that reports missing prerequisites honestly, and an official-source competitor feature matrix.
@@ -71,13 +73,14 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Area | State | Fresh or historical evidence |
 | --- | --- | --- |
-| Profile schema, migration, API, organization, access, health & extension inventory | Implemented; full local suite passed | **361/361 backend tests passed** on 23 July 2026 (live diagnostics + bulk organize). |
-| Desktop/mobile organization, form, access dashboard, harness boundary and compact health UI | Implemented; full local suite passed | **132/132 frontend tests passed** and the production build passed on 22 July 2026. |
+| Profile schema, migration, API, organization, access, health, extension inventory & proxy pool | Implemented; full local suite passed | **371/371 backend tests passed** on 23 July 2026 (proxy inventory + auto profile + prior suites). |
+| Desktop/mobile organization, Browser-Use shell, access dashboard, harness boundary and compact health UI | Implemented; full local suite passed | **133/133 frontend tests passed** and the production build passed on 23 July 2026. |
 | Release, mobile, streaming and deployment scripts | Full local script suite passed | **26/26 script tests passed**, including an explicit Python 3.11 compilation regression check. |
 | Compact mobile workspace and scoped live browser control | Proven on the current automated VCVM Chromium surface | The authenticated release run passed **316 checks** across five viewports plus the access dashboard and captured **31 screenshots**. |
 | Browser-path profile health | Proven on a live no-proxy VCVM profile | First-launch scheduling, manual rerun, refresh persistence, masked outbound IP, **100/100 fingerprint consistency**, **100/100 BrowserScan authenticity**, and a redacted desktop panel passed. The Manager container also reached the separately bound VCVM-local proxychecker health endpoint. |
 | Admin-only live diagnostics | Implemented; full local suite passed | `GET /api/admin/live-diagnostics` returns launch/VNC counters with measured-or-unavailable metrics, strips ports/paths/URLs/proxy/secrets, rejects non-admin callers with HTTP 403, and leaves the mobile workspace unchanged. |
 | Credentialed proxychecker enrichment | Live-proven on VCVM | Restored VCVM-local proxychecker; Manager launched a disposable credentialed-proxy profile; health sources reported `proxychecker: measured` with risk/authenticity scores, masked outbound IP, and no credentials in the API payload. Local Basic-auth forward proxy is intentionally low-authenticity (`warning`). |
+| Proxy inventory + auto geo-aligned profiles | Live-proven on VCVM | Admin ingest of **11** inventory entries (credentials never returned), Proxy-Checker check produced redacted scores, auto profile created under `proxied/auto` with `geoip` + locale/timezone defaults; Browser-Use/Proxies UI verified via headless Chromium screenshots. |
 | Physical iPhone Safari and private Tailnet HTTPS | Not yet proven | Chromium emulation is not relabeled as Safari evidence; Safari Remote Automation and a physical-device run remain external prerequisites. |
 | Direct Tailnet latency | Not achieved in the last measurement | The recorded Mac route used `DERP(nue)`; direct-path proof must be rerun rather than inferred. |
 
@@ -92,6 +95,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 ### Development timeline
 
+- **23 July 2026 (late)** — Browser-Use desktop shell, redacted proxy inventory, Proxy-Checker overview, and auto geo-aligned profile creation landed and redeployed to VCVM; 371 backend / 133 frontend tests and production build passed; inventory ingest + checker + auto-profile proven live without leaking credentials into API payloads.
 - **23 July 2026** — admin-only live diagnostics landed; bulk profile organization API/UI added; VCVM proxychecker service restored and credentialed `/check` proven against a local Basic-auth proxy; live-diagnostics import fix prepared for redeploy:
 - **23 July 2026** — admin-only live diagnostics landed: launch/VNC counters, honest unavailable metrics, redaction tests, and `GET /api/admin/live-diagnostics` without mobile UI clutter.
 - **20 July 2026** — mobile VNC workspace, iOS-safe paste, initial E2E gates, scoped Paperclip access, protected mobile login, and private Tailnet fail-closed helper landed.

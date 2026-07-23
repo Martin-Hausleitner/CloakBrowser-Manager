@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Plus } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import {
   api,
@@ -8,6 +8,7 @@ import {
   type AccessPermission,
   type Profile,
   type ProfileCreateData,
+  type ProfileHarness,
 } from "./lib/api";
 import { hasAccessPermission } from "./lib/accessPermissions";
 import { ProfileList } from "./components/ProfileList";
@@ -19,11 +20,14 @@ import { LoginPage } from "./components/LoginPage";
 import { MobileSplitScreen } from "./components/mobile/MobileSplitScreen";
 import { AccessDashboard } from "./components/AccessDashboard";
 import { ProfileHealthSummary } from "./components/ProfileHealthSummary";
+import { BrowserUseHome } from "./components/BrowserUseHome";
+import { ProxyOverview } from "./components/ProxyOverview";
 
 type AuthState = "checking" | "required" | "ok" | "error";
-type View = "empty" | "create" | "edit" | "view" | "access";
+type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies";
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 type MobileConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
+const FIXED_PROJECTS = ["default", "proxied", "mobile", "research"] as const;
 
 interface ApplyProfileViewportOptions {
   profile: Profile | null;
@@ -161,18 +165,27 @@ interface AppContentProps {
 function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: AppContentProps) {
   const { profiles, loading, error, refresh, create, update, remove, launch, stop } = useProfiles();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [view, setView] = useState<View>("empty");
+  const [view, setView] = useState<View>("home");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileFullscreenOpen, setMobileFullscreenOpen] = useState(false);
   const [mobileBrowserZoom, setMobileBrowserZoom] = useState(100);
   const [mobileRemoteToolsOpen, setMobileRemoteToolsOpen] = useState(false);
   const [mobileConnectionStatus, setMobileConnectionStatus] = useState<MobileConnectionStatus>("connecting");
+  const [projectId, setProjectId] = useState<string>("default");
+  const [harness, setHarness] = useState<ProfileHarness>("browser-use");
+  const [taskDraft, setTaskDraft] = useState("");
   const isMobile = useIsMobile();
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
   const canManageProfiles = isAdministrator(identity);
   const canOperateSelected = Boolean(selected && canAccess(identity, selected, "operate"));
   const canInteractSelected = Boolean(selected && canAccess(identity, selected, "interact"));
+  const projects = Array.from(
+    new Set<string>([
+      ...FIXED_PROJECTS,
+      ...profiles.map((profile) => profile.project_id || "default"),
+    ]),
+  );
 
   useEffect(() => {
     if (!isMobile || loading || profiles.length === 0) return;
@@ -192,7 +205,9 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const handleSelect = useCallback((id: string) => {
     setSelectedId(id);
     const profile = profiles.find((p) => p.id === id);
-    setView(isMobile ? "view" : profile?.status === "running" ? "view" : canManageProfiles ? "edit" : "empty");
+    if (profile?.project_id) setProjectId(profile.project_id);
+    if (profile?.harness) setHarness(profile.harness);
+    setView(isMobile ? "view" : profile?.status === "running" ? "view" : canManageProfiles ? "edit" : "home");
   }, [canManageProfiles, isMobile, profiles]);
 
   const handleNew = useCallback(() => {
@@ -203,12 +218,16 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
 
   const handleCreate = useCallback(async (data: ProfileCreateData) => {
     if (!canManageProfiles) return;
-    const profile = await create(data);
+    const profile = await create({
+      ...data,
+      project_id: data.project_id || projectId,
+      harness: data.harness || harness,
+    });
     if (profile) {
       setSelectedId(profile.id);
       setView("edit");
     }
-  }, [canManageProfiles, create]);
+  }, [canManageProfiles, create, harness, projectId]);
 
   const handleUpdate = useCallback(async (data: ProfileCreateData) => {
     if (!selectedId || !canManageProfiles) return;
@@ -219,7 +238,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     if (!selectedId || !canManageProfiles) return;
     await remove(selectedId);
     setSelectedId(null);
-    setView("empty");
+    setView("home");
   }, [canManageProfiles, selectedId, remove]);
 
   const handleLaunch = useCallback(async () => {
@@ -231,11 +250,11 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const handleStop = useCallback(async () => {
     if (!selectedId || !canAccess(identity, profiles.find((profile) => profile.id === selectedId) ?? null, "operate")) return;
     await stop(selectedId);
-    setView("edit");
-  }, [identity, profiles, selectedId, stop]);
+    setView(canManageProfiles ? "edit" : "home");
+  }, [canManageProfiles, identity, profiles, selectedId, stop]);
 
   const handleVncDisconnect = useCallback(() => {
-    setView(isMobile ? "view" : canManageProfiles ? "edit" : "empty");
+    setView(isMobile ? "view" : canManageProfiles ? "edit" : "home");
   }, [canManageProfiles, isMobile]);
 
   const handleViewportApply = useCallback(async (width: number, height: number) => {
@@ -272,7 +291,7 @@ const handleTogglePin = useCallback(async (id: string) => {
   }, [canManageProfiles, profiles, update]);
 
   if (view === "access" && canManageProfiles && accessControlEnabled) {
-    return <AccessDashboard onClose={() => setView(selected ? "view" : "empty")} />;
+    return <AccessDashboard onClose={() => setView(selected ? "view" : "home")} />;
   }
 
   if (loading) {
@@ -382,19 +401,58 @@ const handleTogglePin = useCallback(async (id: string) => {
 
   return (
     <div className="h-screen flex">
-      {/* Sidebar */}
+      {/* Compact Browser-Use style sidebar */}
       {sidebarOpen && (
-        <div className="w-64 border-r border-border bg-surface-1 flex-shrink-0">
-          <ProfileList
-            profiles={profiles}
-            selectedId={selectedId}
-            onSelect={handleSelect}
-            onNew={handleNew}
-            canCreate={canManageProfiles}
-            canManage={canManageProfiles}
-            onTogglePin={handleTogglePin}
-            onBulkOrganize={canManageProfiles ? handleBulkOrganize : undefined}
-          />
+        <div className="w-56 border-r border-border bg-surface-1 flex-shrink-0 flex flex-col">
+          <div className="border-b border-border px-3 py-3">
+            <div className="text-sm font-semibold tracking-tight">Browser Use</div>
+            <div className="mt-2 space-y-1">
+              <button
+                type="button"
+                onClick={() => setView("home")}
+                className={`flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs ${
+                  view === "home" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <LayoutGrid className="h-3.5 w-3.5" />
+                Agent home
+              </button>
+              {canManageProfiles ? (
+                <button
+                  type="button"
+                  onClick={() => setView("proxies")}
+                  className={`flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs ${
+                    view === "proxies" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                  }`}
+                >
+                  <Globe2 className="h-3.5 w-3.5" />
+                  Proxies
+                </button>
+              ) : null}
+              {canManageProfiles ? (
+                <button
+                  type="button"
+                  onClick={handleNew}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs text-gray-400 hover:bg-surface-2"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  New profile
+                </button>
+              ) : null}
+            </div>
+          </div>
+          <div className="min-h-0 flex-1">
+            <ProfileList
+              profiles={profiles}
+              selectedId={selectedId}
+              onSelect={handleSelect}
+              onNew={handleNew}
+              canCreate={canManageProfiles}
+              canManage={canManageProfiles}
+              onTogglePin={handleTogglePin}
+              onBulkOrganize={canManageProfiles ? handleBulkOrganize : undefined}
+            />
+          </div>
         </div>
       )}
 
@@ -410,7 +468,7 @@ const handleTogglePin = useCallback(async (id: string) => {
             >
               {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
             </button>
-            {selected && (
+            {selected && view !== "home" && view !== "proxies" && (
               <div className="flex items-center gap-2">
                 <StatusIndicator status={selected.status} size="md" />
                 <span className="text-sm font-medium">{selected.name}</span>
@@ -424,7 +482,7 @@ const handleTogglePin = useCallback(async (id: string) => {
             )}
           </div>
           <div className="flex items-center gap-2">
-            {selected && (
+            {selected && view !== "home" && view !== "proxies" && (
               canOperateSelected && (
               <LaunchButton
                 status={selected.status}
@@ -469,6 +527,53 @@ const handleTogglePin = useCallback(async (id: string) => {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto overscroll-contain">
+          {view === "home" && (
+            <BrowserUseHome
+              projects={projects}
+              projectId={projectId}
+              harness={harness}
+              profiles={profiles}
+              task={taskDraft}
+              canManage={canManageProfiles}
+              selectedProfile={selected}
+              onProjectChange={setProjectId}
+              onHarnessChange={setHarness}
+              onTaskChange={setTaskDraft}
+              onOpenProxies={() => setView("proxies")}
+              onCreateProjectProfile={handleNew}
+              onOpenSettings={(profileId) => {
+                if (!profileId) {
+                  handleNew();
+                  return;
+                }
+                setSelectedId(profileId);
+                setView(canManageProfiles ? "edit" : "home");
+              }}
+              onLaunchSelected={async () => {
+                if (!selected) return;
+                if (selected.status === "running") {
+                  setView("view");
+                  return;
+                }
+                await handleLaunch();
+              }}
+            />
+          )}
+
+          {view === "proxies" && canManageProfiles && (
+            <ProxyOverview
+              harness={harness}
+              projectId={projectId || "proxied"}
+              onProfileCreated={async (profile) => {
+                await refresh();
+                setSelectedId(profile.id);
+                setProjectId(profile.project_id || "proxied");
+                setHarness(profile.harness);
+                setView("edit");
+              }}
+            />
+          )}
+
           {view === "empty" && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
@@ -481,7 +586,7 @@ const handleTogglePin = useCallback(async (id: string) => {
             <ProfileForm
               profile={null}
               onSave={handleCreate}
-              onCancel={() => setView("empty")}
+              onCancel={() => setView("home")}
             />
           )}
 
@@ -492,7 +597,7 @@ const handleTogglePin = useCallback(async (id: string) => {
               onDelete={handleDelete}
               onCancel={() => {
                 setSelectedId(null);
-                setView("empty");
+                setView("home");
               }}
             />
           )}

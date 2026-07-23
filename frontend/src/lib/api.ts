@@ -4,6 +4,38 @@
 
 export type ProfileHarness = "codex" | "antigravity" | "claude-code" | "opencode" | "browser-use";
 
+export type ProxyCheckState = "missing" | "passed" | "warning" | "failed" | "unavailable";
+
+export interface ProxyInventoryItem {
+  id: string;
+  label: string;
+  host_masked: string;
+  port: number | null;
+  username_masked: string | null;
+  has_credentials: boolean;
+  active: boolean;
+  check_state: ProxyCheckState;
+  reachable: boolean | null;
+  latency_ms: number | null;
+  risk_score: number | null;
+  authenticity_score: number | null;
+  country_code: string | null;
+  timezone_hint: string | null;
+  locale_hint: string | null;
+  warnings: string[];
+  blockers: string[];
+  last_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProxyInventoryIngestResult {
+  created: number;
+  updated: number;
+  rejected: number;
+  items: ProxyInventoryItem[];
+}
+
 export interface Profile {
   id: string;
   name: string;
@@ -406,6 +438,34 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
     request<ProfileHealth>(`/api/profiles/${encodeURIComponent(id)}/health/run`, { method: "POST" }),
 
   getStatus: () => request<SystemStatus>("/api/status"),
+
+  listProxies: () => request<ProxyInventoryItem[]>("/api/proxies"),
+
+  ingestProxies: (lines: string[]) =>
+    request<ProxyInventoryIngestResult>("/api/proxies/ingest", {
+      method: "POST",
+      body: JSON.stringify({ lines }),
+    }),
+
+  checkProxy: (id: string) =>
+    request<ProxyInventoryItem>(`/api/proxies/${encodeURIComponent(id)}/check`, {
+      method: "POST",
+    }),
+
+  createProfileFromProxy: (
+    id: string,
+    data?: {
+      name?: string | null;
+      project_id?: string;
+      sandbox_id?: string;
+      harness?: ProfileHarness;
+      launch?: boolean;
+    },
+  ) =>
+    request<Profile>(`/api/proxies/${encodeURIComponent(id)}/profiles`, {
+      method: "POST",
+      body: JSON.stringify(data ?? {}),
+    }),
 
   getBenchmarkReport: (url = DEFAULT_BENCHMARK_REPORT_URL) =>
     request<BenchmarkReport>(url),

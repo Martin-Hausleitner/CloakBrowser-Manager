@@ -23,8 +23,9 @@ The inherent network and streaming dependency makes this a high-risk mobile surf
 | Compact browser-first mobile UI and keyboard-safe composer | Proven on automated VCVM surface | Five viewport runs, 31 screenshots, independent visual PASS | Physical iPhone keyboard and private HTTPS proof |
 | Existing profiles, colored tags and scoped access groups | Proven | Profile/tag persistence, groups CRUD/effective grants, authenticated E2E | None for the current MVP |
 | Persistent profile pinning, projects and collapsible folders | Proven on automated VCVM surface; bulk move implemented locally | Additive SQLite migration, deterministic desktop/mobile organization, search/filter, and admin bulk-organize API/UI with tests | Refresh-stable live VCVM E2E after redeploy |
-| Harness choice for Codex, Antigravity, Claude Code, OpenCode and Browser Use clients | Implemented; full local suites passed | Preference persists, capability state and task metadata are visible, execution remains fail-closed behind the verified Codex Computer Use bridge, and full local suites pass | Fresh live VCVM round-trip for each label/state; non-Codex preferences remain metadata, not execution providers |
-| Proxy reachability, outbound IP, fingerprint consistency and BrowserScan score | Live-proven on VCVM | No-proxy path earlier; credentialed disposable profile after redeploy produced `proxychecker: measured`, risk/authenticity scores, masked IP, redacted API payload | Optional higher-quality residential proxy sample remains nice-to-have, not a blocker for the integration claim |
+| Harness choice for Codex, Antigravity, Claude Code, OpenCode and Browser Use clients | Live-proven on VCVM desktop shell | Preference persists, Browser-Use home exposes project + harness selectors, execution remains fail-closed behind the verified Codex Computer Use bridge, and full local suites pass | Fresh live VCVM round-trip for each non-Codex label remains metadata-only |
+| Proxy reachability, outbound IP, fingerprint consistency and BrowserScan score | Live-proven on VCVM | No-proxy path earlier; credentialed disposable profile after redeploy produced `proxychecker: measured`, risk/authenticity scores, masked IP, redacted API payload | Optional higher-quality residential proxy sample remains nice-to-have |
+| Proxy inventory, overview UI, checker and auto geo-aligned profiles | Live-proven on VCVM | Admin ingest of 11 entries, redacted overview, Proxy-Checker check scores, auto profile under `proxied/auto` with geoip/timezone/locale defaults; credentials never returned | Batch-check remaining inventory entries; optional country enrichment when providers return codes |
 | Read-only extension inventory managed from CLI | Implemented; full local suites passed | Safe manifest parser, trust/error state calculation, GET `/api/profiles/{profile_id}/extensions` endpoint, CLI tool `scripts/inspect_extensions.py`, and unit test suites (9 new tests passed; 351 total backend tests) | None for MVP extension inventory |
 | Live latency and developer diagnostics | Implemented; full local suites passed | Admin-only `GET /api/admin/live-diagnostics` with launch/VNC counters, measured-or-unavailable timings, redaction tests and non-admin 403 | Fresh VCVM live connection counters after deploy; still no encoded FPS or touch-to-pixel claim |
 | Competitor research | Proven | `COMPETITOR-UI-FEATURE-MATRIX-2026-07-22.md` | Keep facts and design inferences separated |
@@ -32,12 +33,13 @@ The inherent network and streaming dependency makes this a high-risk mobile surf
 
 ## Fresh verification snapshot
 
-- Complete backend suite: **343 passed**.
-- Complete frontend suite: **132 passed**.
+- Complete backend suite: **371 passed**.
+- Complete frontend suite: **133 passed**.
 - Complete script suite: **26 passed**, including Python 3.11 release-gate compilation.
 - Frontend production build: **passed**.
-- Redacted release acceptance gate: **passed**.
+- Redacted release acceptance gate: **passed** (prior mobile pack); Browser-Use/Proxies VCVM UI re-verified with headless Chromium screenshots on 23 July evening.
 - VCVM deployment: **healthy and protected**, with the optional local proxychecker reachable from the Manager container.
+- Proxy inventory: **11** entries ingested on VCVM; credentials masked in API/UI; one live Proxy-Checker sample recorded as redacted scores.
 - Authenticated VCVM Chromium gate: **316 checks passed**, **31 screenshots**, five mobile/tablet viewports plus access dashboard.
 - Live profile health: first-launch persistence, manual rerun, masked outbound IP, 100/100 fingerprint consistency and 100/100 BrowserScan passed.
 - Safari/WebKit gate: **blocked externally** because Safari Remote Automation is disabled; no WebKit or physical-iPhone claim is made.

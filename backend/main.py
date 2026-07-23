@@ -59,6 +59,10 @@ if __package__:
         ProfileStatusResponse,
         ProfileBulkOrganize,
         ProfileUpdate,
+        ProxyAutoProfileCreate,
+        ProxyInventoryIngest,
+        ProxyInventoryIngestResponse,
+        ProxyInventoryItem,
         StatusResponse,
         TagResponse,
         TaskCommandRequest,
@@ -68,6 +72,7 @@ if __package__:
         TaskSessionCreate,
         TaskSessionResponse,
     )
+    from . import proxy_inventory
 else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
     import database as db
@@ -98,6 +103,10 @@ else:  # Support `uvicorn main:app` from the backend directory.
         ProfileStatusResponse,
         ProfileBulkOrganize,
         ProfileUpdate,
+        ProxyAutoProfileCreate,
+        ProxyInventoryIngest,
+        ProxyInventoryIngestResponse,
+        ProxyInventoryItem,
         StatusResponse,
         TagResponse,
         TaskCommandRequest,
@@ -107,6 +116,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
         TaskSessionCreate,
         TaskSessionResponse,
     )
+    import proxy_inventory
 
 logger = logging.getLogger("cloakbrowser.manager")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -2174,6 +2184,196 @@ async def list_task_events(
 
 
 # ── Profile CRUD ──────────────────────────────────────────────────────────────
+
+
+def _proxy_inventory_item(row: dict[str, object]) -> ProxyInventoryItem:
+    return ProxyInventoryItem(
+        id=str(row["id"]),
+        label=str(row.get("label") or "proxy"),
+        host_masked=str(row.get("host_masked") or "unknown"),
+        port=row.get("port") if isinstance(row.get("port"), int) else None,
+        username_masked=row.get("username_masked") if isinstance(row.get("username_masked"), str) else None,
+        has_credentials=bool(row.get("has_credentials")),
+        active=bool(row.get("active", True)),
+        check_state=str(row.get("check_state") or "missing"),  # type: ignore[arg-type]
+        reachable=row.get("reachable") if isinstance(row.get("reachable"), bool) else None,
+        latency_ms=row.get("latency_ms") if isinstance(row.get("latency_ms"), (int, float)) else None,
+        risk_score=row.get("risk_score") if isinstance(row.get("risk_score"), int) else None,
+        authenticity_score=(
+            row.get("authenticity_score") if isinstance(row.get("authenticity_score"), int) else None
+        ),
+        country_code=row.get("country_code") if isinstance(row.get("country_code"), str) else None,
+        timezone_hint=row.get("timezone_hint") if isinstance(row.get("timezone_hint"), str) else None,
+        locale_hint=row.get("locale_hint") if isinstance(row.get("locale_hint"), str) else None,
+        warnings=[str(item) for item in (row.get("warnings") or [])],
+        blockers=[str(item) for item in (row.get("blockers") or [])],
+        last_checked_at=row.get("last_checked_at") if isinstance(row.get("last_checked_at"), str) else None,
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+async def _proxychecker_check(proxy_url: str) -> dict[str, object]:
+    """Call VCVM-local proxychecker and reduce to redacted summary fields."""
+    base = getattr(profile_health_probe, "proxychecker_url", "") or ""
+    if not base:
+        return {
+            "reachable": None,
+            "latency_ms": None,
+            "risk_score": None,
+            "authenticity_score": None,
+            "country_code": None,
+            "timezone_hint": None,
+            "locale_hint": None,
+            "warnings": [],
+            "blockers": ["proxychecker_unavailable"],
+            "check_state": "unavailable",
+        }
+    try:
+        async with httpx.AsyncClient(timeout=getattr(profile_health_probe, "component_timeout_s", 20.0)) as client:
+            response = await client.post(
+                f"{base.rstrip('/')}/check",
+                json={
+                    "target": getattr(profile_health_probe, "ip_echo_url", "https://api.ipify.org"),
+                    "proxies": [proxy_url],
+                    "limit": 1,
+                    "scoring_profile": "default",
+                },
+            )
+            response.raise_for_status()
+            return proxy_inventory.summarize_check_payload(response.json())
+    except Exception:
+        return {
+            "reachable": None,
+            "latency_ms": None,
+            "risk_score": None,
+            "authenticity_score": None,
+            "country_code": None,
+            "timezone_hint": None,
+            "locale_hint": None,
+            "warnings": [],
+            "blockers": ["proxychecker_unavailable"],
+            "check_state": "unavailable",
+        }
+
+
+@app.get("/api/proxies", response_model=list[ProxyInventoryItem])
+async def list_proxies(request: Request):
+    identity = _require_admin(request.scope)
+    del identity  # admin gate only
+    return [_proxy_inventory_item(row) for row in db.list_proxy_inventory()]
+
+
+@app.post("/api/proxies/ingest", response_model=ProxyInventoryIngestResponse, status_code=201)
+async def ingest_proxies(req: ProxyInventoryIngest, request: Request):
+    identity = _require_admin(request.scope)
+    created = 0
+    updated = 0
+    rejected = 0
+    items: list[ProxyInventoryItem] = []
+
+    for raw in req.lines:
+        try:
+            proxy_url = proxy_inventory.parse_proxy_line(raw)
+        except proxy_inventory.ProxyParseError:
+            rejected += 1
+            continue
+        fingerprint = proxy_inventory.proxy_fingerprint(proxy_url)
+        with db.get_db() as conn:
+            existing = conn.execute(
+                "SELECT id FROM proxy_inventory WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+        redacted = proxy_inventory.redact_proxy_url(proxy_url)
+        row = db.upsert_proxy_inventory_entry(proxy_url, redacted=redacted)
+        if existing:
+            updated += 1
+        else:
+            created += 1
+        items.append(_proxy_inventory_item(row))
+
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "proxy.ingest",
+        "allowed",
+        None,
+        None,
+    )
+    return ProxyInventoryIngestResponse(
+        created=created,
+        updated=updated,
+        rejected=rejected,
+        items=items,
+    )
+
+
+@app.post("/api/proxies/{proxy_id}/check", response_model=ProxyInventoryItem)
+async def check_proxy(proxy_id: str, request: Request):
+    identity = _require_admin(request.scope)
+    secret_row = db.get_proxy_inventory_entry(proxy_id, include_secret=True)
+    if secret_row is None:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+    proxy_url = str(secret_row.get("proxy_url") or "")
+    summary = await _proxychecker_check(proxy_url)
+    updated = db.update_proxy_inventory_check(proxy_id, summary)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "proxy.check",
+        "allowed",
+        None,
+        None,
+    )
+    return _proxy_inventory_item(updated)
+
+
+@app.post("/api/proxies/{proxy_id}/profiles", response_model=ProfileResponse, status_code=201)
+async def create_profile_from_proxy(
+    proxy_id: str,
+    req: ProxyAutoProfileCreate,
+    request: Request,
+):
+    """Create a proxy-aligned anti-stealth profile without manual fingerprint tuning."""
+    identity = _require_admin(request.scope)
+    secret_row = db.get_proxy_inventory_entry(proxy_id, include_secret=True)
+    if secret_row is None:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+    proxy_url = str(secret_row.get("proxy_url") or "")
+    country = secret_row.get("country_code") if isinstance(secret_row.get("country_code"), str) else None
+    if country is None:
+        # Soft enrichment before profile create; degrade if checker is down.
+        summary = await _proxychecker_check(proxy_url)
+        db.update_proxy_inventory_check(proxy_id, summary)
+        country = summary.get("country_code") if isinstance(summary.get("country_code"), str) else None
+
+    defaults = proxy_inventory.build_auto_profile_defaults(
+        proxy_url=proxy_url,
+        country_code=country,
+        name=req.name,
+        project_id=req.project_id,
+        harness=req.harness,
+        sandbox_id=req.sandbox_id,
+    )
+    tags = defaults.pop("tags", [])
+    profile = db.create_profile(**defaults, tags=tags)
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "profile.create_from_proxy",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        str(profile.get("id") or ""),
+    )
+    if req.launch:
+        try:
+            running = await browser_mgr.launch(profile)
+            _schedule_profile_health(profile, running, force=False)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to launch profile") from exc
+    return _profile_response(profile, identity)
 
 
 @app.get("/api/profiles", response_model=list[ProfileResponse])

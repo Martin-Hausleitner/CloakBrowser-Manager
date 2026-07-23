@@ -208,9 +208,12 @@ export function ProfileList({
                             <StatusIndicator status={profile.status} />
                             <span className="truncate text-sm font-medium">{profile.name}</span>
                             {profile.pinned ? (
-                              <span className="inline-flex items-center gap-1 rounded bg-surface-4 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-gray-300">
-                                <Pin className="h-2.5 w-2.5" />
-                                Pinned
+                              <span
+                                className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-amber-500/15 text-amber-300"
+                                title="Pinned"
+                                aria-label="Pinned"
+                              >
+                                <Pin className="h-3 w-3 fill-current" />
                               </span>
                             ) : null}
                           </div>
@@ -246,13 +249,15 @@ export function ProfileList({
                               event.stopPropagation();
                               onTogglePin(profile.id);
                             }}
-                            className={`m-1.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border border-border hover:bg-surface-3 ${
-                              profile.pinned ? "text-indigo-200" : "text-gray-500"
+                            className={`m-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                              profile.pinned
+                                ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                                : "border-border text-gray-500 hover:bg-surface-3"
                             }`}
                             aria-label={`${profile.pinned ? "Unpin" : "Pin"} ${profile.name}`}
                             title={`${profile.pinned ? "Unpin" : "Pin"} ${profile.name}`}
                           >
-                            <Pin className="h-3.5 w-3.5" />
+                            <Pin className={`h-3.5 w-3.5 ${profile.pinned ? "fill-current" : ""}`} />
                           </button>
                         ) : null}
                       </div>

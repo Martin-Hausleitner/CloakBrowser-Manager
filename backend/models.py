@@ -526,3 +526,52 @@ class ExtensionInventoryResponse(BaseModel):
     profile_id: str
     extensions: list[ExtensionItem] = Field(default_factory=list)
 
+
+ProxyCheckState = Literal["missing", "passed", "warning", "failed", "unavailable"]
+
+
+class ProxyInventoryIngest(BaseModel):
+    """Bulk ingest of ``host:port:user:pass`` lines. Secrets never leave the server."""
+
+    lines: list[str] = Field(min_length=1, max_length=500)
+
+
+class ProxyInventoryItem(BaseModel):
+    id: str
+    label: str
+    host_masked: str
+    port: int | None = None
+    username_masked: str | None = None
+    has_credentials: bool = False
+    active: bool = True
+    check_state: ProxyCheckState = "missing"
+    reachable: bool | None = None
+    latency_ms: float | None = Field(default=None, ge=0)
+    risk_score: int | None = Field(default=None, ge=0, le=100)
+    authenticity_score: int | None = Field(default=None, ge=0, le=100)
+    country_code: str | None = Field(default=None, max_length=2)
+    timezone_hint: str | None = None
+    locale_hint: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    last_checked_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class ProxyInventoryIngestResponse(BaseModel):
+    created: int = 0
+    updated: int = 0
+    rejected: int = 0
+    items: list[ProxyInventoryItem] = Field(default_factory=list)
+
+
+class ProxyAutoProfileCreate(BaseModel):
+    """Create a geo-aligned stealth profile from an inventory proxy."""
+
+    name: str | None = Field(default=None, max_length=120)
+    project_id: str = Field(default="proxied", min_length=1, max_length=80, pattern=SLUG_PATTERN)
+    sandbox_id: str = Field(default="default", min_length=1, max_length=80, pattern=SLUG_PATTERN)
+    harness: Harness = "browser-use"
+    launch: bool = False
+

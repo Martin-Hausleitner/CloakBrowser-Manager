@@ -72,7 +72,7 @@ describe("ProfileList organization", () => {
       .filter((text) => text.includes("Checkout"));
     expect(names[0]).toContain("Pinned Checkout");
     expect(names[1]).toContain("Unpinned Checkout");
-    expect(screen.getByText("Pinned")).toBeTruthy();
+    expect(screen.getByLabelText("Pinned")).toBeTruthy();
     expect(screen.getAllByText("commerce / checkout").length).toBeGreaterThan(0);
   });
 

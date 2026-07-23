@@ -231,6 +231,35 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_task_events_session
                 ON task_events(session_id, created_at ASC);
+
+            CREATE TABLE IF NOT EXISTS proxy_inventory (
+                id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL UNIQUE,
+                proxy_url TEXT NOT NULL,
+                host_masked TEXT NOT NULL,
+                port INTEGER,
+                username_masked TEXT,
+                has_credentials BOOLEAN NOT NULL DEFAULT 0,
+                label TEXT NOT NULL,
+                active BOOLEAN NOT NULL DEFAULT 1,
+                check_state TEXT NOT NULL DEFAULT 'missing'
+                    CHECK (check_state IN ('missing', 'passed', 'warning', 'failed', 'unavailable')),
+                reachable BOOLEAN,
+                latency_ms REAL,
+                risk_score INTEGER,
+                authenticity_score INTEGER,
+                country_code TEXT,
+                timezone_hint TEXT,
+                locale_hint TEXT,
+                warnings_json TEXT NOT NULL DEFAULT '[]',
+                blockers_json TEXT NOT NULL DEFAULT '[]',
+                last_checked_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_proxy_inventory_active
+                ON proxy_inventory(active, updated_at DESC);
         """)
         conn.commit()
 
@@ -1159,3 +1188,145 @@ def record_access_audit_event(
             (str(uuid.uuid4()), actor_type, actor_id, action, sandbox_id, profile_id, outcome, _now()),
         )
         conn.commit()
+
+
+def _proxy_inventory_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    data = dict(row)
+    for key in ("warnings_json", "blockers_json"):
+        raw = data.pop(key, "[]")
+        try:
+            parsed = json.loads(raw or "[]")
+        except (TypeError, json.JSONDecodeError):
+            parsed = []
+        data[key.replace("_json", "")] = parsed if isinstance(parsed, list) else []
+    data["has_credentials"] = bool(data.get("has_credentials"))
+    data["active"] = bool(data.get("active"))
+    # Never return the secret URL from row helpers used by API list paths.
+    data.pop("proxy_url", None)
+    return data
+
+
+def upsert_proxy_inventory_entry(proxy_url: str, *, redacted: dict[str, Any]) -> dict[str, Any]:
+    """Insert or reactivate a proxy inventory row. Secrets stay server-side only."""
+    from backend.proxy_inventory import proxy_fingerprint
+
+    fingerprint = proxy_fingerprint(proxy_url)
+    now = _now()
+    entry_id = str(uuid.uuid4())
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM proxy_inventory WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE proxy_inventory SET
+                    proxy_url = ?, host_masked = ?, port = ?, username_masked = ?,
+                    has_credentials = ?, label = ?, active = 1, updated_at = ?
+                WHERE fingerprint = ?""",
+                (
+                    proxy_url,
+                    redacted.get("host_masked") or "unknown",
+                    redacted.get("port"),
+                    redacted.get("username_masked"),
+                    1 if redacted.get("has_credentials") else 0,
+                    redacted.get("label") or "proxy",
+                    now,
+                    fingerprint,
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM proxy_inventory WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+            return _proxy_inventory_row(row) or {}
+
+        conn.execute(
+            """INSERT INTO proxy_inventory (
+                id, fingerprint, proxy_url, host_masked, port, username_masked,
+                has_credentials, label, active, check_state, warnings_json, blockers_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'missing', '[]', '[]', ?, ?)""",
+            (
+                entry_id,
+                fingerprint,
+                proxy_url,
+                redacted.get("host_masked") or "unknown",
+                redacted.get("port"),
+                redacted.get("username_masked"),
+                1 if redacted.get("has_credentials") else 0,
+                redacted.get("label") or "proxy",
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM proxy_inventory WHERE id = ?", (entry_id,)).fetchone()
+        return _proxy_inventory_row(row) or {}
+
+
+def list_proxy_inventory(*, include_inactive: bool = False) -> list[dict[str, Any]]:
+    with get_db() as conn:
+        if include_inactive:
+            rows = conn.execute(
+                "SELECT * FROM proxy_inventory ORDER BY updated_at DESC, label ASC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM proxy_inventory
+                   WHERE active = 1
+                   ORDER BY updated_at DESC, label ASC"""
+            ).fetchall()
+    return [item for item in (_proxy_inventory_row(row) for row in rows) if item]
+
+
+def get_proxy_inventory_entry(entry_id: str, *, include_secret: bool = False) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM proxy_inventory WHERE id = ?", (entry_id,)).fetchone()
+    if row is None:
+        return None
+    if include_secret:
+        data = dict(row)
+        for key in ("warnings_json", "blockers_json"):
+            raw = data.pop(key, "[]")
+            try:
+                parsed = json.loads(raw or "[]")
+            except (TypeError, json.JSONDecodeError):
+                parsed = []
+            data[key.replace("_json", "")] = parsed if isinstance(parsed, list) else []
+        data["has_credentials"] = bool(data.get("has_credentials"))
+        data["active"] = bool(data.get("active"))
+        return data
+    return _proxy_inventory_row(row)
+
+
+def update_proxy_inventory_check(entry_id: str, summary: dict[str, Any]) -> dict[str, Any] | None:
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE proxy_inventory SET
+                check_state = ?, reachable = ?, latency_ms = ?, risk_score = ?,
+                authenticity_score = ?, country_code = ?, timezone_hint = ?, locale_hint = ?,
+                warnings_json = ?, blockers_json = ?, last_checked_at = ?, updated_at = ?
+            WHERE id = ?""",
+            (
+                summary.get("check_state") or "unavailable",
+                summary.get("reachable"),
+                summary.get("latency_ms"),
+                summary.get("risk_score"),
+                summary.get("authenticity_score"),
+                summary.get("country_code"),
+                summary.get("timezone_hint"),
+                summary.get("locale_hint"),
+                json.dumps(summary.get("warnings") or []),
+                json.dumps(summary.get("blockers") or []),
+                now,
+                now,
+                entry_id,
+            ),
+        )
+        conn.commit()
+    return get_proxy_inventory_entry(entry_id)

@@ -1,0 +1,30 @@
+{
+  "capabilities": {
+    "harness": "skyvern",
+    "status": "ready",
+    "skyvern_installed": true,
+    "llm_configured": true,
+    "cdp_routing": "cloakbrowser-manager",
+    "skyvern_license": "AGPL-3.0",
+    "skyvern_repo": "https://github.com/Skyvern-AI/skyvern",
+    "capabilities": {
+      "connect_over_cdp": true,
+      "run_task": true,
+      "navigate_screenshot": true
+    },
+    "notes": "Skyvern remains an optional AGPL-3.0 dependency. Automation attaches to CloakBrowser profiles via Manager CDP; do not launch vanilla Chromium for harness runs."
+  },
+  "profile_id": "a8b99a1f-bd77-4249-917f-0ad681ea5519",
+  "browser_address": "http://127.0.0.1:18115/api/profiles/a8b99a1f-bd77-4249-917f-0ad681ea5519/cdp",
+  "result": {
+    "status": "ok",
+    "mode": "Skyvern.local+SkyvernBrowser.connect_over_cdp",
+    "url": "https://example.com/",
+    "title": "Example Domain",
+    "screenshot": "/home/coder/vk-repos/CloakBrowser-Manager-skyvern/.proof/2026-07-24-skyvern-harness.png",
+    "browser_address": "http://127.0.0.1:18115/api/profiles/a8b99a1f-bd77-4249-917f-0ad681ea5519/cdp",
+    "headers_applied": true
+  },
+  "screenshot_bytes": 17487,
+  "vcvm_mirror": "/home/coder/cloakbrowser-manager-vcvm/.proof/2026-07-24-skyvern-harness.png"
+}

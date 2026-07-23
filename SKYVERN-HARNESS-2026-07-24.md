@@ -1,4 +1,4 @@
-[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T01:38+02:00
+[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T01:43+02:00
 > 🧠 NotebookLM: n/a (kein IDR-Auftrag in dieser Lane; Architektur aus Skyvern README + CloakBrowser-Manager CDP API)
 
 # SKYVERN-HARNESS — CloakBrowser × Skyvern (2026-07-24)
@@ -20,7 +20,7 @@ Skyvern ist als **optionaler AGPL-Harness** an CloakBrowser Manager angedockt. A
 | Backend suite (`AUTH_TOKEN=` clean) | **228 passed** |
 | Live CDP proof via `Skyvern.local` + `SkyvernBrowser` | **PASS** → example.com |
 | Screenshot non-empty | **17487 bytes**, 664×992 PNG |
-| LLM agent `run_task` | **ehrlich blocked/degraded** (keine LLM-Keys in diesem Lauf) |
+| LLM agent `run_task` | **ehrlich blocked/degraded** (keine LLM-Keys; `OPENAI_BASE_URL` Proxy unreachable) |
 
 ## Was integriert wurde
 
@@ -39,10 +39,11 @@ Skyvern ist als **optionaler AGPL-Harness** an CloakBrowser Manager angedockt. A
 
 ## Lizenz-Hinweis (AGPL)
 
-- **Skyvern** ([Skyvern-AI/skyvern](https://github.com/Skyvern-AI/skyvern)): **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+- **Skyvern** ([Skyvern-AI/skyvern](https://github.com/Skyvern-AI/skyvern)): **GNU Affero General Public License v3.0 (AGPL-3.0)** — bestätigt via upstream `LICENSE`.
 - Dieser Manager-GUI-Code bleibt **MIT**.
 - Skyvern wird **nicht** in den Repo-Tree vendored; Installation ist optional (`pip install "skyvern[local]"`).
 - Wer Skyvern als Netzwerkdienst zusammen mit dem Manager betreibt, muss die AGPL-Pflichten (Corresponding Source für den kombinierten Service) selbst einhalten.
+- „1:1 kopieren“ der gesamten Skyvern-Codebasis wäre AGPL-Kontamination des MIT-Trees — bewusst vermieden zugunsten Adapter + optionalem Dependency (Skyvern-Kernfähigkeiten CDP-Attach / Browser-Wrap / optional `run_task` über die public API).
 
 ## Kombinations-Architektur
 
@@ -66,7 +67,7 @@ Docking-Punkt ist bewusst **CDP**, nicht ein zweiter Chromium-Launch: Skyvern st
 
 ![Skyvern harness through CloakBrowser CDP — example.com](.proof/2026-07-24-skyvern-harness.png)
 
-Live-Lauf (re-verified 2026-07-24T01:38+02:00, this lane):
+Live-Lauf (re-verified 2026-07-24T01:43+02:00, this lane):
 
 - Manager: `http://127.0.0.1:18115` (container `cloakbrowser-manager-vcvm`)
 - Profile: `a8b99a1f-bd77-4249-917f-0ad681ea5519` (VCVM Mobile Demo, fingerprint seed 12695)
@@ -84,10 +85,11 @@ VCVM-Spiegel: `~/cloakbrowser-manager-vcvm/.proof/2026-07-24-skyvern-harness.png
 - Vollständiger Vision-Agent-`run_task`-Loop braucht LLM-Keys (`OPENAI_*` / Skyvern cloud). Capability meldet dann `run_task: true`; ohne Keys → `blocked`/`degraded`, kein Fake.
 - PyPI-`Skyvern.connect_to_browser_over_cdp` ohne Header scheitert an Manager-Auth; der Harness bridged deshalb Skyverns Playwright-Driver **mit** Headers und wrappt `SkyvernBrowser`.
 - Laufendes VCVM-Docker-Image ist noch ohne `/api/harnesses/skyvern/*` (vor-PR Build). Adapter + Routes sind im Branch; Skyvern-Runtime bleibt Opt-in (`pip install "skyvern[local]"`), nicht im Core-Image.
-- „1:1 kopieren“ der gesamten Skyvern-Codebasis wäre AGPL-Kontamination des MIT-Trees — bewusst vermieden zugunsten Adapter + optionalem Dependency (Skyvern-Kernfähigkeiten CDP-Attach / Browser-Wrap / optional `run_task` über die public API).
+- LLM-Proxy `OPENAI_BASE_URL` war in diesem Lauf unreachable → kein Fake-`run_task`.
 
 ## NEXT
 
 - Optional: Compose-Sidecar für Skyvern-Server-Mode
 - Optional: Frontend-Toggle „Run with Skyvern“ im Mobile Task Workspace
 - Optional: LLM-Keys setzen und echten `run_task`-Agent-Loop durch denselben CDP-Pfad beweisen
+- Optional: VCVM-Image aus diesem Branch neu bauen, damit `/api/harnesses/skyvern/*` im Container antwortet

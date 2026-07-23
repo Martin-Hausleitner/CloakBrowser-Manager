@@ -1,6 +1,7 @@
 import { Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Profile, ProfileCreateData, ProfileHarness } from "../lib/api";
+import { HARNESS_OPTIONS } from "../lib/harnessOptions";
 
 interface ProfileFormProps {
   profile: Profile | null; // null = create mode
@@ -29,13 +30,9 @@ const TAG_COLORS = [
   "#ec4899", // pink
 ];
 
-const HARNESS_OPTIONS: Array<{ value: ProfileHarness; label: string }> = [
-  { value: "codex", label: "Codex" },
-  { value: "antigravity", label: "Antigravity" },
-  { value: "claude-code", label: "Claude Code" },
-  { value: "opencode", label: "OpenCode" },
-  { value: "browser-use", label: "Browser Use" },
-];
+const HARNESS_SELECT_OPTIONS: Array<{ value: ProfileHarness; label: string }> = HARNESS_OPTIONS.map(
+  (option) => ({ value: option.value, label: option.label }),
+);
 
 const GPU_PRESETS: Record<string, { vendor: string; renderer: string }> = {
   "NVIDIA RTX 3070": {
@@ -350,7 +347,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 value={form.harness ?? "codex"}
                 onChange={(e) => set("harness", e.target.value as ProfileHarness)}
               >
-                {HARNESS_OPTIONS.map((option) => (
+                {HARNESS_SELECT_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
               </select>

@@ -257,15 +257,35 @@ def score_fingerprint_consistency(
 
     expected_timezone = config.get("timezone")
     if isinstance(expected_timezone, str) and expected_timezone:
+        # When geoip alignment is on, timezone may be rewritten from egress IP.
+        # Treat mismatch as soft warning rather than hard score damage.
         actual_timezone = runtime.get("timezone")
-        comparisons.append(
-            ("timezone", None if not isinstance(actual_timezone, str) else actual_timezone == expected_timezone)
-        )
+        if bool(config.get("geoip")):
+            if isinstance(actual_timezone, str) and actual_timezone != expected_timezone:
+                # still count as match for scoring; warning retained via separate path below
+                comparisons.append(("timezone", True))
+            else:
+                comparisons.append(
+                    (
+                        "timezone",
+                        None if not isinstance(actual_timezone, str) else actual_timezone == expected_timezone,
+                    )
+                )
+        else:
+            comparisons.append(
+                ("timezone", None if not isinstance(actual_timezone, str) else actual_timezone == expected_timezone)
+            )
 
     expected_locale = _normalized_locale(config.get("locale"))
     if expected_locale is not None:
         actual_locale = _normalized_locale(runtime.get("language"))
-        comparisons.append(("locale", None if actual_locale is None else actual_locale == expected_locale))
+        if bool(config.get("geoip")) and actual_locale is not None and actual_locale != expected_locale:
+            # Soft-match language family (de-AT vs de-DE) under geoip.
+            expected_family = expected_locale.split("-", 1)[0]
+            actual_family = actual_locale.split("-", 1)[0]
+            comparisons.append(("locale", expected_family == actual_family))
+        else:
+            comparisons.append(("locale", None if actual_locale is None else actual_locale == expected_locale))
 
     expected_hardware = config.get("hardware_concurrency")
     if isinstance(expected_hardware, int):

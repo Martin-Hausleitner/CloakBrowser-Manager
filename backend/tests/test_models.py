@@ -193,6 +193,15 @@ def test_profile_create_invalid_harness():
         ProfileCreate(name="Bad", harness="selenium")
 
 
+@pytest.mark.parametrize(
+    "harness",
+    ["browser-use", "browser-harness", "unbrowse", "stagehand", "codex"],
+)
+def test_profile_create_accepts_callable_browser_harnesses(harness: str):
+    profile = ProfileCreate(name="Harness", harness=harness)
+    assert profile.harness == harness
+
+
 # ── ProfileUpdate ────────────────────────────────────────────────────────────
 
 

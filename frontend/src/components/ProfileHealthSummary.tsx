@@ -87,7 +87,15 @@ export function ProfileHealthSummary({ profileId, canRun, running }: ProfileHeal
   };
 
   const state = health?.state ?? "unavailable";
-  const compactLabel = loading ? "Health …" : loadFailed ? "Health unavailable" : `Health ${state}`;
+  const fp = health?.fingerprint_consistency_score;
+  const scan = health?.browser_scan_score;
+  const compactLabel = loading
+    ? "Health …"
+    : loadFailed
+      ? "Health unavailable"
+      : fp != null || scan != null
+        ? `Health ${state} · FP ${fp ?? "—"} · Scan ${scan ?? "—"}`
+        : `Health ${state}`;
 
   return (
     <details className="relative">

@@ -11,7 +11,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 FOLDER_SEGMENT_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._ -]*$"
 ACCENT_COLOR_PATTERN = r"^#[0-9A-Fa-f]{6}$"
-Harness = Literal["codex", "antigravity", "claude-code", "opencode", "browser-use"]
+Harness = Literal[
+    "codex",
+    "antigravity",
+    "claude-code",
+    "opencode",
+    "browser-use",
+    "browser-harness",
+    "unbrowse",
+    "stagehand",
+]
 ProfileHealthState = Literal["pending", "running", "passed", "warning", "failed", "unavailable"]
 ProfileHealthSourceState = Literal["missing", "measured", "derived", "unavailable", "skipped"]
 
@@ -211,12 +220,44 @@ class ProfileResponse(BaseModel):
     cdp_url: str | None = None
 
 
+class SessionLinkSet(BaseModel):
+    """Absolute open links for one origin (local tunnel or cloud/public)."""
+
+    session_viewer_url: str
+    vnc_fullscreen_url: str | None = None
+    cdp_fullscreen_url: str | None = None
+    live_url: str | None = None
+    vnc_ws_url: str
+    debug_url: str | None = None
+    debugger_url: str | None = None
+    cdp_http_url: str | None = None
+    cdp_ws_url: str | None = None
+    live_metrics_url: str | None = None
+    launch_path: str
+    stop_path: str
+    status_path: str
+    live_metrics_path: str | None = None
+
+
+class SessionOpenLinks(BaseModel):
+    """Steel-style local vs cloud open URLs for a profile session."""
+
+    profile_id: str
+    prefer: Literal["local", "cloud"] = "local"
+    mode: Literal["cdp", "vnc", "shell"] = "cdp"
+    open_url: str
+    local: SessionLinkSet
+    cloud: SessionLinkSet | None = None
+    bases: dict[str, str | None] = Field(default_factory=dict)
+
+
 class LaunchResponse(BaseModel):
     profile_id: str
     status: str = "running"
     vnc_ws_port: int
     display: str
     cdp_url: str | None = None
+    links: SessionOpenLinks | None = None
 
 
 class StatusResponse(BaseModel):
@@ -230,6 +271,7 @@ class ProfileStatusResponse(BaseModel):
     vnc_ws_port: int | None = None
     display: str | None = None
     cdp_url: str | None = None
+    links: SessionOpenLinks | None = None
 
 
 class ProfileHealthResponse(BaseModel):
@@ -574,4 +616,176 @@ class ProxyAutoProfileCreate(BaseModel):
     sandbox_id: str = Field(default="default", min_length=1, max_length=80, pattern=SLUG_PATTERN)
     harness: Harness = "browser-use"
     launch: bool = False
+
+
+class ExtensionProfileSummary(BaseModel):
+    id: str
+    name: str
+    project_id: str = "default"
+    folder_path: str = ""
+    sandbox_id: str = "default"
+    harness: Harness = "codex"
+    pinned: bool = False
+    timezone: str | None = None
+    locale: str | None = None
+    proxy_configured: bool = False
+    status: str = "stopped"
+    running: bool = False
+
+
+class ExtensionCatalogResponse(BaseModel):
+    """One-shot bootstrap payload for a Chrome extension or agent."""
+
+    bases: dict[str, str | None] = Field(default_factory=dict)
+    endpoints: dict[str, str] = Field(default_factory=dict)
+    profiles: list[ExtensionProfileSummary] = Field(default_factory=list)
+    proxies: list[ProxyInventoryItem] = Field(default_factory=list)
+    capabilities: dict[str, bool] = Field(default_factory=dict)
+
+
+class ExtensionOpenSessionRequest(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=120)
+    launch: bool = True
+    prefer: Literal["local", "cloud"] = "local"
+    mode: Literal["cdp", "vnc", "shell"] = "cdp"
+
+
+class ExtensionOpenSessionResponse(BaseModel):
+    profile_id: str
+    status: str
+    launched: bool = False
+    already_running: bool = False
+    prefer: Literal["local", "cloud"] = "local"
+    mode: Literal["cdp", "vnc", "shell"] = "cdp"
+    open_url: str
+    links: SessionOpenLinks
+    cdp_url: str | None = None
+    vnc_ws_port: int | None = None
+    display: str | None = None
+
+
+class ProfileOpenLinksResponse(BaseModel):
+    """Flat + nested open links for Chrome extension / agent one-click actions."""
+
+    profile_id: str
+    prefer: Literal["local", "cloud"] = "local"
+    mode: Literal["cdp", "vnc", "shell"] = "cdp"
+    open_url: str
+    local: SessionLinkSet
+    cloud: SessionLinkSet | None = None
+    bases: dict[str, str | None] = Field(default_factory=dict)
+    session_viewer_url: str
+    vnc_fullscreen_url: str
+    cdp_fullscreen_url: str | None = None
+    live_url: str | None = None
+    debug_url: str | None = None
+    debugger_url: str | None = None
+    websocket_url: str
+    cdp_url: str | None = None
+    live_metrics_url: str | None = None
+    local_url: str
+    cloud_url: str | None = None
+    local_vnc_fullscreen_url: str | None = None
+    local_cdp_fullscreen_url: str | None = None
+    cloud_vnc_fullscreen_url: str | None = None
+    cloud_cdp_fullscreen_url: str | None = None
+
+
+class DefaultExtensionItem(BaseModel):
+    """Selectable Comet-derived catalog entry for new/template profiles."""
+
+    id: str
+    name: str
+    description: str | None = None
+    category: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    recommended: bool = False
+    default_selected: bool = False
+    selectable: bool = True
+    selected: bool = False
+    available: bool = False
+    path: str | None = None
+    icon_url: str | None = None
+    store_url: str | None = None
+
+
+class ExtensionDefaultsResponse(BaseModel):
+    source: str = "comet"
+    source_label: str = "Comet"
+    catalog_dir_configured: bool = False
+    selected_ids: list[str] = Field(default_factory=list)
+    extensions: list[DefaultExtensionItem] = Field(default_factory=list)
+    items: list[DefaultExtensionItem] = Field(default_factory=list)
+    count: int = 0
+
+
+class ExtensionDefaultsUpdate(BaseModel):
+    selected_ids: list[str] = Field(default_factory=list, max_length=64)
+
+
+class ProfileTemplateSummary(BaseModel):
+    id: str
+    name: str
+    summary: str = ""
+    system_prompt: str = ""
+    harness: Harness = "browser-use"
+    project_id: str = "default"
+    folder_path: str = ""
+    platform: Literal["windows", "macos", "linux"] = "windows"
+    apply_default_extensions: bool = True
+    quick_options: list[str] = Field(default_factory=list)
+
+
+class ProfileTemplateCreate(BaseModel):
+    template_id: str = Field(min_length=1, max_length=80)
+    name: str | None = Field(default=None, max_length=120)
+    project_id: str | None = None
+    harness: Harness | None = None
+    proxy: str | None = None
+    apply_default_extensions: bool | None = None
+    launch: bool = False
+
+
+class ExtensionTemplateItem(BaseModel):
+    id: str
+    name: str
+    project_id: str = "default"
+    folder_path: str = ""
+    harness: Harness = "browser-use"
+    geoip: bool | None = None
+    screen_width: int | None = None
+    screen_height: int | None = None
+    create_path: str = "/api/profiles"
+    from_proxy_path: str | None = None
+
+
+class ExtensionTemplatesResponse(BaseModel):
+    templates: list[ExtensionTemplateItem] = Field(default_factory=list)
+    create_profile_path: str = "/api/profiles"
+    create_from_proxy_path: str = "/api/proxies/{proxy_id}/profiles"
+
+
+class LiveMetricsSample(BaseModel):
+    transport: Literal["cdp", "vnc"] = "cdp"
+    connection_state: Literal["connecting", "connected", "reconnecting", "failed", "idle"] = (
+        "connected"
+    )
+    fps: float | None = Field(default=None, ge=0)
+    rtt_ms: float | None = Field(default=None, ge=0)
+    frames_received: int | None = Field(default=None, ge=0)
+    reconnect_count: int | None = Field(default=None, ge=0)
+    dropped_frames: int | None = Field(default=None, ge=0)
+
+
+class LiveMetricsResponse(BaseModel):
+    profile_id: str
+    transport: Literal["cdp", "vnc"] | None = None
+    connection_state: Literal["connecting", "connected", "reconnecting", "failed", "idle"] = "idle"
+    fps: float | None = None
+    rtt_ms: float | None = None
+    frames_received: int | None = None
+    reconnect_count: int | None = None
+    dropped_frames: int | None = None
+    updated_at: str | None = None
+    transports: dict[str, dict[str, object]] = Field(default_factory=dict)
 

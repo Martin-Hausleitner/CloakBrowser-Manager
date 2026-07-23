@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Plus } from "lucide-react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Plus, Users, KeyRound } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import {
   api,
@@ -13,6 +13,7 @@ import {
 import { hasAccessPermission } from "./lib/accessPermissions";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
+import { CreateProfileFlow } from "./components/CreateProfileFlow";
 import { ProfileViewer } from "./components/ProfileViewer";
 import { LaunchButton } from "./components/LaunchButton";
 import { StatusIndicator } from "./components/StatusIndicator";
@@ -22,9 +23,13 @@ import { AccessDashboard } from "./components/AccessDashboard";
 import { ProfileHealthSummary } from "./components/ProfileHealthSummary";
 import { BrowserUseHome } from "./components/BrowserUseHome";
 import { ProxyOverview } from "./components/ProxyOverview";
+import { ProfilesWorkspace } from "./components/ProfilesWorkspace";
+import { AccountsOverview } from "./components/AccountsOverview";
+import { LiveDevPanel } from "./components/LiveDevPanel";
+import { SessionStreamButtons } from "./components/SessionStreamButtons";
 
 type AuthState = "checking" | "required" | "ok" | "error";
-type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies";
+type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies" | "profiles" | "accounts";
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 type MobileConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
 const FIXED_PROJECTS = ["default", "proxied", "mobile", "research"] as const;
@@ -202,6 +207,29 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     setView("view");
   }, [isMobile, loading, profiles, selectedId]);
 
+  // Deep-link from the Cloak Profile Sync extension (?profile=<id>).
+  useEffect(() => {
+    if (loading || profiles.length === 0) return;
+    const params = new URLSearchParams(window.location.search);
+    const profileParam = params.get("profile");
+    if (!profileParam) return;
+    const match = profiles.find((profile) => profile.id === profileParam);
+    if (!match) return;
+    setSelectedId(match.id);
+    if (match.project_id) setProjectId(match.project_id);
+    if (match.harness) setHarness(match.harness);
+    const viewParam = params.get("view");
+    const wantFullscreen = params.get("fullscreen") === "1";
+    if (match.status === "running") {
+      setView("view");
+      if (wantFullscreen || viewParam === "vnc") {
+        setMobileFullscreenOpen(true);
+      }
+    } else {
+      setView("home");
+    }
+  }, [loading, profiles]);
+
   const handleSelect = useCallback((id: string) => {
     setSelectedId(id);
     const profile = profiles.find((p) => p.id === id);
@@ -271,17 +299,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   }, [canManageProfiles, canOperateSelected, launch, selected, stop, update]);
 
 
-  const handleBulkOrganize = async (payload: {
-    profile_ids: string[];
-    project_id?: string;
-    folder_path?: string;
-    pinned?: boolean;
-  }) => {
-    await api.bulkOrganizeProfiles(payload);
-    await refresh();
-  };
-
-const handleTogglePin = useCallback(async (id: string) => {
+  const handleTogglePin = useCallback(async (id: string) => {
     const profile = profiles.find((candidate) => candidate.id === id) ?? null;
     await toggleProfilePin({
       profile,
@@ -403,39 +421,59 @@ const handleTogglePin = useCallback(async (id: string) => {
     <div className="h-screen flex">
       {/* Compact Browser-Use style sidebar */}
       {sidebarOpen && (
-        <div className="w-56 border-r border-border bg-surface-1 flex-shrink-0 flex flex-col">
-          <div className="border-b border-border px-3 py-3">
-            <div className="text-sm font-semibold tracking-tight">Browser Use</div>
-            <div className="mt-2 space-y-1">
+        <div className="w-48 border-r border-border bg-surface-1 flex-shrink-0 flex flex-col">
+          <div className="border-b border-border px-2 py-2">
+            <div className="px-1 text-xs font-semibold tracking-tight">Browser Use</div>
+            <div className="mt-1.5 space-y-0.5">
               <button
                 type="button"
                 onClick={() => setView("home")}
-                className={`flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs ${
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
                   view === "home" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
                 }`}
               >
-                <LayoutGrid className="h-3.5 w-3.5" />
+                <LayoutGrid className="h-3 w-3" />
                 Agent home
               </button>
               {canManageProfiles ? (
                 <button
                   type="button"
                   onClick={() => setView("proxies")}
-                  className={`flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs ${
+                  className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
                     view === "proxies" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
                   }`}
                 >
-                  <Globe2 className="h-3.5 w-3.5" />
+                  <Globe2 className="h-3 w-3" />
                   Proxies
                 </button>
               ) : null}
+              <button
+                type="button"
+                onClick={() => setView("profiles")}
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                  view === "profiles" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <Users className="h-3 w-3" />
+                Profiles
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("accounts")}
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                  view === "accounts" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <KeyRound className="h-3 w-3" />
+                Accounts
+              </button>
               {canManageProfiles ? (
                 <button
                   type="button"
                   onClick={handleNew}
-                  className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs text-gray-400 hover:bg-surface-2"
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] text-gray-400 hover:bg-surface-2"
                 >
-                  <Plus className="h-3.5 w-3.5" />
+                  <Plus className="h-3 w-3" />
                   New profile
                 </button>
               ) : null}
@@ -450,7 +488,7 @@ const handleTogglePin = useCallback(async (id: string) => {
               canCreate={canManageProfiles}
               canManage={canManageProfiles}
               onTogglePin={handleTogglePin}
-              onBulkOrganize={canManageProfiles ? handleBulkOrganize : undefined}
+              compact
             />
           </div>
         </div>
@@ -468,7 +506,7 @@ const handleTogglePin = useCallback(async (id: string) => {
             >
               {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
             </button>
-            {selected && view !== "home" && view !== "proxies" && (
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && (
               <div className="flex items-center gap-2">
                 <StatusIndicator status={selected.status} size="md" />
                 <span className="text-sm font-medium">{selected.name}</span>
@@ -482,7 +520,10 @@ const handleTogglePin = useCallback(async (id: string) => {
             )}
           </div>
           <div className="flex items-center gap-2">
-            {selected && view !== "home" && view !== "proxies" && (
+            {selected && selected.status === "running" ? (
+              <SessionStreamButtons profileId={selected.id} running />
+            ) : null}
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && (
               canOperateSelected && (
               <LaunchButton
                 status={selected.status}
@@ -525,6 +566,14 @@ const handleTogglePin = useCallback(async (id: string) => {
           </div>
         )}
 
+        {selected && view === "view" ? (
+          <LiveDevPanel
+            profileId={selected.id}
+            running={selected.status === "running"}
+            connectionStatus={mobileConnectionStatus}
+          />
+        ) : null}
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto overscroll-contain">
           {view === "home" && (
@@ -540,6 +589,8 @@ const handleTogglePin = useCallback(async (id: string) => {
               onHarnessChange={setHarness}
               onTaskChange={setTaskDraft}
               onOpenProxies={() => setView("proxies")}
+              onOpenProfiles={() => setView("profiles")}
+              onOpenAccounts={() => setView("accounts")}
               onCreateProjectProfile={handleNew}
               onOpenSettings={(profileId) => {
                 if (!profileId) {
@@ -574,6 +625,38 @@ const handleTogglePin = useCallback(async (id: string) => {
             />
           )}
 
+          {view === "profiles" && (
+            <ProfilesWorkspace
+              profiles={profiles}
+              selectedId={selectedId}
+              canManage={canManageProfiles}
+              onSelect={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+              }}
+              onEdit={(profileId) => {
+                setSelectedId(profileId);
+                setView(canManageProfiles ? "edit" : "profiles");
+              }}
+            />
+          )}
+
+          {view === "accounts" && (
+            <AccountsOverview
+              profiles={profiles}
+              selectedId={selectedId}
+              onSelect={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+                setView(canManageProfiles ? "edit" : "accounts");
+              }}
+            />
+          )}
+
           {view === "empty" && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
@@ -583,10 +666,16 @@ const handleTogglePin = useCallback(async (id: string) => {
           )}
 
           {view === "create" && canManageProfiles && (
-            <ProfileForm
-              profile={null}
-              onSave={handleCreate}
+            <CreateProfileFlow
+              projectId={projectId}
+              harness={harness}
               onCancel={() => setView("home")}
+              onSave={handleCreate}
+              onCreated={async (profileId) => {
+                await refresh();
+                setSelectedId(profileId);
+                setView("edit");
+              }}
             />
           )}
 

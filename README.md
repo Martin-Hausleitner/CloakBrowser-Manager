@@ -88,6 +88,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Priority | Feature | Required completion evidence |
 | --- | --- | --- |
+| P0 | Callable browser backends UI (Browser Use / Browser Harness / Unbrowse / Stagehand) + Proxies / Profiles / Accounts&2FA tabs | Local: harness enum + home settings panel + Accounts derivation tests green. VCVM browser proof of the three tabs and harness cards still required. Execution remains Codex Computer Use only. |
 | P0 | Finish the release handoff | Push only the fork branch, verify its SHA and GitHub files, then retain the green release report and screenshot paths as local evidence. |
 | P1 | Direct Tailnet route and real iPhone Safari acceptance | Private HTTPS, physical keyboard behavior, touch interaction, direct-versus-DERP route evidence, and honest latency definitions. |
 | P1 | Profile organization refinements | Search/filter and safe bulk movement implemented; refresh-stable live E2E after redeploy remains. |
@@ -95,6 +96,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 ### Development timeline
 
+- **23 July 2026 (night)** — Browser Use home gained first-class preference cards for Browser Harness, Unbrowse, and Stagehand (metadata only); sidebar tabs for Proxies, Profiles, and Accounts & 2FA (redacted session/auth badges + planned Bitwarden/Keypad sync). Focused harness/account tests passed; host execution boundary unchanged.
 - **23 July 2026 (late)** — Browser-Use desktop shell, redacted proxy inventory, Proxy-Checker overview, and auto geo-aligned profile creation landed and redeployed to VCVM; 371 backend / 133 frontend tests and production build passed; inventory ingest + checker + auto-profile proven live without leaking credentials into API payloads.
 - **23 July 2026** — admin-only live diagnostics landed; bulk profile organization API/UI added; VCVM proxychecker service restored and credentialed `/check` proven against a local Basic-auth proxy; live-diagnostics import fix prepared for redeploy:
 - **23 July 2026** — admin-only live diagnostics landed: launch/VNC counters, honest unavailable metrics, redaction tests, and `GET /api/admin/live-diagnostics` without mobile UI clutter.

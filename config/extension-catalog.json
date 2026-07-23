@@ -1,0 +1,76 @@
+{
+  "source": "comet",
+  "source_label": "Comet (MeinComet) Default profile",
+  "extensions": [
+    {
+      "id": "ddkjiahejlhfcafbddmgiahcphecmpfh",
+      "name": "uBlock Origin Lite",
+      "description": "Content blocker (MV3)",
+      "default_selected": true,
+      "tags": ["privacy", "adblock"]
+    },
+    {
+      "id": "fihnjjcciajhdojfnbdddfaoknhalnja",
+      "name": "I don't care about cookies",
+      "description": "Auto-dismiss cookie banners",
+      "default_selected": true,
+      "tags": ["ux"]
+    },
+    {
+      "id": "mlomiejdfkolichcflejclcbmpeaniij",
+      "name": "Ghostery AdBlocker for Privacy",
+      "description": "Privacy / tracker blocking",
+      "default_selected": false,
+      "tags": ["privacy", "adblock"]
+    },
+    {
+      "id": "gppongmhjkpfnbhagpmjfkannfbllamg",
+      "name": "Wappalyzer - Technology profiler",
+      "description": "Identify web technologies",
+      "default_selected": true,
+      "tags": ["devtools"]
+    },
+    {
+      "id": "nffaoalbilbmmfgbnbgppjihopabppdk",
+      "name": "Video Speed Controller",
+      "description": "HTML5 media speed shortcuts",
+      "default_selected": false,
+      "tags": ["media"]
+    },
+    {
+      "id": "mnjggcdmjocbbbhaepdhchncahnbgone",
+      "name": "SponsorBlock for YouTube",
+      "description": "Skip sponsorships",
+      "default_selected": false,
+      "tags": ["media"]
+    },
+    {
+      "id": "neebplgakaahbhdphmkckjjcegoiijjo",
+      "name": "Keepa - Amazon Price Tracker",
+      "description": "Amazon price history",
+      "default_selected": false,
+      "tags": ["commerce"]
+    },
+    {
+      "id": "cnjifjpddelmedmihgijeibhnjfabmlf",
+      "name": "Obsidian Web Clipper",
+      "description": "Save pages to Obsidian",
+      "default_selected": false,
+      "tags": ["notes"]
+    },
+    {
+      "id": "hjdoplcnndgiblooccencgcggcoihigg",
+      "name": "Terms of Service; Didn’t Read",
+      "description": "ToS rating overlays",
+      "default_selected": false,
+      "tags": ["privacy"]
+    },
+    {
+      "id": "icallnadddjmdinamnolclfjanhfoafe",
+      "name": "FastForward",
+      "description": "Skip redirect/timer walls",
+      "default_selected": false,
+      "tags": ["ux"]
+    }
+  ]
+}

@@ -249,9 +249,16 @@ class BrowserManager:
 
             # Normalize proxy format (host:port:user:pass → http://user:pass@host:port)
             raw_proxy = profile.get("proxy") or None
+            if isinstance(raw_proxy, str) and not raw_proxy.strip():
+                raw_proxy = None
             proxy = _normalize_proxy(raw_proxy) if raw_proxy else None
+            if raw_proxy and not proxy:
+                raise ValueError("Profile proxy is configured but could not be applied")
             if proxy:
                 _validate_proxy(proxy)
+                # Also pin Chromium proxy flags so Playwright env gaps cannot
+                # silently launch without the assigned proxy.
+                extra_args.append(f"--proxy-server={proxy}")
 
             # Some CloakBrowser builds do not forward Playwright's env kwarg to
             # Chromium, so set DISPLAY around the launch and restore it after.

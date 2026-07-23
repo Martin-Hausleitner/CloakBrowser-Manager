@@ -97,6 +97,9 @@ const harnessNames: Record<ProfileHarness, string> = {
   "claude-code": "Claude Code",
   opencode: "OpenCode",
   "browser-use": "Browser Use",
+  "browser-harness": "Browser Harness",
+  unbrowse: "Unbrowse",
+  stagehand: "Stagehand",
 };
 
 type PinnedHarnessAction = Omit<TaskHarnessAction, "kind"> & {

@@ -30,6 +30,7 @@ Use this repository-local workflow to continue the fork without losing its secur
 - A preferred harness is metadata, not an execution authority. Host-scoped browser actions must continue to require the verified `codex-computer-use` bridge and fail closed otherwise.
 - Profile health is an observation, not an undetectability guarantee. Persist only masked IPs, numeric scores, source states and whitelisted warning/blocker codes; never provider HTML, raw responses or exception text.
 - Keep the optional proxychecker on a trusted VCVM-local boundary. Manager `/health` must not depend on it, and an unavailable proxychecker must degrade to an explicit source state rather than block profile launch.
+- **External agents steer via API/CLI/skill, not UI clicks.** Profile create/update/launch/stop/open-links must remain callable with a scoped `cbm_agent_…` bearer key. See [references/agent-control.md](references/agent-control.md).
 
 ## Start every continuation
 
@@ -80,6 +81,7 @@ If the repository's `bd` issue tool is unavailable, record that limitation in th
 - Saved preferences for Antigravity, Claude Code, OpenCode, or Browser Use may be displayed and propagated as metadata, but must not bypass bridge verification.
 - Keep quick actions typed and capability-checked. Reject unknown commands.
 - Server-side task history is persistence and conversation state; it is not proof that an agent executed a browser task.
+- External agents authenticate with opaque `cbm_agent_…` keys and sandbox grants (`view` / `interact` / `operate` / `automate`). `operate` covers profile create/update/delete/launch/stop inside granted sandboxes; `automate` is separate for CDP. Prefer `scripts/cbm_agent_ctl.py` and [references/agent-control.md](references/agent-control.md) over UI workflows.
 
 ### Profile health and external observations
 
@@ -93,14 +95,13 @@ If the repository's `bd` issue tool is unavailable, record that limitation in th
 
 ## Current verified checkpoint
 
-Snapshot from 23 July 2026 (evening) on `integrate-pr-47-27-26`:
+Snapshot from 23 July 2026 (late night) on `integrate-pr-47-27-26`:
 
-- Backend suite **371/371**; frontend suite **133/133**; production build passed.
-- Browser-Use desktop shell, compact sidebar, project/harness selectors, proxy overview, and auto geo-aligned profile creation deployed on VCVM.
-- Proxy inventory ingest of 11 entries live-proven; Proxy-Checker check returns redacted scores; credentials stay server-side.
-- Prior 22–23 July checkpoints still hold for profile health, mobile gate, live diagnostics, and proxychecker health reachability.
-- Safari Remote Automation is disabled, so WebKit and physical-iPhone evidence remain external blockers.
-- The next vertical slices are batch proxy checks with better geo enrichment and the release handoff pack.
+- Agent/extension control plane: `GET/POST /api/extension/catalog`, `POST /api/extension/sessions/open`, `GET/PUT /api/extension/defaults`, templates, open-links (`mode=cdp|vnc|shell`), CDP live `/session/{id}/live`, and live-metrics.
+- Reuse `GET /api/profiles/{id}/open-links` for VNC/CDP fullscreen URLs — do not invent parallel link builders in UI/extension.
+- Backend suites for session links / extension sessions / defaults are green locally; refresh VCVM verify after deploy.
+- Prior 23 July evening checkpoints still hold for proxy inventory, Browser-Use shell, and profile health.
+- Safari Remote Automation remains an external blocker.
 
 Refresh these numbers and claims after any relevant change; this is a dated handoff, not permanent proof.
 

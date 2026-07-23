@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Pin, Plus, Search, Monitor } from "lucide-react";
+import { Pin, Plus, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Profile } from "../lib/api";
 import { compareOrganizedProfiles, profileOrganizationLabel } from "../lib/profileOrganization";
@@ -8,16 +8,11 @@ interface ProfileListProps {
   profiles: Profile[];
   selectedId: string | null;
   onSelect: (id: string) => void;
-  onNew: () => void;
+  onNew?: () => void;
   canCreate?: boolean;
   onTogglePin?: (id: string) => void;
-  onBulkOrganize?: (payload: {
-    profile_ids: string[];
-    project_id?: string;
-    folder_path?: string;
-    pinned?: boolean;
-  }) => Promise<void> | void;
   canManage?: boolean;
+  compact?: boolean;
 }
 
 interface ProfileGroup {
@@ -45,17 +40,12 @@ export function ProfileList({
   selectedId,
   onSelect,
   onNew,
-  canCreate = true,
+  canCreate = false,
   onTogglePin,
-  onBulkOrganize,
   canManage = false,
+  compact = true,
 }: ProfileListProps) {
   const [search, setSearch] = useState("");
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
-  const [bulkProject, setBulkProject] = useState("default");
-  const [bulkFolder, setBulkFolder] = useState("");
-  const [bulkBusy, setBulkBusy] = useState(false);
 
   const { filtered, groups } = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
@@ -66,219 +56,94 @@ export function ProfileList({
   }, [profiles, search]);
 
   const runningCount = profiles.filter((p) => p.status === "running").length;
-  const toggleGroup = (key: string) => {
-    setCollapsedGroups((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="p-4 border-b border-border">
-        <div className="flex items-center gap-2 mb-3">
-          <Monitor className="h-4 w-4 text-accent" />
-          <h1 className="text-sm font-semibold tracking-tight">CloakBrowser Manager</h1>
-        </div>
-        {runningCount > 0 && (
-          <div className="text-xs text-gray-500 mb-3">
-            {runningCount} running
-          </div>
-        )}
-        {/* Search */}
+    <div className="flex h-full flex-col">
+      <div className={`border-b border-border ${compact ? "px-2 py-2" : "p-4"}`}>
         <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-500" />
+          <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-gray-500" />
           <input
             type="text"
-            placeholder="Search profiles..."
+            placeholder="Search…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="input pl-8 py-1.5 text-xs"
+            className="input py-1 pl-7 text-[11px]"
+            aria-label="Search profiles"
           />
         </div>
-        {canManage && onBulkOrganize ? (
-          <div className="mt-3 space-y-2 rounded-md border border-border bg-surface-2 p-2">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-              Bulk organize ({selectedIds.size})
-            </div>
-            <input
-              aria-label="Bulk project"
-              className="input py-1.5 text-xs"
-              value={bulkProject}
-              onChange={(e) => setBulkProject(e.target.value)}
-              placeholder="project"
-            />
-            <input
-              aria-label="Bulk folder path"
-              className="input py-1.5 text-xs"
-              value={bulkFolder}
-              onChange={(e) => setBulkFolder(e.target.value)}
-              placeholder="folder/path"
-            />
+        <div className="mt-1.5 flex items-center justify-between gap-2">
+          <span className="text-[10px] text-gray-500">
+            {runningCount > 0 ? `${runningCount} running` : `${profiles.length} profiles`}
+          </span>
+          {canCreate && onNew ? (
             <button
               type="button"
-              className="btn btn-secondary w-full text-xs"
-              disabled={selectedIds.size === 0 || bulkBusy}
-              onClick={async () => {
-                setBulkBusy(true);
-                try {
-                  await onBulkOrganize({
-                    profile_ids: Array.from(selectedIds),
-                    project_id: bulkProject.trim() || "default",
-                    folder_path: bulkFolder.trim(),
-                  });
-                  setSelectedIds(new Set());
-                } finally {
-                  setBulkBusy(false);
-                }
-              }}
+              onClick={onNew}
+              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-surface-2 hover:text-gray-200"
+              aria-label="New profile"
+              title="New profile"
             >
-              Move selected
+              <Plus className="h-3 w-3" />
+              New
             </button>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
       </div>
 
-      {/* Profile list */}
-      <div className="flex-1 overflow-y-auto p-2">
-        {filtered.length === 0 && (
-          <div className="text-center text-gray-500 text-xs py-8">
+      <div className={`min-h-0 flex-1 overflow-y-auto ${compact ? "p-1" : "p-2"}`}>
+        {filtered.length === 0 ? (
+          <div className="px-2 py-6 text-center text-[11px] text-gray-500">
             {profiles.length === 0 ? "No profiles yet" : "No matches"}
           </div>
-        )}
-        {groups.map((group, groupIndex) => {
-          const collapsed = collapsedGroups.has(group.key);
-          const countId = `profile-group-count-${groupIndex}`;
-          return (
-            <section key={group.key} className="mb-2">
-              <button
-                type="button"
-                onClick={() => toggleGroup(group.key)}
-                className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500 hover:bg-surface-2"
-                aria-expanded={!collapsed}
-                aria-label={`Profile group: ${group.label}`}
-                aria-describedby={countId}
+        ) : null}
+        {groups.map((group) => (
+          <section key={group.key} className="mb-1">
+            <div className="truncate px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">
+              {group.label}
+            </div>
+            {group.profiles.map((profile) => (
+              <div
+                key={profile.id}
+                className={`group mb-0.5 flex items-center gap-0.5 rounded border-l-2 ${
+                  selectedId === profile.id
+                    ? "border-accent bg-surface-3"
+                    : "border-transparent hover:bg-surface-2"
+                }`}
+                style={profile.accent_color ? { borderLeftColor: profile.accent_color } : undefined}
               >
-                {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                <span className="min-w-0 flex-1 truncate">{group.label}</span>
-                <span id={countId}>{group.profiles.length}</span>
-              </button>
-              {!collapsed ? (
-                <div className="mt-1">
-                  {group.profiles.map((profile) => (
-                    <div
-                      key={profile.id}
-                      className={`mb-1 rounded-md border transition-colors ${
-                        selectedId === profile.id
-                          ? "bg-surface-3 border-border-hover"
-                          : "hover:bg-surface-2 border-transparent"
-                      }`}
-                      style={{
-                        borderLeftWidth: 3,
-                        ...(profile.accent_color ? { borderLeftColor: profile.accent_color } : {}),
-                      }}
-                    >
-                      <div className="flex items-start gap-1.5">
-                        {canManage && onBulkOrganize ? (
-                          <label className="flex items-center pl-2 pt-3">
-                            <input
-                              type="checkbox"
-                              aria-label={`Select ${profile.name}`}
-                              checked={selectedIds.has(profile.id)}
-                              onChange={(e) => {
-                                setSelectedIds((current) => {
-                                  const next = new Set(current);
-                                  if (e.target.checked) next.add(profile.id);
-                                  else next.delete(profile.id);
-                                  return next;
-                                });
-                              }}
-                            />
-                          </label>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() => onSelect(profile.id)}
-                          className="min-w-0 flex-1 px-3 py-2.5 text-left"
-                        >
-                          <div className="flex items-center gap-2">
-                            <StatusIndicator status={profile.status} />
-                            <span className="truncate text-sm font-medium">{profile.name}</span>
-                            {profile.pinned ? (
-                              <span
-                                className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-amber-500/15 text-amber-300"
-                                title="Pinned"
-                                aria-label="Pinned"
-                              >
-                                <Pin className="h-3 w-3 fill-current" />
-                              </span>
-                            ) : null}
-                          </div>
-                          <div className="mt-1 ml-4 flex items-center gap-2">
-                            <span className="truncate text-xs text-gray-500">{group.label}</span>
-                            <span className="text-xs text-gray-600">·</span>
-                            <span className="text-xs text-gray-500 capitalize">{profile.platform}</span>
-                            {profile.proxy && (
-                              <>
-                                <span className="text-xs text-gray-600">·</span>
-                                <span className="text-xs text-gray-500">Proxy</span>
-                              </>
-                            )}
-                          </div>
-                          {profile.tags.length > 0 && (
-                            <div className="ml-4 mt-1.5 flex flex-wrap gap-1">
-                              {profile.tags.map((t) => (
-                                <span
-                                  key={t.tag}
-                                  className="rounded-full bg-surface-4 px-1.5 py-0.5 text-[10px] text-gray-400"
-                                  style={t.color ? { backgroundColor: `${t.color}20`, color: t.color } : undefined}
-                                >
-                                  {t.tag}
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                        </button>
-                        {canManage && onTogglePin ? (
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onTogglePin(profile.id);
-                            }}
-                            className={`m-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors ${
-                              profile.pinned
-                                ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-                                : "border-border text-gray-500 hover:bg-surface-3"
-                            }`}
-                            aria-label={`${profile.pinned ? "Unpin" : "Pin"} ${profile.name}`}
-                            title={`${profile.pinned ? "Unpin" : "Pin"} ${profile.name}`}
-                          >
-                            <Pin className={`h-3.5 w-3.5 ${profile.pinned ? "fill-current" : ""}`} />
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </section>
-          );
-        })}
+                <button
+                  type="button"
+                  onClick={() => onSelect(profile.id)}
+                  className="min-w-0 flex-1 px-1.5 py-1.5 text-left"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <StatusIndicator status={profile.status} />
+                    <span className="truncate text-xs font-medium text-gray-100">{profile.name}</span>
+                  </div>
+                </button>
+                {canManage && onTogglePin ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onTogglePin(profile.id);
+                    }}
+                    className={`mr-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-600 opacity-70 hover:bg-surface-3 hover:opacity-100 ${
+                      profile.pinned ? "text-amber-400 opacity-100" : "group-hover:opacity-100"
+                    }`}
+                    aria-label={`${profile.pinned ? "Unpin" : "Pin"} ${profile.name}`}
+                    title={`${profile.pinned ? "Unpin" : "Pin"} ${profile.name}`}
+                  >
+                    <Pin className={`h-2.5 w-2.5 ${profile.pinned ? "fill-current" : ""}`} />
+                  </button>
+                ) : profile.pinned ? (
+                  <Pin className="mr-1 h-2.5 w-2.5 shrink-0 fill-current text-amber-400" aria-label="Pinned" />
+                ) : null}
+              </div>
+            ))}
+          </section>
+        ))}
       </div>
-
-      {/* New profile button */}
-      {canCreate && (
-        <div className="p-3 border-t border-border">
-          <button onClick={onNew} className="btn-secondary w-full flex items-center justify-center gap-1.5">
-            <Plus className="h-3.5 w-3.5" />
-            <span>New Profile</span>
-          </button>
-        </div>
-      )}
     </div>
   );
 }

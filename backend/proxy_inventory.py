@@ -214,6 +214,14 @@ def build_auto_profile_defaults(
         "timezone": timezone,
         "locale": locale,
         "platform": "windows",
+        "screen_width": 1920,
+        "screen_height": 1080,
+        "hardware_concurrency": 8,
+        "gpu_vendor": "Google Inc. (NVIDIA)",
+        "gpu_renderer": (
+            "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 (0x00002786) "
+            "Direct3D11 vs_5_0 ps_5_0, D3D11)"
+        ),
         "geoip": True,
         "humanize": True,
         "human_preset": "default",

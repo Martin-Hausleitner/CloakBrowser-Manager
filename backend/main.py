@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import starlette.requests
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -49,20 +49,34 @@ if __package__:
         AccessUserCreate,
         AccessUserResponse,
         AccessUserUpdate,
+        ExtensionCatalogResponse,
+        ExtensionDefaultsResponse,
+        ExtensionDefaultsUpdate,
+        ExtensionTemplatesResponse,
+        ExtensionTemplateItem,
         ExtensionInventoryResponse,
         ExtensionItem,
+        ExtensionOpenSessionRequest,
+        ExtensionOpenSessionResponse,
+        ExtensionProfileSummary,
         LaunchResponse,
+        LiveMetricsResponse,
+        LiveMetricsSample,
         LoginRequest,
         ProfileCreate,
         ProfileHealthResponse,
+        ProfileOpenLinksResponse,
         ProfileResponse,
         ProfileStatusResponse,
         ProfileBulkOrganize,
+        ProfileTemplateCreate,
+        ProfileTemplateSummary,
         ProfileUpdate,
         ProxyAutoProfileCreate,
         ProxyInventoryIngest,
         ProxyInventoryIngestResponse,
         ProxyInventoryItem,
+        SessionOpenLinks,
         StatusResponse,
         TagResponse,
         TaskCommandRequest,
@@ -73,6 +87,11 @@ if __package__:
         TaskSessionResponse,
     )
     from . import proxy_inventory
+    from . import session_links
+    from . import session_views
+    from . import extension_catalog
+    from . import profile_templates
+    from . import stream_metrics
 else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
     import database as db
@@ -93,20 +112,34 @@ else:  # Support `uvicorn main:app` from the backend directory.
         AccessUserCreate,
         AccessUserResponse,
         AccessUserUpdate,
+        ExtensionCatalogResponse,
+        ExtensionDefaultsResponse,
+        ExtensionDefaultsUpdate,
+        ExtensionTemplatesResponse,
+        ExtensionTemplateItem,
         ExtensionInventoryResponse,
         ExtensionItem,
+        ExtensionOpenSessionRequest,
+        ExtensionOpenSessionResponse,
+        ExtensionProfileSummary,
         LaunchResponse,
+        LiveMetricsResponse,
+        LiveMetricsSample,
         LoginRequest,
         ProfileCreate,
         ProfileHealthResponse,
+        ProfileOpenLinksResponse,
         ProfileResponse,
         ProfileStatusResponse,
         ProfileBulkOrganize,
+        ProfileTemplateCreate,
+        ProfileTemplateSummary,
         ProfileUpdate,
         ProxyAutoProfileCreate,
         ProxyInventoryIngest,
         ProxyInventoryIngestResponse,
         ProxyInventoryItem,
+        SessionOpenLinks,
         StatusResponse,
         TagResponse,
         TaskCommandRequest,
@@ -117,6 +150,11 @@ else:  # Support `uvicorn main:app` from the backend directory.
         TaskSessionResponse,
     )
     import proxy_inventory
+    import session_links
+    import session_views
+    import extension_catalog
+    import profile_templates
+    import stream_metrics
 
 logger = logging.getLogger("cloakbrowser.manager")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -1428,6 +1466,25 @@ def _require_admin(scope: Scope) -> access.AccessIdentity:
     return identity
 
 
+def _require_sandbox_permission(
+    scope: Scope, sandbox_id: str, permission: access.Permission
+) -> access.AccessIdentity:
+    """Authorize a sandbox-scoped action for agents/operators (not UI-only)."""
+    identity = _require_identity(scope)
+    sid = str(sandbox_id or "default")
+    if access.has_permission(identity, sid, permission):
+        return identity
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        f"sandbox.permission.{permission}",
+        "denied",
+        sid,
+        None,
+    )
+    raise HTTPException(status_code=403, detail="Sandbox permission required")
+
+
 def _require_profile_permission(
     scope: Scope, profile_id: str, permission: access.Permission
 ) -> tuple[dict[str, object], access.AccessIdentity]:
@@ -1597,6 +1654,60 @@ def _profile_response(profile: dict[str, object], identity: access.AccessIdentit
             response["cdp_url"] = None
 
     return ProfileResponse(**response)
+
+
+def _request_local_base(request: Request) -> str:
+    """Client-facing base URL (SSH tunnel Host or reverse-proxy Host)."""
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host")
+    return session_links.request_base_url(
+        scheme=request.url.scheme,
+        host=request.headers.get("host") or request.url.netloc,
+        forwarded_proto=forwarded_proto,
+        forwarded_host=forwarded_host,
+    )
+
+
+def _session_open_links(
+    request: Request,
+    profile: dict[str, object],
+    identity: access.AccessIdentity,
+    *,
+    prefer: str = "local",
+    mode: str = "cdp",
+) -> SessionOpenLinks:
+    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "automate"
+    )
+    payload = session_links.build_session_open_links(
+        str(profile["id"]),
+        local_base=_request_local_base(request),
+        include_cdp=include_cdp,
+        prefer=prefer,
+        mode=mode,
+    )
+    return SessionOpenLinks(**payload)
+
+
+def _profile_open_links_response(
+    request: Request,
+    profile: dict[str, object],
+    identity: access.AccessIdentity,
+    *,
+    prefer: str = "local",
+    mode: str = "cdp",
+) -> ProfileOpenLinksResponse:
+    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "automate"
+    )
+    payload = session_links.build_session_open_links(
+        str(profile["id"]),
+        local_base=_request_local_base(request),
+        include_cdp=include_cdp,
+        prefer=prefer,
+        mode=mode,
+    )
+    return ProfileOpenLinksResponse(**payload)
 
 
 def _access_user_response(user: dict[str, object]) -> AccessUserResponse:
@@ -1976,9 +2087,12 @@ async def rotate_access_agent_key(agent_id: str, request: Request):
 
 @app.get("/api/access/sandboxes")
 async def list_access_sandboxes(request: Request):
-    _require_admin(request.scope)
+    """List sandboxes visible to the caller (admin: all; agent/user: granted only)."""
+    identity = _require_identity(request.scope)
     summaries: dict[str, dict[str, Any]] = {}
     for profile in db.list_profiles():
+        if not access.can_access_profile(identity, profile, "view"):
+            continue
         sandbox_id = str(profile.get("sandbox_id") or "default")
         summary = summaries.setdefault(
             sandbox_id,
@@ -1995,6 +2109,18 @@ async def list_access_sandboxes(request: Request):
         if folder_path:
             summary["folder_paths"].add(folder_path)
         summary["profile_names"].add(str(profile.get("name") or "Unnamed profile"))
+
+    # Include empty granted sandboxes so agents can create the first profile there.
+    if not identity.is_admin:
+        for grant in identity.grants:
+            sid = str(grant.get("sandbox_id") or "")
+            if sid and sid not in summaries and access.has_permission(identity, sid, "view"):
+                summaries[sid] = {
+                    "profile_count": 0,
+                    "project_ids": set(),
+                    "folder_paths": set(),
+                    "profile_names": set(),
+                }
 
     return [
         {
@@ -2388,8 +2514,10 @@ async def list_profiles(request: Request):
 
 @app.post("/api/profiles", response_model=ProfileResponse, status_code=201)
 async def create_profile(req: ProfileCreate, request: Request):
-    identity = _require_admin(request.scope)
+    """Create a profile in a sandbox the caller can operate (agent/CLI control plane)."""
     data = req.model_dump()
+    sandbox_id = str(data.get("sandbox_id") or "default")
+    identity = _require_sandbox_permission(request.scope, sandbox_id, "operate")
     tags = data.pop("tags", None)
     if tags:
         data["tags"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in tags]
@@ -2411,14 +2539,30 @@ async def get_profile(profile_id: str, request: Request):
 
 @app.post("/api/profiles/bulk-organize", response_model=list[ProfileResponse])
 async def bulk_organize_profiles(req: ProfileBulkOrganize, request: Request):
-    """Move or pin multiple profiles. Matches profile update: administrator only."""
-    identity = _require_admin(request.scope)
+    """Move or pin profiles the caller can operate (sandbox-scoped; not UI-only)."""
+    identity = _require_identity(request.scope)
     if req.project_id is None and req.folder_path is None and req.pinned is None:
         raise HTTPException(status_code=400, detail="No organization fields provided")
 
+    # Authorize every requested profile for operate before mutating any of them.
+    authorized_ids: list[str] = []
+    for profile_id in req.profile_ids:
+        profile = db.get_profile(profile_id)
+        if not profile or not access.can_access_profile(identity, profile, "operate"):
+            db.record_access_audit_event(
+                identity.kind,
+                identity.id,
+                "profile.permission.operate",
+                "denied",
+                str((profile or {}).get("sandbox_id") or "default"),
+                profile_id,
+            )
+            raise HTTPException(status_code=404, detail="Profile not found")
+        authorized_ids.append(profile_id)
+
     try:
         updated = db.bulk_organize_profiles(
-            req.profile_ids,
+            authorized_ids,
             project_id=req.project_id,
             folder_path=req.folder_path,
             pinned=req.pinned,
@@ -2443,36 +2587,38 @@ async def bulk_organize_profiles(req: ProfileBulkOrganize, request: Request):
 
 @app.put("/api/profiles/{profile_id}", response_model=ProfileResponse)
 async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
-    identity = _require_admin(request.scope)
+    """Update profile details for callers with operate on the profile sandbox."""
+    profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
     # Only pass fields that were explicitly set
     data = req.model_dump(exclude_unset=True)
     tags = data.pop("tags", None)
     if tags is not None:
         data["tags"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in tags]
-    profile = db.update_profile(profile_id, **data)
-    if not profile:
+    if "sandbox_id" in data:
+        target_sandbox = str(data.get("sandbox_id") or "default")
+        current_sandbox = str(profile.get("sandbox_id") or "default")
+        if target_sandbox != current_sandbox:
+            _require_sandbox_permission(request.scope, target_sandbox, "operate")
+    updated = db.update_profile(profile_id, **data)
+    if not updated:
         raise HTTPException(status_code=404, detail="Profile not found")
     if "sandbox_id" in data:
         _revoke_websocket_access(profile_id=profile_id)
     db.record_access_audit_event(
-        identity.kind, identity.id, "profile.update", "allowed", str(profile.get("sandbox_id") or "default"), profile_id
+        identity.kind, identity.id, "profile.update", "allowed", str(updated.get("sandbox_id") or "default"), profile_id
     )
-    return _profile_response(profile, identity)
+    return _profile_response(updated, identity)
 
 
 @app.delete("/api/profiles/{profile_id}")
 async def delete_profile(profile_id: str, request: Request):
-    identity = _require_admin(request.scope)
+    profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
     # Stop browser if running
     if profile_id in browser_mgr.running:
         await browser_mgr.stop(profile_id)
     await _cancel_profile_health_task(profile_id)
 
-    profile = db.get_profile(profile_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
-    user_data_dir = Path(profile["user_data_dir"])
+    user_data_dir = Path(str(profile["user_data_dir"]))
 
     # DB first — if this fails, filesystem is untouched
     db.delete_profile(profile_id)
@@ -2526,6 +2672,7 @@ async def launch_profile(profile_id: str, request: Request):
             if access.can_access_profile(identity, profile, "automate")
             else None
         ),
+        links=_session_open_links(request, profile, identity),
     )
 
 
@@ -2605,7 +2752,310 @@ async def get_profile_status(profile_id: str, request: Request):
         status["vnc_ws_port"] = None
         if not access.can_access_profile(identity, profile, "automate"):
             status["cdp_url"] = None
-    return ProfileStatusResponse(**status)
+    links = _session_open_links(request, profile, identity)
+    return ProfileStatusResponse(**status, links=links)
+
+
+# ── Extension bootstrap (Chrome extension / agent one-click) ─────────────────
+
+
+# ── Extension bootstrap (Chrome extension / agent one-click) ─────────────────
+
+
+def _extension_catalog_payload(request: Request) -> ExtensionCatalogResponse:
+    identity = _require_identity(request.scope)
+    profiles: list[ExtensionProfileSummary] = []
+    for profile in db.list_profiles():
+        if not access.can_access_profile(identity, profile, "view"):
+            continue
+        status = browser_mgr.get_status(str(profile["id"]))
+        summary = session_links.extension_profile_summary(
+            profile,
+            status=str(status.get("status") or "stopped"),
+            running=str(status.get("status") or "") == "running",
+        )
+        profiles.append(ExtensionProfileSummary(**summary))
+
+    proxies: list[ProxyInventoryItem] = []
+    if identity.is_admin:
+        proxies = [_proxy_inventory_item(row) for row in db.list_proxy_inventory()]
+
+    local_base = _request_local_base(request)
+    cloud_base = session_links.cloud_base_url()
+    return ExtensionCatalogResponse(
+        bases={"local": local_base, "cloud": cloud_base},
+        endpoints=session_links.catalog_endpoint_map(),
+        profiles=profiles,
+        proxies=proxies,
+        capabilities={
+            "can_list_proxies": identity.is_admin,
+            "can_ingest_proxies": identity.is_admin,
+            "can_open_sessions": True,
+            "cloud_base_configured": bool(cloud_base),
+            "can_manage_extension_defaults": identity.is_admin,
+            "can_list_templates": True,
+            "cdp_live": True,
+            "live_metrics": True,
+        },
+    )
+
+
+@app.get("/api/extension/catalog", response_model=ExtensionCatalogResponse)
+async def get_extension_catalog(request: Request):
+    """List redacted profiles + proxies and stable endpoints for an extension."""
+    return _extension_catalog_payload(request)
+
+
+@app.post("/api/extension/catalog", response_model=ExtensionCatalogResponse)
+async def post_extension_catalog(request: Request):
+    """POST alias for catalog refresh (agent-friendly; same as GET)."""
+    return _extension_catalog_payload(request)
+
+
+@app.get("/api/extension/defaults", response_model=ExtensionDefaultsResponse)
+async def get_extension_defaults(request: Request):
+    """Selectable Comet-derived default extensions for new/template profiles."""
+    _require_identity(request.scope)
+    payload = extension_catalog.defaults_payload()
+    return ExtensionDefaultsResponse(**payload)
+
+
+@app.put("/api/extension/defaults", response_model=ExtensionDefaultsResponse)
+async def put_extension_defaults(req: ExtensionDefaultsUpdate, request: Request):
+    """Persist which catalog extensions install by default (admin/API parity)."""
+    identity = _require_identity(request.scope)
+    if ACCESS_CONTROL_ENABLED and not identity.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator required")
+    extension_catalog.save_selected_ids(list(req.selected_ids or []))
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "extension.defaults.update",
+        "allowed",
+        "default",
+        None,
+    )
+    return ExtensionDefaultsResponse(**extension_catalog.defaults_payload())
+
+
+@app.get("/api/extension/templates", response_model=ExtensionTemplatesResponse)
+async def get_extension_templates(request: Request):
+    """Lightweight template list for Chrome sync / agents."""
+    _require_identity(request.scope)
+    items = []
+    for template in profile_templates.list_templates():
+        items.append(
+            ExtensionTemplateItem(
+                id=str(template["id"]),
+                name=str(template["name"]),
+                project_id=str(template.get("project_id") or "default"),
+                folder_path=str(template.get("folder_path") or ""),
+                harness=template.get("harness") or "browser-use",
+                geoip=bool(template.get("geoip")) if "geoip" in template else None,
+                screen_width=template.get("screen_width"),
+                screen_height=template.get("screen_height"),
+                create_path="/api/profile-templates/{template_id}/profiles",
+                from_proxy_path="/api/proxies/{proxy_id}/profiles",
+            )
+        )
+    # Also expose the thin session_links templates for compatibility.
+    for template in session_links.profile_templates():
+        if any(item.id == template["id"] for item in items):
+            continue
+        items.append(ExtensionTemplateItem(**template))
+    return ExtensionTemplatesResponse(templates=items)
+
+
+@app.get("/api/profile-templates", response_model=list[ProfileTemplateSummary])
+async def list_profile_templates(request: Request):
+    """Full template cards including system prompts (agent + UI parity)."""
+    _require_identity(request.scope)
+    return [
+        ProfileTemplateSummary(
+            id=str(item["id"]),
+            name=str(item["name"]),
+            summary=str(item.get("summary") or ""),
+            system_prompt=str(item.get("system_prompt") or ""),
+            harness=item.get("harness") or "browser-use",
+            project_id=str(item.get("project_id") or "default"),
+            folder_path=str(item.get("folder_path") or ""),
+            platform=item.get("platform") or "windows",
+            apply_default_extensions=bool(item.get("apply_default_extensions", True)),
+            quick_options=list(item.get("quick_options") or []),
+        )
+        for item in profile_templates.list_templates()
+    ]
+
+
+@app.post(
+    "/api/profile-templates/{template_id}/profiles",
+    response_model=ProfileResponse,
+    status_code=201,
+)
+async def create_profile_from_template(
+    template_id: str,
+    request: Request,
+    req: ProfileTemplateCreate | None = None,
+):
+    """Materialize a prefabricated profile (includes selected default extensions)."""
+    identity = _require_identity(request.scope)
+    if ACCESS_CONTROL_ENABLED and not identity.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator required")
+    body = req or ProfileTemplateCreate(template_id=template_id)
+    try:
+        fields = profile_templates.build_profile_fields(
+            template_id,
+            overrides={
+                "name": body.name,
+                "project_id": body.project_id,
+                "harness": body.harness,
+                "proxy": body.proxy,
+            },
+            apply_extensions=body.apply_default_extensions,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Template not found") from None
+    # Strip agent-only metadata before DB write
+    fields.pop("system_prompt", None)
+    fields.pop("template_id", None)
+    profile = db.create_profile(**fields)
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "profile.create_from_template",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        str(profile["id"]),
+    )
+    if body.launch:
+        try:
+            await browser_mgr.launch(profile)
+        except Exception:
+            logger.error("Template profile launch failed for %s", profile["id"])
+    return _profile_response(profile, identity)
+
+
+@app.get("/session/{profile_id}/live")
+async def cdp_live_session(profile_id: str, request: Request):
+    """Browser-Use-style CDP screencast fullscreen page (snappy live URL)."""
+    from fastapi.responses import HTMLResponse
+
+    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
+    if profile_id not in browser_mgr.running:
+        raise HTTPException(status_code=409, detail="Profile is not running")
+    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "automate"
+    )
+    if not include_cdp:
+        raise HTTPException(status_code=403, detail="CDP live view requires automate permission")
+    local_base = _request_local_base(request)
+    ws_base = f"{session_links.ws_scheme_for(local_base)}://{local_base.split('://', 1)[-1]}"
+    cdp_ws = f"{ws_base}/api/profiles/{profile_id}/cdp"
+    metrics = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/live-metrics"
+    interactive = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "interact"
+    )
+    html = session_views.render_cdp_live_html(
+        profile_id=profile_id,
+        profile_name=str(profile.get("name") or profile_id),
+        cdp_ws_url=cdp_ws,
+        metrics_url=metrics,
+        interactive=interactive,
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/api/profiles/{profile_id}/open-links", response_model=ProfileOpenLinksResponse)
+async def get_profile_open_links(
+    profile_id: str,
+    request: Request,
+    prefer: str = Query(default="local"),
+    mode: str = Query(default="cdp"),
+):
+    """Steel-style local/cloud open URLs for a profile (extension/agent compatible)."""
+    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
+    prefer_key = prefer if prefer in {"local", "cloud"} else "local"
+    mode_key = mode if mode in {"cdp", "vnc", "shell"} else "cdp"
+    return _profile_open_links_response(
+        request, profile, identity, prefer=prefer_key, mode=mode_key
+    )
+
+
+@app.post("/api/extension/sessions/open", response_model=ExtensionOpenSessionResponse)
+async def extension_open_session(req: ExtensionOpenSessionRequest, request: Request):
+    """Launch (optional) and return local/cloud open links for one-click use."""
+    profile, identity = _require_profile_permission(request.scope, req.profile_id, "view")
+    already_running = req.profile_id in browser_mgr.running
+    launched = False
+    running = browser_mgr.running.get(req.profile_id)
+
+    if req.launch and not already_running:
+        _require_profile_permission(request.scope, req.profile_id, "operate")
+        try:
+            running = await browser_mgr.launch(profile)
+            launched = True
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid browser profile configuration")
+        except Exception:
+            logger.error("Extension open failed for profile %s", req.profile_id)
+            raise HTTPException(status_code=500, detail="Failed to launch browser")
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "profile.launch",
+            "allowed",
+            str(profile.get("sandbox_id") or "default"),
+            req.profile_id,
+        )
+        try:
+            _schedule_profile_health(profile, running, force=False)
+        except Exception as exc:
+            logger.error(
+                "Could not schedule profile health for %s (%s)",
+                req.profile_id,
+                type(exc).__name__,
+            )
+
+    links = _session_open_links(
+        request, profile, identity, prefer=req.prefer, mode=req.mode
+    )
+    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "automate"
+    )
+    status = "running" if (already_running or launched or running) else "stopped"
+    return ExtensionOpenSessionResponse(
+        profile_id=req.profile_id,
+        status=status,
+        launched=launched,
+        already_running=already_running,
+        prefer=links.prefer,
+        mode=links.mode,
+        open_url=links.open_url,
+        links=links,
+        cdp_url=(f"/api/profiles/{req.profile_id}/cdp" if include_cdp and status == "running" else None),
+        vnc_ws_port=(
+            None
+            if ACCESS_CONTROL_ENABLED and not identity.is_admin
+            else (running.ws_port if running else None)
+        ),
+        display=(f":{running.display}" if running and (identity.is_admin or not ACCESS_CONTROL_ENABLED) else None),
+    )
+
+
+@app.get("/api/profiles/{profile_id}/live-metrics", response_model=LiveMetricsResponse)
+async def get_live_metrics(profile_id: str, request: Request):
+    """Poll CDP/VNC livestream metrics (fps, rtt, connection state)."""
+    _require_profile_permission(request.scope, profile_id, "view")
+    return LiveMetricsResponse(**stream_metrics.stream_metrics.snapshot(profile_id))
+
+
+@app.post("/api/profiles/{profile_id}/live-metrics", response_model=LiveMetricsResponse)
+async def post_live_metrics(profile_id: str, body: LiveMetricsSample, request: Request):
+    """Client/agent heartbeat for livestream quality metrics."""
+    _require_profile_permission(request.scope, profile_id, "view")
+    return LiveMetricsResponse(
+        **stream_metrics.stream_metrics.record(profile_id, body.model_dump())
+    )
 
 
 # ── System Status ─────────────────────────────────────────────────────────────

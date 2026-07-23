@@ -2,9 +2,72 @@
  * API client for CloakBrowser Manager backend.
  */
 
-export type ProfileHarness = "codex" | "antigravity" | "claude-code" | "opencode" | "browser-use";
+export type ProfileHarness =
+  | "codex"
+  | "antigravity"
+  | "claude-code"
+  | "opencode"
+  | "browser-use"
+  | "browser-harness"
+  | "unbrowse"
+  | "stagehand";
 
 export type ProxyCheckState = "missing" | "passed" | "warning" | "failed" | "unavailable";
+
+export interface ExtensionDefaultItem {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  tags?: string[];
+  recommended?: boolean;
+  default_selected?: boolean;
+  selectable?: boolean;
+  selected?: boolean;
+  available?: boolean;
+  path?: string | null;
+  icon_url?: string | null;
+  store_url?: string | null;
+}
+
+export interface ExtensionDefaults {
+  source: string;
+  source_label?: string;
+  catalog_dir_configured?: boolean;
+  selected_ids: string[];
+  extensions: ExtensionDefaultItem[];
+  items?: ExtensionDefaultItem[];
+  count?: number;
+}
+
+export interface ProfileTemplate {
+  id: string;
+  name: string;
+  summary: string;
+  system_prompt: string;
+  harness: ProfileHarness;
+  project_id: string;
+  folder_path: string;
+  platform: string;
+  apply_default_extensions: boolean;
+  quick_options: string[];
+}
+
+export interface ProfileOpenLinks {
+  profile_id: string;
+  prefer: "local" | "cloud";
+  mode?: "cdp" | "vnc" | "shell";
+  open_url: string;
+  session_viewer_url: string;
+  vnc_fullscreen_url?: string | null;
+  cdp_fullscreen_url?: string | null;
+  live_url?: string | null;
+  websocket_url?: string;
+  cdp_url?: string | null;
+  live_metrics_url?: string | null;
+  local_url?: string;
+  cloud_url?: string | null;
+}
 
 export interface ProxyInventoryItem {
   id: string;
@@ -466,6 +529,41 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
       method: "POST",
       body: JSON.stringify(data ?? {}),
     }),
+
+  getExtensionDefaults: () => request<ExtensionDefaults>("/api/extension/defaults"),
+
+  updateExtensionDefaults: (selected_ids: string[]) =>
+    request<ExtensionDefaults>("/api/extension/defaults", {
+      method: "PUT",
+      body: JSON.stringify({ selected_ids }),
+    }),
+
+  listProfileTemplates: () => request<ProfileTemplate[]>("/api/profile-templates"),
+
+  createProfileFromTemplate: (
+    templateId: string,
+    data?: {
+      name?: string | null;
+      project_id?: string;
+      harness?: ProfileHarness;
+      proxy?: string | null;
+      apply_default_extensions?: boolean;
+      launch?: boolean;
+    },
+  ) =>
+    request<Profile>(`/api/profile-templates/${encodeURIComponent(templateId)}/profiles`, {
+      method: "POST",
+      body: JSON.stringify({ template_id: templateId, ...(data ?? {}) }),
+    }),
+
+  getProfileOpenLinks: (
+    id: string,
+    prefer: "local" | "cloud" = "local",
+    mode: "cdp" | "vnc" | "shell" = "cdp",
+  ) =>
+    request<ProfileOpenLinks>(
+      `/api/profiles/${encodeURIComponent(id)}/open-links?prefer=${encodeURIComponent(prefer)}&mode=${encodeURIComponent(mode)}`,
+    ),
 
   getBenchmarkReport: (url = DEFAULT_BENCHMARK_REPORT_URL) =>
     request<BenchmarkReport>(url),

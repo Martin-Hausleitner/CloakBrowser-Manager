@@ -48,8 +48,8 @@ describe("ProfileHealthSummary", () => {
   it("shows a compact state and explicit measured, derived, unavailable and skipped details", async () => {
     render(<ProfileHealthSummary profileId="profile-1" canRun={false} running={false} />);
 
-    expect(await screen.findByText("Health warning")).toBeTruthy();
-    fireEvent.click(screen.getByText("Health warning"));
+    expect(await screen.findByText(/Health warning/)).toBeTruthy();
+    fireEvent.click(screen.getByText(/Health warning/));
 
     expect(screen.getByText("Profile health")).toBeTruthy();
     expect(screen.getByText("203.0.113.x")).toBeTruthy();
@@ -75,8 +75,8 @@ describe("ProfileHealthSummary", () => {
     const { container } = render(
       <ProfileHealthSummary profileId="profile-1" canRun={false} running={false} />,
     );
-    await screen.findByText("Health warning");
-    fireEvent.click(screen.getByText("Health warning"));
+    await screen.findByText(/Health warning/);
+    fireEvent.click(screen.getByText(/Health warning/));
 
     expect(container.textContent).not.toContain("secret-password");
     expect(container.textContent).not.toContain("proxy.example");
@@ -88,19 +88,19 @@ describe("ProfileHealthSummary", () => {
     vi.mocked(api.runProfileHealth).mockResolvedValue({ ...warningHealth, state: "pending" });
     render(<ProfileHealthSummary profileId="profile-1" canRun running />);
 
-    await screen.findByText("Health warning");
-    fireEvent.click(screen.getByText("Health warning"));
+    await screen.findByText(/Health warning/);
+    fireEvent.click(screen.getByText(/Health warning/));
     fireEvent.click(screen.getByRole("button", { name: "Run health check" }));
 
     await waitFor(() => expect(api.runProfileHealth).toHaveBeenCalledWith("profile-1"));
-    expect(await screen.findByText("Health pending")).toBeTruthy();
+    expect(await screen.findByText(/Health pending/)).toBeTruthy();
   });
 
   it("keeps rerun disabled while the profile is stopped", async () => {
     render(<ProfileHealthSummary profileId="profile-1" canRun running={false} />);
 
-    await screen.findByText("Health warning");
-    fireEvent.click(screen.getByText("Health warning"));
+    await screen.findByText(/Health warning/);
+    fireEvent.click(screen.getByText(/Health warning/));
     expect((screen.getByRole("button", { name: "Run health check" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

@@ -159,7 +159,7 @@ interface AppContentProps {
 }
 
 function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: AppContentProps) {
-  const { profiles, loading, error, create, update, remove, launch, stop } = useProfiles();
+  const { profiles, loading, error, refresh, create, update, remove, launch, stop } = useProfiles();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>("empty");
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -251,7 +251,18 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     });
   }, [canManageProfiles, canOperateSelected, launch, selected, stop, update]);
 
-  const handleTogglePin = useCallback(async (id: string) => {
+
+  const handleBulkOrganize = async (payload: {
+    profile_ids: string[];
+    project_id?: string;
+    folder_path?: string;
+    pinned?: boolean;
+  }) => {
+    await api.bulkOrganizeProfiles(payload);
+    await refresh();
+  };
+
+const handleTogglePin = useCallback(async (id: string) => {
     const profile = profiles.find((candidate) => candidate.id === id) ?? null;
     await toggleProfilePin({
       profile,
@@ -382,6 +393,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             canCreate={canManageProfiles}
             canManage={canManageProfiles}
             onTogglePin={handleTogglePin}
+            onBulkOrganize={canManageProfiles ? handleBulkOrganize : undefined}
           />
         </div>
       )}

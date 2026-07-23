@@ -11,6 +11,12 @@ interface ProfileListProps {
   onNew: () => void;
   canCreate?: boolean;
   onTogglePin?: (id: string) => void;
+  onBulkOrganize?: (payload: {
+    profile_ids: string[];
+    project_id?: string;
+    folder_path?: string;
+    pinned?: boolean;
+  }) => Promise<void> | void;
   canManage?: boolean;
 }
 
@@ -41,10 +47,15 @@ export function ProfileList({
   onNew,
   canCreate = true,
   onTogglePin,
+  onBulkOrganize,
   canManage = false,
 }: ProfileListProps) {
   const [search, setSearch] = useState("");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkProject, setBulkProject] = useState("default");
+  const [bulkFolder, setBulkFolder] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const { filtered, groups } = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
@@ -88,6 +99,47 @@ export function ProfileList({
             className="input pl-8 py-1.5 text-xs"
           />
         </div>
+        {canManage && onBulkOrganize ? (
+          <div className="mt-3 space-y-2 rounded-md border border-border bg-surface-2 p-2">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+              Bulk organize ({selectedIds.size})
+            </div>
+            <input
+              aria-label="Bulk project"
+              className="input py-1.5 text-xs"
+              value={bulkProject}
+              onChange={(e) => setBulkProject(e.target.value)}
+              placeholder="project"
+            />
+            <input
+              aria-label="Bulk folder path"
+              className="input py-1.5 text-xs"
+              value={bulkFolder}
+              onChange={(e) => setBulkFolder(e.target.value)}
+              placeholder="folder/path"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary w-full text-xs"
+              disabled={selectedIds.size === 0 || bulkBusy}
+              onClick={async () => {
+                setBulkBusy(true);
+                try {
+                  await onBulkOrganize({
+                    profile_ids: Array.from(selectedIds),
+                    project_id: bulkProject.trim() || "default",
+                    folder_path: bulkFolder.trim(),
+                  });
+                  setSelectedIds(new Set());
+                } finally {
+                  setBulkBusy(false);
+                }
+              }}
+            >
+              Move selected
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {/* Profile list */}
@@ -130,6 +182,23 @@ export function ProfileList({
                       }}
                     >
                       <div className="flex items-start gap-1.5">
+                        {canManage && onBulkOrganize ? (
+                          <label className="flex items-center pl-2 pt-3">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select ${profile.name}`}
+                              checked={selectedIds.has(profile.id)}
+                              onChange={(e) => {
+                                setSelectedIds((current) => {
+                                  const next = new Set(current);
+                                  if (e.target.checked) next.add(profile.id);
+                                  else next.delete(profile.id);
+                                  return next;
+                                });
+                              }}
+                            />
+                          </label>
+                        ) : null}
                         <button
                           type="button"
                           onClick={() => onSelect(profile.id)}

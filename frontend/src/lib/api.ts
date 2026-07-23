@@ -373,7 +373,18 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
+    bulkOrganizeProfiles: (data: {
+    profile_ids: string[];
+    project_id?: string | null;
+    folder_path?: string | null;
+    pinned?: boolean | null;
+  }) =>
+    request<Profile[]>("/api/profiles/bulk-organize", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
     request<Profile>(`/api/profiles/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),

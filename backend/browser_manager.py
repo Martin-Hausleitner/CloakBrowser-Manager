@@ -15,8 +15,10 @@ from typing import Any
 from cloakbrowser import launch_persistent_context_async
 
 if __package__:
+    from . import live_diagnostics
     from .vnc_manager import VNCManager
 else:  # Support importing browser_manager as a top-level module.
+    import live_diagnostics
     from vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")

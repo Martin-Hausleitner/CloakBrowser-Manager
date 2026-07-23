@@ -57,6 +57,7 @@ if __package__:
         ProfileHealthResponse,
         ProfileResponse,
         ProfileStatusResponse,
+        ProfileBulkOrganize,
         ProfileUpdate,
         StatusResponse,
         TagResponse,
@@ -95,6 +96,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
         ProfileHealthResponse,
         ProfileResponse,
         ProfileStatusResponse,
+        ProfileBulkOrganize,
         ProfileUpdate,
         StatusResponse,
         TagResponse,
@@ -2204,6 +2206,39 @@ async def create_profile(req: ProfileCreate, request: Request):
 async def get_profile(profile_id: str, request: Request):
     profile, identity = _require_profile_permission(request.scope, profile_id, "view")
     return _profile_response(profile, identity)
+
+
+
+@app.post("/api/profiles/bulk-organize", response_model=list[ProfileResponse])
+async def bulk_organize_profiles(req: ProfileBulkOrganize, request: Request):
+    """Move or pin multiple profiles. Matches profile update: administrator only."""
+    identity = _require_admin(request.scope)
+    if req.project_id is None and req.folder_path is None and req.pinned is None:
+        raise HTTPException(status_code=400, detail="No organization fields provided")
+
+    try:
+        updated = db.bulk_organize_profiles(
+            req.profile_ids,
+            project_id=req.project_id,
+            folder_path=req.folder_path,
+            pinned=req.pinned,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    for row in updated:
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "profile.bulk_organize",
+            "allowed",
+            str(row.get("sandbox_id") or "default"),
+            str(row.get("id") or ""),
+        )
+    return [_profile_response(row, identity) for row in updated]
 
 
 @app.put("/api/profiles/{profile_id}", response_model=ProfileResponse)

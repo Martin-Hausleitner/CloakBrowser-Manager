@@ -117,6 +117,40 @@ class ProfileUpdate(BaseModel):
         return _validate_folder_path(value)
 
 
+class ProfileBulkOrganize(BaseModel):
+    """Safe bulk organization update. Authorization remains sandbox-scoped per profile."""
+
+    profile_ids: list[str] = Field(min_length=1, max_length=100)
+    project_id: str | None = Field(default=None, min_length=1, max_length=80, pattern=SLUG_PATTERN)
+    folder_path: str | None = Field(default=None, max_length=240)
+    pinned: bool | None = None
+
+    @field_validator("folder_path")
+    @classmethod
+    def validate_folder_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_folder_path(value)
+
+    @field_validator("profile_ids")
+    @classmethod
+    def validate_profile_ids(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            pid = str(item or "").strip()
+            if not pid or len(pid) > 120:
+                raise ValueError("profile_ids must contain non-empty ids up to 120 characters")
+            if pid in seen:
+                continue
+            seen.add(pid)
+            cleaned.append(pid)
+        if not cleaned:
+            raise ValueError("profile_ids must not be empty")
+        return cleaned
+
+
+
 class TagCreate(BaseModel):
     tag: str
     color: str | None = None  # hex color

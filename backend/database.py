@@ -426,6 +426,34 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
     return get_profile(profile_id)
 
 
+def bulk_organize_profiles(
+    profile_ids: list[str],
+    *,
+    project_id: str | None = None,
+    folder_path: str | None = None,
+    pinned: bool | None = None,
+) -> list[dict[str, Any]]:
+    """Apply organization fields to many profiles using the normal update path."""
+    if not profile_ids:
+        return []
+    fields: dict[str, Any] = {}
+    if project_id is not None:
+        fields["project_id"] = project_id
+    if folder_path is not None:
+        fields["folder_path"] = folder_path
+    if pinned is not None:
+        fields["pinned"] = pinned
+    if not fields:
+        raise ValueError("No organization fields provided")
+
+    updated: list[dict[str, Any]] = []
+    for profile_id in profile_ids:
+        row = update_profile(profile_id, **fields)
+        if row is not None:
+            updated.append(row)
+    return updated
+
+
 def delete_profile(profile_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))

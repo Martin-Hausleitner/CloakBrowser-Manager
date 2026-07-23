@@ -103,3 +103,59 @@ describe("ProfileList organization", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 });
+
+
+it("shows bulk organize controls for managers", async () => {
+  const onBulkOrganize = vi.fn();
+  render(
+    <ProfileList
+      profiles={[
+        {
+          id: "1",
+          name: "Alpha",
+          sandbox_id: "alpha",
+          project_id: "commerce",
+          folder_path: "us",
+          pinned: false,
+          accent_color: null,
+          harness: "codex",
+          fingerprint_seed: 1,
+          proxy: null,
+          timezone: null,
+          locale: null,
+          platform: "windows",
+          user_agent: null,
+          screen_width: 1920,
+          screen_height: 1080,
+          gpu_vendor: null,
+          gpu_renderer: null,
+          hardware_concurrency: null,
+          humanize: false,
+          human_preset: "default",
+          headless: false,
+          geoip: false,
+          clipboard_sync: false,
+          auto_launch: false,
+          color_scheme: null,
+          search_engine: null,
+          launch_args: [],
+          notes: null,
+          user_data_dir: "",
+          created_at: "2026-07-22T00:00:00Z",
+          updated_at: "2026-07-22T00:00:00Z",
+          tags: [],
+          status: "stopped",
+          vnc_ws_port: null,
+          cdp_url: null,
+        },
+      ]}
+      selectedId={null}
+      onSelect={() => {}}
+      onNew={() => {}}
+      canManage
+      onBulkOrganize={onBulkOrganize}
+    />,
+  );
+  expect(screen.getByText(/Bulk organize/i)).toBeTruthy();
+  expect(screen.getByLabelText("Select Alpha")).toBeTruthy();
+});

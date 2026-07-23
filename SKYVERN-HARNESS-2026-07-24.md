@@ -1,4 +1,4 @@
-[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T01:47+02:00
+[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T01:51+02:00
 > 🧠 NotebookLM: n/a (kein IDR-Auftrag in dieser Lane; Architektur aus Skyvern README + CloakBrowser-Manager CDP API)
 
 # SKYVERN-HARNESS — CloakBrowser × Skyvern (2026-07-24)
@@ -17,7 +17,7 @@ Skyvern ist als **optionaler AGPL-Harness** an CloakBrowser Manager angedockt. A
 |---|---|
 | OpenSpec `skyvern-harness --strict` | PASS |
 | Unit tests `test_skyvern_harness.py` | **6/6** |
-| API + harness suite (`AUTH_TOKEN=` clean) | **49 passed** |
+| Full backend suite (`AUTH_TOKEN=` clean) | **228 passed** |
 | Live CDP proof via `Skyvern.local` + `SkyvernBrowser` | **PASS** → example.com |
 | Screenshot non-empty | **17487 bytes**, 664×992 PNG |
 | LLM agent `run_task` | **ehrlich blocked/degraded** (keine LLM-Keys) |
@@ -67,7 +67,7 @@ Docking-Punkt ist bewusst **CDP**, nicht ein zweiter Chromium-Launch: Skyvern st
 
 ![Skyvern harness through CloakBrowser CDP — example.com](.proof/2026-07-24-skyvern-harness.png)
 
-Live-Lauf (re-verified 2026-07-24T01:47+02:00, lane cursor-grok-4.5):
+Live-Lauf (re-verified 2026-07-24T01:51+02:00, lane cursor-grok-4.5):
 
 - Manager: `http://127.0.0.1:18115` (container `cloakbrowser-manager-vcvm`)
 - Profile: `a8b99a1f-bd77-4249-917f-0ad681ea5519` (VCVM Mobile Demo)

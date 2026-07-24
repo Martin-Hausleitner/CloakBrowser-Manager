@@ -26,13 +26,5 @@
     "headers_applied": true
   },
   "screenshot_bytes": 17487,
-  "vcvm_mirror": "/home/coder/cloakbrowser-manager-vcvm/.proof/2026-07-24-skyvern-harness.png",
-  "verified_at": "2026-07-24T09:48+0200",
-  "lane": "cloak-skyvern-harness",
-  "model": "cursor-grok-4.5",
-  "openspec": "PASS",
-  "tests": {
-    "unit_skyvern": "6/6",
-    "backend": "228 passed"
-  }
+  "vcvm_mirror": "/home/coder/cloakbrowser-manager-vcvm/.proof/2026-07-24-skyvern-harness.png"
 }

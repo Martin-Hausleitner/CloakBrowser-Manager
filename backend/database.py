@@ -1978,6 +1978,53 @@ def cancel_task_run(run_id: str) -> dict[str, Any] | None:
     return get_task_run(run_id)
 
 
+
+def _release_task_run_claim_on_conn(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    now: str,
+    status: str,
+    reason: str,
+) -> list[str]:
+    """Release a run claim/lease while preserving the task run for requeue/block."""
+    lease_ids: list[str] = []
+    lease_id = row["lease_id"]
+    if lease_id:
+        lease_ids.append(str(lease_id))
+        conn.execute(
+            """
+            UPDATE automation_leases
+            SET released_at = ?,
+                release_reason = ?,
+                token_digest = ?
+            WHERE id = ? AND released_at IS NULL
+            """,
+            (now, reason, "placeholder:" + uuid.uuid4().hex, lease_id),
+        )
+    claim_eligible_at = None
+    if status == "queued":
+        claim_eligible_at = row["claim_eligible_at"] or now
+    conn.execute(
+        """
+        UPDATE task_runs
+        SET status = ?,
+            claimed_by = NULL,
+            worker_id = NULL,
+            claim_expires_at = NULL,
+            lease_id = NULL,
+            capability_digest = NULL,
+            claim_eligible_at = ?,
+            updated_at = ?
+        WHERE id = ?
+          AND status IN ('queued', 'health_check', 'blocked_health', 'running')
+          AND cancelled_at IS NULL
+        """,
+        (status, claim_eligible_at, now, row["id"]),
+    )
+    return lease_ids
+
+
 def retry_task_run_health(run_id: str) -> dict[str, Any] | None:
     run = get_task_run(run_id)
     if run is None:
@@ -2004,26 +2051,35 @@ def retry_task_run_health(run_id: str) -> dict[str, Any] | None:
         if current["status"] not in TASK_RUN_CANCELABLE_STATUSES:
             conn.commit()
             return current
+        lease_ids = _release_task_run_claim_on_conn(
+            conn,
+            row,
+            now=now,
+            status=status,
+            reason="health_retry",
+        )
         conn.execute(
             """UPDATE task_runs
             SET health_snapshot_json = ?,
                 health_decision_json = ?,
-                status = ?,
                 retry_count = retry_count + 1,
                 updated_at = ?
             WHERE id = ?
-              AND status IN ('queued', 'health_check', 'blocked_health', 'running')
+              AND status = ?
               AND cancelled_at IS NULL""",
             (
                 json.dumps(snapshot, separators=(",", ":"), sort_keys=True),
                 json.dumps(decision, separators=(",", ":"), sort_keys=True),
-                status,
                 now,
                 run_id,
+                status,
             ),
         )
         conn.commit()
-    return get_task_run(run_id)
+    updated = get_task_run(run_id)
+    if updated is not None and lease_ids:
+        updated["_cleanup_lease_ids"] = lease_ids
+    return updated
 
 
 def override_task_run_health(
@@ -2098,14 +2154,20 @@ def override_task_run_health(
             "failed_reasons": [],
             "non_overridable_reasons": [],
         }
+        lease_ids = _release_task_run_claim_on_conn(
+            conn,
+            row,
+            now=now,
+            status="queued",
+            reason="health_override",
+        )
         conn.execute(
             """UPDATE task_runs
             SET health_override_json = ?,
                 health_decision_json = ?,
-                status = 'queued',
                 updated_at = ?
             WHERE id = ?
-              AND status NOT IN ('succeeded', 'failed', 'cancelled', 'revoked')
+              AND status = 'queued'
               AND cancelled_at IS NULL""",
             (
                 json.dumps(override, separators=(",", ":"), sort_keys=True),
@@ -2115,7 +2177,10 @@ def override_task_run_health(
             ),
         )
         conn.commit()
-    return get_task_run(run_id)
+    updated = get_task_run(run_id)
+    if updated is not None and lease_ids:
+        updated["_cleanup_lease_ids"] = lease_ids
+    return updated
 
 
 def append_task_output(

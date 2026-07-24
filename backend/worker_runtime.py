@@ -53,11 +53,19 @@ class CapabilityConflict(Exception):
 class CapabilityNotReady(Exception):
     """Health gate not yet allowing CDP issuance."""
 
-    def __init__(self, *, waiting: bool, blocked: bool, decision: dict[str, Any]):
+    def __init__(
+        self,
+        *,
+        waiting: bool,
+        blocked: bool,
+        decision: dict[str, Any],
+        lease_ids: tuple[str, ...] = (),
+    ):
         super().__init__("capability_not_ready")
         self.waiting = waiting
         self.blocked = blocked
         self.decision = decision
+        self.lease_ids = lease_ids
 
 
 def _utc_now() -> datetime:
@@ -719,17 +727,37 @@ class WorkerRuntimeService:
                         waiting=True, blocked=False, decision=decision
                     )
                 if not decision.get("allowed"):
+                    lease_ids: list[str] = []
+                    if lease_id:
+                        lease_ids.append(str(lease_id))
+                        self._leases.release_on_conn(
+                            conn,
+                            str(lease_id),
+                            now=now,
+                            reason="health_blocked",
+                        )
                     conn.execute(
                         """
                         UPDATE task_runs
-                        SET status = 'blocked_health', updated_at = ?
+                        SET status = 'blocked_health',
+                            claimed_by = NULL,
+                            worker_id = NULL,
+                            claim_expires_at = NULL,
+                            lease_id = NULL,
+                            capability_digest = NULL,
+                            claim_eligible_at = NULL,
+                            updated_at = ?
                         WHERE id = ?
                         """,
                         (_iso(now), run_id),
                     )
+                    self._refresh_profile_eligibility_preserving(conn, profile_id, now)
                     conn.commit()
                     raise CapabilityNotReady(
-                        waiting=False, blocked=True, decision=decision
+                        waiting=False,
+                        blocked=True,
+                        decision=decision,
+                        lease_ids=tuple(lease_ids),
                     )
 
                 token = access.generate_run_capability_token()

@@ -83,6 +83,23 @@ def seed_passed_health(profile_id: str) -> None:
     )
 
 
+def seed_blocked_health(profile_id: str) -> None:
+    db.upsert_profile_health(
+        profile_id,
+        state="warning",
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        proxy_configured=False,
+        proxy_reachable=True,
+        proxy_authenticity_score=10,
+        fingerprint_consistency_score=100,
+        browser_scan_score=90,
+        warnings=[],
+        blockers=[],
+        error_code=None,
+        sources={"proxy_authenticity": "measured"},
+    )
+
+
 def create_and_claim(client: TestClient) -> tuple[dict, dict]:
     profile = db.create_profile("Cap profile", sandbox_id="alpha")
     seed_passed_health(profile["id"])
@@ -185,6 +202,151 @@ def test_capability_waiting_health_no_token(client_access: TestClient):
     # Pending health creates health_check status — not claimable as queued.
     empty = client_access.post("/internal/task-runs/claim", headers=worker_headers())
     assert empty.status_code == 204
+
+
+def test_blocked_capability_override_releases_claim_and_requeues_for_next_worker(
+    client_access: TestClient,
+):
+    from backend import main
+
+    run, profile = create_and_claim(client_access)
+    with db.get_db() as conn:
+        lease_id = str(
+            conn.execute(
+                "SELECT id FROM automation_leases WHERE profile_id = ? AND released_at IS NULL",
+                (profile["id"],),
+            ).fetchone()["id"]
+        )
+    handle = main.direct_cdp_socket_registry.register(
+        lease_id=lease_id,
+        profile_id=profile["id"],
+        owner_kind="worker",
+        owner_id=WORKER_ID,
+        expires_at=datetime.now(timezone.utc),
+    )
+
+    other_profile = db.create_profile("Unrelated direct lease", sandbox_id="alpha")
+    unrelated = main.automation_lease_service.acquire_direct(
+        profile_id=other_profile["id"],
+        owner_kind="agent",
+        owner_id="agent-unrelated",
+    )
+
+    seed_blocked_health(profile["id"])
+    blocked = issue_capability(client_access, run["id"])
+    assert blocked.status_code == 409
+    assert blocked.json() == {"detail": "Not ready"}
+    assert "cbm_run_" not in blocked.text
+    assert handle.revoked.is_set()
+
+    with db.get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT status, claimed_by, worker_id, claim_expires_at, lease_id,
+                   capability_digest, claim_eligible_at
+            FROM task_runs WHERE id = ?
+            """,
+            (run["id"],),
+        ).fetchone()
+        released = conn.execute(
+            "SELECT released_at FROM automation_leases WHERE id = ?",
+            (lease_id,),
+        ).fetchone()
+        unrelated_row = conn.execute(
+            "SELECT released_at FROM automation_leases WHERE id = ?",
+            (unrelated.lease_id,),
+        ).fetchone()
+    assert row["status"] == "blocked_health"
+    assert row["claimed_by"] is None
+    assert row["worker_id"] is None
+    assert row["claim_expires_at"] is None
+    assert row["lease_id"] is None
+    assert row["capability_digest"] is None
+    assert row["claim_eligible_at"] is None
+    assert released["released_at"] is not None
+    assert unrelated_row["released_at"] is None
+
+    stale_hb = client_access.post(
+        f"/internal/task-runs/{run['id']}/heartbeat",
+        headers=worker_headers(),
+    )
+    assert stale_hb.status_code == 404
+
+    seed_passed_health(profile["id"])
+    override = client_access.post(
+        f"/api/task-runs/{run['id']}/override-health",
+        headers=bootstrap_headers(),
+        json={"reason": "operator accepted current health risk"},
+    )
+    assert override.status_code == 200, override.text
+    assert override.json()["status"] == "queued"
+
+    with db.get_db() as conn:
+        queued = conn.execute(
+            """
+            SELECT status, claimed_by, worker_id, claim_expires_at, lease_id,
+                   capability_digest, claim_eligible_at
+            FROM task_runs WHERE id = ?
+            """,
+            (run["id"],),
+        ).fetchone()
+    assert queued["status"] == "queued"
+    assert queued["claimed_by"] is None
+    assert queued["worker_id"] is None
+    assert queued["claim_expires_at"] is None
+    assert queued["lease_id"] is None
+    assert queued["capability_digest"] is None
+    assert queued["claim_eligible_at"] is not None
+
+    reclaimed = client_access.post("/internal/task-runs/claim", headers=worker_headers())
+    assert reclaimed.status_code == 200, reclaimed.text
+    assert reclaimed.json()["id"] == run["id"]
+
+
+def test_blocked_capability_retry_releases_claim_and_requeues_for_next_worker(
+    client_access: TestClient,
+):
+    run, profile = create_and_claim(client_access)
+    seed_blocked_health(profile["id"])
+    blocked = issue_capability(client_access, run["id"])
+    assert blocked.status_code == 409
+
+    seed_passed_health(profile["id"])
+    retried = client_access.post(
+        f"/api/task-runs/{run['id']}/retry-health",
+        headers=bootstrap_headers(),
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "queued"
+
+    with db.get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT status, claimed_by, worker_id, claim_expires_at, lease_id,
+                   capability_digest, claim_eligible_at
+            FROM task_runs WHERE id = ?
+            """,
+            (run["id"],),
+        ).fetchone()
+        active_leases = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM automation_leases
+            WHERE owner_kind = 'worker' AND owner_id = ? AND released_at IS NULL
+            """,
+            (WORKER_ID,),
+        ).fetchone()["n"]
+    assert row["status"] == "queued"
+    assert row["claimed_by"] is None
+    assert row["worker_id"] is None
+    assert row["claim_expires_at"] is None
+    assert row["lease_id"] is None
+    assert row["capability_digest"] is None
+    assert row["claim_eligible_at"] is not None
+    assert active_leases == 0
+
+    reclaimed = client_access.post("/internal/task-runs/claim", headers=worker_headers())
+    assert reclaimed.status_code == 200, reclaimed.text
+    assert reclaimed.json()["id"] == run["id"]
 
 
 def test_cdp_http_and_ws_accept_run_capability(client_access: TestClient):
@@ -390,6 +552,56 @@ def test_outputs_screenshot_complete_fail(client_access: TestClient):
     )
     # Already terminal → 404; or if accepted earlier would reject secrets
     assert secret_fail.status_code in {404, 422}
+
+
+def test_screenshot_upload_rejects_chunked_oversize_without_buffering_tail(
+    client_access: TestClient,
+    monkeypatch,
+):
+    from backend import main
+
+    run, _profile = create_and_claim(client_access)
+    out = client_access.post(
+        f"/internal/task-runs/{run['id']}/outputs",
+        headers=worker_headers(),
+        json={
+            "idempotency_key": "chunked-shot",
+            "kind": "screenshot",
+            "summary": "Chunked viewport",
+            "payload": {},
+        },
+    )
+    assert out.status_code == 201, out.text
+    output_id = out.json()["id"]
+
+    first = b"12345678"
+    second = b"ABCDEFGH"
+    body = first + second
+    monkeypatch.setattr(main.artifact_store_mod, "MAX_BYTES", len(first) + 1)
+
+    async def body_forbidden(_request):
+        raise AssertionError("request.body() must not be used for screenshot ingest")
+
+    def fail_ingest(*_args, **_kwargs):
+        raise AssertionError("oversized content reached artifact store")
+
+    monkeypatch.setattr(main.starlette.requests.Request, "body", body_forbidden)
+    monkeypatch.setattr(main.artifact_store, "ingest_screenshot", fail_ingest)
+
+    response = client_access.put(
+        f"/internal/task-runs/{run['id']}/screenshots/{output_id}",
+        headers={
+            **worker_headers(),
+            "Content-Type": "image/png",
+            "Transfer-Encoding": "chunked",
+            "X-CBM-Screenshot-SHA256": hashlib.sha256(body).hexdigest(),
+        },
+        content=body,
+    )
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid screenshot"}
+    assert "12345678" not in response.text
+    assert "ABCDEFGH" not in response.text
 
 
 def test_public_cancel_revokes_lease_browser_stays_running(client_access: TestClient):

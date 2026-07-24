@@ -3016,6 +3016,10 @@ async def retry_task_run_health(run_id: str, request: Request):
     updated = db.retry_task_run_health(run_id)
     if updated is None:
         raise HTTPException(status_code=404, detail="Task run not found")
+    cleanup_lease_ids = tuple(updated.pop("_cleanup_lease_ids", ()) or ())
+    _apply_terminal_cleanup(
+        worker_runtime_mod.TerminalCleanup(lease_ids=cleanup_lease_ids)
+    )
     db.record_access_audit_event(
         identity.kind,
         identity.id,
@@ -3042,6 +3046,10 @@ async def override_task_run_health(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Task run not found")
+    cleanup_lease_ids = tuple(updated.pop("_cleanup_lease_ids", ()) or ())
+    _apply_terminal_cleanup(
+        worker_runtime_mod.TerminalCleanup(lease_ids=cleanup_lease_ids)
+    )
     db.record_access_audit_event(
         identity.kind,
         identity.id,
@@ -3144,6 +3152,9 @@ async def issue_internal_task_run_capability(run_id: str, request: Request):
         raise HTTPException(status_code=409, detail="Not found") from exc
     except worker_runtime_mod.CapabilityNotReady as exc:
         # Waiting/blocked: no token; deterministic state without secrets.
+        _apply_terminal_cleanup(
+            worker_runtime_mod.TerminalCleanup(lease_ids=tuple(exc.lease_ids))
+        )
         raise HTTPException(
             status_code=409 if exc.blocked else 409,
             detail="Not ready",
@@ -3180,11 +3191,16 @@ async def put_internal_task_run_screenshot(
     if content_type not in {"image/png", "image/jpeg"}:
         raise HTTPException(status_code=422, detail="Invalid screenshot")
     digest_header = request.headers.get("x-cbm-screenshot-sha256") or ""
-    # Stream with hard max 5MiB+1.
-    max_read = artifact_store_mod.MAX_BYTES + 1
-    body = await request.body()
-    if len(body) > max_read or len(body) > artifact_store_mod.MAX_BYTES:
-        raise HTTPException(status_code=422, detail="Invalid screenshot")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > artifact_store_mod.MAX_BYTES:
+            raise HTTPException(status_code=422, detail="Invalid screenshot")
+        chunks.append(chunk)
+    body = b"".join(chunks)
     run = db.get_task_run(run_id)
     if run is None:
         raise _worker_not_found()

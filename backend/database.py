@@ -527,6 +527,10 @@ class ProjectConflictError(Exception):
     """Raised when creating a project that already exists in a sandbox."""
 
 
+class TaskArchivedError(Exception):
+    """Raised when appending to an archived task session."""
+
+
 def _project_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return dict(row)
 
@@ -587,31 +591,37 @@ def create_project(
     sid = str(sandbox_id or "default")
     pid = str(project_id)
     with get_db() as conn:
-        existing = conn.execute(
-            "SELECT 1 FROM projects WHERE sandbox_id = ? AND id = ?",
-            (sid, pid),
-        ).fetchone()
-        if existing:
-            raise ProjectConflictError(f"Project already exists: {sid}/{pid}")
-        conn.execute(
-            """INSERT INTO projects (
-                sandbox_id, id, name, accent_color, description, default_retention,
-                archived_at, created_by_kind, created_by_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)""",
-            (
-                sid,
-                pid,
-                name,
-                accent_color,
-                description,
-                default_retention,
-                created_by_kind,
-                created_by_id,
-                now,
-                now,
-            ),
-        )
-        conn.commit()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT 1 FROM projects WHERE sandbox_id = ? AND id = ?",
+                (sid, pid),
+            ).fetchone()
+            if existing:
+                conn.commit()
+                raise ProjectConflictError(f"Project already exists: {sid}/{pid}")
+            conn.execute(
+                """INSERT INTO projects (
+                    sandbox_id, id, name, accent_color, description, default_retention,
+                    archived_at, created_by_kind, created_by_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)""",
+                (
+                    sid,
+                    pid,
+                    name,
+                    accent_color,
+                    description,
+                    default_retention,
+                    created_by_kind,
+                    created_by_id,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            raise ProjectConflictError(f"Project already exists: {sid}/{pid}") from exc
     project = get_project(sid, pid)
     if project is None:
         raise RuntimeError(f"Failed to create project {sid}/{pid}")
@@ -1175,6 +1185,16 @@ def append_task_message(
     message_id = str(uuid.uuid4())
     now = _now()
     with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, archived_at FROM task_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is not None and (
+            row["status"] == "archived" or row["archived_at"] is not None
+        ):
+            conn.commit()
+            raise TaskArchivedError(f"Task session is archived: {session_id}")
         conn.execute(
             """INSERT INTO task_messages
             (id, session_id, role, content, created_by_kind, created_by_id, created_at, metadata)

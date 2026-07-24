@@ -2292,10 +2292,11 @@ async def list_task_sessions(
     profile_id: str = Query(..., min_length=1, max_length=120),
     limit: int = Query(100, ge=1, le=200),
 ):
-    profile, _identity = _require_task_profile(request.scope, profile_id, "view")
+    profile, identity = _require_task_profile(request.scope, profile_id, "view")
     return [
         TaskSessionResponse(**session)
         for session in db.list_task_sessions(str(profile["id"]), limit=limit)
+        if _can_read_task_sessions(identity, str(session.get("sandbox_id") or "default"))
     ]
 
 
@@ -2382,14 +2383,19 @@ def _append_task_user_message(
     if command_payload:
         stored_metadata_input["commands"] = command_payload
     stored_metadata = _sanitize_task_metadata(stored_metadata_input)
-    message = db.append_task_message(
-        str(session["id"]),
-        "user",
-        text,
-        identity.kind,
-        identity.id,
-        stored_metadata,
-    )
+    try:
+        message = db.append_task_message(
+            str(session["id"]),
+            "user",
+            text,
+            identity.kind,
+            identity.id,
+            stored_metadata,
+        )
+    except db.TaskArchivedError as exc:
+        raise HTTPException(
+            status_code=409, detail="Task session is archived"
+        ) from exc
     host_command_count = sum(
         1 for command in command_payload
         if isinstance(command, dict) and command.get("scope") == "host"

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import threading
 from unittest.mock import AsyncMock
 
 import pytest
@@ -90,7 +92,8 @@ def test_empty_project_survives_reload(client_access: TestClient):
     assert listed.status_code == 200
     assert listed.json()[0]["id"] == "research"
 
-    # Reload from a fresh process-facing DB read path.
+    # Reload after re-init of the same DB file (simulates process reopen).
+    db.init_db()
     stored = db.get_project("alpha", "research")
     assert stored is not None
     assert stored["name"] == "Research"
@@ -145,6 +148,43 @@ def test_duplicate_project_is_conflict(client_access: TestClient):
         json={"id": "research", "name": "Research again", "sandbox_id": "alpha"},
     )
     assert second.status_code == 409
+
+
+def test_concurrent_create_project_maps_primary_key_race_to_conflict(
+    client_access: TestClient,
+):
+    """Exactly one concurrent create wins; the loser is ProjectConflictError, not IntegrityError."""
+    del client_access  # Ensures isolated tmp_db is initialized.
+    start = threading.Barrier(2)
+    results: list[object] = []
+
+    def attempt() -> None:
+        start.wait(timeout=5)
+        try:
+            results.append(
+                db.create_project(
+                    sandbox_id="alpha",
+                    project_id="race",
+                    name="Race",
+                    created_by_kind="bootstrap",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - capture exact loser type
+            results.append(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(attempt) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=10)
+
+    successes = [item for item in results if isinstance(item, dict)]
+    failures = [item for item in results if not isinstance(item, dict)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], db.ProjectConflictError)
+    assert not isinstance(failures[0], db.sqlite3.IntegrityError)
+    assert db.get_project("alpha", "race") is not None
+    assert db.get_project("alpha", "race")["id"] == "race"
 
 
 def test_cross_sandbox_projects_are_indistinguishable_404(client_access: TestClient):

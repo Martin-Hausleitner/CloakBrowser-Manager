@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import threading
 from unittest.mock import AsyncMock
 
 import pytest
@@ -222,3 +224,139 @@ def test_legacy_retention_is_preserved_and_not_overwritten_by_reopen(
     )
     assert updated["retention_class"] == "legacy"
     assert updated["expires_at"] is None
+
+
+def test_task_list_filters_historical_tasks_after_profile_sandbox_move(
+    client_access: TestClient,
+):
+    """Beta-only callers must not see immutable alpha history via moved profiles."""
+    profile = db.create_profile("Movable browser", sandbox_id="alpha")
+    alpha_task = db.create_task_session(profile["id"], "alpha", "bootstrap")
+
+    moved = client_access.put(
+        f"/api/profiles/{profile['id']}",
+        headers=bootstrap_headers(),
+        json={"sandbox_id": "beta", "project_id": "beta-project"},
+    )
+    assert moved.status_code == 200
+    assert moved.json()["sandbox_id"] == "beta"
+    assert db.get_task_session(alpha_task["id"])["sandbox_id"] == "alpha"
+
+    beta_password = create_user(client_access, "beta-viewer", "beta", "interact")
+    login(client_access, "beta-viewer", beta_password)
+    beta_task = create_task(client_access, profile["id"])
+    assert beta_task["sandbox_id"] == "beta"
+
+    listed = client_access.get(f"/api/task-sessions?profile_id={profile['id']}")
+    assert listed.status_code == 200
+    listed_ids = {item["id"] for item in listed.json()}
+    assert beta_task["id"] in listed_ids
+    assert alpha_task["id"] not in listed_ids
+
+
+def test_archived_task_rejects_new_messages_and_preserves_history(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    password = create_user(client_access, "alpha-interact", "alpha", "interact")
+    login(client_access, "alpha-interact", password)
+
+    task = create_task(client_access, profile["id"])
+    prior = client_access.post(
+        f"/api/task-sessions/{task['id']}/messages",
+        json={"text": "before archive"},
+    )
+    assert prior.status_code == 201
+
+    archived = patch_task(client_access, task, {"archived": True})
+    assert archived["archived_at"]
+    assert archived["status"] == "archived"
+
+    prior_messages = client_access.get(f"/api/task-sessions/{task['id']}/messages")
+    assert prior_messages.status_code == 200
+    prior_message_bodies = prior_messages.json()
+    prior_events = client_access.get(f"/api/task-sessions/{task['id']}/events")
+    assert prior_events.status_code == 200
+    prior_event_bodies = prior_events.json()
+    activity_after_archive = db.get_task_session(task["id"])["activity_at"]
+
+    denied = client_access.post(
+        f"/api/task-sessions/{task['id']}/messages",
+        json={"text": "should not append while archived"},
+    )
+    assert denied.status_code == 409
+    assert "archiv" in denied.json()["detail"].lower()
+
+    frozen_messages = client_access.get(f"/api/task-sessions/{task['id']}/messages")
+    assert frozen_messages.status_code == 200
+    assert frozen_messages.json() == prior_message_bodies
+    frozen_events = client_access.get(f"/api/task-sessions/{task['id']}/events")
+    assert frozen_events.status_code == 200
+    assert frozen_events.json() == prior_event_bodies
+    frozen_task = db.get_task_session(task["id"])
+    assert frozen_task["activity_at"] == activity_after_archive
+    assert all(
+        item["content"] != "should not append while archived"
+        for item in frozen_messages.json()
+    )
+
+    reopened = patch_task(
+        client_access,
+        archived,
+        {"archived": False, "workflow_state": "open"},
+    )
+    assert reopened["archived_at"] is None
+    assert reopened["status"] == "active"
+
+    after = client_access.post(
+        f"/api/task-sessions/{task['id']}/messages",
+        json={"text": "after reopen"},
+    )
+    assert after.status_code == 201
+    history = client_access.get(f"/api/task-sessions/{task['id']}/messages")
+    assert history.status_code == 200
+    contents = [item["content"] for item in history.json()]
+    assert contents == ["before archive", "after reopen"]
+    assert any(item["content"] == "before archive" for item in prior_message_bodies)
+
+
+def test_concurrent_row_version_update_one_writer_wins(client_access: TestClient):
+    """Two writers starting from row_version 1: exactly one wins, one conflicts."""
+    del client_access
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    task = db.create_task_session(profile["id"], "alpha", "bootstrap")
+    assert task["row_version"] == 1
+
+    start = threading.Barrier(2)
+    results: list[object] = []
+
+    def attempt(title: str) -> None:
+        start.wait(timeout=5)
+        try:
+            results.append(
+                db.update_task_session(
+                    task["id"],
+                    expected_row_version=1,
+                    title=title,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - capture exact loser type
+            results.append(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(attempt, "writer-a"),
+            executor.submit(attempt, "writer-b"),
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    successes = [item for item in results if isinstance(item, dict)]
+    failures = [item for item in results if not isinstance(item, dict)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], db.OptimisticConcurrencyError)
+    current = db.get_task_session(task["id"])
+    assert current is not None
+    assert current["row_version"] == 2
+    assert current["title"] in {"writer-a", "writer-b"}

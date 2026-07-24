@@ -20,7 +20,8 @@ def client_access(tmp_db, monkeypatch):
 
     monkeypatch.setattr(main, "AUTH_TOKEN", "bootstrap-test-secret")
     monkeypatch.setattr(main, "ACCESS_CONTROL_ENABLED", True)
-    monkeypatch.setattr(main, "CBM_WORKER_TOKEN", "worker-test-secret")
+    monkeypatch.setattr(main, "CBM_WORKER_ID", "browser-use-worker-1")
+    monkeypatch.setattr(main, "CBM_WORKER_TOKEN", "cbm_worker_" + ("ab" * 32))
     main._login_failures.clear()
     monkeypatch.setattr(main.browser_mgr, "cleanup_stale", AsyncMock())
     monkeypatch.setattr(main.browser_mgr, "cleanup_all", AsyncMock())

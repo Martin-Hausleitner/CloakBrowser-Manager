@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import re
 import struct
 import shutil
 import time
@@ -37,6 +38,7 @@ if __package__:
     from . import database as db
     from . import extensions
     from . import live_diagnostics
+    from . import worker_runtime as worker_runtime_mod
     from . import workspace_maintenance as workspace_maintenance_mod
     from .browser_manager import BrowserManager
     from .profile_health import ProfileHealthProbe
@@ -100,6 +102,10 @@ if __package__:
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
+        WorkerCapabilityResponse,
+        WorkerClaimResponse,
+        WorkerFailRequest,
+        WorkerHeartbeatResponse,
     )
     from . import proxy_inventory
     from . import session_links
@@ -115,6 +121,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
     import database as db
     import extensions
     import live_diagnostics
+    import worker_runtime as worker_runtime_mod
     import workspace_maintenance as workspace_maintenance_mod
     from browser_manager import BrowserManager
     from profile_health import ProfileHealthProbe
@@ -178,6 +185,10 @@ else:  # Support `uvicorn main:app` from the backend directory.
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
+        WorkerCapabilityResponse,
+        WorkerClaimResponse,
+        WorkerFailRequest,
+        WorkerHeartbeatResponse,
     )
     import proxy_inventory
     import session_links
@@ -204,14 +215,18 @@ ACCESS_CONTROL_ENABLED = bool(AUTH_TOKEN) and access.access_control_enabled(
 if os.environ.get("ACCESS_CONTROL_ENABLED") and not AUTH_TOKEN:
     logger.warning("ACCESS_CONTROL_ENABLED ignored because AUTH_TOKEN is not configured")
 
-# Temporary Task 4 worker service credential for internal output append only.
-# Missing/empty values fail closed; public bearer auth never authorizes /internal.
+# Browser-Use worker provisioning inputs (VCVM secrets). Plaintext is never
+# persisted; only SHA-256 digests of valid cbm_worker_ keys are stored.
+CBM_WORKER_ID: str | None = os.environ.get("CBM_WORKER_ID") or None
 CBM_WORKER_TOKEN: str | None = os.environ.get("CBM_WORKER_TOKEN") or None
 
 # Paths that bypass authentication even when AUTH_TOKEN is set.  ``/health``
 # deliberately contains no profile or runtime metadata so Docker can probe the
 # service without turning ``/api/status`` into an information leak.
 _AUTH_EXEMPT = frozenset({"/api/auth/status", "/api/auth/login", "/health"})
+_CDP_RUN_CAPABILITY_PATH = re.compile(
+    r"^/api/profiles/[^/]+/cdp(?:/json(?:/version|/list)?/?|/devtools/.+)?$"
+)
 _LOGIN_FAILURE_LIMIT = 5
 _LOGIN_BACKOFF_SECONDS = 60.0
 _LOGIN_FAILURE_TTL_SECONDS = 10 * 60.0
@@ -249,11 +264,23 @@ artifact_store = artifact_store_mod.ArtifactStore()
 workspace_maintenance_service = workspace_maintenance_mod.WorkspaceMaintenance(
     artifact_store=artifact_store,
 )
+worker_runtime_service = worker_runtime_mod.WorkerRuntimeService(
+    lease_service=automation_lease_service,
+    worker_id_env=lambda: CBM_WORKER_ID,
+    worker_token_env=lambda: CBM_WORKER_TOKEN,
+)
 direct_cdp_socket_registry = cdp_gateway.DirectCdpSocketRegistry(
     poll_interval_seconds=0.25
 )
 _workspace_maintenance_stop: asyncio.Event | None = None
 _workspace_maintenance_task: asyncio.Task | None = None
+_worker_maintenance_stop: asyncio.Event | None = None
+_worker_maintenance_task: asyncio.Task | None = None
+
+
+def _apply_terminal_cleanup(cleanup: worker_runtime_mod.TerminalCleanup) -> None:
+    if cleanup.lease_ids:
+        close_direct_cdp_sockets_for_leases(list(cleanup.lease_ids))
 
 
 def close_direct_cdp_sockets_for_leases(
@@ -806,6 +833,11 @@ class AuthMiddleware:
 
     Uses raw ASGI instead of BaseHTTPMiddleware because the latter
     breaks WebSocket routes (wraps request body, preventing WS upgrade).
+
+    ``/internal/*`` always requires an active worker Bearer, regardless of
+    ACCESS_CONTROL_ENABLED / legacy-open mode. Worker keys never authorize
+    normal ``/api/*`` routes. A ``cbm_run_`` capability may bypass ``/api``
+    auth only for exact CDP discovery/WebSocket paths.
     """
 
     def __init__(self, app: ASGIApp):
@@ -818,6 +850,29 @@ class AuthMiddleware:
             return
 
         path = scope["path"]
+
+        # Internal worker API: always fail closed to worker Bearer only.
+        if path.startswith("/internal/"):
+            worker = access.resolve_worker_identity(scope)
+            if worker is None:
+                await _reject_unauthenticated(scope, receive, send)
+                return
+            scope.setdefault("state", {})["worker_identity"] = worker
+            await self.app(scope, receive, send)
+            return
+
+        bearer = _bearer_from_scope(scope)
+
+        # Worker keys are never valid on public APIs.
+        if access.is_valid_worker_key(bearer):
+            await _reject_unauthenticated(scope, receive, send)
+            return
+
+        # Run capability may reach exact CDP discovery/WS paths only.
+        if access.is_run_capability_token(bearer) and _CDP_RUN_CAPABILITY_PATH.match(path):
+            scope.setdefault("state", {})["run_capability_token"] = bearer
+            await self.app(scope, receive, send)
+            return
 
         # Scoped policy mode recognizes bootstrap, signed human sessions, and
         # individual agent bearer keys. The resolved identity is placed on the
@@ -850,6 +905,16 @@ class AuthMiddleware:
             return
 
         await _reject_unauthenticated(scope, receive, send)
+
+
+def _bearer_from_scope(scope: Scope) -> str | None:
+    for key, value in scope.get("headers", []):
+        if key.lower() == b"authorization":
+            text = value.decode("latin-1")
+            if text.startswith("Bearer "):
+                token = text[7:]
+                return token or None
+    return None
 
 
 async def _reject_unauthenticated(scope: Scope, receive: Receive, send: Send) -> None:
@@ -1533,10 +1598,16 @@ async def _cancel_all_profile_health_tasks() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _workspace_maintenance_stop, _workspace_maintenance_task
+    global _worker_maintenance_stop, _worker_maintenance_task
     db.init_db()
     automation_lease_service.ensure_schema()
     # Artifact schema/root/permissions are mandatory; fail closed on init errors.
     artifact_store.ensure_schema()
+    # Bootstrap configured worker digest from VCVM secrets (never log plaintext).
+    rotated = worker_runtime_service.sync_configured_worker()
+    if rotated.get("lease_ids"):
+        close_direct_cdp_sockets_for_leases(list(rotated["lease_ids"]))
+    worker_runtime_service.refresh_claim_eligibility()
     await browser_mgr.cleanup_stale()
     browser_mgr._auto_launch_task = asyncio.create_task(browser_mgr.auto_launch_all())
     _workspace_maintenance_stop = asyncio.Event()
@@ -1546,9 +1617,22 @@ async def lifespan(app: FastAPI):
             stop_event=_workspace_maintenance_stop,
         )
     )
+    _worker_maintenance_stop = asyncio.Event()
+    _worker_maintenance_task = asyncio.create_task(
+        worker_runtime_mod.run_worker_maintenance_loop(
+            worker_runtime_service,
+            on_cleanup=_apply_terminal_cleanup,
+            stop_event=_worker_maintenance_stop,
+        )
+    )
     logger.info("CloakBrowser Manager started")
     yield
     logger.info("Shutting down — stopping all browsers...")
+    if _worker_maintenance_stop is not None:
+        _worker_maintenance_stop.set()
+    if _worker_maintenance_task is not None and not _worker_maintenance_task.done():
+        _worker_maintenance_task.cancel()
+        await asyncio.gather(_worker_maintenance_task, return_exceptions=True)
     if _workspace_maintenance_stop is not None:
         _workspace_maintenance_stop.set()
     if _workspace_maintenance_task is not None and not _workspace_maintenance_task.done():
@@ -1733,12 +1817,17 @@ def _task_run_response(run: dict[str, object]) -> TaskRunResponse:
     return TaskRunResponse(**run)
 
 
-def _require_worker_token(request: Request) -> None:
-    """Fail closed for the temporary Task 4 internal worker credential."""
-    configured = CBM_WORKER_TOKEN
-    supplied = request.headers.get("X-CBM-Worker-Token")
-    if not configured or not supplied or not hmac.compare_digest(supplied, configured):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def _require_worker(request: Request) -> access.WorkerIdentity:
+    """Return the middleware-resolved worker identity or 401."""
+    state = request.scope.get("state") or {}
+    worker = state.get("worker_identity")
+    if isinstance(worker, access.WorkerIdentity) and worker.active:
+        return worker
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _worker_not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail="Not found")
 
 
 def _require_project_sandbox(
@@ -1836,6 +1925,74 @@ def _automation_lease_header(headers) -> str | None:
             text = str(value).strip()
             return text or None
     return None
+
+
+def _run_capability_bearer(request: Request) -> str | None:
+    state = request.scope.get("state") or {}
+    token = state.get("run_capability_token")
+    if isinstance(token, str) and token:
+        return token
+    auth = request.headers.get("authorization") or ""
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        if access.is_run_capability_token(token):
+            return token
+    return None
+
+
+def _require_cdp_automation_access(
+    request: Request,
+    *,
+    profile_id: str,
+) -> automation_leases.LeaseRecord:
+    """Accept direct actor lease header OR bound run capability Bearer."""
+    run_token = _run_capability_bearer(request)
+    if run_token:
+        record = worker_runtime_service.validate_run_capability(run_token, profile_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        return record
+
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    return _require_direct_automation_lease(
+        profile_id=profile_id,
+        identity=identity,
+        token=_automation_lease_header(request.headers),
+    )
+
+
+async def _require_websocket_cdp_automation_access(
+    websocket: WebSocket,
+    *,
+    profile_id: str,
+) -> automation_leases.LeaseRecord | None:
+    state = websocket.scope.get("state") or {}
+    run_token = state.get("run_capability_token")
+    if not isinstance(run_token, str) or not run_token:
+        auth = None
+        for key, value in websocket.scope.get("headers", []):
+            if key.lower() == b"authorization":
+                text = value.decode("latin-1")
+                if text.startswith("Bearer "):
+                    auth = text[7:].strip()
+                break
+        if access.is_run_capability_token(auth):
+            run_token = auth
+    if isinstance(run_token, str) and run_token:
+        record = worker_runtime_service.validate_run_capability(run_token, profile_id)
+        if record is None:
+            await websocket.close(code=4403, reason="Automation lease required")
+            return None
+        return record
+    access_result = await _require_websocket_profile_permission(
+        websocket, profile_id, "automate"
+    )
+    if not access_result:
+        return None
+    _profile, identity = access_result
+    return await _require_websocket_direct_automation_lease(
+        websocket, profile_id=profile_id, identity=identity
+    )
 
 
 def _require_direct_automation_lease(
@@ -2796,6 +2953,7 @@ async def create_task_run(session_id: str, body: TaskRunCreate, request: Request
         identity.id,
         {"run_id": run["id"], "status": run["status"]},
     )
+    worker_runtime_service.refresh_claim_eligibility()
     return _task_run_response(run)
 
 
@@ -2808,7 +2966,8 @@ async def get_task_run(run_id: str, request: Request):
 @app.post("/api/task-runs/{run_id}/cancel", response_model=TaskRunResponse)
 async def cancel_task_run(run_id: str, request: Request):
     _run, identity = _require_task_run(request.scope, run_id, "automate")
-    cancelled = db.cancel_task_run(run_id)
+    cancelled, cleanup = worker_runtime_service.cancel_run(run_id)
+    _apply_terminal_cleanup(cleanup)
     if cancelled is None:
         raise HTTPException(status_code=404, detail="Task run not found")
     db.record_access_audit_event(
@@ -2889,10 +3048,11 @@ async def list_task_run_outputs(
     status_code=201,
 )
 async def append_internal_task_run_output(run_id: str, request: Request):
-    _require_worker_token(request)
-    run = db.get_task_run(run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="Task run not found")
+    worker = _require_worker(request)
+    try:
+        worker_runtime_service.require_bound_claim(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
     try:
         raw = await request.json()
     except Exception as exc:
@@ -2913,10 +3073,138 @@ async def append_internal_task_run_output(run_id: str, request: Request):
             payload=dict(body.payload),
         )
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Task run not found") from exc
+        raise _worker_not_found() from exc
     except db.TaskOutputConflictError as exc:
         raise HTTPException(status_code=409, detail="Output idempotency conflict") from exc
     return TaskOutputResponse(**output)
+
+
+@app.post("/internal/task-runs/claim", response_model=WorkerClaimResponse)
+async def claim_internal_task_run(request: Request):
+    worker = _require_worker(request)
+    claimed = worker_runtime_service.claim_next(worker.id)
+    if claimed is None:
+        return Response(status_code=204)
+    return WorkerClaimResponse(**claimed)
+
+
+@app.post(
+    "/internal/task-runs/{run_id}/heartbeat",
+    response_model=WorkerHeartbeatResponse,
+)
+async def heartbeat_internal_task_run(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        body = worker_runtime_service.heartbeat(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    return WorkerHeartbeatResponse(**body)
+
+
+@app.post(
+    "/internal/task-runs/{run_id}/capability",
+    response_model=WorkerCapabilityResponse,
+)
+async def issue_internal_task_run_capability(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        body = worker_runtime_service.issue_capability(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    except worker_runtime_mod.CapabilityConflict as exc:
+        raise HTTPException(status_code=409, detail="Not found") from exc
+    except worker_runtime_mod.CapabilityNotReady as exc:
+        # Waiting/blocked: no token; deterministic state without secrets.
+        raise HTTPException(
+            status_code=409 if exc.blocked else 409,
+            detail="Not ready",
+        ) from exc
+    return WorkerCapabilityResponse(**body)
+
+
+@app.delete("/internal/task-runs/{run_id}/capability")
+async def revoke_internal_task_run_capability(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        cleanup = worker_runtime_service.revoke_capability(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    _apply_terminal_cleanup(cleanup)
+    return Response(status_code=204)
+
+
+@app.put("/internal/task-runs/{run_id}/screenshots/{output_id}")
+async def put_internal_task_run_screenshot(
+    run_id: str, output_id: str, request: Request
+):
+    worker = _require_worker(request)
+    try:
+        worker_runtime_service.require_bound_claim(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    output = db.get_task_output(output_id)
+    if output is None or str(output.get("run_id")) != run_id:
+        raise _worker_not_found()
+    if output.get("kind") != "screenshot":
+        raise HTTPException(status_code=422, detail="Invalid screenshot")
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if content_type not in {"image/png", "image/jpeg"}:
+        raise HTTPException(status_code=422, detail="Invalid screenshot")
+    digest_header = request.headers.get("x-cbm-screenshot-sha256") or ""
+    # Stream with hard max 5MiB+1.
+    max_read = artifact_store_mod.MAX_BYTES + 1
+    body = await request.body()
+    if len(body) > max_read or len(body) > artifact_store_mod.MAX_BYTES:
+        raise HTTPException(status_code=422, detail="Invalid screenshot")
+    run = db.get_task_run(run_id)
+    if run is None:
+        raise _worker_not_found()
+    try:
+        artifact_store.ingest_screenshot(
+            output_id=output_id,
+            body=body,
+            media_type=content_type,
+            sha256=digest_header,
+        )
+    except artifact_store_mod.ArtifactValidationError as exc:
+        raise HTTPException(status_code=422, detail="Invalid screenshot") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid screenshot") from exc
+    return Response(status_code=204)
+
+
+@app.post("/internal/task-runs/{run_id}/complete", response_model=TaskRunResponse)
+async def complete_internal_task_run(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        run, cleanup = worker_runtime_service.complete(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    _apply_terminal_cleanup(cleanup)
+    return _task_run_response(run)
+
+
+@app.post("/internal/task-runs/{run_id}/fail", response_model=TaskRunResponse)
+async def fail_internal_task_run(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        raw = await request.json()
+        body = WorkerFailRequest.model_validate(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid request") from exc
+    try:
+        run, cleanup = worker_runtime_service.fail(
+            worker.id,
+            run_id,
+            error_code=body.error_code,
+            message=body.message,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid request") from exc
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    _apply_terminal_cleanup(cleanup)
+    return _task_run_response(run)
 
 
 @app.get("/api/task-outputs/{output_id}/screenshot")
@@ -4077,6 +4365,7 @@ async def acquire_automation_lease(profile_id: str, request: Request):
         )
     except automation_leases.AutomationBusy:
         raise HTTPException(status_code=409, detail="automation_busy")
+    worker_runtime_service.refresh_claim_eligibility()
     db.record_access_audit_event(
         identity.kind,
         identity.id,
@@ -4144,6 +4433,7 @@ async def release_automation_lease(profile_id: str, lease_id: str, request: Requ
     except automation_leases.AutomationLeaseInvalid:
         raise HTTPException(status_code=404, detail="Profile not found")
     close_direct_cdp_sockets_for_leases([lease_id])
+    worker_runtime_service.refresh_claim_eligibility()
     return Response(status_code=204)
 
 
@@ -4155,12 +4445,7 @@ async def release_automation_lease(profile_id: str, lease_id: str, request: Requ
 async def cdp_info(profile_id: str, request: Request):
     """Return CDP connection info. Prevents SPA catch-all from serving index.html."""
     _reject_token_like_query(request)
-    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
-    _require_direct_automation_lease(
-        profile_id=profile_id,
-        identity=identity,
-        token=_automation_lease_header(request.headers),
-    )
+    _require_cdp_automation_access(request, profile_id=profile_id)
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -4176,12 +4461,7 @@ async def cdp_info(profile_id: str, request: Request):
 async def cdp_json_version(profile_id: str, request: Request):
     """Proxy Chrome's /json/version, rewriting WS URLs to go through our proxy."""
     _reject_token_like_query(request)
-    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
-    _require_direct_automation_lease(
-        profile_id=profile_id,
-        identity=identity,
-        token=_automation_lease_header(request.headers),
-    )
+    _require_cdp_automation_access(request, profile_id=profile_id)
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -4209,12 +4489,7 @@ async def cdp_json_version(profile_id: str, request: Request):
 async def cdp_json_list(profile_id: str, request: Request):
     """Proxy Chrome's /json/list, rewriting WS URLs."""
     _reject_token_like_query(request)
-    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
-    _require_direct_automation_lease(
-        profile_id=profile_id,
-        identity=identity,
-        token=_automation_lease_header(request.headers),
-    )
+    _require_cdp_automation_access(request, profile_id=profile_id)
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -4472,12 +4747,8 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
     if not await _check_websocket_origin(websocket):
         return
 
-    access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
-    if not access_result:
-        return
-    _profile, identity = access_result
-    lease = await _require_websocket_direct_automation_lease(
-        websocket, profile_id=profile_id, identity=identity
+    lease = await _require_websocket_cdp_automation_access(
+        websocket, profile_id=profile_id
     )
     if not lease:
         return
@@ -4487,7 +4758,10 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
         await websocket.close(code=4004, reason="Profile not running")
         return
 
-    access_lease = _register_websocket_access(identity, profile_id)
+    identity = _access_identity(websocket.scope)
+    access_lease = (
+        _register_websocket_access(identity, profile_id) if identity is not None else None
+    )
     automation_handle = direct_cdp_socket_registry.register(
         lease_id=lease.lease_id,
         profile_id=profile_id,
@@ -4519,10 +4793,14 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
         )
     finally:
         try:
-            retire_direct_automation_lease_on_websocket_close(lease.lease_id)
+            # Direct leases retire on socket close; run capabilities stay until
+            # explicit revoke/complete/cancel/heartbeat loss (reconnect window).
+            if lease.owner_kind != automation_leases.RUN_OWNER_KIND:
+                retire_direct_automation_lease_on_websocket_close(lease.lease_id)
         finally:
             direct_cdp_socket_registry.unregister(automation_handle)
-            _unregister_websocket_access(access_lease)
+            if access_lease is not None:
+                _unregister_websocket_access(access_lease)
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp/devtools/{path:path}")
@@ -4533,12 +4811,8 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     if not await _check_websocket_origin(websocket):
         return
 
-    access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
-    if not access_result:
-        return
-    _profile, identity = access_result
-    lease = await _require_websocket_direct_automation_lease(
-        websocket, profile_id=profile_id, identity=identity
+    lease = await _require_websocket_cdp_automation_access(
+        websocket, profile_id=profile_id
     )
     if not lease:
         return
@@ -4548,7 +4822,10 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
         await websocket.close(code=4004, reason="Profile not running")
         return
 
-    access_lease = _register_websocket_access(identity, profile_id)
+    identity = _access_identity(websocket.scope)
+    access_lease = (
+        _register_websocket_access(identity, profile_id) if identity is not None else None
+    )
     automation_handle = direct_cdp_socket_registry.register(
         lease_id=lease.lease_id,
         profile_id=profile_id,
@@ -4568,10 +4845,12 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
         )
     finally:
         try:
-            retire_direct_automation_lease_on_websocket_close(lease.lease_id)
+            if lease.owner_kind != automation_leases.RUN_OWNER_KIND:
+                retire_direct_automation_lease_on_websocket_close(lease.lease_id)
         finally:
             direct_cdp_socket_registry.unregister(automation_handle)
-            _unregister_websocket_access(access_lease)
+            if access_lease is not None:
+                _unregister_websocket_access(access_lease)
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp-observer/devtools/{path:path}")

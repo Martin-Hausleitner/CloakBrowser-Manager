@@ -35,6 +35,10 @@ _PASSWORD_R = 8
 _PASSWORD_P = 1
 _PASSWORD_LENGTH = 32
 _SESSION_TTL_SECONDS = 8 * 60 * 60
+WORKER_KEY_PREFIX = "cbm_worker_"
+WORKER_KEY_BYTES = 32
+RUN_CAPABILITY_PREFIX = "cbm_run_"
+RUN_CAPABILITY_BYTES = 32
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,18 @@ class AccessIdentity:
             "group_ids": list(self.group_ids),
             "effective_grants": [dict(grant) for grant in self.grants],
         }
+
+
+@dataclass(frozen=True)
+class WorkerIdentity:
+    """Narrowly scoped Browser-Use worker principal (never an AccessIdentity)."""
+
+    id: str
+    active: bool = True
+
+    @property
+    def kind(self) -> str:
+        return "worker"
 
 
 def access_control_enabled(value: object) -> bool:
@@ -130,6 +146,66 @@ def generate_agent_key() -> str:
 
 def hash_agent_key(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def generate_worker_key() -> str:
+    """Create an opaque worker key: prefix + 32 random bytes as hex."""
+    return WORKER_KEY_PREFIX + secrets.token_bytes(WORKER_KEY_BYTES).hex()
+
+
+def hash_worker_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def is_valid_worker_key(key: str | None) -> bool:
+    """Return True only for a strong cbm_worker_ key (32 random bytes hex)."""
+    if not isinstance(key, str) or not key.startswith(WORKER_KEY_PREFIX):
+        return False
+    raw = key[len(WORKER_KEY_PREFIX) :]
+    if len(raw) != WORKER_KEY_BYTES * 2:
+        return False
+    try:
+        return len(bytes.fromhex(raw)) == WORKER_KEY_BYTES
+    except ValueError:
+        return False
+
+
+def generate_run_capability_token() -> str:
+    """Mint a one-time run CDP capability token (plaintext returned once)."""
+    return RUN_CAPABILITY_PREFIX + secrets.token_bytes(RUN_CAPABILITY_BYTES).hex()
+
+
+def hash_run_capability_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def is_run_capability_token(token: str | None) -> bool:
+    if not isinstance(token, str) or not token.startswith(RUN_CAPABILITY_PREFIX):
+        return False
+    raw = token[len(RUN_CAPABILITY_PREFIX) :]
+    if len(raw) != RUN_CAPABILITY_BYTES * 2:
+        return False
+    try:
+        return len(bytes.fromhex(raw)) == RUN_CAPABILITY_BYTES
+    except ValueError:
+        return False
+
+
+def resolve_worker_identity(scope: Scope) -> WorkerIdentity | None:
+    """Resolve an active worker from Bearer cbm_worker_* only (never logs the key)."""
+    state = scope.get("state") or {}
+    cached = state.get("worker_identity")
+    if isinstance(cached, WorkerIdentity):
+        return cached if cached.active else None
+
+    bearer = _bearer_token(scope)
+    if not is_valid_worker_key(bearer):
+        return None
+    assert bearer is not None
+    row = db.get_worker_identity_by_key_hash(hash_worker_key(bearer))
+    if row is None or not bool(row.get("active")):
+        return None
+    return WorkerIdentity(id=str(row["id"]), active=True)
 
 
 def create_session(user_id: str, signing_secret: str, ttl_seconds: int = _SESSION_TTL_SECONDS) -> str:

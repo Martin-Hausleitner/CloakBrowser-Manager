@@ -1045,10 +1045,57 @@ class TaskRunResponse(BaseModel):
     worker_id: str | None = None
     claim_eligible_at: str | None = None
     cancelled_at: str | None = None
+    lease_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    queued_at: str | None = None
     created_by_kind: str
     created_by_id: str | None = None
     created_at: str
     updated_at: str
+
+
+class WorkerClaimResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    task_session_id: str
+    task: str
+    profile_id: str | None = None
+    sandbox_id: str
+    harness: Harness
+    status: TaskRunStatus
+    allowed_origins: list[str] = Field(default_factory=list)
+    max_steps: int
+    timeout_seconds: int
+    model_alias: str | None = None
+    deadline_at: str
+    claim_expires_at: str | None = None
+    worker_id: str | None = None
+    launch_if_stopped: bool = False
+
+
+class WorkerHeartbeatResponse(BaseModel):
+    claim_expires_at: str
+    lease_expires_at: str
+    cancel_requested: bool = False
+    heartbeat_interval_seconds: int = 15
+
+
+class WorkerCapabilityResponse(BaseModel):
+    token: str
+    cdp_url: str
+    headers: dict[str, str]
+    expires_at: str
+    profile_id: str
+    run_id: str
+
+
+class WorkerFailRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    error_code: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=1, max_length=500)
 
 
 class TaskRunHealthOverrideRequest(BaseModel):

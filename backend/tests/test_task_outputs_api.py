@@ -13,7 +13,8 @@ from starlette.testclient import TestClient
 from backend import database as db
 
 
-WORKER_TOKEN = "worker-test-secret"
+WORKER_ID = "browser-use-worker-1"
+WORKER_TOKEN = "cbm_worker_" + ("ab" * 32)
 
 
 @pytest.fixture()
@@ -22,12 +23,14 @@ def client_access(tmp_db, monkeypatch):
 
     monkeypatch.setattr(main, "AUTH_TOKEN", "bootstrap-test-secret")
     monkeypatch.setattr(main, "ACCESS_CONTROL_ENABLED", True)
+    monkeypatch.setattr(main, "CBM_WORKER_ID", WORKER_ID)
     monkeypatch.setattr(main, "CBM_WORKER_TOKEN", WORKER_TOKEN)
     main._login_failures.clear()
     monkeypatch.setattr(main.browser_mgr, "cleanup_stale", AsyncMock())
     monkeypatch.setattr(main.browser_mgr, "cleanup_all", AsyncMock())
     monkeypatch.setattr(main.browser_mgr.vnc, "cleanup_stale", AsyncMock())
     with TestClient(main.app) as client:
+        main.worker_runtime_service.sync_configured_worker()
         yield client
 
 
@@ -36,7 +39,7 @@ def bootstrap_headers() -> dict[str, str]:
 
 
 def worker_headers() -> dict[str, str]:
-    return {"X-CBM-Worker-Token": WORKER_TOKEN}
+    return {"Authorization": f"Bearer {WORKER_TOKEN}"}
 
 
 def create_user(
@@ -106,7 +109,9 @@ def create_queued_run(client: TestClient) -> tuple[dict, dict]:
         },
     )
     assert created.status_code == 201, created.text
-    return created.json(), profile
+    claimed = client.post("/internal/task-runs/claim", headers=worker_headers())
+    assert claimed.status_code == 200, claimed.text
+    return claimed.json(), profile
 
 
 def append_internal_output(client: TestClient, run_id: str, body: dict, headers=None):
@@ -245,6 +250,12 @@ def test_public_tail_requires_view_and_hides_cross_sandbox(client_access: TestCl
             "timeout_seconds": 60,
         },
     ).json()
+    claimed_beta = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+    )
+    assert claimed_beta.status_code == 200, claimed_beta.text
+    beta_run = claimed_beta.json()
     assert (
         append_internal_output(
             client_access,
@@ -284,10 +295,18 @@ def test_internal_output_auth_fail_closed_and_rejects_public_bearer(
         client_access,
         run["id"],
         body,
-        headers={"X-CBM-Worker-Token": "wrong-token"},
+        headers={"Authorization": "Bearer cbm_worker_" + ("00" * 32)},
     )
     assert wrong.status_code == 401
     assert missing.json() == wrong.json()
+
+    legacy = append_internal_output(
+        client_access,
+        run["id"],
+        body,
+        headers={"X-CBM-Worker-Token": WORKER_TOKEN},
+    )
+    assert legacy.status_code == 401
 
     bearer = append_internal_output(
         client_access,
@@ -300,10 +319,17 @@ def test_internal_output_auth_fail_closed_and_rejects_public_bearer(
     from backend import main
 
     monkeypatch.setattr(main, "CBM_WORKER_TOKEN", None)
+    # Middleware still authenticates via DB digest; deactivate worker instead.
+    with db.get_db() as conn:
+        conn.execute(
+            "UPDATE worker_identities SET active = 0 WHERE id = ?",
+            (WORKER_ID,),
+        )
+        conn.commit()
     unset = append_internal_output(client_access, run["id"], body)
     assert unset.status_code == 401
-    assert "worker-test-secret" not in unset.text
-    assert "worker-test-secret" not in unset.headers.get("authorization", "")
+    assert WORKER_TOKEN not in unset.text
+    assert WORKER_TOKEN not in unset.headers.get("authorization", "")
 
 
 def test_output_validation_rejects_secrets_and_unsafe_screenshot_payload(

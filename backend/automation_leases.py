@@ -20,6 +20,8 @@ HEARTBEAT_INTERVAL_SECONDS = 15
 LEASE_TTL_SECONDS = 45
 TOKEN_PREFIX = "cbm_lease_"
 TOKEN_BYTES = 32
+RUN_OWNER_KIND = "worker"
+PLACEHOLDER_DIGEST_PREFIX = "placeholder:"
 
 
 class AutomationBusy(Exception):
@@ -66,6 +68,28 @@ def _mint_token() -> tuple[str, str]:
     raw = secrets.token_bytes(TOKEN_BYTES)
     token = f"{TOKEN_PREFIX}{raw.hex()}"
     return token, _digest_token(token)
+
+
+def _mint_placeholder_digest() -> str:
+    return PLACEHOLDER_DIGEST_PREFIX + secrets.token_bytes(TOKEN_BYTES).hex()
+
+
+def profile_has_active_lease(conn: sqlite3.Connection, profile_id: str, now: datetime) -> bool:
+    """True when an unreleased, unexpired lease holds the profile."""
+    row = conn.execute(
+        """
+        SELECT id, expires_at FROM automation_leases
+        WHERE profile_id = ? AND released_at IS NULL
+        LIMIT 1
+        """,
+        (profile_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    expires = _parse_dt(row["expires_at"])
+    if expires is None or expires <= now:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -216,6 +240,146 @@ class AutomationLeaseService:
             heartbeat_at=now,
             expires_at=expires,
         )
+
+    def acquire_run_lease_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        profile_id: str,
+        worker_id: str,
+        now: datetime | None = None,
+        expires_at: datetime | None = None,
+    ) -> tuple[str, datetime]:
+        """Insert a run-owned lease with an unexposed placeholder digest.
+
+        Caller must hold BEGIN IMMEDIATE. Raises AutomationBusy on contention.
+        """
+        current = now or self._clock()
+        expires = expires_at or (current + timedelta(seconds=LEASE_TTL_SECONDS))
+        self._retire_expired_locked(conn, current)
+        if profile_has_active_lease(conn, profile_id, current):
+            raise AutomationBusy("automation_busy")
+        lease_id = str(uuid.uuid4())
+        digest = _mint_placeholder_digest()
+        try:
+            conn.execute(
+                """
+                INSERT INTO automation_leases (
+                    id, profile_id, owner_kind, owner_id, token_digest,
+                    created_at, heartbeat_at, expires_at, released_at, release_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    lease_id,
+                    profile_id,
+                    RUN_OWNER_KIND,
+                    _normalize_owner_id(worker_id),
+                    digest,
+                    _iso(current),
+                    _iso(current),
+                    _iso(expires),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise AutomationBusy("automation_busy") from exc
+        return lease_id, expires
+
+    def set_token_digest_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        lease_id: str,
+        token_digest: str,
+        *,
+        owner_kind: str,
+        owner_id: str | None,
+    ) -> bool:
+        """Replace placeholder/prior digest for a bound active lease."""
+        updated = conn.execute(
+            """
+            UPDATE automation_leases
+            SET token_digest = ?
+            WHERE id = ? AND owner_kind = ? AND owner_id = ?
+              AND released_at IS NULL
+            """,
+            (
+                token_digest,
+                lease_id,
+                owner_kind,
+                _normalize_owner_id(owner_id),
+            ),
+        )
+        return updated.rowcount == 1
+
+    def heartbeat_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        lease_id: str,
+        *,
+        now: datetime,
+        expires_at: datetime,
+        owner_kind: str,
+        owner_id: str | None,
+    ) -> bool:
+        updated = conn.execute(
+            """
+            UPDATE automation_leases
+            SET heartbeat_at = ?, expires_at = ?
+            WHERE id = ? AND owner_kind = ? AND owner_id = ?
+              AND released_at IS NULL
+            """,
+            (
+                _iso(now),
+                _iso(expires_at),
+                lease_id,
+                owner_kind,
+                _normalize_owner_id(owner_id),
+            ),
+        )
+        return updated.rowcount == 1
+
+    def release_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        lease_id: str,
+        *,
+        now: datetime,
+        reason: str,
+    ) -> bool:
+        row = conn.execute(
+            "SELECT released_at FROM automation_leases WHERE id = ?",
+            (lease_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["released_at"] is not None:
+            return True
+        conn.execute(
+            """
+            UPDATE automation_leases
+            SET released_at = ?, release_reason = ?, token_digest = ?
+            WHERE id = ? AND released_at IS NULL
+            """,
+            (_iso(now), reason, _mint_placeholder_digest(), lease_id),
+        )
+        return True
+
+    def validate_token(
+        self,
+        token: str,
+        profile_id: str,
+    ) -> LeaseRecord | None:
+        """Validate any active lease token on a profile (direct or run capability)."""
+        now = self._clock()
+        digest = _digest_token(token)
+        with self._get_db() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM automation_leases
+                WHERE profile_id = ? AND released_at IS NULL
+                """,
+                (profile_id,),
+            ).fetchone()
+        return self._row_if_valid(row, digest, now)
 
     def validate(
         self,

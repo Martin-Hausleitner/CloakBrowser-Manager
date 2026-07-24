@@ -357,6 +357,83 @@ def _migrate_task_runs_v1(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_worker_runtime_v1(conn: sqlite3.Connection) -> None:
+    """Worker identities plus run claim/capability columns (Task 7)."""
+    migration_version = "worker_runtime_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_identities (
+                id TEXT PRIMARY KEY,
+                key_digest TEXT NOT NULL UNIQUE,
+                active BOOLEAN NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_worker_identities_digest
+                ON worker_identities(key_digest)
+            """
+        )
+
+        task_runs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+        ).fetchone()
+        if task_runs_exists is None:
+            # Depend on task_runs_v1; retry on a later init_db without marking applied.
+            conn.rollback()
+            return
+
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if "lease_id" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN lease_id TEXT")
+        if "capability_digest" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN capability_digest TEXT")
+        if "error_code" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN error_code TEXT")
+        if "error_message" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN error_message TEXT")
+        if "queued_at" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN queued_at TEXT")
+
+        conn.execute(
+            """
+            UPDATE task_runs
+            SET queued_at = created_at
+            WHERE status = 'queued' AND queued_at IS NULL
+            """
+        )
+
+        violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            raise RuntimeError(
+                f"Foreign key violation after {migration_version}: {tuple(violation)}"
+            )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
@@ -630,6 +707,7 @@ def init_db():
             conn.commit()
         _migrate_agent_workspace_v1(conn)
         _migrate_task_runs_v1(conn)
+        _migrate_worker_runtime_v1(conn)
 
 
 def _now() -> str:
@@ -1476,6 +1554,8 @@ def _task_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
     override = run.pop("health_override_json", None)
     run["health_override"] = _json_object(override) if override else None
     run.pop("next_output_sequence", None)
+    # Digests are never exposed on public API responses.
+    run.pop("capability_digest", None)
     return run
 
 
@@ -1692,10 +1772,12 @@ def _insert_task_run_on_conn(
             health_snapshot_json, health_decision_json, health_override_json,
             retry_count, first_action_sequence, first_action_at, next_output_sequence,
             claimed_by, claim_expires_at, worker_id, claim_eligible_at, cancelled_at,
-            created_by_kind, created_by_id, created_at, updated_at
+            created_by_kind, created_by_id, created_at, updated_at,
+            lease_id, capability_digest, error_code, error_message, queued_at
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
-            0, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?
+            0, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?,
+            NULL, NULL, NULL, NULL, ?
         )""",
         (
             run_id,
@@ -1718,6 +1800,7 @@ def _insert_task_run_on_conn(
             created_by_id,
             now,
             now,
+            now if status == "queued" else None,
         ),
     )
     conn.execute(
@@ -2458,6 +2541,57 @@ def get_access_agent_by_key_hash(key_hash: str) -> dict[str, Any] | None:
         agent = dict(row)
         agent["grants"] = _access_grants(conn, "agent", agent["id"])
         return agent
+
+
+def get_worker_identity(worker_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, key_digest, active, created_at, updated_at FROM worker_identities WHERE id = ?",
+            (worker_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_worker_identity_by_key_hash(key_hash: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, key_digest, active, created_at, updated_at FROM worker_identities WHERE key_digest = ?",
+            (key_hash,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_worker_identity(worker_id: str, key_digest: str, *, active: bool = True) -> dict[str, Any]:
+    """Persist worker id + key digest only. Never stores plaintext keys."""
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = conn.execute(
+                "SELECT id, key_digest FROM worker_identities WHERE id = ?",
+                (worker_id,),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """INSERT INTO worker_identities (id, key_digest, active, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (worker_id, key_digest, 1 if active else 0, now, now),
+                )
+            else:
+                conn.execute(
+                    """UPDATE worker_identities
+                       SET key_digest = ?, active = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (key_digest, 1 if active else 0, now, worker_id),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    row = get_worker_identity(worker_id)
+    if row is None:  # pragma: no cover
+        raise RuntimeError("worker identity upsert failed")
+    return row
 
 
 def list_access_agents() -> list[dict[str, Any]]:

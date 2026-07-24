@@ -90,13 +90,6 @@ def _create_workspace_task_sessions_table(conn: sqlite3.Connection, table_name: 
 def _migrate_agent_workspace_v1(conn: sqlite3.Connection) -> None:
     """Snapshot legacy task ownership and make profile deletion history-safe."""
     migration_version = "agent_workspace_v1"
-    already_applied = conn.execute(
-        "SELECT 1 FROM schema_migrations WHERE version = ?",
-        (migration_version,),
-    ).fetchone()
-    if already_applied:
-        return
-
     foreign_keys_enabled = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
     conn.commit()
     if foreign_keys_enabled:
@@ -104,6 +97,14 @@ def _migrate_agent_workspace_v1(conn: sqlite3.Connection) -> None:
 
     try:
         conn.execute("BEGIN IMMEDIATE")
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+
         conn.execute(
             """INSERT OR IGNORE INTO projects (
                 sandbox_id, id, name, accent_color, description, default_retention,

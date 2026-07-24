@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -279,3 +281,52 @@ def test_workspace_migration_is_idempotent(legacy_database: Path):
         assert conn.execute("SELECT COUNT(*) FROM task_sessions").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 1
+
+
+def test_workspace_migration_serializes_concurrent_initialization(
+    legacy_database: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    real_connect = sqlite3.connect
+    with real_connect(str(legacy_database)) as conn:
+        conn.executescript(
+            """
+            ALTER TABLE profiles ADD COLUMN clipboard_sync BOOLEAN DEFAULT 1;
+            ALTER TABLE profiles ADD COLUMN launch_args TEXT DEFAULT '[]';
+            ALTER TABLE profiles ADD COLUMN auto_launch BOOLEAN DEFAULT 0;
+            ALTER TABLE profiles ADD COLUMN color_scheme TEXT;
+            ALTER TABLE profiles ADD COLUMN search_engine TEXT;
+            ALTER TABLE profiles ADD COLUMN folder_path TEXT NOT NULL DEFAULT '';
+            ALTER TABLE profiles ADD COLUMN pinned BOOLEAN NOT NULL DEFAULT 0;
+            ALTER TABLE profiles ADD COLUMN accent_color TEXT;
+            ALTER TABLE profiles ADD COLUMN harness TEXT NOT NULL DEFAULT 'codex';
+            """
+        )
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+
+    unsafe_check_barrier = threading.Barrier(2)
+
+    class SynchronizedMigrationConnection(sqlite3.Connection):
+        def execute(self, sql: str, parameters=()):  # type: ignore[no-untyped-def]
+            cursor = super().execute(sql, parameters)
+            if (
+                not self.in_transaction
+                and sql.lstrip().startswith("SELECT 1 FROM schema_migrations")
+            ):
+                unsafe_check_barrier.wait(timeout=5)
+            return cursor
+
+    def synchronized_connect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return real_connect(*args, factory=SynchronizedMigrationConnection, **kwargs)
+
+    monkeypatch.setattr(db.sqlite3, "connect", synchronized_connect)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        initializations = [executor.submit(db.init_db) for _ in range(2)]
+        for initialization in initializations:
+            initialization.result(timeout=10)
+
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM task_sessions").fetchone()[0] == 2

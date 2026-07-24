@@ -22,7 +22,8 @@ This specification is the first implementation increment of the broader CloakBro
 3. First-class projects, temporary/done chats, runs, and typed outputs.
 4. Fixed reusable browser-session inventory backed by existing profiles.
 5. Compact adaptive desktop/mobile/fullscreen UI using shared controls.
-6. Local, VCVM, authorization, failure, and responsive E2E validation.
+6. Cursor CLI as the public scoped harness entry for Browser-Use runs.
+7. Local, VCVM, authorization, failure, and responsive E2E validation.
 
 Existing profile organization, proxy inventory, extension inventory, account/access surfaces, live metrics, and CDP/VNC streaming remain in place. This increment integrates with them without unrelated redesign. Later increments may extend the same adapter contract to Stagehand, Unbrowse, Browser Harness, Antigravity, Claude Code, Codex, and OpenCode.
 
@@ -81,6 +82,14 @@ The Manager is the only component allowed to:
 
 The sidecar may only attach, execute a bounded task, report events, and disconnect. It must call Browser-Use disconnect/stop semantics that leave the remote browser alive.
 
+### 4.4 Cursor CLI harness entry
+
+Cursor CLI is a public orchestration client, not a privileged worker. A deterministic adapter script and Cursor rule let `cursor-agent` create or select a project/task/profile, submit a `browser-use` run through the public Manager API, stream typed outputs as NDJSON, cancel, and return a stable terminal exit code. Cursor receives only a scoped `cbm_agent_*` key with the sandbox grants required by the requested operation. It never receives an administrator token, worker identity, run capability, direct CDP address, upstream port, proxy credential, or model-provider secret.
+
+The adapter uses `CBM_BASE_URL` from trusted local configuration and rejects URL credentials, query tokens, and non-HTTPS remote origins. Local loopback HTTP is allowed for development. The Cursor rule instructs the agent to use the adapter instead of calling Browser-Use Cloud or launching a browser. Cursor's own `stream-json` format is treated as an external, versioned input: the adapter ignores unknown Cursor fields and emits its own stable Manager NDJSON schema.
+
+Cursor CLI is never spawned inside an HTTP request handler. Interactive CLI hangs are bounded by explicit connect, poll, idle-output, and total-run timeouts. Timeout, signal, or nonzero terminal states cancel the Manager run when possible and exit nonzero with a redacted machine-readable error.
+
 ## 5. Run lifecycle and authorization
 
 ### 5.1 Public API
@@ -106,6 +115,8 @@ Run creation accepts:
 ```
 
 Every run names its browser `profile_id`. The profile must exist in the task's immutable `sandbox_id`, and the caller must hold `automate` for both the task sandbox and that profile. The run stores the selected profile independently; it does not silently reassign the task. `launch_if_stopped=true` additionally requires `operate`. Unauthorized resources preserve the existing indistinguishable `404` behavior.
+
+The Cursor adapter uses only these public endpoints plus project/task creation and listing. Internal claim, output, screenshot, capability, and worker-authentication routes are not reachable with a Cursor agent key.
 
 ### 5.2 Internal sidecar API
 
@@ -340,6 +351,8 @@ Browser-Use is pinned to a tested version and guarded by adapter contract tests.
 22. Profile deletion preserves task history under immutable task-sandbox authorization, while a new run succeeds only with an explicitly selected same-sandbox profile.
 23. Worker claim timeout and the single pre-action retry use an injected clock and durable first-action marker; post-action loss never retries.
 24. A second run may wait behind an active profile lease for longer than the worker timeout without failing; the timeout begins only when that run becomes continuously claim-eligible.
+25. Cursor CLI can submit, tail, cancel, and report one Browser-Use run using only public endpoints and a scoped agent key; fixtures with unknown Cursor stream fields remain compatible.
+26. Cursor CLI connect, idle-output, and total-run timeouts exit nonzero, attempt cancellation exactly once, and never print tokens, direct CDP ports, proxy credentials, or internal routes.
 
 ### 11.2 Real VCVM E2E
 
@@ -353,6 +366,7 @@ Browser-Use is pinned to a tested version and guarded by adapter contract tests.
 8. Revoke the run capability and verify the WebSocket closes and cannot reconnect.
 9. Repeat UI checks at 390, 768, 1024, and 1440 px, including fullscreen and an open mobile keyboard.
 10. Capture versioned JSON evidence and screenshots; record exact commit, container digests, test commands, timings, and known gaps.
+11. Invoke the Cursor CLI harness noninteractively against the deployed Manager, verify that it starts the same Browser-Use run, receives typed outputs, and exits successfully; repeat with a forced hang and verify bounded cancellation and redacted failure output.
 
 ## 12. Definition of done
 

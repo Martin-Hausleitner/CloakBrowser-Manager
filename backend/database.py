@@ -519,6 +519,159 @@ def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+class OptimisticConcurrencyError(Exception):
+    """Raised when an update loses an optimistic row_version check."""
+
+
+class ProjectConflictError(Exception):
+    """Raised when creating a project that already exists in a sandbox."""
+
+
+def _project_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return dict(row)
+
+
+def ensure_project(
+    sandbox_id: str,
+    project_id: str,
+    *,
+    name: str | None = None,
+    created_by_kind: str = "system",
+    created_by_id: str | None = None,
+    default_retention: str = "project",
+    accent_color: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """Create a project row if missing; never overwrite an existing one."""
+    now = _now()
+    sid = str(sandbox_id or "default")
+    pid = str(project_id or "default")
+    with get_db() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO projects (
+                sandbox_id, id, name, accent_color, description, default_retention,
+                archived_at, created_by_kind, created_by_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)""",
+            (
+                sid,
+                pid,
+                name or pid,
+                accent_color,
+                description,
+                default_retention,
+                created_by_kind,
+                created_by_id,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    project = get_project(sid, pid)
+    if project is None:
+        raise RuntimeError(f"Failed to ensure project {sid}/{pid}")
+    return project
+
+
+def create_project(
+    sandbox_id: str,
+    project_id: str,
+    name: str,
+    *,
+    created_by_kind: str,
+    created_by_id: str | None = None,
+    accent_color: str | None = None,
+    description: str | None = None,
+    default_retention: str = "project",
+) -> dict[str, Any]:
+    now = _now()
+    sid = str(sandbox_id or "default")
+    pid = str(project_id)
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM projects WHERE sandbox_id = ? AND id = ?",
+            (sid, pid),
+        ).fetchone()
+        if existing:
+            raise ProjectConflictError(f"Project already exists: {sid}/{pid}")
+        conn.execute(
+            """INSERT INTO projects (
+                sandbox_id, id, name, accent_color, description, default_retention,
+                archived_at, created_by_kind, created_by_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)""",
+            (
+                sid,
+                pid,
+                name,
+                accent_color,
+                description,
+                default_retention,
+                created_by_kind,
+                created_by_id,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    project = get_project(sid, pid)
+    if project is None:
+        raise RuntimeError(f"Failed to create project {sid}/{pid}")
+    return project
+
+
+def get_project(sandbox_id: str, project_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM projects WHERE sandbox_id = ? AND id = ?",
+            (str(sandbox_id or "default"), str(project_id)),
+        ).fetchone()
+        return _project_from_row(row) if row else None
+
+
+def list_projects(sandbox_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(limit, 500))
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM projects
+            WHERE sandbox_id = ?
+            ORDER BY archived_at IS NOT NULL, name ASC, id ASC
+            LIMIT ?""",
+            (str(sandbox_id or "default"), safe_limit),
+        ).fetchall()
+        return [_project_from_row(row) for row in rows]
+
+
+def update_project(sandbox_id: str, project_id: str, **fields: Any) -> dict[str, Any] | None:
+    existing = get_project(sandbox_id, project_id)
+    if not existing:
+        return None
+
+    updates: dict[str, Any] = {}
+    if "name" in fields and fields["name"] is not None:
+        updates["name"] = fields["name"]
+    if "accent_color" in fields:
+        updates["accent_color"] = fields["accent_color"]
+    if "description" in fields:
+        updates["description"] = fields["description"]
+    if "default_retention" in fields and fields["default_retention"] is not None:
+        updates["default_retention"] = fields["default_retention"]
+    if "archived" in fields and fields["archived"] is not None:
+        updates["archived_at"] = _now() if fields["archived"] else None
+
+    if not updates:
+        return existing
+
+    updates["updated_at"] = _now()
+    columns = ", ".join(f"{column} = ?" for column in updates)
+    values = list(updates.values()) + [str(sandbox_id or "default"), str(project_id)]
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE projects SET {columns} WHERE sandbox_id = ? AND id = ?",
+            values,
+        )
+        conn.commit()
+    return get_project(sandbox_id, project_id)
+
+
 def create_profile(
     name: str,
     fingerprint_seed: int | None = None,
@@ -529,6 +682,8 @@ def create_profile(
     user_data_dir = str(DATA_DIR / "profiles" / profile_id)
     now = _now()
     tags = fields.pop("tags", None) or []
+    sandbox_id = fields.get("sandbox_id", "default")
+    project_id = fields.get("project_id", "default")
 
     with get_db() as conn:
         conn.execute(
@@ -541,8 +696,8 @@ def create_profile(
                 user_data_dir, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                profile_id, name, fields.get("sandbox_id", "default"),
-                fields.get("project_id", "default"),
+                profile_id, name, sandbox_id,
+                project_id,
                 fields.get("folder_path", ""),
                 fields.get("pinned", False),
                 fields.get("accent_color"),
@@ -578,6 +733,11 @@ def create_profile(
             )
         conn.commit()
 
+    ensure_project(
+        str(sandbox_id or "default"),
+        str(project_id or "default"),
+        created_by_kind="system",
+    )
     return get_profile(profile_id)  # type: ignore[return-value]
 
 
@@ -662,7 +822,14 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
                 )
             conn.commit()
 
-    return get_profile(profile_id)
+    updated = get_profile(profile_id)
+    if updated is not None:
+        ensure_project(
+            str(updated.get("sandbox_id") or "default"),
+            str(updated.get("project_id") or "default"),
+            created_by_kind="system",
+        )
+    return updated
 
 
 def bulk_organize_profiles(
@@ -901,6 +1068,7 @@ def create_task_session(
             ),
         )
         conn.commit()
+    ensure_project(str(sandbox_id or "default"), project_id, created_by_kind="system")
     return get_task_session(session_id)  # type: ignore[return-value]
 
 
@@ -921,6 +1089,79 @@ def list_task_sessions(profile_id: str, limit: int = 100) -> list[dict[str, Any]
             (profile_id, safe_limit),
         ).fetchall()
         return [_task_session_from_row(row) for row in rows]
+
+
+def update_task_session(
+    session_id: str,
+    *,
+    expected_row_version: int,
+    title: str | None = None,
+    workflow_state: str | None = None,
+    archived: bool | None = None,
+    retention_class: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Apply lifecycle updates with optimistic concurrency on row_version."""
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM task_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        current = _task_session_from_row(row)
+        if int(current["row_version"]) != int(expected_row_version):
+            conn.commit()
+            raise OptimisticConcurrencyError(
+                f"Task session row_version conflict for {session_id}"
+            )
+
+        updates: dict[str, Any] = {
+            "updated_at": now,
+            "activity_at": now,
+            "row_version": int(current["row_version"]) + 1,
+        }
+        if title is not None:
+            updates["title"] = title
+        if metadata is not None:
+            updates["metadata"] = json.dumps(metadata, separators=(",", ":"))
+        if retention_class is not None:
+            if retention_class not in {"temporary", "project"}:
+                conn.commit()
+                raise ValueError("retention_class must be temporary or project")
+            updates["retention_class"] = retention_class
+        if workflow_state is not None:
+            if workflow_state not in {"open", "done"}:
+                conn.commit()
+                raise ValueError("workflow_state must be open or done")
+            updates["workflow_state"] = workflow_state
+            updates["done_at"] = now if workflow_state == "done" else None
+        if archived is not None:
+            if archived:
+                updates["archived_at"] = now
+                updates["status"] = "archived"
+            else:
+                updates["archived_at"] = None
+                updates["status"] = "active"
+
+        columns = ", ".join(f"{column} = ?" for column in updates)
+        values = list(updates.values()) + [session_id, int(expected_row_version)]
+        cursor = conn.execute(
+            f"""UPDATE task_sessions
+            SET {columns}
+            WHERE id = ? AND row_version = ?""",
+            values,
+        )
+        if cursor.rowcount != 1:
+            conn.commit()
+            raise OptimisticConcurrencyError(
+                f"Task session row_version conflict for {session_id}"
+            )
+        conn.commit()
+    return get_task_session(session_id)
 
 
 def append_task_message(

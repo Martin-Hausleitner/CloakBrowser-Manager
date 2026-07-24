@@ -72,6 +72,9 @@ if __package__:
         ProfileTemplateCreate,
         ProfileTemplateSummary,
         ProfileUpdate,
+        ProjectCreate,
+        ProjectResponse,
+        ProjectUpdate,
         ProxyAutoProfileCreate,
         ProxyInventoryIngest,
         ProxyInventoryIngestResponse,
@@ -85,6 +88,7 @@ if __package__:
         TaskMessageResponse,
         TaskSessionCreate,
         TaskSessionResponse,
+        TaskSessionUpdate,
     )
     from . import proxy_inventory
     from . import session_links
@@ -135,6 +139,9 @@ else:  # Support `uvicorn main:app` from the backend directory.
         ProfileTemplateCreate,
         ProfileTemplateSummary,
         ProfileUpdate,
+        ProjectCreate,
+        ProjectResponse,
+        ProjectUpdate,
         ProxyAutoProfileCreate,
         ProxyInventoryIngest,
         ProxyInventoryIngestResponse,
@@ -148,6 +155,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
         TaskMessageResponse,
         TaskSessionCreate,
         TaskSessionResponse,
+        TaskSessionUpdate,
     )
     import proxy_inventory
     import session_links
@@ -1507,17 +1515,17 @@ def _require_profile_permission(
     return profile, identity
 
 
-def _can_read_task_sessions(identity: access.AccessIdentity, profile: dict[str, object]) -> bool:
-    sandbox_id = str(profile.get("sandbox_id") or "default")
-    return identity.is_admin or access.has_permission(identity, sandbox_id, "view")
+def _can_read_task_sessions(identity: access.AccessIdentity, sandbox_id: str) -> bool:
+    sid = str(sandbox_id or "default")
+    return identity.is_admin or access.has_permission(identity, sid, "view")
 
 
-def _can_write_task_sessions(identity: access.AccessIdentity, profile: dict[str, object]) -> bool:
-    sandbox_id = str(profile.get("sandbox_id") or "default")
+def _can_write_task_sessions(identity: access.AccessIdentity, sandbox_id: str) -> bool:
+    sid = str(sandbox_id or "default")
     return (
         identity.is_admin
-        or access.has_permission(identity, sandbox_id, "interact")
-        or access.has_permission(identity, sandbox_id, "automate")
+        or access.has_permission(identity, sid, "interact")
+        or access.has_permission(identity, sid, "automate")
     )
 
 
@@ -1528,10 +1536,11 @@ def _require_task_profile(
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     identity = _require_identity(scope)
+    sandbox_id = str(profile.get("sandbox_id") or "default")
     allowed = (
-        _can_write_task_sessions(identity, profile)
+        _can_write_task_sessions(identity, sandbox_id)
         if permission == "interact"
-        else _can_read_task_sessions(identity, profile)
+        else _can_read_task_sessions(identity, sandbox_id)
     )
     if not allowed:
         db.record_access_audit_event(
@@ -1539,7 +1548,7 @@ def _require_task_profile(
             identity.id,
             f"task_session.permission.{permission}",
             "denied",
-            str(profile.get("sandbox_id") or "default"),
+            sandbox_id,
             profile_id,
         )
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -1548,31 +1557,51 @@ def _require_task_profile(
 
 def _require_task_session(
     scope: Scope, session_id: str, permission: access.Permission = "view"
-) -> tuple[dict[str, object], dict[str, object], access.AccessIdentity]:
+) -> tuple[dict[str, object], dict[str, object] | None, access.AccessIdentity]:
     session = db.get_task_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Task session not found")
-    profile = db.get_profile(str(session["profile_id"]))
     identity = _require_identity(scope)
-    allowed = False
-    if profile:
-        allowed = (
-            _can_write_task_sessions(identity, profile)
-            if permission == "interact"
-            else _can_read_task_sessions(identity, profile)
+    sandbox_id = str(session.get("sandbox_id") or "default")
+    allowed = (
+        _can_write_task_sessions(identity, sandbox_id)
+        if permission == "interact"
+        else _can_read_task_sessions(identity, sandbox_id)
+    )
+    if not allowed:
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            f"task_session.permission.{permission}",
+            "denied",
+            sandbox_id,
+            str(session.get("profile_id") or ""),
         )
-    if not profile or not allowed:
-        if profile:
-            db.record_access_audit_event(
-                identity.kind,
-                identity.id,
-                f"task_session.permission.{permission}",
-                "denied",
-                str(profile.get("sandbox_id") or "default"),
-                str(profile.get("id") or session["profile_id"]),
-            )
         raise HTTPException(status_code=404, detail="Task session not found")
+    profile = None
+    profile_id = session.get("profile_id")
+    if profile_id:
+        profile = db.get_profile(str(profile_id))
     return session, profile, identity
+
+
+def _require_project_sandbox(
+    scope: Scope, sandbox_id: str, permission: access.Permission
+) -> access.AccessIdentity:
+    """Authorize project access with sandbox-scoped indistinguishable 404."""
+    identity = _require_identity(scope)
+    sid = str(sandbox_id or "default")
+    if access.has_permission(identity, sid, permission) or identity.is_admin:
+        return identity
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        f"project.permission.{permission}",
+        "denied",
+        sid,
+        None,
+    )
+    raise HTTPException(status_code=404, detail="Project not found")
 
 
 def _sanitize_task_value(value: object, depth: int = 0) -> object:
@@ -2149,6 +2178,85 @@ async def list_access_sandboxes(request: Request):
 # ── Task sessions ───────────────────────────────────────────────────────────
 
 
+@app.post("/api/projects", response_model=ProjectResponse, status_code=201)
+async def create_project(body: ProjectCreate, request: Request):
+    identity = _require_project_sandbox(request.scope, body.sandbox_id, "operate")
+    try:
+        project = db.create_project(
+            body.sandbox_id,
+            body.id,
+            body.name,
+            created_by_kind=identity.kind,
+            created_by_id=identity.id,
+            accent_color=body.accent_color,
+            description=body.description,
+            default_retention=body.default_retention,
+        )
+    except db.ProjectConflictError as exc:
+        raise HTTPException(status_code=409, detail="Project already exists") from exc
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "project.create",
+        "allowed",
+        body.sandbox_id,
+        body.id,
+    )
+    return ProjectResponse(**project)
+
+
+@app.get("/api/projects", response_model=list[ProjectResponse])
+async def list_projects(
+    request: Request,
+    sandbox_id: str = Query(..., min_length=1, max_length=80),
+    limit: int = Query(200, ge=1, le=500),
+):
+    _require_project_sandbox(request.scope, sandbox_id, "view")
+    return [
+        ProjectResponse(**project)
+        for project in db.list_projects(sandbox_id, limit=limit)
+    ]
+
+
+@app.get("/api/projects/{project_id}", response_model=ProjectResponse)
+async def get_project(
+    project_id: str,
+    request: Request,
+    sandbox_id: str = Query(..., min_length=1, max_length=80),
+):
+    _require_project_sandbox(request.scope, sandbox_id, "view")
+    project = db.get_project(sandbox_id, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return ProjectResponse(**project)
+
+
+@app.patch("/api/projects/{project_id}", response_model=ProjectResponse)
+async def update_project(
+    project_id: str,
+    body: ProjectUpdate,
+    request: Request,
+    sandbox_id: str = Query(..., min_length=1, max_length=80),
+):
+    identity = _require_project_sandbox(request.scope, sandbox_id, "operate")
+    project = db.update_project(
+        sandbox_id,
+        project_id,
+        **body.model_dump(exclude_unset=True),
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "project.update",
+        "allowed",
+        sandbox_id,
+        project_id,
+    )
+    return ProjectResponse(**project)
+
+
 @app.post("/api/task-sessions", response_model=TaskSessionResponse, status_code=201)
 async def create_task_session(body: TaskSessionCreate, request: Request):
     profile, identity = _require_task_profile(request.scope, body.profile_id, "interact")
@@ -2197,6 +2305,53 @@ async def get_task_session(session_id: str, request: Request):
     return TaskSessionResponse(**session)
 
 
+@app.patch("/api/task-sessions/{session_id}", response_model=TaskSessionResponse)
+async def update_task_session(
+    session_id: str,
+    body: TaskSessionUpdate,
+    request: Request,
+):
+    session, _profile, identity = _require_task_session(
+        request.scope, session_id, "interact"
+    )
+    updates = body.model_dump(exclude_unset=True)
+    expected_row_version = int(updates.pop("row_version"))
+    if "metadata" in updates and updates["metadata"] is not None:
+        updates["metadata"] = _sanitize_task_metadata(updates["metadata"])
+    try:
+        updated = db.update_task_session(
+            str(session["id"]),
+            expected_row_version=expected_row_version,
+            **updates,
+        )
+    except db.OptimisticConcurrencyError as exc:
+        raise HTTPException(status_code=409, detail="Task session conflict") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Task session not found")
+    db.record_task_event(
+        str(updated["id"]),
+        "task_session.updated",
+        identity.kind,
+        identity.id,
+        {
+            "workflow_state": updated.get("workflow_state"),
+            "archived_at": updated.get("archived_at"),
+            "row_version": updated.get("row_version"),
+        },
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_session.update",
+        "allowed",
+        str(updated.get("sandbox_id") or "default"),
+        str(updated.get("profile_id") or ""),
+    )
+    return TaskSessionResponse(**updated)
+
+
 def _append_task_user_message(
     scope: Scope,
     session_id: str,
@@ -2205,8 +2360,8 @@ def _append_task_user_message(
     commands: list[object],
     metadata: dict[str, object],
 ) -> TaskMessageResponse:
-    session, profile, identity = _require_task_session(scope, session_id, "interact")
-    if profile_id and profile_id != str(session["profile_id"]):
+    session, _profile, identity = _require_task_session(scope, session_id, "interact")
+    if profile_id and profile_id != str(session.get("profile_id") or ""):
         requested_profile = db.get_profile(profile_id)
         if requested_profile:
             db.record_access_audit_event(
@@ -2257,8 +2412,8 @@ def _append_task_user_message(
         identity.id,
         "task_message.append",
         "allowed",
-        str(profile.get("sandbox_id") or "default"),
-        str(profile["id"]),
+        str(session.get("sandbox_id") or "default"),
+        str(session.get("profile_id") or ""),
     )
     return TaskMessageResponse(**message)
 

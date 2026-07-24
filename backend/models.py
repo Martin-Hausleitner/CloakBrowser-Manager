@@ -312,18 +312,66 @@ class ClipboardRequest(BaseModel):
     text: str = Field(max_length=1_048_576)  # 1MB max
 
 
+class ProjectCreate(BaseModel):
+    id: str = Field(min_length=1, max_length=80, pattern=SLUG_PATTERN)
+    name: str = Field(min_length=1, max_length=120)
+    sandbox_id: str = Field(min_length=1, max_length=80, pattern=SLUG_PATTERN)
+    accent_color: str | None = Field(default=None, pattern=ACCENT_COLOR_PATTERN)
+    description: str | None = Field(default=None, max_length=2_000)
+    default_retention: Literal["temporary", "project"] = "project"
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    accent_color: str | None = Field(default=None, pattern=ACCENT_COLOR_PATTERN)
+    description: str | None = Field(default=None, max_length=2_000)
+    default_retention: Literal["temporary", "project"] | None = None
+    archived: bool | None = None
+
+
+class ProjectResponse(BaseModel):
+    sandbox_id: str
+    id: str
+    name: str
+    accent_color: str | None = None
+    description: str | None = None
+    default_retention: Literal["temporary", "project"] = "project"
+    archived_at: str | None = None
+    created_by_kind: str
+    created_by_id: str | None = None
+    created_at: str
+    updated_at: str
+
+
 class TaskSessionCreate(BaseModel):
     profile_id: str = Field(min_length=1, max_length=120)
     title: str | None = Field(default=None, max_length=120)
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+class TaskSessionUpdate(BaseModel):
+    row_version: int = Field(ge=1)
+    title: str | None = Field(default=None, max_length=120)
+    workflow_state: Literal["open", "done"] | None = None
+    archived: bool | None = None
+    retention_class: Literal["temporary", "project"] | None = None
+    metadata: dict[str, object] | None = None
+
+
 class TaskSessionResponse(BaseModel):
     id: str
-    profile_id: str
+    profile_id: str | None = None
     sandbox_id: str
+    project_id: str = "default"
     title: str | None = None
     status: Literal["active", "archived"] = "active"
+    workflow_state: Literal["open", "done"] = "open"
+    done_at: str | None = None
+    archived_at: str | None = None
+    retention_class: Literal["temporary", "project", "legacy"] = "project"
+    expires_at: str | None = None
+    activity_at: str
+    row_version: int = 1
     created_by_kind: str
     created_by_id: str | None = None
     created_at: str

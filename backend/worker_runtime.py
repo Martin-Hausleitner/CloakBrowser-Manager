@@ -151,6 +151,12 @@ class WorkerRuntimeService:
 
         ``CBM_WORKER_TOKEN`` is accepted only as provisioning input when it is a
         valid strong ``cbm_worker_`` key. Plaintext is never persisted.
+
+        Uses one ``BEGIN IMMEDIATE`` transaction to make the configured worker
+        the sole active internal identity: upsert current ID/digest, deactivate
+        every other active worker, and revoke their active claims/capabilities/
+        run leases (including same-ID digest changes). Returns affected lease
+        IDs for socket closure after commit — never awaits sockets in-txn.
         """
         wid = (worker_id if worker_id is not None else self._worker_id_env()) or None
         token = worker_token if worker_token is not None else self._worker_token_env()
@@ -158,16 +164,85 @@ class WorkerRuntimeService:
             return {"configured": False, "rotated": False, "worker_id": wid}
         assert token is not None
         digest = access.hash_worker_key(token)
-        existing = db.get_worker_identity(wid)
-        rotated = bool(
-            existing
-            and existing.get("key_digest")
-            and existing["key_digest"] != digest
-        )
-        db.upsert_worker_identity(wid, digest, active=True)
+        now = self._clock()
         lease_ids: list[str] = []
-        if rotated:
-            lease_ids = self._revoke_worker_claims(wid, reason="credential_rotation")
+        rotated = False
+        with self._get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    "SELECT id, key_digest, active FROM worker_identities WHERE id = ?",
+                    (wid,),
+                ).fetchone()
+                digest_changed = bool(
+                    existing
+                    and existing["key_digest"]
+                    and existing["key_digest"] != digest
+                )
+                # Workers that will lose active status (other IDs, or same-ID digest change).
+                stale_rows = conn.execute(
+                    """
+                    SELECT id FROM worker_identities
+                    WHERE active = 1 AND id != ?
+                    """,
+                    (wid,),
+                ).fetchall()
+                stale_ids = [str(row["id"]) for row in stale_rows]
+                if digest_changed:
+                    rotated = True
+                if stale_ids:
+                    rotated = True
+
+                if existing is None:
+                    conn.execute(
+                        """
+                        INSERT INTO worker_identities
+                            (id, key_digest, active, created_at, updated_at)
+                        VALUES (?, ?, 1, ?, ?)
+                        """,
+                        (wid, digest, _iso(now), _iso(now)),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE worker_identities
+                        SET key_digest = ?, active = 1, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (digest, _iso(now), wid),
+                    )
+
+                if stale_ids:
+                    conn.execute(
+                        f"""
+                        UPDATE worker_identities
+                        SET active = 0, updated_at = ?
+                        WHERE id IN ({",".join("?" for _ in stale_ids)})
+                        """,
+                        (_iso(now), *stale_ids),
+                    )
+
+                revoke_ids = list(stale_ids)
+                if digest_changed:
+                    revoke_ids.append(wid)
+                for revoke_wid in revoke_ids:
+                    lease_ids.extend(
+                        self._revoke_worker_claims_on_conn(
+                            conn, revoke_wid, now=now, reason="credential_rotation"
+                        )
+                    )
+                # De-dupe while preserving order.
+                seen: set[str] = set()
+                unique_leases: list[str] = []
+                for lid in lease_ids:
+                    if lid not in seen:
+                        seen.add(lid)
+                        unique_leases.append(lid)
+                lease_ids = unique_leases
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         return {
             "configured": True,
             "rotated": rotated,
@@ -175,60 +250,76 @@ class WorkerRuntimeService:
             "lease_ids": lease_ids,
         }
 
+    def _revoke_worker_claims_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        worker_id: str,
+        *,
+        now: datetime,
+        reason: str,
+    ) -> list[str]:
+        """Revoke active claims/capabilities/run leases for one worker on ``conn``.
+
+        Caller must hold ``BEGIN IMMEDIATE``. Does not commit/rollback.
+        """
+        lease_ids: list[str] = []
+        rows = conn.execute(
+            """
+            SELECT id, lease_id, profile_id FROM task_runs
+            WHERE worker_id = ?
+              AND status IN ('health_check', 'running')
+            """,
+            (worker_id,),
+        ).fetchall()
+        for row in rows:
+            lid = row["lease_id"]
+            if lid:
+                lease_ids.append(str(lid))
+                self._leases.release_on_conn(
+                    conn, str(lid), now=now, reason=reason
+                )
+            conn.execute(
+                """
+                UPDATE task_runs
+                SET status = 'revoked',
+                    claimed_by = NULL,
+                    claim_expires_at = NULL,
+                    worker_id = NULL,
+                    lease_id = NULL,
+                    capability_digest = NULL,
+                    error_code = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (reason, "Worker credential rotated", _iso(now), row["id"]),
+            )
+            if row["profile_id"]:
+                self._refresh_profile_eligibility_on_conn(
+                    conn, str(row["profile_id"]), now
+                )
+        extra = conn.execute(
+            """
+            SELECT id FROM automation_leases
+            WHERE owner_kind = ? AND owner_id = ? AND released_at IS NULL
+            """,
+            (automation_leases.RUN_OWNER_KIND, worker_id),
+        ).fetchall()
+        for row in extra:
+            lid = str(row["id"])
+            if lid not in lease_ids:
+                lease_ids.append(lid)
+            self._leases.release_on_conn(conn, lid, now=now, reason=reason)
+        return lease_ids
+
     def _revoke_worker_claims(self, worker_id: str, *, reason: str) -> list[str]:
         now = self._clock()
-        lease_ids: list[str] = []
         with self._get_db() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                rows = conn.execute(
-                    """
-                    SELECT id, lease_id, profile_id FROM task_runs
-                    WHERE worker_id = ?
-                      AND status IN ('health_check', 'running')
-                    """,
-                    (worker_id,),
-                ).fetchall()
-                for row in rows:
-                    lid = row["lease_id"]
-                    if lid:
-                        lease_ids.append(str(lid))
-                        self._leases.release_on_conn(
-                            conn, str(lid), now=now, reason=reason
-                        )
-                    conn.execute(
-                        """
-                        UPDATE task_runs
-                        SET status = 'revoked',
-                            claimed_by = NULL,
-                            claim_expires_at = NULL,
-                            worker_id = NULL,
-                            lease_id = NULL,
-                            capability_digest = NULL,
-                            error_code = ?,
-                            error_message = ?,
-                            updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (reason, "Worker credential rotated", _iso(now), row["id"]),
-                    )
-                    if row["profile_id"]:
-                        self._refresh_profile_eligibility_on_conn(
-                            conn, str(row["profile_id"]), now
-                        )
-                # Also release any residual worker-owned leases.
-                extra = conn.execute(
-                    """
-                    SELECT id FROM automation_leases
-                    WHERE owner_kind = ? AND owner_id = ? AND released_at IS NULL
-                    """,
-                    (automation_leases.RUN_OWNER_KIND, worker_id),
-                ).fetchall()
-                for row in extra:
-                    lid = str(row["id"])
-                    if lid not in lease_ids:
-                        lease_ids.append(lid)
-                    self._leases.release_on_conn(conn, lid, now=now, reason=reason)
+                lease_ids = self._revoke_worker_claims_on_conn(
+                    conn, worker_id, now=now, reason=reason
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -789,9 +880,11 @@ class WorkerRuntimeService:
         if not cleaned or len(cleaned) > 500:
             raise ValueError("invalid_message")
         lowered = cleaned.lower()
-        for needle in ("cbm_run_", "cbm_worker_", "cbm_lease_", "bearer ", "authorization"):
+        for needle in ("bearer ", "authorization"):
             if needle in lowered:
                 raise ValueError("invalid_message")
+        if access.contains_persisted_cbm_token(cleaned):
+            raise ValueError("invalid_message")
         return self._terminal(
             worker_id,
             run_id,

@@ -1173,6 +1173,12 @@ def _reject_sensitive_common(value: str) -> None:
         raise ValueError("text contains rejected sensitive content")
     if _PROXY_CREDENTIAL_RE.search(value):
         raise ValueError("text contains rejected sensitive content")
+    try:
+        from . import access_control as access
+    except ImportError:  # pragma: no cover - flat uvicorn import path
+        import access_control as access
+    if access.contains_persisted_cbm_token(value):
+        raise ValueError("text contains rejected sensitive content")
     if _HTML_DOM_TAG_RE.search(value):
         raise ValueError("text contains rejected markup")
     if _looks_like_base64_blob(value):

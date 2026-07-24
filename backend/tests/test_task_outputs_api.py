@@ -783,3 +783,177 @@ def test_output_rejects_token_assignment_variants_without_echo(
             },
         )
         _assert_rejected_without_echo(response)
+
+
+# Distinct bare-token markers (never echoed). Suffixes cover hex / base64url / alnum.
+_RUN_TOKEN_MARKER = "cbm_run_" + ("d0" * 32)
+_WORKER_TOKEN_MARKER = "cbm_worker_" + ("e1" * 32)
+_LEASE_TOKEN_MARKER = "cbm_lease_" + ("f2" * 32)
+_BASE64URL_RUN_MARKER = "cbm_run_" + ("A1_-Zz09" * 4)  # 32 base64url-ish chars
+_HEX_SHORT_RUN_MARKER = "CBM_RUN_deadbeefcafebabe"
+_ALNUM_WORKER_MARKER = "Cbm_Worker_AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+
+
+def _assert_output_never_persisted(run_id: str, marker: str) -> None:
+    outputs = db.list_task_outputs(run_id, after_sequence=0, limit=200)
+    blob = str(outputs)
+    assert marker not in blob
+    assert marker.lower() not in blob.lower()
+
+
+def test_output_rejects_bare_cbm_tokens_in_summary_and_payloads(
+    client_access: TestClient,
+):
+    """Reject bare cbm_* tokens in summary and every representative kind field."""
+    run, _profile = create_queued_run(client_access)
+    run_id = run["id"]
+
+    # Harmless prefix mentions without token material must remain accepted.
+    safe_prefix = append_internal_output(
+        client_access,
+        run_id,
+        {
+            "idempotency_key": "safe-prefix-mention",
+            "kind": "observation",
+            "summary": "Document the cbm_run_ prefix for operators",
+            "payload": {
+                "text": "Keys use cbm_worker_ / cbm_lease_ prefixes; never paste raw values."
+            },
+        },
+    )
+    assert safe_prefix.status_code == 201, safe_prefix.text
+
+    summary_cases = [
+        ("run-bare", f"saw {_RUN_TOKEN_MARKER} in logs"),
+        ("worker-punct", f"({_WORKER_TOKEN_MARKER})."),
+        ("lease-case", f"lease={_LEASE_TOKEN_MARKER}"),
+        ("b64url", f"token {_BASE64URL_RUN_MARKER} ok"),
+        ("hex-short", f"cap {_HEX_SHORT_RUN_MARKER}"),
+        ("alnum", f"worker {_ALNUM_WORKER_MARKER}"),
+    ]
+    for key, summary in summary_cases:
+        marker = next(
+            m
+            for m in (
+                _RUN_TOKEN_MARKER,
+                _WORKER_TOKEN_MARKER,
+                _LEASE_TOKEN_MARKER,
+                _BASE64URL_RUN_MARKER,
+                _HEX_SHORT_RUN_MARKER,
+                _ALNUM_WORKER_MARKER,
+            )
+            if m in summary
+        )
+        response = append_internal_output(
+            client_access,
+            run_id,
+            {
+                "idempotency_key": f"bare-summary-{key}",
+                "kind": "observation",
+                "summary": summary,
+                "payload": {"text": "safe"},
+            },
+        )
+        _assert_rejected_without_echo(response, marker=marker)
+        assert marker not in response.text
+        assert response.json() == {"detail": "Invalid output payload"}
+
+    kind_payload_cases = [
+        ("status", "status", {"status": "ok", "detail": f"x {_RUN_TOKEN_MARKER}"}),
+        ("action", "action", {"name": "click", "text": f"bearer {_WORKER_TOKEN_MARKER}"}),
+        ("observation", "observation", {"note": f"[{_LEASE_TOKEN_MARKER}]"}),
+        (
+            "extracted",
+            "extracted_data",
+            {"label": "x", "fields": {"a": f"value {_BASE64URL_RUN_MARKER}"}},
+        ),
+        ("link", "link", {"url": "https://example.com", "title": _HEX_SHORT_RUN_MARKER}),
+        ("metric", "metric", {"name": "n", "value": 1, "unit": _ALNUM_WORKER_MARKER}),
+        ("error", "error", {"code": "x", "message": f"err {_RUN_TOKEN_MARKER}"}),
+        ("approval", "approval", {"prompt": f"approve {_WORKER_TOKEN_MARKER}?", "required": True}),
+        ("summary", "summary", {"text": f"done {_LEASE_TOKEN_MARKER}", "status": "ok"}),
+        (
+            "nested",
+            "observation",
+            {"text": "outer", "title": f"inner {_RUN_TOKEN_MARKER}"},
+        ),
+    ]
+    for key, kind, payload in kind_payload_cases:
+        marker = next(
+            m
+            for m in (
+                _RUN_TOKEN_MARKER,
+                _WORKER_TOKEN_MARKER,
+                _LEASE_TOKEN_MARKER,
+                _BASE64URL_RUN_MARKER,
+                _HEX_SHORT_RUN_MARKER,
+                _ALNUM_WORKER_MARKER,
+            )
+            if m in str(payload)
+        )
+        response = append_internal_output(
+            client_access,
+            run_id,
+            {
+                "idempotency_key": f"bare-payload-{key}",
+                "kind": kind,
+                "summary": "safe summary",
+                "payload": payload,
+            },
+        )
+        _assert_rejected_without_echo(response, marker=marker)
+        assert marker not in response.text
+        assert response.status_code == 422
+
+    # DB must never contain rejected markers from failed attempts.
+    for marker in (
+        _RUN_TOKEN_MARKER,
+        _WORKER_TOKEN_MARKER,
+        _LEASE_TOKEN_MARKER,
+        _BASE64URL_RUN_MARKER,
+        _HEX_SHORT_RUN_MARKER,
+        _ALNUM_WORKER_MARKER,
+    ):
+        _assert_output_never_persisted(run_id, marker)
+        listed = client_access.get(
+            f"/api/task-runs/{run_id}/outputs",
+            headers=bootstrap_headers(),
+        )
+        assert listed.status_code == 200
+        assert marker not in listed.text
+
+
+def test_fail_rejects_bare_cbm_tokens_in_message_without_echo(
+    client_access: TestClient,
+):
+    run, _profile = create_queued_run(client_access)
+    marker = _RUN_TOKEN_MARKER
+    response = client_access.post(
+        f"/internal/task-runs/{run['id']}/fail",
+        headers=worker_headers(),
+        json={
+            "error_code": "internal_error",
+            "message": f"upstream said {marker} while failing",
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert marker not in response.text
+    assert response.json() == {"detail": "Invalid request"}
+    fetched = client_access.get(
+        f"/api/task-runs/{run['id']}",
+        headers=bootstrap_headers(),
+    )
+    assert fetched.status_code == 200
+    assert marker not in fetched.text
+    assert fetched.json()["status"] != "failed" or fetched.json().get("error_message") is None
+    # Harmless prefix-only mention is allowed when no token material follows.
+    ok = client_access.post(
+        f"/internal/task-runs/{run['id']}/fail",
+        headers=worker_headers(),
+        json={
+            "error_code": "max_steps",
+            "message": "Do not paste cbm_run_ values into failure notes",
+        },
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["status"] == "failed"

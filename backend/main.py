@@ -224,8 +224,13 @@ CBM_WORKER_TOKEN: str | None = os.environ.get("CBM_WORKER_TOKEN") or None
 # deliberately contains no profile or runtime metadata so Docker can probe the
 # service without turning ``/api/status`` into an information leak.
 _AUTH_EXEMPT = frozenset({"/api/auth/status", "/api/auth/login", "/health"})
-_CDP_RUN_CAPABILITY_PATH = re.compile(
-    r"^/api/profiles/[^/]+/cdp(?:/json(?:/version|/list)?/?|/devtools/.+)?$"
+# HTTP run-capability bypass: GET discovery only.
+_CDP_RUN_CAPABILITY_HTTP_PATH = re.compile(
+    r"^/api/profiles/[^/]+/cdp/json/(?:version|list)/?$"
+)
+# WebSocket run-capability bypass: browser WS + page/devtools WS only.
+_CDP_RUN_CAPABILITY_WS_PATH = re.compile(
+    r"^/api/profiles/[^/]+/cdp(?:/devtools/.+)?$"
 )
 _LOGIN_FAILURE_LIMIT = 5
 _LOGIN_BACKOFF_SECONDS = 60.0
@@ -868,8 +873,8 @@ class AuthMiddleware:
             await _reject_unauthenticated(scope, receive, send)
             return
 
-        # Run capability may reach exact CDP discovery/WS paths only.
-        if access.is_run_capability_token(bearer) and _CDP_RUN_CAPABILITY_PATH.match(path):
+        # Run capability may reach exact CDP discovery (HTTP GET) or CDP WS only.
+        if access.is_run_capability_token(bearer) and _run_capability_path_allowed(scope):
             scope.setdefault("state", {})["run_capability_token"] = bearer
             await self.app(scope, receive, send)
             return
@@ -905,6 +910,30 @@ class AuthMiddleware:
             return
 
         await _reject_unauthenticated(scope, receive, send)
+
+
+def _run_capability_path_allowed(scope: Scope) -> bool:
+    """Scope/method-aware allowlist for ``cbm_run_`` auth bypass.
+
+    HTTP Bearer may bypass only GET ``.../cdp/json/version`` and
+    ``.../cdp/json/list``. WebSocket may bypass only browser ``.../cdp`` and
+    page ``.../cdp/devtools/{path}``. Helper ``.../cdp`` HTTP and any other
+    method/path must fall through to normal auth rejection.
+    """
+    path = scope.get("path") or ""
+    if scope["type"] == "http":
+        method = str(scope.get("method") or "GET").upper()
+        if method != "GET":
+            return False
+        return _CDP_RUN_CAPABILITY_HTTP_PATH.match(path) is not None
+    if scope["type"] == "websocket":
+        # Exact browser WS is ``.../cdp`` (no /json); page WS under /devtools/.
+        if _CDP_RUN_CAPABILITY_HTTP_PATH.match(path):
+            return False
+        if "/cdp/json" in path:
+            return False
+        return _CDP_RUN_CAPABILITY_WS_PATH.match(path) is not None
+    return False
 
 
 def _bearer_from_scope(scope: Scope) -> str | None:

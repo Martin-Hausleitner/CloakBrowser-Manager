@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -39,6 +40,11 @@ WORKER_KEY_PREFIX = "cbm_worker_"
 WORKER_KEY_BYTES = 32
 RUN_CAPABILITY_PREFIX = "cbm_run_"
 RUN_CAPABILITY_BYTES = 32
+# Bare persisted tokens: prefix + ≥1 base64url/hex/alnum char. Prefix-only mentions
+# (e.g. "use the cbm_run_ prefix") do not match. Never echo the match.
+_PERSISTED_CBM_TOKEN_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])(?:cbm_run_|cbm_worker_|cbm_lease_)[A-Za-z0-9_-]+"
+)
 
 
 @dataclass(frozen=True)
@@ -189,6 +195,17 @@ def is_run_capability_token(token: str | None) -> bool:
         return len(bytes.fromhex(raw)) == RUN_CAPABILITY_BYTES
     except ValueError:
         return False
+
+
+def contains_persisted_cbm_token(text: str) -> bool:
+    """True when text embeds a bare cbm_run_/cbm_worker_/cbm_lease_ token.
+
+    Conservative and boundary-aware. Does not treat a lone prefix mention as a
+    token. Callers must never echo the matched token material.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    return _PERSISTED_CBM_TOKEN_RE.search(text) is not None
 
 
 def resolve_worker_identity(scope: Scope) -> WorkerIdentity | None:

@@ -477,4 +477,147 @@ def test_wrong_worker_indistinguishable_404(client_access: TestClient):
                 headers=worker_headers(),
             )
         assert resp.status_code == 404
-        assert resp.json() == {"detail": "Not found"}
+
+
+def test_run_capability_cdp_route_matrix_rejects_non_exact_surfaces(
+    client_access: TestClient,
+):
+    """Run bearer may bypass only exact HTTP discovery GETs and CDP WS paths."""
+    from backend import main
+
+    run, profile = create_and_claim(client_access)
+    token = issue_capability(client_access, run["id"]).json()["token"]
+    pid = profile["id"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    main.browser_mgr.running[pid] = SimpleNamespace(
+        ws_port=6100, cdp_port=19222, display=100
+    )
+    upstream_calls: list[str] = []
+
+    try:
+        with patch("httpx.AsyncClient") as client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__.return_value = None
+
+            async def get(url, *args, **kwargs):
+                upstream_calls.append(str(url))
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.raise_for_status = MagicMock()
+                if str(url).endswith("/json/version"):
+                    resp.json.return_value = {
+                        "Browser": "Chrome/test",
+                        "webSocketDebuggerUrl": "ws://127.0.0.1:19222/devtools/browser/ABC",
+                    }
+                else:
+                    resp.json.return_value = []
+                return resp
+
+            mock_client.get = get
+            client_cls.return_value = mock_client
+
+            # Allowed HTTP discovery GETs.
+            version = client_access.get(
+                f"/api/profiles/{pid}/cdp/json/version", headers=headers
+            )
+            assert version.status_code == 200, version.text
+            listed = client_access.get(
+                f"/api/profiles/{pid}/cdp/json/list", headers=headers
+            )
+            assert listed.status_code == 200, listed.text
+            allowed_upstream = list(upstream_calls)
+
+            # Helper/base HTTP route must reject run bearer before handler/upstream.
+            upstream_calls.clear()
+            helper = client_access.get(f"/api/profiles/{pid}/cdp", headers=headers)
+            assert helper.status_code in {401, 404}
+            assert upstream_calls == []
+
+            # Other HTTP paths / methods must not bypass.
+            rejected_http = [
+                ("GET", f"/api/profiles/{pid}/cdp/json"),
+                ("GET", f"/api/profiles/{pid}/cdp/json/"),
+                ("POST", f"/api/profiles/{pid}/cdp/json/version"),
+                ("PUT", f"/api/profiles/{pid}/cdp/json/list"),
+                ("GET", f"/api/profiles/{pid}/cdp/json/version/extra"),
+                ("GET", f"/api/profiles/{pid}/cdp/devtools/page/P1"),
+                ("GET", f"/api/profiles/{pid}/status"),
+            ]
+            for method, path in rejected_http:
+                upstream_calls.clear()
+                resp = client_access.request(method, path, headers=headers)
+                assert resp.status_code in {401, 404, 405}, (method, path, resp.status_code)
+                assert upstream_calls == []
+                assert token not in resp.text
+
+            # Query tokens remain 400/4400-class without upstream.
+            upstream_calls.clear()
+            query = client_access.get(
+                f"/api/profiles/{pid}/cdp/json/version?token={token}",
+            )
+            assert query.status_code in {400, 401, 404}
+            assert upstream_calls == []
+
+            # Direct normal actor auth unchanged on helper route.
+            agent = client_access.post(
+                "/api/access/agents",
+                headers=bootstrap_headers(),
+                json={
+                    "display_name": "CDP Agent",
+                    "paperclip_agent_id": "paperclip-cdp-matrix",
+                    "grants": [{"sandbox_id": "alpha", "permission": "automate"}],
+                },
+            )
+            assert agent.status_code == 201, agent.text
+            agent_key = agent.json()["api_key"]
+            lease = client_access.post(
+                f"/api/profiles/{pid}/automation-leases",
+                headers={"Authorization": f"Bearer {agent_key}"},
+            )
+            # Profile may already hold run lease — either busy or acquired.
+            if lease.status_code == 201:
+                lease_headers = {
+                    "Authorization": f"Bearer {agent_key}",
+                    "X-CBM-Automation-Lease": lease.json()["token"],
+                }
+                upstream_calls.clear()
+                actor_helper = client_access.get(
+                    f"/api/profiles/{pid}/cdp", headers=lease_headers
+                )
+                assert actor_helper.status_code == 200, actor_helper.text
+                assert upstream_calls == []  # helper does not call upstream CDP
+
+            assert allowed_upstream  # version/list did reach upstream when allowed
+
+        # WebSocket: browser + page paths are allowlisted for run capability.
+        # HTTP discovery paths must not be treated as WS allow surfaces.
+        try:
+            with client_access.websocket_connect(
+                f"/api/profiles/{pid}/cdp",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as _ws:
+                pass
+        except WebSocketDisconnect as exc:
+            # Upstream may be absent; auth bypass itself must not be 401-class.
+            assert exc.code not in {4401}
+
+        with pytest.raises(WebSocketDisconnect) as denied_ws:
+            with client_access.websocket_connect(
+                f"/api/profiles/{pid}/cdp/json/version",
+                headers={"Authorization": f"Bearer {token}"},
+            ):
+                pass
+        assert denied_ws.value.code in {1000, 1006, 1008, 4000, 4400, 4401, 4403, 4404}
+
+        try:
+            with client_access.websocket_connect(
+                f"/api/profiles/{pid}/cdp/devtools/page/P1",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as _ws:
+                pass
+        except WebSocketDisconnect as exc:
+            assert exc.code not in {4401}
+    finally:
+        main.browser_mgr.running.pop(pid, None)

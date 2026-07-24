@@ -498,3 +498,151 @@ def test_retry_and_override_cross_sandbox_are_404(client_access: TestClient):
         == 404
     )
     assert client_access.post(f"/api/task-runs/{run['id']}/cancel").status_code == 404
+
+
+def seed_overridable_blocked_health(profile_id: str) -> None:
+    checked_at = datetime.now(timezone.utc).isoformat()
+    db.upsert_profile_health(
+        profile_id,
+        state="warning",
+        checked_at=checked_at,
+        proxy_configured=False,
+        proxy_reachable=True,
+        proxy_authenticity_score=10,
+        fingerprint_consistency_score=100,
+        browser_scan_score=90,
+        warnings=[],
+        blockers=[],
+        error_code=None,
+        sources={"proxy_authenticity": "measured"},
+    )
+
+
+def _force_run_status(run_id: str, status: str, *, cancelled_at: str | None = None) -> None:
+    with db.get_db() as conn:
+        conn.execute(
+            """UPDATE task_runs
+            SET status = ?, cancelled_at = ?, updated_at = ?
+            WHERE id = ?""",
+            (status, cancelled_at, datetime.now(timezone.utc).isoformat(), run_id),
+        )
+        conn.commit()
+
+
+def test_override_health_does_not_resurrect_terminal_runs(client_access: TestClient):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_overridable_blocked_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"], task="override terminal")
+    assert run["status"] == "blocked_health"
+    assert run["health_decision"]["non_overridable_reasons"] == []
+
+    cancelled = client_access.post(f"/api/task-runs/{run['id']}/cancel")
+    assert cancelled.status_code == 200
+    before = cancelled.json()
+    assert before["status"] == "cancelled"
+    assert before["cancelled_at"]
+    assert before.get("health_override") is None
+
+    overridden = client_access.post(
+        f"/api/task-runs/{run['id']}/override-health",
+        json={"reason": "should not resurrect cancelled run"},
+    )
+    assert overridden.status_code == 200
+    after = overridden.json()
+    assert after["status"] == before["status"]
+    assert after["cancelled_at"] == before["cancelled_at"]
+    assert after.get("health_override") == before.get("health_override")
+    assert after["health_decision"] == before["health_decision"]
+    assert after["updated_at"] == before["updated_at"]
+
+    for terminal in ("succeeded", "failed", "revoked"):
+        blocked = create_run(
+            client_access,
+            session["id"],
+            profile["id"],
+            task=f"terminal-{terminal}",
+        )
+        assert blocked["status"] == "blocked_health"
+        _force_run_status(blocked["id"], terminal)
+        frozen = client_access.get(f"/api/task-runs/{blocked['id']}").json()
+        response = client_access.post(
+            f"/api/task-runs/{blocked['id']}/override-health",
+            json={"reason": f"should not resurrect {terminal}"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == frozen["status"] == terminal
+        assert body.get("health_override") == frozen.get("health_override")
+        assert body["health_decision"] == frozen["health_decision"]
+        assert body["cancelled_at"] == frozen["cancelled_at"]
+        assert body["updated_at"] == frozen["updated_at"]
+
+
+def test_retry_health_loses_to_concurrent_cancel(client_access: TestClient, monkeypatch):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_failed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"], task="retry race")
+    assert run["status"] == "blocked_health"
+    run_id = run["id"]
+    before_snapshot = run["health_snapshot"]
+    before_decision = run["health_decision"]
+
+    real_build = db.build_run_health_gate
+    cancelled_at_holder: dict[str, str] = {}
+
+    def cancel_during_health_build(profile_id: str):
+        cancelled = db.cancel_task_run(run_id)
+        assert cancelled is not None
+        assert cancelled["status"] == "cancelled"
+        cancelled_at_holder["cancelled_at"] = cancelled["cancelled_at"]
+        seed_passed_health(profile_id)
+        return real_build(profile_id)
+
+    monkeypatch.setattr(db, "build_run_health_gate", cancel_during_health_build)
+
+    retried = db.retry_task_run_health(run_id)
+    assert retried is not None
+    assert retried["status"] == "cancelled"
+    assert retried["cancelled_at"] == cancelled_at_holder["cancelled_at"]
+    assert retried["retry_count"] == 0
+    assert retried["health_snapshot"] == before_snapshot
+    assert retried["health_decision"] == before_decision
+    assert retried["health_decision"]["allowed"] is False
+
+
+def test_create_run_is_atomic_when_run_insert_fails(
+    client_access: TestClient,
+    monkeypatch,
+):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    def fail_run_insert(*_args, **_kwargs):
+        raise RuntimeError("injected run insert failure")
+
+    if hasattr(db, "_insert_task_run_on_conn"):
+        monkeypatch.setattr(db, "_insert_task_run_on_conn", fail_run_insert)
+    else:
+        monkeypatch.setattr(db, "create_task_run", fail_run_insert)
+
+    with pytest.raises(RuntimeError, match="injected run insert failure"):
+        client_access.post(
+            f"/api/task-sessions/{session['id']}/runs",
+            json=run_body(profile_id=profile["id"], task="atomic prompt"),
+        )
+
+    assert db.list_task_messages(session["id"]) == []
+    with db.get_db() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_session_id = ?",
+            (session["id"],),
+        ).fetchone()[0] == 0

@@ -308,6 +308,72 @@ def test_workspace_migration_is_idempotent(legacy_database: Path):
         assert conn.execute("SELECT COUNT(*) FROM task_outputs").fetchone()[0] == 0
 
 
+def test_task_runs_migration_rolls_back_when_marker_insert_fails(
+    legacy_database: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """DDL + migration marker must commit atomically (no executescript leak)."""
+    real_migrate = db._migrate_task_runs_v1
+    monkeypatch.setattr(db, "_migrate_task_runs_v1", lambda _conn: None)
+    db.init_db()
+    monkeypatch.setattr(db, "_migrate_task_runs_v1", real_migrate)
+
+    with db.get_db() as conn:
+        versions = {
+            row["version"]
+            for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert "agent_workspace_v1" in versions
+    assert "task_runs_v1" not in versions
+    assert "task_runs" not in tables
+    assert "task_outputs" not in tables
+
+    real_connect = sqlite3.connect
+
+    class MarkerFailConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):  # type: ignore[no-untyped-def]
+            normalized = " ".join(str(sql).split())
+            if (
+                normalized.startswith("INSERT INTO schema_migrations")
+                and parameters
+                and parameters[0] == "task_runs_v1"
+            ):
+                raise RuntimeError("injected marker failure")
+            return super().execute(sql, parameters)
+
+    def connect_with_fail(*args, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs.setdefault("factory", MarkerFailConnection)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(db.sqlite3, "connect", connect_with_fail)
+
+    with db.get_db() as conn:
+        with pytest.raises(RuntimeError, match="injected marker failure"):
+            db._migrate_task_runs_v1(conn)
+
+    with db.get_db() as conn:
+        versions_after = {
+            row["version"]
+            for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        tables_after = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert "task_runs_v1" not in versions_after
+    assert "task_runs" not in tables_after
+    assert "task_outputs" not in tables_after
+    assert "agent_workspace_v1" in versions_after
+
+
 def test_workspace_migration_serializes_concurrent_initialization(
     legacy_database: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -925,7 +925,7 @@ _AUTH_BEARER_RE = re.compile(
     r"(?i)(?:\bauthorization\s*:\s*bearer\b|\bbearer\s+[A-Za-z0-9\-._~+/]+=*)"
 )
 _SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(?:(?:set-)?cookie|password|secret|api[_-]?key|access[_-]?token)\s*[:=]"
+    r"(?i)\b(?:(?:set-)?cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|model[_-]?token|token)\s*[:=]"
 )
 _PROXY_CREDENTIAL_RE = re.compile(
     r"(?i)\b(?:https?|socks5?)://[^/\s\"']+:[^/\s\"']+@"
@@ -940,6 +940,13 @@ _MIME_TYPE_RE = re.compile(
 _WINDOWS_DRIVE_RE = re.compile(r"(?i)^[a-z]:[\\/]")
 _DOT_RELATIVE_RE = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
 _OPAQUE_ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_HTTP_URL_IN_TEXT_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+_RELATIVE_FILE_PATH_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:[A-Za-z0-9._-]+[\\/])+[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,16}\b"
+)
+_URL_FIELD_NAMES = frozenset({"url"})
+_SELECTOR_FIELD_NAMES = frozenset({"selector"})
+_OPAQUE_FIELD_NAMES = frozenset({"artifact_id"})
 
 
 class TaskRunCreate(BaseModel):
@@ -1058,18 +1065,31 @@ def _looks_like_http_url(value: str) -> bool:
     return True
 
 
+def _looks_like_relative_browser_url(value: str) -> bool:
+    if not value.startswith("/") or value.startswith("//"):
+        return False
+    if any(ch.isspace() for ch in value):
+        return False
+    if "\\" in value or ".." in value.split("/"):
+        return False
+    return True
+
+
 def _looks_like_filesystem_path(value: str) -> bool:
     if _MIME_TYPE_RE.fullmatch(value):
         return False
-    if value.startswith("/") or value.startswith("file:"):
+    scrubbed = _HTTP_URL_IN_TEXT_RE.sub(" ", value).strip()
+    if not scrubbed:
+        return False
+    if scrubbed.startswith("/") or "file:" in scrubbed.lower():
         return True
-    if value.startswith("\\\\"):
+    if scrubbed.startswith("\\\\"):
         return True
-    if _WINDOWS_DRIVE_RE.match(value):
+    if _WINDOWS_DRIVE_RE.match(scrubbed):
         return True
-    if _DOT_RELATIVE_RE.search(value):
+    if _DOT_RELATIVE_RE.search(scrubbed):
         return True
-    if ("/" in value or "\\" in value) and not _looks_like_http_url(value):
+    if _RELATIVE_FILE_PATH_RE.search(scrubbed):
         return True
     return False
 
@@ -1087,8 +1107,7 @@ def _looks_like_base64_blob(value: str) -> bool:
     return False
 
 
-def _reject_unsafe_text(value: str) -> None:
-    """Reject credential-like, path, HTML, or binary text without echoing it."""
+def _reject_sensitive_common(value: str) -> None:
     if _AUTH_BEARER_RE.search(value):
         raise ValueError("text contains rejected sensitive content")
     if _SENSITIVE_ASSIGNMENT_RE.search(value):
@@ -1099,6 +1118,28 @@ def _reject_unsafe_text(value: str) -> None:
         raise ValueError("text contains rejected markup")
     if _looks_like_base64_blob(value):
         raise ValueError("text contains rejected binary content")
+
+
+def _reject_unsafe_url_value(value: str) -> None:
+    lower = value.lower()
+    if lower.startswith("file:"):
+        raise ValueError("text contains rejected filesystem path")
+    if _looks_like_http_url(value) or _looks_like_relative_browser_url(value):
+        return
+    raise ValueError("text contains rejected filesystem path")
+
+
+def _reject_unsafe_text(value: str, *, field_name: str | None = None) -> None:
+    """Reject credential-like, path, HTML, or binary text without echoing it."""
+    _reject_sensitive_common(value)
+    field = (field_name or "").lower()
+    if field in _OPAQUE_FIELD_NAMES:
+        return
+    if field in _URL_FIELD_NAMES:
+        _reject_unsafe_url_value(value)
+        return
+    if field in _SELECTOR_FIELD_NAMES:
+        return
     if _looks_like_filesystem_path(value):
         raise ValueError("text contains rejected filesystem path")
 
@@ -1109,7 +1150,12 @@ def _reject_sensitive_output_key(key: str) -> None:
         raise ValueError("payload contains a rejected key")
 
 
-def _validate_output_payload_value(value: object, *, depth: int) -> object:
+def _validate_output_payload_value(
+    value: object,
+    *,
+    depth: int,
+    field_name: str | None = None,
+) -> object:
     if depth > _TASK_OUTPUT_MAX_DEPTH:
         raise ValueError("payload exceeds maximum nesting depth")
     if value is None or isinstance(value, (bool, int, float)):
@@ -1117,13 +1163,14 @@ def _validate_output_payload_value(value: object, *, depth: int) -> object:
     if isinstance(value, str):
         if len(value) > 2_048:
             raise ValueError("payload string values are too large")
-        _reject_unsafe_text(value)
+        _reject_unsafe_text(value, field_name=field_name)
         return value
     if isinstance(value, list):
         if len(value) > _TASK_OUTPUT_MAX_LIST_ITEMS:
             raise ValueError("payload lists are too large")
         return [
-            _validate_output_payload_value(item, depth=depth + 1) for item in value
+            _validate_output_payload_value(item, depth=depth + 1, field_name=field_name)
+            for item in value
         ]
     if isinstance(value, dict):
         if len(value) > _TASK_OUTPUT_MAX_KEYS:
@@ -1133,7 +1180,11 @@ def _validate_output_payload_value(value: object, *, depth: int) -> object:
             if not isinstance(raw_key, str):
                 raise ValueError("payload object keys must be strings")
             _reject_sensitive_output_key(raw_key)
-            cleaned[raw_key] = _validate_output_payload_value(raw_value, depth=depth + 1)
+            cleaned[raw_key] = _validate_output_payload_value(
+                raw_value,
+                depth=depth + 1,
+                field_name=raw_key,
+            )
         return cleaned
     raise ValueError("payload values must be JSON scalars, lists, or objects")
 

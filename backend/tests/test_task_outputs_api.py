@@ -624,3 +624,99 @@ def test_screenshot_artifact_id_rejects_path_traversal(client_access: TestClient
             },
         )
         assert response.status_code == 422, (key, response.text)
+
+
+def test_output_accepts_field_aware_browser_use_values(client_access: TestClient):
+    run, _profile = create_queued_run(client_access)
+    cases = [
+        (
+            "summary-https-docs",
+            {
+                "idempotency_key": "ok-summary-url",
+                "kind": "summary",
+                "summary": "Read https://example.com/docs/getting-started carefully",
+                "payload": {"text": "done", "status": "ok"},
+            },
+        ),
+        (
+            "action-css-path-href",
+            {
+                "idempotency_key": "ok-css-selector",
+                "kind": "action",
+                "summary": "click docs link",
+                "payload": {
+                    "name": "click",
+                    "selector": "a[href='/docs/getting-started']",
+                    "url": "https://example.com/docs/getting-started",
+                },
+            },
+        ),
+        (
+            "action-xpath",
+            {
+                "idempotency_key": "ok-xpath",
+                "kind": "action",
+                "summary": "click continue",
+                "payload": {
+                    "name": "click",
+                    "selector": "//button[@id='continue']",
+                },
+            },
+        ),
+        (
+            "link-relative-url",
+            {
+                "idempotency_key": "ok-relative-url",
+                "kind": "link",
+                "summary": "profile settings",
+                "payload": {"url": "/settings/profile", "title": "Profile"},
+            },
+        ),
+        (
+            "observation-https-prose",
+            {
+                "idempotency_key": "ok-obs-url-prose",
+                "kind": "observation",
+                "summary": "saw docs link",
+                "payload": {
+                    "text": "The page linked to https://example.com/docs/getting-started in the nav",
+                    "url": "https://example.com/home",
+                },
+            },
+        ),
+        (
+            "metric-unit-mb-s",
+            {
+                "idempotency_key": "ok-metric-unit",
+                "kind": "metric",
+                "summary": "throughput",
+                "payload": {"name": "download", "value": 12.5, "unit": "MB/s"},
+            },
+        ),
+    ]
+    for key, body in cases:
+        response = append_internal_output(client_access, run["id"], body)
+        assert response.status_code == 201, (key, response.text)
+
+
+def test_output_rejects_token_assignment_variants_without_echo(
+    client_access: TestClient,
+):
+    run, _profile = create_queued_run(client_access)
+    cases = [
+        ("token", f"token={SECRET_MARKER}"),
+        ("refresh-token", f"refresh_token={SECRET_MARKER}"),
+        ("model-token", f"model_token={SECRET_MARKER}"),
+    ]
+    for key, text in cases:
+        response = append_internal_output(
+            client_access,
+            run["id"],
+            {
+                "idempotency_key": f"token-assign-{key}",
+                "kind": "observation",
+                "summary": "safe summary",
+                "payload": {"text": text},
+            },
+        )
+        _assert_rejected_without_echo(response)

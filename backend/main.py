@@ -2602,18 +2602,10 @@ async def create_task_run(session_id: str, body: TaskRunCreate, request: Request
             detail="Empty allowed_origins requires operate permission",
         )
 
-    message = db.append_task_message(
-        str(session["id"]),
-        "user",
-        body.task,
-        identity.kind,
-        identity.id,
-        {"source": "task_run"},
-    )
     snapshot, decision = db.build_run_health_gate(str(profile["id"]))
-    run = db.create_task_run(
+    run = db.create_task_run_with_message(
         task_session_id=str(session["id"]),
-        task_message_id=str(message["id"]),
+        content=body.task,
         profile_id=str(profile["id"]),
         sandbox_id=sandbox_id,
         harness=body.harness,
@@ -2626,6 +2618,7 @@ async def create_task_run(session_id: str, body: TaskRunCreate, request: Request
         health_decision=decision,
         created_by_kind=identity.kind,
         created_by_id=identity.id,
+        message_metadata={"source": "task_run"},
     )
     db.record_task_event(
         str(session["id"]),

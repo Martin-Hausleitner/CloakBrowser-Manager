@@ -467,7 +467,11 @@ def test_profile_health_is_deleted_with_profile(tmp_db: Path):
 
 
 def test_task_session_message_and_event_roundtrip(tmp_db: Path):
-    profile = db.create_profile("Task Browser", sandbox_id="tasks")
+    profile = db.create_profile(
+        "Task Browser",
+        sandbox_id="tasks",
+        project_id="research",
+    )
     session = db.create_task_session(
         profile["id"],
         profile["sandbox_id"],
@@ -493,13 +497,15 @@ def test_task_session_message_and_event_roundtrip(tmp_db: Path):
         {"message_id": message["id"]},
     )
 
-    assert db.get_task_session(session["id"])["metadata"] == {"source": "test"}
+    stored_session = db.get_task_session(session["id"])
+    assert stored_session["project_id"] == "research"
+    assert stored_session["metadata"] == {"source": "test"}
     assert db.list_task_sessions(profile["id"])[0]["id"] == session["id"]
     assert db.list_task_messages(session["id"]) == [message]
     assert db.list_task_events(session["id"]) == [event]
 
 
-def test_task_sessions_are_deleted_with_profile(tmp_db: Path):
+def test_profile_delete_sets_null_and_preserves_task_history(tmp_db: Path):
     profile = db.create_profile("Task Browser")
     session = db.create_task_session(
         profile["id"],
@@ -512,9 +518,9 @@ def test_task_sessions_are_deleted_with_profile(tmp_db: Path):
 
     assert db.delete_profile(profile["id"]) is True
 
-    assert db.get_task_session(session["id"]) is None
-    assert db.list_task_messages(session["id"]) == []
-    assert db.list_task_events(session["id"]) == []
+    assert db.get_task_session(session["id"])["profile_id"] is None
+    assert db.list_task_messages(session["id"])[0]["content"] == "hello"
+    assert db.list_task_events(session["id"])[0]["type"] == "task_session.created"
 
 
 # ── update_profile ───────────────────────────────────────────────────────────

@@ -58,6 +58,188 @@ def get_db():
         conn.close()
 
 
+def _create_workspace_task_sessions_table(conn: sqlite3.Connection, table_name: str) -> None:
+    if table_name not in {"task_sessions", "task_sessions_workspace_v1"}:
+        raise ValueError("Unsupported task sessions table name")
+    conn.execute(
+        f"""CREATE TABLE {table_name} (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+            sandbox_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'default',
+            title TEXT,
+            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+            workflow_state TEXT NOT NULL DEFAULT 'open'
+                CHECK (workflow_state IN ('open', 'done')),
+            done_at TEXT,
+            archived_at TEXT,
+            retention_class TEXT NOT NULL DEFAULT 'project'
+                CHECK (retention_class IN ('temporary', 'project', 'legacy')),
+            expires_at TEXT,
+            activity_at TEXT NOT NULL,
+            row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+            created_by_kind TEXT NOT NULL,
+            created_by_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{{}}'
+        )"""
+    )
+
+
+def _migrate_agent_workspace_v1(conn: sqlite3.Connection) -> None:
+    """Snapshot legacy task ownership and make profile deletion history-safe."""
+    migration_version = "agent_workspace_v1"
+    already_applied = conn.execute(
+        "SELECT 1 FROM schema_migrations WHERE version = ?",
+        (migration_version,),
+    ).fetchone()
+    if already_applied:
+        return
+
+    foreign_keys_enabled = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+    conn.commit()
+    if foreign_keys_enabled:
+        conn.execute("PRAGMA foreign_keys=OFF")
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """INSERT OR IGNORE INTO projects (
+                sandbox_id, id, name, accent_color, description, default_retention,
+                archived_at, created_by_kind, created_by_id, created_at, updated_at
+            )
+            SELECT
+                sandbox_id,
+                project_id,
+                project_id,
+                NULL,
+                NULL,
+                'project',
+                NULL,
+                'migration',
+                NULL,
+                MIN(created_at),
+                MAX(updated_at)
+            FROM profiles
+            GROUP BY sandbox_id, project_id"""
+        )
+
+        task_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_sessions)").fetchall()
+        }
+        profile_foreign_key = next(
+            (
+                row
+                for row in conn.execute("PRAGMA foreign_key_list(task_sessions)").fetchall()
+                if row["from"] == "profile_id"
+            ),
+            None,
+        )
+        required_columns = {
+            "project_id",
+            "workflow_state",
+            "done_at",
+            "archived_at",
+            "retention_class",
+            "expires_at",
+            "activity_at",
+            "row_version",
+        }
+        needs_rebuild = not required_columns.issubset(task_columns) or (
+            profile_foreign_key is None or profile_foreign_key["on_delete"] != "SET NULL"
+        )
+
+        if needs_rebuild:
+            conn.execute("DROP TABLE IF EXISTS task_sessions_workspace_v1")
+            _create_workspace_task_sessions_table(conn, "task_sessions_workspace_v1")
+
+            workflow_state = (
+                "task_sessions.workflow_state" if "workflow_state" in task_columns else "'open'"
+            )
+            done_at = "task_sessions.done_at" if "done_at" in task_columns else "NULL"
+            if "archived_at" in task_columns:
+                archived_at = "task_sessions.archived_at"
+            else:
+                archived_at = (
+                    "CASE WHEN task_sessions.status = 'archived' "
+                    "THEN task_sessions.updated_at ELSE NULL END"
+                )
+            retention_class = (
+                "task_sessions.retention_class"
+                if "retention_class" in task_columns
+                else "'legacy'"
+            )
+            expires_at = "task_sessions.expires_at" if "expires_at" in task_columns else "NULL"
+            activity_at = (
+                "task_sessions.activity_at"
+                if "activity_at" in task_columns
+                else "task_sessions.updated_at"
+            )
+            row_version = (
+                "task_sessions.row_version" if "row_version" in task_columns else "1"
+            )
+
+            conn.execute(
+                f"""INSERT INTO task_sessions_workspace_v1 (
+                    id, profile_id, sandbox_id, project_id, title, status,
+                    workflow_state, done_at, archived_at, retention_class, expires_at,
+                    activity_at, row_version, created_by_kind, created_by_id,
+                    created_at, updated_at, metadata
+                )
+                SELECT
+                    task_sessions.id,
+                    task_sessions.profile_id,
+                    COALESCE(profiles.sandbox_id, task_sessions.sandbox_id, 'default'),
+                    COALESCE(profiles.project_id, 'default'),
+                    task_sessions.title,
+                    task_sessions.status,
+                    {workflow_state},
+                    {done_at},
+                    {archived_at},
+                    {retention_class},
+                    {expires_at},
+                    {activity_at},
+                    {row_version},
+                    task_sessions.created_by_kind,
+                    task_sessions.created_by_id,
+                    task_sessions.created_at,
+                    task_sessions.updated_at,
+                    task_sessions.metadata
+                FROM task_sessions
+                LEFT JOIN profiles ON profiles.id = task_sessions.profile_id"""
+            )
+            conn.execute("DROP TABLE task_sessions")
+            conn.execute(
+                "ALTER TABLE task_sessions_workspace_v1 RENAME TO task_sessions"
+            )
+            conn.execute(
+                """CREATE INDEX idx_task_sessions_profile
+                ON task_sessions(profile_id, created_at DESC)"""
+            )
+            conn.execute(
+                """CREATE INDEX idx_task_sessions_sandbox
+                ON task_sessions(sandbox_id, created_at DESC)"""
+            )
+
+        violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            raise RuntimeError(
+                f"Foreign key violation after {migration_version}: {tuple(violation)}"
+            )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if foreign_keys_enabled:
+            conn.execute("PRAGMA foreign_keys=ON")
+
+
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
@@ -186,12 +368,43 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                sandbox_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                accent_color TEXT,
+                description TEXT,
+                default_retention TEXT NOT NULL DEFAULT 'project'
+                    CHECK (default_retention IN ('temporary', 'project')),
+                archived_at TEXT,
+                created_by_kind TEXT NOT NULL,
+                created_by_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (sandbox_id, id)
+            );
+
             CREATE TABLE IF NOT EXISTS task_sessions (
                 id TEXT PRIMARY KEY,
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
                 sandbox_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'default',
                 title TEXT,
                 status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+                workflow_state TEXT NOT NULL DEFAULT 'open'
+                    CHECK (workflow_state IN ('open', 'done')),
+                done_at TEXT,
+                archived_at TEXT,
+                retention_class TEXT NOT NULL DEFAULT 'project'
+                    CHECK (retention_class IN ('temporary', 'project', 'legacy')),
+                expires_at TEXT,
+                activity_at TEXT NOT NULL,
+                row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
                 created_by_kind TEXT NOT NULL,
                 created_by_id TEXT,
                 created_at TEXT NOT NULL,
@@ -298,6 +511,7 @@ def init_db():
         if "harness" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN harness TEXT NOT NULL DEFAULT 'codex'")
             conn.commit()
+        _migrate_agent_workspace_v1(conn)
 
 
 def _now() -> str:
@@ -435,11 +649,6 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
                 f"UPDATE profiles SET {', '.join(update_cols)} WHERE id = ?",
                 update_vals,
             )
-            if "sandbox_id" in fields:
-                conn.execute(
-                    "UPDATE task_sessions SET sandbox_id = ?, updated_at = ? WHERE profile_id = ?",
-                    (fields["sandbox_id"], now, profile_id),
-                )
             conn.commit()
 
     if tags is not None:
@@ -665,16 +874,24 @@ def create_task_session(
     session_id = str(uuid.uuid4())
     now = _now()
     with get_db() as conn:
+        profile = conn.execute(
+            "SELECT project_id FROM profiles WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+        project_id = str(profile["project_id"] or "default") if profile else "default"
         conn.execute(
             """INSERT INTO task_sessions
-            (id, profile_id, sandbox_id, title, status, created_by_kind, created_by_id,
+            (id, profile_id, sandbox_id, project_id, title, status, workflow_state,
+             retention_class, activity_at, row_version, created_by_kind, created_by_id,
              created_at, updated_at, metadata)
-            VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, 'active', 'open', 'project', ?, 1, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 profile_id,
                 sandbox_id,
+                project_id,
                 title,
+                now,
                 created_by_kind,
                 created_by_id,
                 now,
@@ -731,7 +948,10 @@ def append_task_message(
                 json.dumps(metadata or {}, separators=(",", ":")),
             ),
         )
-        conn.execute("UPDATE task_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+        conn.execute(
+            "UPDATE task_sessions SET updated_at = ?, activity_at = ? WHERE id = ?",
+            (now, now, session_id),
+        )
         conn.commit()
     return get_task_message(message_id)  # type: ignore[return-value]
 

@@ -438,3 +438,189 @@ def test_concurrent_output_sequence_and_first_action_atomicity(client_access: Te
     assert len(first_sequences) == 1
     assert fetched["first_action_sequence"] in {1, 2}
     assert fetched["first_action_at"]
+
+
+SECRET_MARKER = "secret-token-MARKER-do-not-echo"
+
+
+def _assert_rejected_without_echo(response, marker: str = SECRET_MARKER) -> None:
+    assert response.status_code == 422, response.text
+    assert marker not in response.text
+    assert marker not in response.headers.get("www-authenticate", "")
+
+
+def test_output_rejects_unknown_top_level_authorization_field(client_access: TestClient):
+    run, _profile = create_queued_run(client_access)
+    response = append_internal_output(
+        client_access,
+        run["id"],
+        {
+            "idempotency_key": "extra-auth",
+            "kind": "observation",
+            "summary": "visible note",
+            "payload": {"text": "ok"},
+            "authorization": f"Bearer {SECRET_MARKER}",
+        },
+    )
+    _assert_rejected_without_echo(response)
+
+
+def test_output_rejects_sensitive_content_in_allowed_payload_text(
+    client_access: TestClient,
+):
+    run, _profile = create_queued_run(client_access)
+    cases = [
+        ("auth-bearer", {"text": f"Authorization: Bearer {SECRET_MARKER}"}),
+        ("cookie-assign", {"text": f"cookie={SECRET_MARKER}"}),
+        ("set-cookie", {"text": f"Set-Cookie: session={SECRET_MARKER}"}),
+        ("password-assign", {"text": f"password={SECRET_MARKER}"}),
+        ("secret-assign", {"text": f"secret: {SECRET_MARKER}"}),
+        ("api-key-assign", {"text": f"api-key={SECRET_MARKER}"}),
+        ("access-token-assign", {"text": f"access-token={SECRET_MARKER}"}),
+        ("proxy-creds", {"text": f"http://user:{SECRET_MARKER}@proxy.example:8080"}),
+    ]
+    for key, payload in cases:
+        response = append_internal_output(
+            client_access,
+            run["id"],
+            {
+                "idempotency_key": f"sensitive-{key}",
+                "kind": "observation",
+                "summary": "safe summary",
+                "payload": payload,
+            },
+        )
+        _assert_rejected_without_echo(response)
+
+
+def test_output_rejects_raw_html_and_dom_markup(client_access: TestClient):
+    run, _profile = create_queued_run(client_access)
+    response = append_internal_output(
+        client_access,
+        run["id"],
+        {
+            "idempotency_key": "html-dom",
+            "kind": "observation",
+            "summary": "page note",
+            "payload": {"text": f"<html><body data-secret='{SECRET_MARKER}'></body></html>"},
+        },
+    )
+    _assert_rejected_without_echo(response)
+
+
+def test_output_rejects_filesystem_paths_but_allows_https_urls(
+    client_access: TestClient,
+):
+    run, _profile = create_queued_run(client_access)
+    path_cases = [
+        ("rel-path", {"text": "tmp/secret.png"}),
+        ("dot-rel", {"text": "../secret"}),
+        ("windows-drive", {"text": r"C:\secret\file.txt"}),
+        ("unc-path", {"text": r"\\server\share\secret.txt"}),
+    ]
+    for key, payload in path_cases:
+        response = append_internal_output(
+            client_access,
+            run["id"],
+            {
+                "idempotency_key": f"path-{key}",
+                "kind": "observation",
+                "summary": "path probe",
+                "payload": payload,
+            },
+        )
+        assert response.status_code == 422, (key, response.text)
+
+    allowed = append_internal_output(
+        client_access,
+        run["id"],
+        {
+            "idempotency_key": "https-url-ok",
+            "kind": "link",
+            "summary": "safe link",
+            "payload": {"url": "https://example.com/docs", "title": "Docs"},
+        },
+    )
+    assert allowed.status_code == 201, allowed.text
+
+
+def test_output_rejects_base64_and_data_uri_blobs(client_access: TestClient):
+    run, _profile = create_queued_run(client_access)
+    long_b64 = "A" * 80 + "B" * 40 + "="
+    cases = [
+        ("data-uri", {"text": f"data:image/png;base64,{SECRET_MARKER}"}),
+        ("base64-colon", {"text": f"base64:{SECRET_MARKER}"}),
+        ("base64-comma", {"text": f"base64,{SECRET_MARKER}"}),
+        ("long-blob", {"text": long_b64}),
+    ]
+    for key, payload in cases:
+        response = append_internal_output(
+            client_access,
+            run["id"],
+            {
+                "idempotency_key": f"b64-{key}",
+                "kind": "observation",
+                "summary": "blob probe",
+                "payload": payload,
+            },
+        )
+        if SECRET_MARKER in payload["text"]:
+            _assert_rejected_without_echo(response)
+        else:
+            assert response.status_code == 422, (key, response.text)
+
+
+def test_output_rejects_sensitive_content_in_summary(client_access: TestClient):
+    run, _profile = create_queued_run(client_access)
+    response = append_internal_output(
+        client_access,
+        run["id"],
+        {
+            "idempotency_key": "summary-secret",
+            "kind": "observation",
+            "summary": f"Authorization: Bearer {SECRET_MARKER}",
+            "payload": {"text": "otherwise fine"},
+        },
+    )
+    _assert_rejected_without_echo(response)
+
+
+def test_output_allows_ordinary_prose_mentioning_token_word(client_access: TestClient):
+    run, _profile = create_queued_run(client_access)
+    response = append_internal_output(
+        client_access,
+        run["id"],
+        {
+            "idempotency_key": "prose-token",
+            "kind": "observation",
+            "summary": "Received a token from the page title",
+            "payload": {"text": "The form asked for a token count"},
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_screenshot_artifact_id_rejects_path_traversal(client_access: TestClient):
+    run, _profile = create_queued_run(client_access)
+    for key, artifact_id in [
+        ("slash", "dir/secret"),
+        ("backslash", r"dir\secret"),
+        ("dotdot", "../secret"),
+    ]:
+        response = append_internal_output(
+            client_access,
+            run["id"],
+            {
+                "idempotency_key": f"artifact-{key}",
+                "kind": "screenshot",
+                "summary": "frame metadata",
+                "payload": {
+                    "artifact_id": artifact_id,
+                    "width": 10,
+                    "height": 10,
+                    "media_type": "image/png",
+                    "sha256": "b" * 64,
+                },
+            },
+        )
+        assert response.status_code == 422, (key, response.text)

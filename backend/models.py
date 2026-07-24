@@ -6,7 +6,8 @@ import json
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from urllib.parse import urlparse
 
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 FOLDER_SEGMENT_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._ -]*$"
@@ -920,9 +921,30 @@ _TASK_OUTPUT_KIND_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     "approval": frozenset({"prompt", "options", "required"}),
     "summary": frozenset({"text", "result", "status"}),
 }
+_AUTH_BEARER_RE = re.compile(
+    r"(?i)(?:\bauthorization\s*:\s*bearer\b|\bbearer\s+[A-Za-z0-9\-._~+/]+=*)"
+)
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(?:(?:set-)?cookie|password|secret|api[_-]?key|access[_-]?token)\s*[:=]"
+)
+_PROXY_CREDENTIAL_RE = re.compile(
+    r"(?i)\b(?:https?|socks5?)://[^/\s\"']+:[^/\s\"']+@"
+)
+_HTML_DOM_TAG_RE = re.compile(r"(?i)</?(?:html|head|body|script|style|iframe|object|embed|svg|dom)\b|<[a-z][\s>/]")
+_BASE64_PREFIX_RE = re.compile(r"(?i)\b(?:data:[a-z0-9.+-]+/[a-z0-9.+-]*;base64,|base64\s*[:,])")
+_BASE64_ALPHABET_CHUNK_RE = re.compile(r"[A-Za-z0-9+/]{64,}={0,2}")
+_HEX_DIGEST_RE = re.compile(r"(?i)^[a-f0-9]{64,128}$")
+_MIME_TYPE_RE = re.compile(
+    r"(?i)^(?:application|audio|font|image|model|multipart|text|video)/[a-z0-9.+-]+$"
+)
+_WINDOWS_DRIVE_RE = re.compile(r"(?i)^[a-z]:[\\/]")
+_DOT_RELATIVE_RE = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
+_OPAQUE_ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class TaskRunCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     harness: Harness = "browser-use"
     task: str = Field(min_length=1, max_length=8_000)
     profile_id: str = Field(min_length=1, max_length=120)
@@ -1011,6 +1033,8 @@ class TaskRunResponse(BaseModel):
 
 
 class TaskRunHealthOverrideRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     reason: str = Field(min_length=1, max_length=500)
 
     @field_validator("reason")
@@ -1020,6 +1044,63 @@ class TaskRunHealthOverrideRequest(BaseModel):
         if not cleaned:
             raise ValueError("reason must be a non-empty string")
         return cleaned
+
+
+def _looks_like_http_url(value: str) -> bool:
+    try:
+        parts = urlparse(value)
+    except ValueError:
+        return False
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return False
+    if parts.username is not None or parts.password is not None:
+        return False
+    return True
+
+
+def _looks_like_filesystem_path(value: str) -> bool:
+    if _MIME_TYPE_RE.fullmatch(value):
+        return False
+    if value.startswith("/") or value.startswith("file:"):
+        return True
+    if value.startswith("\\\\"):
+        return True
+    if _WINDOWS_DRIVE_RE.match(value):
+        return True
+    if _DOT_RELATIVE_RE.search(value):
+        return True
+    if ("/" in value or "\\" in value) and not _looks_like_http_url(value):
+        return True
+    return False
+
+
+def _looks_like_base64_blob(value: str) -> bool:
+    if _BASE64_PREFIX_RE.search(value):
+        return True
+    for match in _BASE64_ALPHABET_CHUNK_RE.finditer(value):
+        chunk = match.group(0)
+        if "=" in chunk or "+" in chunk or "/" in chunk:
+            return True
+        # Pure hex digests (e.g. sha256) are allowed; other long alnum blobs are not.
+        if _HEX_DIGEST_RE.fullmatch(chunk) is None:
+            return True
+    return False
+
+
+def _reject_unsafe_text(value: str) -> None:
+    """Reject credential-like, path, HTML, or binary text without echoing it."""
+    if _AUTH_BEARER_RE.search(value):
+        raise ValueError("text contains rejected sensitive content")
+    if _SENSITIVE_ASSIGNMENT_RE.search(value):
+        raise ValueError("text contains rejected sensitive content")
+    if _PROXY_CREDENTIAL_RE.search(value):
+        raise ValueError("text contains rejected sensitive content")
+    if _HTML_DOM_TAG_RE.search(value):
+        raise ValueError("text contains rejected markup")
+    if _looks_like_base64_blob(value):
+        raise ValueError("text contains rejected binary content")
+    if _looks_like_filesystem_path(value):
+        raise ValueError("text contains rejected filesystem path")
 
 
 def _reject_sensitive_output_key(key: str) -> None:
@@ -1036,13 +1117,7 @@ def _validate_output_payload_value(value: object, *, depth: int) -> object:
     if isinstance(value, str):
         if len(value) > 2_048:
             raise ValueError("payload string values are too large")
-        lowered = value.lower()
-        if "data:image" in lowered or "base64," in lowered:
-            raise ValueError("payload must not contain binary or base64 content")
-        if "://" in value and "@" in value.split("://", 1)[-1].split("/", 1)[0]:
-            raise ValueError("payload must not contain credentialed URLs")
-        if value.startswith("/") or value.startswith("file:"):
-            raise ValueError("payload must not contain filesystem paths")
+        _reject_unsafe_text(value)
         return value
     if isinstance(value, list):
         if len(value) > _TASK_OUTPUT_MAX_LIST_ITEMS:
@@ -1064,6 +1139,8 @@ def _validate_output_payload_value(value: object, *, depth: int) -> object:
 
 
 class TaskOutputCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     idempotency_key: str = Field(min_length=1, max_length=128)
     kind: TaskOutputKind
     summary: str = Field(min_length=1, max_length=500)
@@ -1083,6 +1160,7 @@ class TaskOutputCreate(BaseModel):
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("summary must be a non-empty string")
+        _reject_unsafe_text(cleaned)
         return cleaned
 
     @model_validator(mode="after")
@@ -1105,14 +1183,15 @@ class TaskOutputCreate(BaseModel):
                     raise ValueError("screenshot dimensions must be integers")
                 if key in {"artifact_id", "media_type", "sha256"} and not isinstance(value, str):
                     raise ValueError("screenshot metadata must be strings")
-                if isinstance(value, (bytes, bytearray)) or (
-                    isinstance(value, str)
-                    and (len(value) > 512 or value.startswith("/") or "base64" in value.lower())
-                ):
-                    if key != "sha256" and isinstance(value, str) and (
-                        value.startswith("/") or "base64" in value.lower()
+                if key == "artifact_id":
+                    artifact_id = str(value)
+                    if (
+                        "/" in artifact_id
+                        or "\\" in artifact_id
+                        or ".." in artifact_id
+                        or _OPAQUE_ARTIFACT_ID_RE.fullmatch(artifact_id) is None
                     ):
-                        raise ValueError("screenshot payload must not contain bytes or paths")
+                        raise ValueError("screenshot artifact_id must be an opaque identifier")
         self.payload = cleaned
         return self
 

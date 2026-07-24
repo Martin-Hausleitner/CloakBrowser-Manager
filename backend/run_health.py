@@ -240,6 +240,11 @@ def evaluate_health(
     instant = _require_aware(now or datetime.now(timezone.utc), field_name="now")
     failed: list[str] = []
 
+    if snapshot.policy_version != active_policy.version:
+        failed.append("health_policy_version_mismatch")
+        if snapshot.state in WAITING_STATES:
+            return _decision(False, False, failed, active_policy.version)
+
     if snapshot.state in WAITING_STATES:
         failed.append(snapshot.state)
         return _decision(False, True, failed, active_policy.version)
@@ -249,9 +254,6 @@ def evaluate_health(
     elif snapshot.state not in PROCEED_STATES:
         failed.append(snapshot.state)
         return _decision(False, False, failed, active_policy.version)
-
-    if snapshot.policy_version != active_policy.version:
-        failed.append("health_policy_version_mismatch")
 
     if snapshot.state in BLOCKING_STATES:
         if snapshot.measurement_error:

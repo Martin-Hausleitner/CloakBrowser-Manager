@@ -13,6 +13,7 @@ from backend.profile_health import (
 from backend.run_health import (
     CRITICAL_REASON_CODES,
     HEALTH_POLICY_VERSION,
+    HEALTH_STATES,
     HealthDecision,
     HealthPolicy,
     HealthSnapshot,
@@ -145,6 +146,19 @@ def test_policy_version_mismatch_blocks_and_is_non_overridable():
     assert "health_policy_version_mismatch" in decision.failed_reasons
     assert "health_policy_version_mismatch" in decision.non_overridable_reasons
     assert "health_policy_version_mismatch" in NON_OVERRIDABLE_REASON_CODES
+
+
+@pytest.mark.parametrize("state", sorted(HEALTH_STATES))
+def test_policy_version_mismatch_blocks_every_health_state(state: str):
+    decision = evaluate_health(
+        _snapshot(state=state, policy_version="run-health.v0"),
+        POLICY,
+        now=NOW,
+    )
+    assert decision.allowed is False
+    assert decision.waiting is False
+    assert "health_policy_version_mismatch" in decision.failed_reasons
+    assert "health_policy_version_mismatch" in decision.non_overridable_reasons
 
 
 @pytest.mark.parametrize("state", ["failed", "unavailable"])

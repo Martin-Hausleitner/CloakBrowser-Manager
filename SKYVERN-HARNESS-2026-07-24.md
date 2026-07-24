@@ -1,4 +1,4 @@
-[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T13:44+02:00
+[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T13:54+02:00
 > 🧠 NotebookLM: n/a (kein IDR-Auftrag in dieser Lane; Architektur aus Skyvern README + CloakBrowser-Manager CDP API)
 
 # SKYVERN-HARNESS — CloakBrowser × Skyvern (2026-07-24)
@@ -17,7 +17,7 @@ Skyvern ist als **optionaler AGPL-Harness** an CloakBrowser Manager angedockt. A
 |---|---|
 | OpenSpec `skyvern-harness --strict` | PASS |
 | Unit tests `test_skyvern_harness.py` | **6/6** |
-| Backend suite (`AUTH_TOKEN=` clean) | **227 passed**, 1 unrelated env flake (`test_allocate_cdp_port_wraps_around` — Port **5199** locally held by unrelated `node`) |
+| Backend suite (`AUTH_TOKEN=` clean) | **227 passed**, 1 unrelated env flake (`test_allocate_cdp_port_wraps_around` — Port **5199** locally held) |
 | Live CDP proof via `Skyvern.local` + `SkyvernBrowser` | **PASS** → example.com |
 | Screenshot non-empty | **17487 bytes**, 664×992 PNG |
 | LLM agent `run_task` | **ehrlich blocked/degraded** (keine LLM-Keys) |
@@ -67,7 +67,7 @@ Docking-Punkt ist bewusst **CDP**, nicht ein zweiter Chromium-Launch: Skyvern st
 
 ![Skyvern harness through CloakBrowser CDP — example.com](.proof/2026-07-24-skyvern-harness.png)
 
-Live-Lauf (re-verified 2026-07-24T13:44+02:00, lane cursor-grok-4.5):
+Live-Lauf (re-verified 2026-07-24T13:54+02:00, lane cursor-grok-4.5):
 
 - Manager: `http://127.0.0.1:18115` (container `cloakbrowser-manager-vcvm`)
 - Profile: `a8b99a1f-bd77-4249-917f-0ad681ea5519` (VCVM Mobile Demo, running)
@@ -78,7 +78,7 @@ Live-Lauf (re-verified 2026-07-24T13:44+02:00, lane cursor-grok-4.5):
 - Harness API on **running** VCVM image: still `404` until image is rebuilt from this branch (proof uses host-side Skyvern adapter → Manager CDP, which is the cloak docking path)
 - OpenSpec / harness unit re-checked this session: `validate --strict` PASS, `test_skyvern_harness.py` 6/6, backend **227 passed** (+1 unrelated CDP wrap flake on port 5199)
 - Upstream license re-checked via `/tmp/skyvern` clone: **AGPL-3.0**
-- Runtime: `pip install "skyvern[local]"` in dedicated venv (`/tmp/skyvern-harness-venv`, PyPI / local skyvern)
+- Runtime: `pip install "skyvern[local]"` in dedicated venv (`.venv-skyvern`, PyPI / local skyvern)
 
 JSON: `.proof/2026-07-24-skyvern-harness.json`  
 VCVM-Spiegel: `~/cloakbrowser-manager-vcvm/.proof/2026-07-24-skyvern-harness.png`
@@ -88,7 +88,7 @@ VCVM-Spiegel: `~/cloakbrowser-manager-vcvm/.proof/2026-07-24-skyvern-harness.png
 - Vollständiger Vision-Agent-`run_task`-Loop braucht LLM-Keys (`OPENAI_*` / Skyvern cloud). Capability meldet dann `run_task: true`; ohne Keys → `blocked`/`degraded`, kein Fake.
 - PyPI-`Skyvern.connect_to_browser_over_cdp` ohne Header scheitert an Manager-Auth; der Harness bridged deshalb Skyverns Playwright-Driver **mit** Headers und wrappt `SkyvernBrowser`.
 - Laufendes VCVM-Docker-Image ist noch ohne `/api/harnesses/skyvern/*` (vor-PR Build). Adapter + Routes sind im Branch; Skyvern-Runtime bleibt Opt-in (`pip install "skyvern[local]"`), nicht im Core-Image.
-- `test_allocate_cdp_port_wraps_around` kann fehlschlagen wenn Port `5199` extern belegt ist (hier: `node`) — unrelated zum Skyvern-Harness.
+- `test_allocate_cdp_port_wraps_around` kann fehlschlagen wenn Port `5199` extern belegt ist — unrelated zum Skyvern-Harness.
 
 ## NEXT
 

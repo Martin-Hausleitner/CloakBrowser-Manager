@@ -266,9 +266,28 @@ def test_workspace_migration_preserves_history_and_snapshots_ownership(
             "updated_at": "2026-02-03T00:00:00+00:00",
         },
     ]
-    assert [row["version"] for row in migrations] == ["agent_workspace_v1"]
+    assert [row["version"] for row in migrations] == [
+        "agent_workspace_v1",
+        "task_runs_v1",
+    ]
     assert profile_fk["table"] == "profiles"
     assert profile_fk["on_delete"] == "SET NULL"
+
+    with db.get_db() as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        run_profile_fk = next(
+            row
+            for row in conn.execute("PRAGMA foreign_key_list(task_runs)").fetchall()
+            if row["from"] == "profile_id"
+        )
+    assert "task_runs" in tables
+    assert "task_outputs" in tables
+    assert run_profile_fk["on_delete"] == "SET NULL"
 
 
 def test_workspace_migration_is_idempotent(legacy_database: Path):
@@ -276,11 +295,17 @@ def test_workspace_migration_is_idempotent(legacy_database: Path):
     db.init_db()
 
     with db.get_db() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 2
+        assert {
+            row["version"]
+            for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        } == {"agent_workspace_v1", "task_runs_v1"}
         assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM task_sessions").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM task_outputs").fetchone()[0] == 0
 
 
 def test_workspace_migration_serializes_concurrent_initialization(
@@ -327,6 +352,11 @@ def test_workspace_migration_serializes_concurrent_initialization(
             initialization.result(timeout=10)
 
     with db.get_db() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 2
+        assert {
+            row["version"]
+            for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        } == {"agent_workspace_v1", "task_runs_v1"}
         assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM task_sessions").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == 0

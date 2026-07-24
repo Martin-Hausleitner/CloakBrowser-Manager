@@ -859,3 +859,271 @@ class LiveMetricsResponse(BaseModel):
     updated_at: str | None = None
     transports: dict[str, dict[str, object]] = Field(default_factory=dict)
 
+
+TaskRunStatus = Literal[
+    "queued",
+    "health_check",
+    "blocked_health",
+    "running",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "revoked",
+]
+
+TaskOutputKind = Literal[
+    "status",
+    "action",
+    "observation",
+    "screenshot",
+    "extracted_data",
+    "link",
+    "metric",
+    "error",
+    "approval",
+    "summary",
+]
+
+_TASK_RUN_MAX_ORIGINS = 64
+_TASK_OUTPUT_MAX_PAYLOAD_BYTES = 8_192
+_TASK_OUTPUT_MAX_DEPTH = 4
+_TASK_OUTPUT_MAX_LIST_ITEMS = 20
+_TASK_OUTPUT_MAX_KEYS = 32
+_TASK_OUTPUT_SENSITIVE_KEY_PARTS = (
+    "authorization",
+    "bearer",
+    "cookie",
+    "set-cookie",
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "proxy",
+    "clipboard",
+    "html",
+    "dom",
+    "base64",
+    "filepath",
+    "file_path",
+    "path",
+)
+_TASK_OUTPUT_KIND_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
+    "status": frozenset({"status", "detail", "progress"}),
+    "action": frozenset({"name", "url", "selector", "text", "step", "target"}),
+    "observation": frozenset({"text", "url", "title", "note"}),
+    "screenshot": frozenset({"artifact_id", "width", "height", "media_type", "sha256"}),
+    "extracted_data": frozenset({"data", "fields", "label"}),
+    "link": frozenset({"url", "title", "rel"}),
+    "metric": frozenset({"name", "value", "unit"}),
+    "error": frozenset({"code", "message", "retryable"}),
+    "approval": frozenset({"prompt", "options", "required"}),
+    "summary": frozenset({"text", "result", "status"}),
+}
+
+
+class TaskRunCreate(BaseModel):
+    harness: Harness = "browser-use"
+    task: str = Field(min_length=1, max_length=8_000)
+    profile_id: str = Field(min_length=1, max_length=120)
+    launch_if_stopped: bool = False
+    allowed_origins: list[str] = Field(default_factory=list, max_length=_TASK_RUN_MAX_ORIGINS)
+    max_steps: int = Field(default=20, ge=1, le=200)
+    timeout_seconds: int = Field(default=300, ge=1, le=3_600)
+    model_alias: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def validate_allowed_origins(cls, value: list[str]) -> list[str]:
+        try:
+            from .origin_policy import normalize_origin_set
+        except ImportError:  # pragma: no cover - flat uvicorn import path
+            from origin_policy import normalize_origin_set
+
+        if len(value) > _TASK_RUN_MAX_ORIGINS:
+            raise ValueError(f"allowed_origins may contain at most {_TASK_RUN_MAX_ORIGINS} entries")
+        # Empty is allowed at the model layer and gated by operate permission in the route.
+        return list(normalize_origin_set(value))
+
+
+class TaskHealthSnapshot(BaseModel):
+    state: str
+    checked_at: str | None = None
+    proxy_configured: bool
+    proxy_reachable: bool | None = None
+    measured_authenticity_score: int | None = None
+    inferred_authenticity_score: int | None = None
+    reasons: list[str] = Field(default_factory=list)
+    measurement_error: bool
+    policy_version: str
+    outbound_ip_masked: str | None = None
+
+
+class TaskHealthDecision(BaseModel):
+    allowed: bool
+    waiting: bool
+    failed_reasons: list[str] = Field(default_factory=list)
+    non_overridable_reasons: list[str] = Field(default_factory=list)
+    policy_version: str
+
+
+class TaskHealthOverride(BaseModel):
+    applied: bool
+    reason: str | None = None
+    actor_kind: str | None = None
+    actor_id: str | None = None
+    applied_at: str | None = None
+    failed_reasons: list[str] = Field(default_factory=list)
+    non_overridable_reasons: list[str] = Field(default_factory=list)
+    policy_version: str | None = None
+
+
+class TaskRunResponse(BaseModel):
+    id: str
+    task_session_id: str
+    task_message_id: str
+    profile_id: str | None = None
+    profile_id_snapshot: str
+    sandbox_id: str
+    harness: Harness
+    status: TaskRunStatus
+    launch_if_stopped: bool = False
+    allowed_origins: list[str] = Field(default_factory=list)
+    max_steps: int
+    timeout_seconds: int
+    model_alias: str | None = None
+    deadline_at: str
+    health_snapshot: TaskHealthSnapshot
+    health_decision: TaskHealthDecision
+    health_override: TaskHealthOverride | None = None
+    retry_count: int = 0
+    first_action_sequence: int | None = None
+    first_action_at: str | None = None
+    claimed_by: str | None = None
+    claim_expires_at: str | None = None
+    worker_id: str | None = None
+    claim_eligible_at: str | None = None
+    cancelled_at: str | None = None
+    created_by_kind: str
+    created_by_id: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class TaskRunHealthOverrideRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("reason must be a non-empty string")
+        return cleaned
+
+
+def _reject_sensitive_output_key(key: str) -> None:
+    key_lower = key.lower()
+    if any(part in key_lower for part in _TASK_OUTPUT_SENSITIVE_KEY_PARTS):
+        raise ValueError("payload contains a rejected key")
+
+
+def _validate_output_payload_value(value: object, *, depth: int) -> object:
+    if depth > _TASK_OUTPUT_MAX_DEPTH:
+        raise ValueError("payload exceeds maximum nesting depth")
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        if len(value) > 2_048:
+            raise ValueError("payload string values are too large")
+        lowered = value.lower()
+        if "data:image" in lowered or "base64," in lowered:
+            raise ValueError("payload must not contain binary or base64 content")
+        if "://" in value and "@" in value.split("://", 1)[-1].split("/", 1)[0]:
+            raise ValueError("payload must not contain credentialed URLs")
+        if value.startswith("/") or value.startswith("file:"):
+            raise ValueError("payload must not contain filesystem paths")
+        return value
+    if isinstance(value, list):
+        if len(value) > _TASK_OUTPUT_MAX_LIST_ITEMS:
+            raise ValueError("payload lists are too large")
+        return [
+            _validate_output_payload_value(item, depth=depth + 1) for item in value
+        ]
+    if isinstance(value, dict):
+        if len(value) > _TASK_OUTPUT_MAX_KEYS:
+            raise ValueError("payload objects have too many keys")
+        cleaned: dict[str, object] = {}
+        for raw_key, raw_value in value.items():
+            if not isinstance(raw_key, str):
+                raise ValueError("payload object keys must be strings")
+            _reject_sensitive_output_key(raw_key)
+            cleaned[raw_key] = _validate_output_payload_value(raw_value, depth=depth + 1)
+        return cleaned
+    raise ValueError("payload values must be JSON scalars, lists, or objects")
+
+
+class TaskOutputCreate(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    kind: TaskOutputKind
+    summary: str = Field(min_length=1, max_length=500)
+    payload: dict[str, object] = Field(default_factory=dict)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def validate_idempotency_key(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or cleaned != value:
+            raise ValueError("idempotency_key must be a non-empty trimmed string")
+        return cleaned
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("summary must be a non-empty string")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_payload_shape(self):
+        allowed = _TASK_OUTPUT_KIND_PAYLOAD_KEYS[self.kind]
+        unknown = set(self.payload) - allowed
+        if unknown:
+            raise ValueError("payload contains keys that are not allowlisted for this kind")
+        for key in self.payload:
+            _reject_sensitive_output_key(key)
+        cleaned = _validate_output_payload_value(self.payload, depth=0)
+        if not isinstance(cleaned, dict):
+            raise ValueError("payload must be an object")
+        encoded = json.dumps(cleaned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > _TASK_OUTPUT_MAX_PAYLOAD_BYTES:
+            raise ValueError("payload exceeds maximum size")
+        if self.kind == "screenshot":
+            for key, value in cleaned.items():
+                if key in {"width", "height"} and not isinstance(value, int):
+                    raise ValueError("screenshot dimensions must be integers")
+                if key in {"artifact_id", "media_type", "sha256"} and not isinstance(value, str):
+                    raise ValueError("screenshot metadata must be strings")
+                if isinstance(value, (bytes, bytearray)) or (
+                    isinstance(value, str)
+                    and (len(value) > 512 or value.startswith("/") or "base64" in value.lower())
+                ):
+                    if key != "sha256" and isinstance(value, str) and (
+                        value.startswith("/") or "base64" in value.lower()
+                    ):
+                        raise ValueError("screenshot payload must not contain bytes or paths")
+        self.payload = cleaned
+        return self
+
+
+class TaskOutputResponse(BaseModel):
+    id: str
+    run_id: str
+    sequence: int
+    idempotency_key: str
+    kind: TaskOutputKind
+    summary: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    created_at: str
+

@@ -241,6 +241,106 @@ def _migrate_agent_workspace_v1(conn: sqlite3.Connection) -> None:
             conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _migrate_task_runs_v1(conn: sqlite3.Connection) -> None:
+    """Add task_runs and task_outputs without rebuilding task_sessions."""
+    migration_version = "task_runs_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS task_runs (
+                id TEXT PRIMARY KEY,
+                task_session_id TEXT NOT NULL REFERENCES task_sessions(id) ON DELETE CASCADE,
+                task_message_id TEXT NOT NULL REFERENCES task_messages(id),
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+                profile_id_snapshot TEXT NOT NULL,
+                sandbox_id TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN (
+                        'queued', 'health_check', 'blocked_health', 'running',
+                        'succeeded', 'failed', 'cancelled', 'revoked'
+                    )
+                ),
+                launch_if_stopped BOOLEAN NOT NULL DEFAULT 0,
+                allowed_origins_json TEXT NOT NULL DEFAULT '[]',
+                max_steps INTEGER NOT NULL CHECK (max_steps >= 1),
+                timeout_seconds INTEGER NOT NULL CHECK (timeout_seconds >= 1),
+                model_alias TEXT,
+                deadline_at TEXT NOT NULL,
+                health_snapshot_json TEXT NOT NULL,
+                health_decision_json TEXT NOT NULL,
+                health_override_json TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+                first_action_sequence INTEGER,
+                first_action_at TEXT,
+                next_output_sequence INTEGER NOT NULL DEFAULT 0 CHECK (next_output_sequence >= 0),
+                claimed_by TEXT,
+                claim_expires_at TEXT,
+                worker_id TEXT,
+                claim_eligible_at TEXT,
+                cancelled_at TEXT,
+                created_by_kind TEXT NOT NULL,
+                created_by_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_runs_session
+                ON task_runs(task_session_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_task_runs_status
+                ON task_runs(status, created_at ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_task_runs_profile
+                ON task_runs(profile_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS task_outputs (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL CHECK (sequence >= 1),
+                idempotency_key TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (
+                    kind IN (
+                        'status', 'action', 'observation', 'screenshot',
+                        'extracted_data', 'link', 'metric', 'error',
+                        'approval', 'summary'
+                    )
+                ),
+                summary TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE (run_id, idempotency_key),
+                UNIQUE (run_id, sequence)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_outputs_run_sequence
+                ON task_outputs(run_id, sequence ASC);
+            """
+        )
+        violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            raise RuntimeError(
+                f"Foreign key violation after {migration_version}: {tuple(violation)}"
+            )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
@@ -513,6 +613,7 @@ def init_db():
             conn.execute("ALTER TABLE profiles ADD COLUMN harness TEXT NOT NULL DEFAULT 'codex'")
             conn.commit()
         _migrate_agent_workspace_v1(conn)
+        _migrate_task_runs_v1(conn)
 
 
 def _now() -> str:
@@ -1282,6 +1383,461 @@ def list_task_events(session_id: str, limit: int = 100) -> list[dict[str, Any]]:
             (session_id, safe_limit),
         ).fetchall()
         return [_task_event_from_row(row) for row in rows]
+
+
+# ── Task run persistence ─────────────────────────────────────────────────────
+
+
+TASK_RUN_STATUSES = frozenset(
+    {
+        "queued",
+        "health_check",
+        "blocked_health",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "revoked",
+    }
+)
+TASK_RUN_CANCELABLE_STATUSES = frozenset(
+    {"queued", "health_check", "blocked_health", "running"}
+)
+TASK_RUN_TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "revoked"}
+)
+
+
+class TaskOutputConflictError(Exception):
+    """Raised when an idempotency key is reused with a conflicting payload."""
+
+
+def _task_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    run = dict(row)
+    run["launch_if_stopped"] = bool(run.get("launch_if_stopped"))
+    run["allowed_origins"] = _json_string_list(run.pop("allowed_origins_json", None))
+    run["health_snapshot"] = _json_object(run.pop("health_snapshot_json", None))
+    run["health_decision"] = _json_object(run.pop("health_decision_json", None))
+    override = run.pop("health_override_json", None)
+    run["health_override"] = _json_object(override) if override else None
+    run.pop("next_output_sequence", None)
+    return run
+
+
+def _task_output_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    output = dict(row)
+    output["payload"] = _json_object(output.pop("payload_json", None))
+    return output
+
+
+def _status_from_health_decision(decision: dict[str, Any]) -> str:
+    if decision.get("waiting"):
+        return "health_check"
+    if not decision.get("allowed"):
+        return "blocked_health"
+    return "queued"
+
+
+def build_run_health_gate(profile_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Copy an immutable health snapshot/decision from the current profile row."""
+    if __package__:
+        from .profile_health import ProfileHealthResult, map_profile_health_gate_fields
+        from .run_health import HEALTH_POLICY_VERSION, HealthSnapshot, evaluate_health
+    else:  # pragma: no cover - flat uvicorn import path
+        from profile_health import ProfileHealthResult, map_profile_health_gate_fields
+        from run_health import HEALTH_POLICY_VERSION, HealthSnapshot, evaluate_health
+
+    row = get_profile_health(profile_id)
+    if row is None:
+        snapshot = HealthSnapshot(
+            state="unavailable",
+            checked_at=None,
+            proxy_configured=False,
+            proxy_reachable=None,
+            measured_authenticity_score=None,
+            inferred_authenticity_score=None,
+            reasons=(),
+            measurement_error=True,
+            policy_version=HEALTH_POLICY_VERSION,
+            outbound_ip_masked=None,
+        )
+    else:
+        result = ProfileHealthResult(
+            state=str(row["state"]),
+            checked_at=str(row["checked_at"] or ""),
+            proxy_configured=bool(row["proxy_configured"]),
+            proxy_reachable=row.get("proxy_reachable"),
+            outbound_ip_masked=row.get("outbound_ip_masked"),
+            proxy_latency_ms=row.get("proxy_latency_ms"),
+            proxy_risk_score=row.get("proxy_risk_score"),
+            proxy_authenticity_score=row.get("proxy_authenticity_score"),
+            fingerprint_consistency_score=row.get("fingerprint_consistency_score"),
+            browser_scan_score=row.get("browser_scan_score"),
+            warnings=tuple(row.get("warnings") or ()),
+            blockers=tuple(row.get("blockers") or ()),
+            error_code=row.get("error_code"),
+            sources=dict(row.get("sources") or {}),
+        )
+        fields = map_profile_health_gate_fields(result)
+        checked_raw = row.get("checked_at")
+        snapshot = HealthSnapshot(
+            state=str(fields["state"]),
+            checked_at=(
+                datetime.datetime.fromisoformat(str(checked_raw))
+                if isinstance(checked_raw, str) and checked_raw
+                else None
+            ),
+            proxy_configured=bool(fields["proxy_configured"]),
+            proxy_reachable=fields["proxy_reachable"],  # type: ignore[arg-type]
+            measured_authenticity_score=fields["measured_authenticity_score"],  # type: ignore[arg-type]
+            inferred_authenticity_score=fields["inferred_authenticity_score"],  # type: ignore[arg-type]
+            reasons=tuple(fields["reasons"]),  # type: ignore[arg-type]
+            measurement_error=bool(fields["measurement_error"]),
+            policy_version=str(fields["policy_version"]),
+            outbound_ip_masked=(
+                str(fields["outbound_ip_masked"])
+                if fields.get("outbound_ip_masked") is not None
+                else None
+            ),
+        )
+    decision = evaluate_health(snapshot)
+    return snapshot.to_dict(), decision.to_dict()
+
+
+def create_task_run(
+    *,
+    task_session_id: str,
+    task_message_id: str,
+    profile_id: str,
+    sandbox_id: str,
+    harness: str,
+    launch_if_stopped: bool,
+    allowed_origins: list[str],
+    max_steps: int,
+    timeout_seconds: int,
+    model_alias: str | None,
+    health_snapshot: dict[str, Any],
+    health_decision: dict[str, Any],
+    created_by_kind: str,
+    created_by_id: str | None = None,
+) -> dict[str, Any]:
+    run_id = str(uuid.uuid4())
+    now = _now()
+    created_at = datetime.datetime.fromisoformat(now)
+    deadline_at = (
+        created_at + datetime.timedelta(seconds=int(timeout_seconds))
+    ).isoformat()
+    status = _status_from_health_decision(health_decision)
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO task_runs (
+                id, task_session_id, task_message_id, profile_id, profile_id_snapshot,
+                sandbox_id, harness, status, launch_if_stopped, allowed_origins_json,
+                max_steps, timeout_seconds, model_alias, deadline_at,
+                health_snapshot_json, health_decision_json, health_override_json,
+                retry_count, first_action_sequence, first_action_at, next_output_sequence,
+                claimed_by, claim_expires_at, worker_id, claim_eligible_at, cancelled_at,
+                created_by_kind, created_by_id, created_at, updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+                0, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?
+            )""",
+            (
+                run_id,
+                task_session_id,
+                task_message_id,
+                profile_id,
+                profile_id,
+                sandbox_id,
+                harness,
+                status,
+                bool(launch_if_stopped),
+                json.dumps(list(allowed_origins), separators=(",", ":")),
+                int(max_steps),
+                int(timeout_seconds),
+                model_alias,
+                deadline_at,
+                json.dumps(health_snapshot, separators=(",", ":"), sort_keys=True),
+                json.dumps(health_decision, separators=(",", ":"), sort_keys=True),
+                created_by_kind,
+                created_by_id,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE task_sessions SET updated_at = ?, activity_at = ? WHERE id = ?",
+            (now, now, task_session_id),
+        )
+        conn.commit()
+    run = get_task_run(run_id)
+    if run is None:  # pragma: no cover
+        raise RuntimeError("task run insert did not create a row")
+    return run
+
+
+def get_task_run(run_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        return _task_run_from_row(row) if row else None
+
+
+def cancel_task_run(run_id: str) -> dict[str, Any] | None:
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        current = _task_run_from_row(row)
+        if current["status"] in TASK_RUN_TERMINAL_STATUSES:
+            conn.commit()
+            return current
+        if current["status"] not in TASK_RUN_CANCELABLE_STATUSES:
+            conn.commit()
+            return current
+        conn.execute(
+            """UPDATE task_runs
+            SET status = 'cancelled', cancelled_at = ?, updated_at = ?
+            WHERE id = ? AND status IN ('queued', 'health_check', 'blocked_health', 'running')""",
+            (now, now, run_id),
+        )
+        conn.commit()
+    return get_task_run(run_id)
+
+
+def retry_task_run_health(run_id: str) -> dict[str, Any] | None:
+    run = get_task_run(run_id)
+    if run is None:
+        return None
+    if run["status"] in TASK_RUN_TERMINAL_STATUSES:
+        return run
+    profile_id = run.get("profile_id") or run.get("profile_id_snapshot")
+    if not profile_id:
+        return run
+    snapshot, decision = build_run_health_gate(str(profile_id))
+    status = _status_from_health_decision(decision)
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE task_runs
+            SET health_snapshot_json = ?,
+                health_decision_json = ?,
+                status = ?,
+                retry_count = retry_count + 1,
+                updated_at = ?
+            WHERE id = ?""",
+            (
+                json.dumps(snapshot, separators=(",", ":"), sort_keys=True),
+                json.dumps(decision, separators=(",", ":"), sort_keys=True),
+                status,
+                now,
+                run_id,
+            ),
+        )
+        conn.commit()
+    return get_task_run(run_id)
+
+
+def override_task_run_health(
+    run_id: str,
+    *,
+    reason: str,
+    actor_kind: str,
+    actor_id: str | None,
+) -> dict[str, Any] | None:
+    if __package__:
+        from .run_health import NON_OVERRIDABLE_REASON_CODES
+    else:  # pragma: no cover
+        from run_health import NON_OVERRIDABLE_REASON_CODES
+
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        current = _task_run_from_row(row)
+        decision = dict(current.get("health_decision") or {})
+        failed_reasons = [
+            item for item in decision.get("failed_reasons", []) if isinstance(item, str)
+        ]
+        non_overridable = [
+            item for item in failed_reasons if item in NON_OVERRIDABLE_REASON_CODES
+        ]
+        if non_overridable:
+            override = {
+                "applied": False,
+                "reason": reason,
+                "actor_kind": actor_kind,
+                "actor_id": actor_id,
+                "applied_at": now,
+                "failed_reasons": failed_reasons,
+                "non_overridable_reasons": non_overridable,
+                "policy_version": decision.get("policy_version"),
+            }
+            conn.execute(
+                """UPDATE task_runs
+                SET health_override_json = ?, updated_at = ?
+                WHERE id = ?""",
+                (
+                    json.dumps(override, separators=(",", ":"), sort_keys=True),
+                    now,
+                    run_id,
+                ),
+            )
+            conn.commit()
+            return get_task_run(run_id)
+
+        override = {
+            "applied": True,
+            "reason": reason,
+            "actor_kind": actor_kind,
+            "actor_id": actor_id,
+            "applied_at": now,
+            "failed_reasons": failed_reasons,
+            "non_overridable_reasons": [],
+            "policy_version": decision.get("policy_version"),
+        }
+        updated_decision = {
+            **decision,
+            "allowed": True,
+            "waiting": False,
+            "failed_reasons": [],
+            "non_overridable_reasons": [],
+        }
+        conn.execute(
+            """UPDATE task_runs
+            SET health_override_json = ?,
+                health_decision_json = ?,
+                status = 'queued',
+                updated_at = ?
+            WHERE id = ?""",
+            (
+                json.dumps(override, separators=(",", ":"), sort_keys=True),
+                json.dumps(updated_decision, separators=(",", ":"), sort_keys=True),
+                now,
+                run_id,
+            ),
+        )
+        conn.commit()
+    return get_task_run(run_id)
+
+
+def append_task_output(
+    run_id: str,
+    *,
+    idempotency_key: str,
+    kind: str,
+    summary: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Atomically append a typed output with idempotent retries."""
+    now = _now()
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        run_row = conn.execute(
+            "SELECT * FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            conn.commit()
+            raise KeyError(run_id)
+
+        existing = conn.execute(
+            """SELECT * FROM task_outputs
+            WHERE run_id = ? AND idempotency_key = ?""",
+            (run_id, idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            current = _task_output_from_row(existing)
+            same = (
+                current["kind"] == kind
+                and current["summary"] == summary
+                and json.dumps(current["payload"], separators=(",", ":"), sort_keys=True)
+                == payload_json
+            )
+            conn.commit()
+            if same:
+                return current
+            raise TaskOutputConflictError(
+                f"Conflicting output for idempotency key {idempotency_key}"
+            )
+
+        next_sequence = int(run_row["next_output_sequence"]) + 1
+        output_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT INTO task_outputs (
+                id, run_id, sequence, idempotency_key, kind, summary, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                output_id,
+                run_id,
+                next_sequence,
+                idempotency_key,
+                kind,
+                summary,
+                payload_json,
+                now,
+            ),
+        )
+        if kind == "action" and run_row["first_action_sequence"] is None:
+            conn.execute(
+                """UPDATE task_runs
+                SET next_output_sequence = ?,
+                    first_action_sequence = ?,
+                    first_action_at = ?,
+                    updated_at = ?
+                WHERE id = ?""",
+                (next_sequence, next_sequence, now, now, run_id),
+            )
+        else:
+            conn.execute(
+                """UPDATE task_runs
+                SET next_output_sequence = ?, updated_at = ?
+                WHERE id = ?""",
+                (next_sequence, now, run_id),
+            )
+        conn.execute(
+            "UPDATE task_sessions SET updated_at = ?, activity_at = ? WHERE id = ?",
+            (now, now, run_row["task_session_id"]),
+        )
+        conn.commit()
+    output = get_task_output(output_id)
+    if output is None:  # pragma: no cover
+        raise RuntimeError("task output insert did not create a row")
+    return output
+
+
+def get_task_output(output_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM task_outputs WHERE id = ?",
+            (output_id,),
+        ).fetchone()
+        return _task_output_from_row(row) if row else None
+
+
+def list_task_outputs(
+    run_id: str,
+    *,
+    after_sequence: int = 0,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_after = max(0, int(after_sequence))
+    safe_limit = max(1, min(int(limit), 200))
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM task_outputs
+            WHERE run_id = ? AND sequence > ?
+            ORDER BY sequence ASC
+            LIMIT ?""",
+            (run_id, safe_after, safe_limit),
+        ).fetchall()
+        return [_task_output_from_row(row) for row in rows]
 
 
 # ── Access control persistence ───────────────────────────────────────────────

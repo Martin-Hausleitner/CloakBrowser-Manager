@@ -86,6 +86,11 @@ if __package__:
         TaskEventResponse,
         TaskMessageCreate,
         TaskMessageResponse,
+        TaskOutputCreate,
+        TaskOutputResponse,
+        TaskRunCreate,
+        TaskRunHealthOverrideRequest,
+        TaskRunResponse,
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
@@ -153,6 +158,11 @@ else:  # Support `uvicorn main:app` from the backend directory.
         TaskEventResponse,
         TaskMessageCreate,
         TaskMessageResponse,
+        TaskOutputCreate,
+        TaskOutputResponse,
+        TaskRunCreate,
+        TaskRunHealthOverrideRequest,
+        TaskRunResponse,
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
@@ -181,6 +191,10 @@ ACCESS_CONTROL_ENABLED = bool(AUTH_TOKEN) and access.access_control_enabled(
 )
 if os.environ.get("ACCESS_CONTROL_ENABLED") and not AUTH_TOKEN:
     logger.warning("ACCESS_CONTROL_ENABLED ignored because AUTH_TOKEN is not configured")
+
+# Temporary Task 4 worker service credential for internal output append only.
+# Missing/empty values fail closed; public bearer auth never authorizes /internal.
+CBM_WORKER_TOKEN: str | None = os.environ.get("CBM_WORKER_TOKEN") or None
 
 # Paths that bypass authentication even when AUTH_TOKEN is set.  ``/health``
 # deliberately contains no profile or runtime metadata so Docker can probe the
@@ -1585,6 +1599,57 @@ def _require_task_session(
     return session, profile, identity
 
 
+def _can_automate_task_sandbox(identity: access.AccessIdentity, sandbox_id: str) -> bool:
+    sid = str(sandbox_id or "default")
+    return identity.is_admin or access.has_permission(identity, sid, "automate")
+
+
+def _can_operate_task_sandbox(identity: access.AccessIdentity, sandbox_id: str) -> bool:
+    sid = str(sandbox_id or "default")
+    return identity.is_admin or access.has_permission(identity, sid, "operate")
+
+
+def _require_task_run(
+    scope: Scope,
+    run_id: str,
+    permission: access.Permission,
+) -> tuple[dict[str, object], access.AccessIdentity]:
+    run = db.get_task_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    identity = _require_identity(scope)
+    sandbox_id = str(run.get("sandbox_id") or "default")
+    if permission == "view":
+        allowed = _can_read_task_sessions(identity, sandbox_id)
+    elif permission == "automate":
+        allowed = _can_automate_task_sandbox(identity, sandbox_id)
+    else:
+        allowed = access.has_permission(identity, sandbox_id, permission) or identity.is_admin
+    if not allowed:
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            f"task_run.permission.{permission}",
+            "denied",
+            sandbox_id,
+            str(run.get("profile_id") or run.get("profile_id_snapshot") or ""),
+        )
+        raise HTTPException(status_code=404, detail="Task run not found")
+    return run, identity
+
+
+def _task_run_response(run: dict[str, object]) -> TaskRunResponse:
+    return TaskRunResponse(**run)
+
+
+def _require_worker_token(request: Request) -> None:
+    """Fail closed for the temporary Task 4 internal worker credential."""
+    configured = CBM_WORKER_TOKEN
+    supplied = request.headers.get("X-CBM-Worker-Token")
+    if not configured or not supplied or not hmac.compare_digest(supplied, configured):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 def _require_project_sandbox(
     scope: Scope, sandbox_id: str, permission: access.Permission
 ) -> access.AccessIdentity:
@@ -2480,6 +2545,216 @@ async def list_task_events(
         TaskEventResponse(**event)
         for event in db.list_task_events(str(session["id"]), limit=limit)
     ]
+
+
+@app.post(
+    "/api/task-sessions/{session_id}/runs",
+    response_model=TaskRunResponse,
+    status_code=201,
+)
+async def create_task_run(session_id: str, body: TaskRunCreate, request: Request):
+    session = db.get_task_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Task session not found")
+    identity = _require_identity(request.scope)
+    sandbox_id = str(session.get("sandbox_id") or "default")
+    if not _can_automate_task_sandbox(identity, sandbox_id):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "task_run.permission.automate",
+            "denied",
+            sandbox_id,
+            str(session.get("profile_id") or ""),
+        )
+        raise HTTPException(status_code=404, detail="Task session not found")
+
+    profile = db.get_profile(body.profile_id)
+    if (
+        not profile
+        or str(profile.get("sandbox_id") or "default") != sandbox_id
+        or not access.can_access_profile(identity, profile, "automate")
+    ):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "task_run.permission.automate",
+            "denied",
+            sandbox_id,
+            body.profile_id,
+        )
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if body.launch_if_stopped and not _can_operate_task_sandbox(identity, sandbox_id):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "task_run.permission.operate",
+            "denied",
+            sandbox_id,
+            body.profile_id,
+        )
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if not body.allowed_origins and not _can_operate_task_sandbox(identity, sandbox_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Empty allowed_origins requires operate permission",
+        )
+
+    message = db.append_task_message(
+        str(session["id"]),
+        "user",
+        body.task,
+        identity.kind,
+        identity.id,
+        {"source": "task_run"},
+    )
+    snapshot, decision = db.build_run_health_gate(str(profile["id"]))
+    run = db.create_task_run(
+        task_session_id=str(session["id"]),
+        task_message_id=str(message["id"]),
+        profile_id=str(profile["id"]),
+        sandbox_id=sandbox_id,
+        harness=body.harness,
+        launch_if_stopped=body.launch_if_stopped,
+        allowed_origins=list(body.allowed_origins),
+        max_steps=body.max_steps,
+        timeout_seconds=body.timeout_seconds,
+        model_alias=body.model_alias,
+        health_snapshot=snapshot,
+        health_decision=decision,
+        created_by_kind=identity.kind,
+        created_by_id=identity.id,
+    )
+    db.record_task_event(
+        str(session["id"]),
+        "task_run.created",
+        identity.kind,
+        identity.id,
+        {"run_id": run["id"], "status": run["status"]},
+    )
+    return _task_run_response(run)
+
+
+@app.get("/api/task-runs/{run_id}", response_model=TaskRunResponse)
+async def get_task_run(run_id: str, request: Request):
+    run, _identity = _require_task_run(request.scope, run_id, "view")
+    return _task_run_response(run)
+
+
+@app.post("/api/task-runs/{run_id}/cancel", response_model=TaskRunResponse)
+async def cancel_task_run(run_id: str, request: Request):
+    _run, identity = _require_task_run(request.scope, run_id, "automate")
+    cancelled = db.cancel_task_run(run_id)
+    if cancelled is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_run.cancel",
+        "allowed",
+        str(cancelled.get("sandbox_id") or "default"),
+        str(cancelled.get("profile_id") or cancelled.get("profile_id_snapshot") or ""),
+    )
+    return _task_run_response(cancelled)
+
+
+@app.post("/api/task-runs/{run_id}/retry-health", response_model=TaskRunResponse)
+async def retry_task_run_health(run_id: str, request: Request):
+    _run, identity = _require_task_run(request.scope, run_id, "automate")
+    updated = db.retry_task_run_health(run_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_run.retry_health",
+        "allowed",
+        str(updated.get("sandbox_id") or "default"),
+        str(updated.get("profile_id") or updated.get("profile_id_snapshot") or ""),
+    )
+    return _task_run_response(updated)
+
+
+@app.post("/api/task-runs/{run_id}/override-health", response_model=TaskRunResponse)
+async def override_task_run_health(
+    run_id: str,
+    body: TaskRunHealthOverrideRequest,
+    request: Request,
+):
+    _run, identity = _require_task_run(request.scope, run_id, "automate")
+    updated = db.override_task_run_health(
+        run_id,
+        reason=body.reason,
+        actor_kind=identity.kind,
+        actor_id=identity.id,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_run.override_health",
+        "allowed",
+        str(updated.get("sandbox_id") or "default"),
+        str(updated.get("profile_id") or updated.get("profile_id_snapshot") or ""),
+    )
+    return _task_run_response(updated)
+
+
+@app.get("/api/task-runs/{run_id}/outputs", response_model=list[TaskOutputResponse])
+async def list_task_run_outputs(
+    run_id: str,
+    request: Request,
+    after_sequence: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+):
+    run, _identity = _require_task_run(request.scope, run_id, "view")
+    return [
+        TaskOutputResponse(**output)
+        for output in db.list_task_outputs(
+            str(run["id"]),
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+    ]
+
+
+@app.post(
+    "/internal/task-runs/{run_id}/outputs",
+    response_model=TaskOutputResponse,
+    status_code=201,
+)
+async def append_internal_task_run_output(run_id: str, request: Request):
+    _require_worker_token(request)
+    run = db.get_task_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    try:
+        raw = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid output payload") from exc
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=422, detail="Invalid output payload")
+    try:
+        body = TaskOutputCreate.model_validate(raw)
+    except Exception as exc:
+        # Keep diagnostics generic; never echo rejected secret values.
+        raise HTTPException(status_code=422, detail="Invalid output payload") from exc
+    try:
+        output = db.append_task_output(
+            run_id,
+            idempotency_key=body.idempotency_key,
+            kind=body.kind,
+            summary=body.summary,
+            payload=dict(body.payload),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Task run not found") from exc
+    except db.TaskOutputConflictError as exc:
+        raise HTTPException(status_code=409, detail="Output idempotency conflict") from exc
+    return TaskOutputResponse(**output)
 
 
 # ── Profile CRUD ──────────────────────────────────────────────────────────────

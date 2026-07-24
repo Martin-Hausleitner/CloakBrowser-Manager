@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from collections.abc import Collection, Iterable
 from urllib.parse import urlparse
 
@@ -10,6 +11,12 @@ _DEFAULT_PORTS = {
     "http": 80,
     "https": 443,
 }
+
+# RFC 1035: wire form is at most 255 octets including labels lengths + root;
+# the textual name without a trailing dot is therefore at most 253 characters.
+_MAX_DNS_NAME_LENGTH = 253
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_DOTTED_NUMERIC_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){3}$")
 
 
 def normalize_origin(value: str) -> str:
@@ -85,6 +92,11 @@ def is_top_level_origin_allowed(candidate: str, allowed_origins: Collection[str]
     return normalized_candidate in allowed_normalized
 
 
+def _looks_like_dotted_numeric(host: str) -> bool:
+    """True when host is exactly four dot-separated all-digit components."""
+    return _DOTTED_NUMERIC_RE.fullmatch(host) is not None
+
+
 def _normalize_host(host: str) -> str:
     # Exact IP literals normalize because listing them is explicit.
     try:
@@ -96,10 +108,23 @@ def _normalize_host(host: str) -> str:
             return f"[{address.compressed}]"
         return str(address)
 
+    # Ambiguous dotted-quad lookalikes that ipaddress rejected must not fall
+    # through as DNS names (e.g. octal-looking 010.000.000.001, out-of-range).
+    if _looks_like_dotted_numeric(host):
+        raise ValueError("origin host is ambiguous")
+
     try:
         idna_host = host.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
         raise ValueError("origin host is invalid") from exc
     if not idna_host or idna_host.startswith(".") or idna_host.endswith("."):
+        raise ValueError("origin host is invalid")
+    if _looks_like_dotted_numeric(idna_host):
+        raise ValueError("origin host is ambiguous")
+    if len(idna_host) > _MAX_DNS_NAME_LENGTH:
+        raise ValueError("origin host is invalid")
+
+    labels = idna_host.split(".")
+    if any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
         raise ValueError("origin host is invalid")
     return idna_host

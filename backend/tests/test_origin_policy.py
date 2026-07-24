@@ -83,6 +83,18 @@ def test_exact_ip_literal_is_allowed_only_when_listed():
         "https://example.com:notaport",
         "https://exa mple.com",
         "https://example.com.",
+        # Invalid / ambiguous DNS-like hosts
+        "https://exa_mple.com",
+        "https://-example.com",
+        "https://example-.com",
+        "https://example..com",
+        f"https://{'a' * 64}.com",
+        f"https://{'a' * 63}.{'b' * 63}.{'c' * 63}.{'d' * 63}.com",
+        # Four-part numeric hosts that ipaddress rejects (ambiguous, not DNS)
+        "https://010.000.000.001",
+        "https://256.0.0.1",
+        "https://1.2.3.999",
+        "https://999.999.999.999",
     ],
 )
 def test_rejects_ambiguous_or_invalid_origins(value: str):

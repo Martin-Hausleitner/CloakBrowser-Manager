@@ -123,6 +123,53 @@ def test_missing_checked_at_is_stale():
     assert "health_stale" in decision.failed_reasons
 
 
+def test_future_checked_at_fails_with_stable_non_overridable_reason():
+    decision = evaluate_health(
+        _snapshot(checked_at=NOW + timedelta(seconds=1)),
+        POLICY,
+        now=NOW,
+    )
+    assert decision.allowed is False
+    assert "health_timestamp_in_future" in decision.failed_reasons
+    assert "health_timestamp_in_future" in decision.non_overridable_reasons
+    assert "health_timestamp_in_future" in NON_OVERRIDABLE_REASON_CODES
+
+
+def test_policy_version_mismatch_blocks_and_is_non_overridable():
+    decision = evaluate_health(
+        _snapshot(policy_version="run-health.v0"),
+        POLICY,
+        now=NOW,
+    )
+    assert decision.allowed is False
+    assert "health_policy_version_mismatch" in decision.failed_reasons
+    assert "health_policy_version_mismatch" in decision.non_overridable_reasons
+    assert "health_policy_version_mismatch" in NON_OVERRIDABLE_REASON_CODES
+
+
+@pytest.mark.parametrize("state", ["failed", "unavailable"])
+def test_blocking_states_preserve_non_overridable_measurement_and_proxy_gates(
+    state: str,
+):
+    decision = evaluate_health(
+        _snapshot(
+            state=state,
+            measurement_error=True,
+            proxy_configured=True,
+            proxy_reachable=False,
+        ),
+        POLICY,
+        now=NOW,
+    )
+    assert decision.allowed is False
+    assert decision.waiting is False
+    assert state in decision.failed_reasons
+    assert "measurement_error" in decision.failed_reasons
+    assert "proxy_unreachable" in decision.failed_reasons
+    assert "measurement_error" in decision.non_overridable_reasons
+    assert "proxy_unreachable" in decision.non_overridable_reasons
+
+
 def test_measured_score_threshold_69_fails_70_passes():
     assert (
         evaluate_health(
@@ -263,6 +310,48 @@ def test_snapshot_and_decision_serialize_immutably():
         snapshot.state = "passed"  # type: ignore[misc]
     with pytest.raises(Exception):
         decision.allowed = True  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"proxy_configured": "true"},
+        {"measurement_error": "false"},
+        {"proxy_reachable": "true"},
+        {"proxy_reachable": 1},
+        {"measured_authenticity_score": True},
+        {"measured_authenticity_score": 101},
+        {"measured_authenticity_score": -1},
+        {"inferred_authenticity_score": False},
+        {"inferred_authenticity_score": 150},
+        {"reasons": "measurement_error"},
+        {"reasons": ["ok", 1]},
+        {"policy_version": ""},
+        {"policy_version": "   "},
+        {"policy_version": None},
+        {"checked_at": datetime(2026, 7, 24, 12, 0)},
+    ],
+)
+def test_health_snapshot_from_dict_rejects_untrusted_coercions(payload: dict):
+    base = _snapshot().to_dict()
+    base.update(payload)
+    with pytest.raises(ValueError):
+        HealthSnapshot.from_dict(base)
+
+
+def test_health_snapshot_rejects_invalid_fields_in_constructor():
+    with pytest.raises(ValueError):
+        _snapshot(proxy_configured="true")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        _snapshot(proxy_reachable="no")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        _snapshot(measured_authenticity_score=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        _snapshot(reasons="proxy_unreachable")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        _snapshot(policy_version="")
+    with pytest.raises(ValueError):
+        _snapshot(checked_at=datetime(2026, 7, 24, 12, 0))
 
 
 def test_map_profile_health_gate_fields_exposes_stable_semantics():

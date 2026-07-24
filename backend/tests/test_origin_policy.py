@@ -100,3 +100,62 @@ def test_exact_ip_literal_is_allowed_only_when_listed():
 def test_rejects_ambiguous_or_invalid_origins(value: str):
     with pytest.raises(ValueError):
         normalize_origin(value)
+
+
+def test_browser_compatible_idna_keeps_sharp_s_distinct_from_fass():
+    # stdlib IDNA2003 collapses faß.de -> fass.de; browsers/UTS46 must not.
+    assert "faß.de".encode("idna").decode("ascii") == "fass.de"
+    sharp = normalize_origin("https://faß.de")
+    ascii_fass = normalize_origin("https://fass.de")
+    assert sharp == "https://xn--fa-hia.de"
+    assert ascii_fass == "https://fass.de"
+    assert sharp != ascii_fass
+
+
+def test_greek_final_sigma_uts46_non_transitional_stays_distinct():
+    final = normalize_origin("https://\u03c2.example")
+    medial = normalize_origin("https://\u03c3.example")
+    assert final == "https://xn--3xa.example"
+    assert medial == "https://xn--4xa.example"
+    assert final != medial
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://\ufffe.com",
+        "https://xn--",
+        "https://xn--a",
+        "https://\u200b.com",
+    ],
+)
+def test_rejects_invalid_uts46_idna_hosts(value: str):
+    with pytest.raises(ValueError):
+        normalize_origin(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://2130706433",
+        "https://0x7f000001",
+        "https://127.1",
+        "https://1.2.3",
+        "https://0177.0.0.1",
+        "https://0x7f.1",
+        "https://0x7f.0.0.1",
+        "https://0X7F.0.0.1",
+        "https://127.0.0.0x1",
+        "https://0x7f.0.0.256",
+        "https://9999999999",
+    ],
+)
+def test_rejects_whatwg_legacy_ipv4_number_forms(value: str):
+    with pytest.raises(ValueError):
+        normalize_origin(value)
+
+
+def test_ordinary_dns_with_nonnumeric_label_still_allowed():
+    assert normalize_origin("https://example.com") == "https://example.com"
+    assert normalize_origin("https://a1.example") == "https://a1.example"
+    assert normalize_origin("https://1.2.3.example") == "https://1.2.3.example"

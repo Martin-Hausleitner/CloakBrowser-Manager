@@ -7,6 +7,8 @@ import re
 from collections.abc import Collection, Iterable
 from urllib.parse import urlparse
 
+import idna
+
 _DEFAULT_PORTS = {
     "http": 80,
     "https": 443,
@@ -17,6 +19,7 @@ _DEFAULT_PORTS = {
 _MAX_DNS_NAME_LENGTH = 253
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _DOTTED_NUMERIC_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){3}$")
+_HEX_COMPONENT_RE = re.compile(r"^0[xX][0-9a-fA-F]+$")
 
 
 def normalize_origin(value: str) -> str:
@@ -97,6 +100,22 @@ def _looks_like_dotted_numeric(host: str) -> bool:
     return _DOTTED_NUMERIC_RE.fullmatch(host) is not None
 
 
+def _looks_like_legacy_ipv4_number(host: str) -> bool:
+    """True for WHATWG-style 1..4 component numeric/hex IPv4-number hosts."""
+    parts = host.split(".")
+    if not (1 <= len(parts) <= 4):
+        return False
+    for part in parts:
+        if not part:
+            return False
+        if part.isdigit():
+            continue
+        if _HEX_COMPONENT_RE.fullmatch(part) is not None:
+            continue
+        return False
+    return True
+
+
 def _normalize_host(host: str) -> str:
     # Exact IP literals normalize because listing them is explicit.
     try:
@@ -113,13 +132,19 @@ def _normalize_host(host: str) -> str:
     if _looks_like_dotted_numeric(host):
         raise ValueError("origin host is ambiguous")
 
+    # Reject WHATWG legacy IPv4-number forms browsers may reinterpret as IPs.
+    if _looks_like_legacy_ipv4_number(host):
+        raise ValueError("origin host is ambiguous")
+
     try:
-        idna_host = host.encode("idna").decode("ascii").lower()
-    except UnicodeError as exc:
+        idna_host = idna.encode(host, uts46=True, std3_rules=True).decode("ascii").lower()
+    except idna.IDNAError as exc:
         raise ValueError("origin host is invalid") from exc
     if not idna_host or idna_host.startswith(".") or idna_host.endswith("."):
         raise ValueError("origin host is invalid")
     if _looks_like_dotted_numeric(idna_host):
+        raise ValueError("origin host is ambiguous")
+    if _looks_like_legacy_ipv4_number(idna_host):
         raise ValueError("origin host is ambiguous")
     if len(idna_host) > _MAX_DNS_NAME_LENGTH:
         raise ValueError("origin host is invalid")

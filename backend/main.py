@@ -32,6 +32,7 @@ if __package__:
     from . import access_control as access
     from . import database as db
     from .browser_manager import BrowserManager
+    from .harnesses import skyvern_harness
     from .models import (
         ClipboardRequest,
         AccessAgentCreate,
@@ -48,6 +49,10 @@ if __package__:
         ProfileResponse,
         ProfileStatusResponse,
         ProfileUpdate,
+        SkyvernHarnessBindRequest,
+        SkyvernHarnessBindResponse,
+        SkyvernHarnessRunRequest,
+        SkyvernHarnessRunResponse,
         StatusResponse,
         TagResponse,
     )
@@ -55,6 +60,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
     import database as db
     from browser_manager import BrowserManager
+    from harnesses import skyvern_harness
     from models import (
         ClipboardRequest,
         AccessAgentCreate,
@@ -71,6 +77,10 @@ else:  # Support `uvicorn main:app` from the backend directory.
         ProfileResponse,
         ProfileStatusResponse,
         ProfileUpdate,
+        SkyvernHarnessBindRequest,
+        SkyvernHarnessBindResponse,
+        SkyvernHarnessRunRequest,
+        SkyvernHarnessRunResponse,
         StatusResponse,
         TagResponse,
     )
@@ -1402,6 +1412,127 @@ async def get_profile_status(profile_id: str, request: Request):
 async def get_health():
     """Minimal unauthenticated liveness endpoint for container health checks."""
     return {"ok": True}
+
+
+@app.get("/api/harnesses/skyvern/capabilities")
+async def skyvern_harness_capabilities(request: Request):
+    """Describe Skyvern harness availability (optional AGPL dependency)."""
+    _require_identity(request.scope)
+    return skyvern_harness.capabilities()
+
+
+@app.post("/api/harnesses/skyvern/bind", response_model=SkyvernHarnessBindResponse)
+async def skyvern_harness_bind(body: SkyvernHarnessBindRequest, request: Request):
+    """Bind Skyvern to a running CloakBrowser profile via CDP."""
+    _require_profile_permission(request.scope, body.profile_id, "automate")
+    running = browser_mgr.running.get(body.profile_id)
+    try:
+        target = skyvern_harness.bind_profile_cdp(
+            base_url=str(request.base_url).rstrip("/"),
+            profile_id=body.profile_id,
+            profile_running=running is not None,
+            auth_token=AUTH_TOKEN,
+            direct_cdp_port=running.cdp_port if running else None,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    preferred = skyvern_harness.preferred_browser_address(
+        target, prefer_direct=body.prefer_direct_cdp
+    )
+    return SkyvernHarnessBindResponse(
+        harness=skyvern_harness.HARNESS_ID,
+        profile_id=body.profile_id,
+        browser_address=target.browser_address,
+        direct_browser_address=target.direct_browser_address,
+        preferred_browser_address=preferred,
+        cdp_routing=skyvern_harness.CDP_ROUTING,
+        skyvern_license=skyvern_harness.SKYVERN_LICENSE,
+        headers_required=bool(target.headers) and preferred == target.browser_address,
+    )
+
+
+@app.post("/api/harnesses/skyvern/run", response_model=SkyvernHarnessRunResponse)
+async def skyvern_harness_run(body: SkyvernHarnessRunRequest, request: Request):
+    """Run a Skyvern harness action through the CloakBrowser CDP layer."""
+    _require_profile_permission(request.scope, body.profile_id, "automate")
+    running = browser_mgr.running.get(body.profile_id)
+    try:
+        target = skyvern_harness.bind_profile_cdp(
+            base_url=str(request.base_url).rstrip("/"),
+            profile_id=body.profile_id,
+            profile_running=running is not None,
+            auth_token=AUTH_TOKEN,
+            direct_cdp_port=running.cdp_port if running else None,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    browser_address = skyvern_harness.preferred_browser_address(
+        target, prefer_direct=body.prefer_direct_cdp
+    )
+    headers = (
+        target.headers
+        if browser_address == target.browser_address
+        else {}
+    )
+
+    if body.prompt:
+        agent = await skyvern_harness.run_agent_task(
+            browser_address=browser_address,
+            prompt=body.prompt,
+            url=body.url,
+            max_steps=body.max_steps,
+        )
+        if agent.get("status") == "blocked":
+            return SkyvernHarnessRunResponse(
+                status="blocked",
+                harness=skyvern_harness.HARNESS_ID,
+                profile_id=body.profile_id,
+                browser_address=browser_address,
+                reason=agent.get("reason"),
+                detail=agent,
+            )
+        return SkyvernHarnessRunResponse(
+            status=str(agent.get("status", "ok")),
+            harness=skyvern_harness.HARNESS_ID,
+            profile_id=body.profile_id,
+            browser_address=browser_address,
+            mode=agent.get("mode"),
+            url=body.url,
+            detail=agent,
+        )
+
+    screenshot = Path(
+        body.screenshot_path
+        or (Path(os.environ.get("CLOAKBROWSER_MANAGER_DATA_DIR", "/tmp")) / "skyvern-harness-last.png")
+    )
+    try:
+        result = await skyvern_harness.run_cdp_navigate_proof(
+            browser_address=browser_address,
+            headers=headers or None,
+            url=body.url,
+            screenshot_path=screenshot,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Skyvern harness run failed for %s", body.profile_id)
+        return SkyvernHarnessRunResponse(
+            status="error",
+            harness=skyvern_harness.HARNESS_ID,
+            profile_id=body.profile_id,
+            browser_address=browser_address,
+            reason=str(exc),
+        )
+    return SkyvernHarnessRunResponse(
+        status=str(result.get("status", "ok")),
+        harness=skyvern_harness.HARNESS_ID,
+        profile_id=body.profile_id,
+        browser_address=browser_address,
+        mode=result.get("mode"),
+        url=result.get("url"),
+        title=result.get("title"),
+        screenshot=result.get("screenshot"),
+        detail=result,
+    )
 
 
 @app.get("/api/status", response_model=StatusResponse)

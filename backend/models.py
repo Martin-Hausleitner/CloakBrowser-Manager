@@ -237,3 +237,41 @@ class AccessIdentityResponse(BaseModel):
     display_name: str
     role: str
     grants: list[AccessGrant] = Field(default_factory=list)
+
+
+class SkyvernHarnessBindRequest(BaseModel):
+    profile_id: str
+    prefer_direct_cdp: bool = True
+
+
+class SkyvernHarnessBindResponse(BaseModel):
+    harness: str
+    profile_id: str
+    browser_address: str
+    direct_browser_address: str | None = None
+    preferred_browser_address: str
+    cdp_routing: str
+    skyvern_license: str
+    headers_required: bool
+
+
+class SkyvernHarnessRunRequest(BaseModel):
+    profile_id: str
+    url: str = "https://example.com"
+    prompt: str | None = None
+    prefer_direct_cdp: bool = True
+    screenshot_path: str | None = None
+    max_steps: int = Field(default=5, ge=1, le=50)
+
+
+class SkyvernHarnessRunResponse(BaseModel):
+    status: str
+    harness: str
+    profile_id: str
+    browser_address: str
+    mode: str | None = None
+    url: str | None = None
+    title: str | None = None
+    screenshot: str | None = None
+    reason: str | None = None
+    detail: dict | None = None

@@ -1,4 +1,4 @@
-[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T13:33+02:00
+[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T13:39+02:00
 > 🧠 NotebookLM: n/a (kein IDR-Auftrag in dieser Lane; Architektur aus Skyvern README + CloakBrowser-Manager CDP API)
 
 # SKYVERN-HARNESS — CloakBrowser × Skyvern (2026-07-24)
@@ -67,7 +67,7 @@ Docking-Punkt ist bewusst **CDP**, nicht ein zweiter Chromium-Launch: Skyvern st
 
 ![Skyvern harness through CloakBrowser CDP — example.com](.proof/2026-07-24-skyvern-harness.png)
 
-Live-Lauf (re-verified 2026-07-24T13:33+02:00, lane cursor-grok-4.5):
+Live-Lauf (re-verified 2026-07-24T13:39+02:00, lane cursor-grok-4.5):
 
 - Manager: `http://127.0.0.1:18115` (container `cloakbrowser-manager-vcvm`)
 - Profile: `a8b99a1f-bd77-4249-917f-0ad681ea5519` (VCVM Mobile Demo, running)
@@ -76,7 +76,7 @@ Live-Lauf (re-verified 2026-07-24T13:33+02:00, lane cursor-grok-4.5):
 - URL: `https://example.com/` · Title: `Example Domain` · PNG **17487** bytes
 - Capability status: `degraded` (`skyvern_installed=true`, `llm_configured=false`)
 - Harness API on **running** VCVM image: still `404` until image is rebuilt from this branch (proof uses host-side Skyvern adapter → Manager CDP, which is the cloak docking path)
-- OpenSpec / harness unit re-checked this session: `validate --strict` PASS, `test_skyvern_harness.py` 6/6
+- OpenSpec / harness unit re-checked this session: `validate --strict` PASS, `test_skyvern_harness.py` 6/6, backend **227 passed** (+1 unrelated CDP wrap flake on port 5199)
 - Upstream license re-checked via `/tmp/skyvern` clone: **AGPL-3.0**
 - Runtime: `pip install "skyvern[local]"` in dedicated venv (`/tmp/skyvern-harness-venv`, PyPI / local skyvern)
 

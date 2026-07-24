@@ -31,12 +31,16 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 if __package__:
     from . import access_control as access
+    from . import automation_leases
+    from . import cdp_gateway
     from . import database as db
     from . import extensions
     from . import live_diagnostics
     from .browser_manager import BrowserManager
     from .profile_health import ProfileHealthProbe
     from .models import (
+        AutomationLeaseAcquireResponse,
+        AutomationLeaseHeartbeatResponse,
         ClipboardRequest,
         AccessAgentCreate,
         AccessAgentCreatedResponse,
@@ -103,12 +107,16 @@ if __package__:
     from . import stream_metrics
 else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
+    import automation_leases
+    import cdp_gateway
     import database as db
     import extensions
     import live_diagnostics
     from browser_manager import BrowserManager
     from profile_health import ProfileHealthProbe
     from models import (
+        AutomationLeaseAcquireResponse,
+        AutomationLeaseHeartbeatResponse,
         ClipboardRequest,
         AccessAgentCreate,
         AccessAgentCreatedResponse,
@@ -231,6 +239,24 @@ class _WebSocketAccessLease:
 
 
 _active_websocket_access_leases: set[_WebSocketAccessLease] = set()
+
+automation_lease_service = automation_leases.AutomationLeaseService()
+direct_cdp_socket_registry = cdp_gateway.DirectCdpSocketRegistry(
+    poll_interval_seconds=0.25
+)
+
+
+def close_direct_cdp_sockets_for_leases(
+    leases: list[tuple[str, str]] | list[str],
+) -> None:
+    """Revoke process-local direct CDP sockets for expired/released leases."""
+    lease_ids: list[str] = []
+    for item in leases:
+        if isinstance(item, tuple):
+            lease_ids.append(item[0])
+        else:
+            lease_ids.append(str(item))
+    direct_cdp_socket_registry.revoke_leases(lease_ids)
 
 
 def _register_websocket_access(
@@ -1458,6 +1484,7 @@ async def _cancel_all_profile_health_tasks() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    automation_lease_service.ensure_schema()
     await browser_mgr.cleanup_stale()
     browser_mgr._auto_launch_task = asyncio.create_task(browser_mgr.auto_launch_all())
     logger.info("CloakBrowser Manager started")
@@ -1720,6 +1747,84 @@ async def _require_websocket_profile_permission(
         await websocket.close(code=4404, reason="Profile not found")
         return None
     return profile, identity
+
+
+def _owner_from_identity(identity: access.AccessIdentity) -> tuple[str, str]:
+    return identity.kind, "" if identity.id is None else str(identity.id)
+
+
+def _reject_token_like_query(request: Request) -> None:
+    if cdp_gateway.query_has_token_like_key(request.query_params.keys()):
+        raise HTTPException(status_code=400, detail="Invalid request")
+
+
+async def _reject_websocket_token_like_query(websocket: WebSocket) -> bool:
+    query = dict(websocket.query_params)
+    if cdp_gateway.query_has_token_like_key(query.keys()):
+        await websocket.close(code=4400, reason="Invalid request")
+        return True
+    return False
+
+
+def _automation_lease_header(headers) -> str | None:
+    for key, value in headers.items():
+        if key.lower() == "x-cbm-automation-lease":
+            text = str(value).strip()
+            return text or None
+    return None
+
+
+def _require_direct_automation_lease(
+    *,
+    profile_id: str,
+    identity: access.AccessIdentity,
+    token: str | None,
+    lease_id: str | None = None,
+) -> automation_leases.LeaseRecord:
+    if not token:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    owner_kind, owner_id = _owner_from_identity(identity)
+    if lease_id:
+        record = automation_lease_service.validate(
+            lease_id,
+            token,
+            profile_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+        )
+    else:
+        record = automation_lease_service.validate_for_actor(
+            token,
+            profile_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+        )
+    if record is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return record
+
+
+async def _require_websocket_direct_automation_lease(
+    websocket: WebSocket,
+    *,
+    profile_id: str,
+    identity: access.AccessIdentity,
+) -> automation_leases.LeaseRecord | None:
+    token = _automation_lease_header(dict(websocket.headers))
+    if not token:
+        await websocket.close(code=4403, reason="Automation lease required")
+        return None
+    owner_kind, owner_id = _owner_from_identity(identity)
+    record = automation_lease_service.validate_for_actor(
+        token,
+        profile_id,
+        owner_kind=owner_kind,
+        owner_id=owner_id,
+    )
+    if record is None:
+        await websocket.close(code=4403, reason="Automation lease required")
+        return None
+    return record
 
 
 def _profile_response(profile: dict[str, object], identity: access.AccessIdentity) -> ProfileResponse:
@@ -3381,29 +3486,22 @@ async def cdp_live_session(profile_id: str, request: Request):
     """Browser-Use-style CDP screencast fullscreen page (snappy live URL)."""
     from fastapi.responses import HTMLResponse
 
-    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
+    profile, _identity = _require_profile_permission(request.scope, profile_id, "view")
     if profile_id not in browser_mgr.running:
         raise HTTPException(status_code=409, detail="Profile is not running")
-    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
-        identity, profile, "automate"
-    )
-    if not include_cdp:
-        raise HTTPException(status_code=403, detail="CDP live view requires automate permission")
     local_base = _request_local_base(request)
     ws_base = f"{session_links.ws_scheme_for(local_base)}://{local_base.split('://', 1)[-1]}"
-    cdp_ws = f"{ws_base}/api/profiles/{profile_id}/cdp"
-    cdp_list = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/cdp/json/list"
+    # Observer discovery/WS only — no automation lease and no arbitrary CDP.
+    cdp_list = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/cdp-observer/json/list"
+    cdp_ws = f"{ws_base}/api/profiles/{profile_id}/cdp-observer/devtools/page/pending"
     metrics = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/live-metrics"
-    interactive = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
-        identity, profile, "interact"
-    )
     html = session_views.render_cdp_live_html(
         profile_id=profile_id,
         profile_name=str(profile.get("name") or profile_id),
         cdp_ws_url=cdp_ws,
         cdp_list_url=cdp_list,
         metrics_url=metrics,
-        interactive=interactive,
+        interactive=False,
     )
     return HTMLResponse(html)
 
@@ -3858,15 +3956,107 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
             logger.debug("VNC proxy: websocket.close() failed: %s", exc)
 
 
+# ── Direct automation leases ─────────────────────────────────────────────────
+
+
+@app.post(
+    "/api/profiles/{profile_id}/automation-leases",
+    response_model=AutomationLeaseAcquireResponse,
+)
+async def acquire_automation_lease(profile_id: str, request: Request):
+    _reject_token_like_query(request)
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    owner_kind, owner_id = _owner_from_identity(identity)
+    try:
+        acquired = automation_lease_service.acquire_direct(
+            profile_id, owner_kind=owner_kind, owner_id=owner_id
+        )
+    except automation_leases.AutomationBusy:
+        raise HTTPException(status_code=409, detail="automation_busy")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "automation_lease.acquire",
+        "allowed",
+        str(_profile.get("sandbox_id") or "default"),
+        profile_id,
+    )
+    return AutomationLeaseAcquireResponse(
+        lease_id=acquired.lease_id,
+        token=acquired.token,
+        expires_at=acquired.expires_at.isoformat(),
+        heartbeat_interval_seconds=automation_leases.HEARTBEAT_INTERVAL_SECONDS,
+    )
+
+
+@app.post(
+    "/api/profiles/{profile_id}/automation-leases/{lease_id}/heartbeat",
+    response_model=AutomationLeaseHeartbeatResponse,
+)
+async def heartbeat_automation_lease(profile_id: str, lease_id: str, request: Request):
+    _reject_token_like_query(request)
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    content_length = int(request.headers.get("content-length") or "0")
+    if content_length > 0 or content_type in {"application/json", "application/x-www-form-urlencoded"}:
+        raise HTTPException(status_code=400, detail="Invalid request")
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    token = _automation_lease_header(request.headers)
+    owner_kind, owner_id = _owner_from_identity(identity)
+    try:
+        expires = automation_lease_service.heartbeat(
+            lease_id,
+            token or "",
+            profile_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+        )
+    except automation_leases.AutomationLeaseInvalid:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    direct_cdp_socket_registry.update_expiry(lease_id, expires)
+    return AutomationLeaseHeartbeatResponse(
+        expires_at=expires.isoformat(),
+        heartbeat_interval_seconds=automation_leases.HEARTBEAT_INTERVAL_SECONDS,
+    )
+
+
+@app.delete(
+    "/api/profiles/{profile_id}/automation-leases/{lease_id}",
+    status_code=204,
+)
+async def release_automation_lease(profile_id: str, lease_id: str, request: Request):
+    _reject_token_like_query(request)
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    token = _automation_lease_header(request.headers)
+    owner_kind, owner_id = _owner_from_identity(identity)
+    try:
+        automation_lease_service.release(
+            lease_id,
+            token or "",
+            profile_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            reason="released",
+        )
+    except automation_leases.AutomationLeaseInvalid:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    close_direct_cdp_sockets_for_leases([lease_id])
+    return Response(status_code=204)
+
+
 # ── CDP WebSocket Proxy ──────────────────────────────────────────────────────
-# Simple bidirectional passthrough — CDP is standard JSON over WebSocket,
-# no protocol translation needed (unlike VNC which requires RFB filtering).
+# Direct CDP requires an automation lease. Human live view uses observer routes.
 
 
 @app.get("/api/profiles/{profile_id}/cdp")
 async def cdp_info(profile_id: str, request: Request):
     """Return CDP connection info. Prevents SPA catch-all from serving index.html."""
-    _profile, _identity = _require_profile_permission(request.scope, profile_id, "automate")
+    _reject_token_like_query(request)
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    _require_direct_automation_lease(
+        profile_id=profile_id,
+        identity=identity,
+        token=_automation_lease_header(request.headers),
+    )
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -3881,7 +4071,13 @@ async def cdp_info(profile_id: str, request: Request):
 @app.get("/api/profiles/{profile_id}/cdp/json/version")
 async def cdp_json_version(profile_id: str, request: Request):
     """Proxy Chrome's /json/version, rewriting WS URLs to go through our proxy."""
-    _profile, _identity = _require_profile_permission(request.scope, profile_id, "automate")
+    _reject_token_like_query(request)
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    _require_direct_automation_lease(
+        profile_id=profile_id,
+        identity=identity,
+        token=_automation_lease_header(request.headers),
+    )
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -3909,7 +4105,13 @@ async def cdp_json_version(profile_id: str, request: Request):
 @app.get("/api/profiles/{profile_id}/cdp/json")
 async def cdp_json_list(profile_id: str, request: Request):
     """Proxy Chrome's /json/list, rewriting WS URLs."""
-    _profile, _identity = _require_profile_permission(request.scope, profile_id, "automate")
+    _reject_token_like_query(request)
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    _require_direct_automation_lease(
+        profile_id=profile_id,
+        identity=identity,
+        token=_automation_lease_header(request.headers),
+    )
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -3935,11 +4137,53 @@ async def cdp_json_list(profile_id: str, request: Request):
     return data
 
 
+@app.get("/api/profiles/{profile_id}/cdp-observer/json/list/")
+@app.get("/api/profiles/{profile_id}/cdp-observer/json/list")
+async def cdp_observer_json_list(profile_id: str, request: Request):
+    """Observer discovery: existing page targets only, Manager WS URLs only."""
+    _reject_token_like_query(request)
+    _require_profile_permission(request.scope, profile_id, "view")
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        raise HTTPException(status_code=404, detail="Profile not running")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{running.cdp_port}/json/list", timeout=5
+            )
+            data = resp.json()
+    except Exception as exc:
+        logger.error("CDP observer: failed to reach Chrome CDP for %s: %s", profile_id, exc)
+        raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
+
+    host = request.headers.get("host", "localhost:8080")
+    ws_scheme = "wss" if _is_https(request) else "ws"
+    pages: list[dict[str, object]] = []
+    if isinstance(data, list):
+        for entry in data:
+            if not isinstance(entry, dict) or entry.get("type") != "page":
+                continue
+            item = dict(entry)
+            if "webSocketDebuggerUrl" in item:
+                target_id = str(item.get("id") or "")
+                ws_tail = str(item["webSocketDebuggerUrl"]).split("/devtools/")[-1]
+                if target_id and "/page/" not in f"/devtools/{ws_tail}":
+                    ws_tail = f"page/{target_id}"
+                item["webSocketDebuggerUrl"] = (
+                    f"{ws_scheme}://{host}/api/profiles/{profile_id}/"
+                    f"cdp-observer/devtools/{ws_tail}"
+                )
+            pages.append(item)
+    return pages
+
+
 async def _proxy_cdp_websocket(
     websocket: WebSocket,
     target_url: str,
     label: str,
     access_lease: _WebSocketAccessLease | None = None,
+    automation_handle: cdp_gateway.DirectCdpSocketHandle | None = None,
 ) -> None:
     """Bidirectional WebSocket proxy between a FastAPI client and a CDP target.
 
@@ -3984,6 +4228,103 @@ async def _proxy_cdp_websocket(
             d2c = asyncio.create_task(cdp_to_client(), name="d2c")
             proxy_tasks = [c2d, d2c]
             revocation_task = None
+            automation_task = None
+            if access_lease is not None:
+                revocation_task = asyncio.create_task(
+                    access_lease.revoked.wait(), name="access-revocation"
+                )
+                proxy_tasks.append(revocation_task)
+            if automation_handle is not None:
+                automation_task = asyncio.create_task(
+                    direct_cdp_socket_registry.watch_until_revoked_or_expired(
+                        automation_handle
+                    ),
+                    name="automation-lease-watch",
+                )
+                proxy_tasks.append(automation_task)
+            done, pending = await asyncio.wait(
+                proxy_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            access_revoked = revocation_task is not None and revocation_task in done
+            automation_revoked = automation_task is not None and automation_task in done
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if access_revoked:
+                logger.info("%s: access revoked", label)
+                await websocket.close(code=4403, reason="Access revoked")
+            elif automation_revoked:
+                logger.info("%s: automation lease revoked", label)
+                await websocket.close(code=4403, reason="Automation lease revoked")
+            logger.info("%s: disconnected", label)
+
+    except Exception as exc:
+        logger.error("%s error: %s", label, exc)
+    finally:
+        try:
+            await websocket.close()
+        except Exception as exc:
+            logger.debug("%s: websocket.close() failed: %s", label, exc)
+
+
+async def _proxy_observer_cdp_websocket(
+    websocket: WebSocket,
+    target_url: str,
+    label: str,
+    access_lease: _WebSocketAccessLease | None = None,
+) -> None:
+    """Screencast-only observer proxy — never a generic CDP tunnel."""
+    import websockets
+
+    accepted_ids: set[int] = set()
+    try:
+        async with websockets.connect(
+            target_url, max_size=None, ping_interval=None, ping_timeout=None
+        ) as cdp_ws:
+            async def client_to_cdp():
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        if msg.get("type") == "websocket.disconnect":
+                            break
+                        raw = msg.get("text") if "text" in msg else msg.get("bytes")
+                        if raw is None:
+                            continue
+                        try:
+                            sanitized = cdp_gateway.validate_observer_client_message(raw)
+                        except cdp_gateway.ObserverFrameRejected:
+                            await websocket.close(code=4400, reason="Observer command denied")
+                            return
+                        if sanitized["id"] in accepted_ids:
+                            await websocket.close(code=4400, reason="Observer command denied")
+                            return
+                        accepted_ids.add(int(sanitized["id"]))
+                        await cdp_ws.send(json.dumps(sanitized, separators=(",", ":")))
+                except WebSocketDisconnect:
+                    pass
+                except Exception as exc:
+                    logger.warning("%s [c->obs]: %s: %s", label, type(exc).__name__, exc)
+
+            async def cdp_to_client():
+                try:
+                    async for msg in cdp_ws:
+                        filtered = cdp_gateway.filter_observer_upstream_message(
+                            msg if isinstance(msg, (str, bytes)) else str(msg),
+                            accepted_ids=accepted_ids,
+                        )
+                        if filtered is None:
+                            continue
+                        await websocket.send_text(filtered)
+                except WebSocketDisconnect:
+                    pass
+                except Exception as exc:
+                    logger.warning("%s [obs->c]: %s: %s", label, type(exc).__name__, exc)
+
+            c2d = asyncio.create_task(client_to_cdp(), name="obs-c2d")
+            d2c = asyncio.create_task(cdp_to_client(), name="obs-d2c")
+            proxy_tasks = [c2d, d2c]
+            revocation_task = None
             if access_lease is not None:
                 revocation_task = asyncio.create_task(
                     access_lease.revoked.wait(), name="access-revocation"
@@ -3998,10 +4339,7 @@ async def _proxy_cdp_websocket(
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
             if access_revoked:
-                logger.info("%s: access revoked", label)
                 await websocket.close(code=4403, reason="Access revoked")
-            logger.info("%s: disconnected", label)
-
     except Exception as exc:
         logger.error("%s error: %s", label, exc)
     finally:
@@ -4014,6 +4352,8 @@ async def _proxy_cdp_websocket(
 @app.websocket("/api/profiles/{profile_id}/cdp")
 async def cdp_proxy(websocket: WebSocket, profile_id: str):
     """Proxy WebSocket frames between external tools and Chrome's CDP."""
+    if await _reject_websocket_token_like_query(websocket):
+        return
     if not await _check_websocket_origin(websocket):
         return
 
@@ -4021,6 +4361,11 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
     if not access_result:
         return
     _profile, identity = access_result
+    lease = await _require_websocket_direct_automation_lease(
+        websocket, profile_id=profile_id, identity=identity
+    )
+    if not lease:
+        return
 
     running = browser_mgr.running.get(profile_id)
     if not running:
@@ -4028,6 +4373,13 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
         return
 
     access_lease = _register_websocket_access(identity, profile_id)
+    automation_handle = direct_cdp_socket_registry.register(
+        lease_id=lease.lease_id,
+        profile_id=profile_id,
+        owner_kind=lease.owner_kind,
+        owner_id=lease.owner_id,
+        expires_at=lease.expires_at,
+    )
     try:
         await websocket.accept()
 
@@ -4044,15 +4396,22 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
             return
 
         await _proxy_cdp_websocket(
-            websocket, ws_url, f"CDP proxy [{profile_id}]", access_lease
+            websocket,
+            ws_url,
+            f"CDP proxy [{profile_id}]",
+            access_lease,
+            automation_handle,
         )
     finally:
+        direct_cdp_socket_registry.unregister(automation_handle)
         _unregister_websocket_access(access_lease)
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp/devtools/{path:path}")
 async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     """Proxy page-specific CDP WebSocket connections (e.g. /devtools/page/GUID)."""
+    if await _reject_websocket_token_like_query(websocket):
+        return
     if not await _check_websocket_origin(websocket):
         return
 
@@ -4060,6 +4419,57 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     if not access_result:
         return
     _profile, identity = access_result
+    lease = await _require_websocket_direct_automation_lease(
+        websocket, profile_id=profile_id, identity=identity
+    )
+    if not lease:
+        return
+
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        await websocket.close(code=4004, reason="Profile not running")
+        return
+
+    access_lease = _register_websocket_access(identity, profile_id)
+    automation_handle = direct_cdp_socket_registry.register(
+        lease_id=lease.lease_id,
+        profile_id=profile_id,
+        owner_kind=lease.owner_kind,
+        owner_id=lease.owner_id,
+        expires_at=lease.expires_at,
+    )
+    try:
+        await websocket.accept()
+        target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
+        await _proxy_cdp_websocket(
+            websocket,
+            target_url,
+            f"CDP page proxy [{profile_id}]",
+            access_lease,
+            automation_handle,
+        )
+    finally:
+        direct_cdp_socket_registry.unregister(automation_handle)
+        _unregister_websocket_access(access_lease)
+
+
+@app.websocket("/api/profiles/{profile_id}/cdp-observer/devtools/{path:path}")
+async def cdp_observer_page_proxy(websocket: WebSocket, profile_id: str, path: str):
+    """Screencast-only observer WebSocket — view permission, no automation lease."""
+    if await _reject_websocket_token_like_query(websocket):
+        return
+    if not await _check_websocket_origin(websocket):
+        return
+
+    access_result = await _require_websocket_profile_permission(websocket, profile_id, "view")
+    if not access_result:
+        return
+    _profile, identity = access_result
+
+    # Only page targets are observably proxied.
+    if not path.startswith("page/"):
+        await websocket.close(code=4403, reason="Observer target denied")
+        return
 
     running = browser_mgr.running.get(profile_id)
     if not running:
@@ -4070,8 +4480,11 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     try:
         await websocket.accept()
         target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
-        await _proxy_cdp_websocket(
-            websocket, target_url, f"CDP page proxy [{profile_id}]", access_lease
+        await _proxy_observer_cdp_websocket(
+            websocket,
+            target_url,
+            f"CDP observer [{profile_id}]",
+            access_lease,
         )
     finally:
         _unregister_websocket_access(access_lease)

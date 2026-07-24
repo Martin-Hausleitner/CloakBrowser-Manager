@@ -454,11 +454,19 @@ def _mock_running_profile(pid: str) -> MagicMock:
     return mock
 
 
+def _acquire_direct_lease(app_client: TestClient, profile_id: str) -> dict[str, str]:
+    resp = app_client.post(f"/api/profiles/{profile_id}/automation-leases")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    return {"X-CBM-Automation-Lease": body["token"]}
+
+
 def test_cdp_json_version_rewrites_ws_url(app_client: TestClient):
     """GET /cdp/json/version rewrites webSocketDebuggerUrl through our proxy."""
     create = app_client.post("/api/profiles", json={"name": "CdpVer"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     chrome_response = MagicMock()
     chrome_response.json.return_value = {
@@ -471,7 +479,9 @@ def test_cdp_json_version_rewrites_ws_url(app_client: TestClient):
     mock_client.get = AsyncMock(return_value=chrome_response)
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        resp = app_client.get(f"/api/profiles/{pid}/cdp/json/version")
+        resp = app_client.get(
+            f"/api/profiles/{pid}/cdp/json/version", headers=lease_headers
+        )
 
     assert resp.status_code == 200
     data = resp.json()
@@ -485,6 +495,7 @@ def test_cdp_json_version_uses_wss_behind_https(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "CdpWss"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     chrome_response = MagicMock()
     chrome_response.json.return_value = {
@@ -498,7 +509,7 @@ def test_cdp_json_version_uses_wss_behind_https(app_client: TestClient):
     with patch("httpx.AsyncClient", return_value=mock_client):
         resp = app_client.get(
             f"/api/profiles/{pid}/cdp/json/version",
-            headers={"X-Forwarded-Proto": "https"},
+            headers={**lease_headers, "X-Forwarded-Proto": "https"},
         )
 
     assert resp.status_code == 200
@@ -511,6 +522,7 @@ def test_cdp_json_list_rewrites_page_urls(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "CdpList"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     chrome_response = MagicMock()
     chrome_response.json.return_value = [
@@ -529,7 +541,9 @@ def test_cdp_json_list_rewrites_page_urls(app_client: TestClient):
     mock_client.get = AsyncMock(return_value=chrome_response)
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        resp = app_client.get(f"/api/profiles/{pid}/cdp/json/list")
+        resp = app_client.get(
+            f"/api/profiles/{pid}/cdp/json/list", headers=lease_headers
+        )
 
     assert resp.status_code == 200
     data = resp.json()
@@ -545,6 +559,7 @@ def test_cdp_json_version_chrome_unreachable(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "CdpDown"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -552,10 +567,23 @@ def test_cdp_json_version_chrome_unreachable(app_client: TestClient):
     mock_client.get = AsyncMock(side_effect=ConnectionError("refused"))
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        resp = app_client.get(f"/api/profiles/{pid}/cdp/json/version")
+        resp = app_client.get(
+            f"/api/profiles/{pid}/cdp/json/version", headers=lease_headers
+        )
 
     assert resp.status_code == 502
     main.browser_mgr.running.pop(pid, None)
+
+
+def test_cdp_requires_automation_lease_header(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "CdpLeaseRequired"})
+    pid = create.json()["id"]
+    _mock_running_profile(pid)
+    try:
+        assert app_client.get(f"/api/profiles/{pid}/cdp/json/version").status_code == 404
+        assert app_client.get(f"/api/profiles/{pid}/cdp").status_code == 404
+    finally:
+        main.browser_mgr.running.pop(pid, None)
 
 
 # ── WebSocket Origin Validation ──────────────────────────────────────────────
@@ -581,11 +609,12 @@ def test_cdp_ws_rejects_cross_origin(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "OriginCdp"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     with pytest.raises(Exception):
         with app_client.websocket_connect(
             f"/api/profiles/{pid}/cdp",
-            headers={"origin": "http://evil.com"},
+            headers={**lease_headers, "origin": "http://evil.com"},
         ):
             pass
     main.browser_mgr.running.pop(pid, None)

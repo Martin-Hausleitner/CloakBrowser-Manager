@@ -313,6 +313,18 @@ class ClipboardRequest(BaseModel):
     text: str = Field(max_length=1_048_576)  # 1MB max
 
 
+class AutomationLeaseAcquireResponse(BaseModel):
+    lease_id: str
+    token: str
+    expires_at: str
+    heartbeat_interval_seconds: int = 15
+
+
+class AutomationLeaseHeartbeatResponse(BaseModel):
+    expires_at: str
+    heartbeat_interval_seconds: int = 15
+
+
 class ProjectCreate(BaseModel):
     id: str = Field(min_length=1, max_length=80, pattern=SLUG_PATTERN)
     name: str = Field(min_length=1, max_length=120)

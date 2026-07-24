@@ -1,4 +1,4 @@
-[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T07:59+02:00
+[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T08:37+02:00
 > 🧠 NotebookLM: n/a (kein IDR-Auftrag in dieser Lane; Architektur aus Skyvern README + CloakBrowser-Manager CDP API)
 
 # SKYVERN-HARNESS — CloakBrowser × Skyvern (2026-07-24)
@@ -39,7 +39,7 @@ Skyvern ist als **optionaler AGPL-Harness** an CloakBrowser Manager angedockt. A
 
 ## Lizenz-Hinweis (AGPL)
 
-- **Skyvern** ([Skyvern-AI/skyvern](https://github.com/Skyvern-AI/skyvern)): **GNU Affero General Public License v3.0 (AGPL-3.0)** — bestätigt via upstream `LICENSE`.
+- **Skyvern** ([Skyvern-AI/skyvern](https://github.com/Skyvern-AI/skyvern)): **GNU Affero General Public License v3.0 (AGPL-3.0)** — bestätigt via upstream `LICENSE` (`/tmp/skyvern`).
 - Dieser Manager-GUI-Code bleibt **MIT**.
 - Skyvern wird **nicht** in den Repo-Tree vendored; Installation ist optional (`pip install "skyvern[local]"`).
 - Wer Skyvern als Netzwerkdienst zusammen mit dem Manager betreibt, muss die AGPL-Pflichten (Corresponding Source für den kombinierten Service) selbst einhalten.
@@ -67,7 +67,7 @@ Docking-Punkt ist bewusst **CDP**, nicht ein zweiter Chromium-Launch: Skyvern st
 
 ![Skyvern harness through CloakBrowser CDP — example.com](.proof/2026-07-24-skyvern-harness.png)
 
-Live-Lauf (re-verified 2026-07-24T07:59+02:00, lane cursor-grok-4.5):
+Live-Lauf (re-verified 2026-07-24T08:37+02:00, lane cursor-grok-4.5):
 
 - Manager: `http://127.0.0.1:18115` (container `cloakbrowser-manager-vcvm`)
 - Profile: `a8b99a1f-bd77-4249-917f-0ad681ea5519` (VCVM Mobile Demo, running)

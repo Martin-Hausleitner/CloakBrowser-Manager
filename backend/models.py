@@ -925,7 +925,8 @@ _TASK_OUTPUT_KIND_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     "status": frozenset({"status", "detail", "progress"}),
     "action": frozenset({"name", "url", "selector", "text", "step", "target"}),
     "observation": frozenset({"text", "url", "title", "note"}),
-    "screenshot": frozenset({"artifact_id", "width", "height", "media_type", "sha256"}),
+    # Screenshot artifact metadata is Manager-derived after ingest; callers send {}.
+    "screenshot": frozenset(),
     "extracted_data": frozenset({"data", "fields", "label"}),
     "link": frozenset({"url", "title", "rel"}),
     "metric": frozenset({"name", "value", "unit"}),
@@ -951,7 +952,6 @@ _MIME_TYPE_RE = re.compile(
 )
 _WINDOWS_DRIVE_RE = re.compile(r"(?i)^[a-z]:[\\/]")
 _DOT_RELATIVE_RE = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
-_OPAQUE_ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _HTTP_URL_IN_TEXT_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _RELATIVE_FILE_PATH_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9])(?:[A-Za-z0-9._-]+[\\/])+[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,16}\b"
@@ -1240,21 +1240,9 @@ class TaskOutputCreate(BaseModel):
         encoded = json.dumps(cleaned, sort_keys=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > _TASK_OUTPUT_MAX_PAYLOAD_BYTES:
             raise ValueError("payload exceeds maximum size")
-        if self.kind == "screenshot":
-            for key, value in cleaned.items():
-                if key in {"width", "height"} and not isinstance(value, int):
-                    raise ValueError("screenshot dimensions must be integers")
-                if key in {"artifact_id", "media_type", "sha256"} and not isinstance(value, str):
-                    raise ValueError("screenshot metadata must be strings")
-                if key == "artifact_id":
-                    artifact_id = str(value)
-                    if (
-                        "/" in artifact_id
-                        or "\\" in artifact_id
-                        or ".." in artifact_id
-                        or _OPAQUE_ARTIFACT_ID_RE.fullmatch(artifact_id) is None
-                    ):
-                        raise ValueError("screenshot artifact_id must be an opaque identifier")
+        if self.kind == "screenshot" and cleaned:
+            # Reject any caller-supplied screenshot artifact fields (Task6 two-phase).
+            raise ValueError("screenshot payload must be empty")
         self.payload = cleaned
         return self
 

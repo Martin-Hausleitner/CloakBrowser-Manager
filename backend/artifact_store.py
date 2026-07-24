@@ -390,8 +390,6 @@ class ArtifactStore:
                 abs_final = abs_dir / rel_file
                 self._atomic_write(abs_dir, abs_tmp, abs_final, bytes(body))
 
-                import json as _json
-
                 conn.execute(
                     """
                     INSERT INTO task_artifacts (
@@ -414,31 +412,8 @@ class ArtifactStore:
                         _iso(now),
                     ),
                 )
-                payload_row = conn.execute(
-                    "SELECT payload_json FROM task_outputs WHERE id = ?",
-                    (output_id,),
-                ).fetchone()
-                try:
-                    payload = db._json_object(payload_row["payload_json"] if payload_row else "{}")
-                except Exception:
-                    payload = {}
-                payload = dict(payload)
-                payload.update(
-                    {
-                        "artifact_id": artifact_id,
-                        "width": width,
-                        "height": height,
-                        "media_type": media,
-                        "sha256": digest,
-                    }
-                )
-                conn.execute(
-                    "UPDATE task_outputs SET payload_json = ? WHERE id = ?",
-                    (
-                        _json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                        output_id,
-                    ),
-                )
+                # Screenshot metadata is derived from task_artifacts on read;
+                # never copy server fields into task_outputs.payload_json.
                 conn.commit()
             except Exception:
                 conn.rollback()

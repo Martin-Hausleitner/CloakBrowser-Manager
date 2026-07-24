@@ -215,6 +215,12 @@ def test_output_list_exposes_artifact_expired_without_weakening_payload(client_a
     shot = next(item for item in body if item["id"] == seeded["output"]["id"])
     assert shot["artifact_expired"] is False
     assert "path" not in shot["payload"]
+    assert set(shot["payload"]) == {"artifact_id", "width", "height", "media_type", "sha256"}
+    assert shot["payload"]["artifact_id"] == seeded["artifact"].artifact_id
+    assert shot["payload"]["width"] == seeded["artifact"].width
+    assert shot["payload"]["height"] == seeded["artifact"].height
+    assert shot["payload"]["media_type"] == seeded["artifact"].media_type
+    assert shot["payload"]["sha256"] == seeded["artifact"].sha256
 
     store.mark_task_archived(seeded["session"]["id"], archived_at=NOW)
     from datetime import timedelta
@@ -225,3 +231,84 @@ def test_output_list_exposes_artifact_expired_without_weakening_payload(client_a
     listed2 = client.get(f"/api/task-runs/{seeded['run']['id']}/outputs")
     shot2 = next(item for item in listed2.json() if item["id"] == seeded["output"]["id"])
     assert shot2["artifact_expired"] is True
+    # Metadata remains server-derived from task_artifacts; never from forged output payload.
+    assert shot2["payload"]["artifact_id"] == seeded["artifact"].artifact_id
+    assert "path" not in shot2["payload"]
+
+
+def test_pending_screenshot_output_has_empty_payload_and_404_bytes(client_access):
+    """Phase-1 screenshot row (no ingest yet) exposes empty payload; bytes 404."""
+    client, _store = client_access
+    profile = db.create_profile("Pending shot", sandbox_id="alpha")
+    session = db.create_task_session(profile["id"], "alpha", "bootstrap")
+    snapshot, decision = db.build_run_health_gate(profile["id"])
+    run = db.create_task_run_with_message(
+        task_session_id=session["id"],
+        content="pending shot",
+        profile_id=profile["id"],
+        sandbox_id="alpha",
+        harness="browser-use",
+        launch_if_stopped=False,
+        allowed_origins=["https://example.com"],
+        max_steps=3,
+        timeout_seconds=30,
+        model_alias=None,
+        health_snapshot=snapshot,
+        health_decision=decision,
+        created_by_kind="test",
+        created_by_id="tester",
+    )
+    # Simulate a forged payload_json that must never surface.
+    output = db.append_task_output(
+        run["id"],
+        idempotency_key="pending-1",
+        kind="screenshot",
+        summary="waiting for upload",
+        payload={},
+    )
+    with db.get_db() as conn:
+        conn.execute(
+            "UPDATE task_outputs SET payload_json = ? WHERE id = ?",
+            (
+                '{"artifact_id":"forged-id","width":1,"height":1,'
+                '"media_type":"image/png","sha256":"' + ("c" * 64) + '"}',
+                output["id"],
+            ),
+        )
+        conn.commit()
+
+    password = create_user(client, "alpha-pending", "alpha", "automate", "view")
+    login(client, "alpha-pending", password)
+
+    listed = client.get(f"/api/task-runs/{run['id']}/outputs")
+    assert listed.status_code == 200
+    shot = next(item for item in listed.json() if item["id"] == output["id"])
+    assert shot["payload"] == {}
+    assert shot["artifact_expired"] is False
+    assert "forged-id" not in listed.text
+
+    missing = client.get(f"/api/task-outputs/{output['id']}/screenshot")
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "Screenshot not found"}
+    assert "forged-id" not in missing.text
+
+
+def test_screenshot_payload_derived_after_ingest_not_from_output_row(client_access):
+    client, store = client_access
+    seeded = seed_screenshot(store)
+    # Corrupt stored output payload; responses must still use task_artifacts.
+    with db.get_db() as conn:
+        conn.execute(
+            "UPDATE task_outputs SET payload_json = ? WHERE id = ?",
+            ('{"artifact_id":"forged","width":9,"height":9}', seeded["output"]["id"]),
+        )
+        conn.commit()
+
+    password = create_user(client, "alpha-derived", "alpha", "automate", "view")
+    login(client, "alpha-derived", password)
+    listed = client.get(f"/api/task-runs/{seeded['run']['id']}/outputs")
+    shot = next(item for item in listed.json() if item["id"] == seeded["output"]["id"])
+    assert shot["payload"]["artifact_id"] == seeded["artifact"].artifact_id
+    assert shot["payload"]["artifact_id"] != "forged"
+    assert shot["payload"]["width"] == seeded["artifact"].width
+    assert "forged" not in listed.text

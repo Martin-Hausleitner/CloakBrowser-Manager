@@ -1535,12 +1535,8 @@ async def lifespan(app: FastAPI):
     global _workspace_maintenance_stop, _workspace_maintenance_task
     db.init_db()
     automation_lease_service.ensure_schema()
-    try:
-        artifact_store.ensure_schema()
-    except Exception:
-        logging.getLogger("cloakbrowser.manager").exception(
-            "artifact_store_schema_failed"
-        )
+    # Artifact schema/root/permissions are mandatory; fail closed on init errors.
+    artifact_store.ensure_schema()
     await browser_mgr.cleanup_stale()
     browser_mgr._auto_launch_task = asyncio.create_task(browser_mgr.auto_launch_all())
     _workspace_maintenance_stop = asyncio.Event()

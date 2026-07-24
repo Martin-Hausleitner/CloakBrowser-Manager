@@ -1442,12 +1442,31 @@ def _task_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 def _task_output_from_row(row: sqlite3.Row) -> dict[str, Any]:
     output = dict(row)
-    output["payload"] = _json_object(output.pop("payload_json", None))
+    stored_payload = _json_object(output.pop("payload_json", None))
+    art_id = output.pop("art_id", None)
+    art_width = output.pop("art_width", None)
+    art_height = output.pop("art_height", None)
+    art_media_type = output.pop("art_media_type", None)
+    art_sha256 = output.pop("art_sha256", None)
     # Prefer SQL-computed artifact_expired when present; default False.
     if "artifact_expired" in output:
         output["artifact_expired"] = bool(output["artifact_expired"])
     else:
         output["artifact_expired"] = False
+    if output.get("kind") == "screenshot":
+        # Server-derived only; ignore any caller/forged task_outputs.payload_json.
+        if art_id:
+            output["payload"] = {
+                "artifact_id": str(art_id),
+                "width": int(art_width),
+                "height": int(art_height),
+                "media_type": str(art_media_type),
+                "sha256": str(art_sha256),
+            }
+        else:
+            output["payload"] = {}
+    else:
+        output["payload"] = stored_payload
     return output
 
 
@@ -1473,11 +1492,27 @@ def _task_artifacts_table_exists(conn: sqlite3.Connection) -> bool:
 
 
 def _select_task_output_sql(conn: sqlite3.Connection, *, now_iso: str | None = None) -> str:
+    art_cols = """
+        NULL AS art_id,
+        NULL AS art_width,
+        NULL AS art_height,
+        NULL AS art_media_type,
+        NULL AS art_sha256
+    """
     if not _task_artifacts_table_exists(conn):
-        return "SELECT o.*, 0 AS artifact_expired FROM task_outputs o"
+        return f"""
+            SELECT o.*, 0 AS artifact_expired, {art_cols}
+            FROM task_outputs o
+        """
     stamp = now_iso or _now()
     return f"""
-        SELECT o.*, {_artifact_expired_sql(stamp)} AS artifact_expired
+        SELECT o.*,
+               {_artifact_expired_sql(stamp)} AS artifact_expired,
+               a.id AS art_id,
+               a.width AS art_width,
+               a.height AS art_height,
+               a.media_type AS art_media_type,
+               a.sha256 AS art_sha256
         FROM task_outputs o
         LEFT JOIN task_artifacts a ON a.output_id = o.id
     """
@@ -1988,15 +2023,18 @@ def append_task_output(
             (run_id, idempotency_key),
         ).fetchone()
         if existing is not None:
-            current = _task_output_from_row(existing)
+            # Compare against persisted payload_json, not derived screenshot views.
             same = (
-                current["kind"] == kind
-                and current["summary"] == summary
-                and json.dumps(current["payload"], separators=(",", ":"), sort_keys=True)
-                == payload_json
+                existing["kind"] == kind
+                and existing["summary"] == summary
+                and str(existing["payload_json"] or "") == payload_json
             )
+            output_id = str(existing["id"])
             conn.commit()
             if same:
+                current = get_task_output(output_id)
+                if current is None:  # pragma: no cover
+                    raise RuntimeError("task output disappeared during idempotent append")
                 return current
             raise TaskOutputConflictError(
                 f"Conflicting output for idempotency key {idempotency_key}"

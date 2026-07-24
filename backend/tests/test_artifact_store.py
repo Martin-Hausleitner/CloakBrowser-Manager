@@ -360,3 +360,96 @@ def test_ingest_does_not_accept_path_based_upload_api_surface(store):
     sig = inspect.signature(mod.ArtifactStore.ingest_screenshot)
     forbidden = {"path", "filepath", "file_path", "directory", "dir", "src", "source_path"}
     assert forbidden.isdisjoint(sig.parameters)
+
+
+def test_ingest_rejects_non_screenshot_and_preserves_run_binding(store):
+    from backend.artifact_store import ArtifactValidationError
+
+    artifact_store, _clock, _root = store
+    seeded = seed_output()
+    other = db.append_task_output(
+        seeded["run"]["id"],
+        idempotency_key="obs-1",
+        kind="observation",
+        summary="note",
+        payload={"text": "hi"},
+    )
+    png = make_png(2, 2)
+    digest = hashlib.sha256(png).hexdigest()
+
+    with pytest.raises(ArtifactValidationError):
+        artifact_store.ingest_screenshot(
+            output_id=other["id"],
+            body=png,
+            media_type="image/png",
+            sha256=digest,
+        )
+
+    meta = artifact_store.ingest_screenshot(
+        output_id=seeded["output"]["id"],
+        body=png,
+        media_type="image/png",
+        sha256=digest,
+    )
+    assert meta.run_id == seeded["run"]["id"]
+    assert meta.task_session_id == seeded["session"]["id"]
+    assert meta.sandbox_id == seeded["profile"]["sandbox_id"]
+    row = artifact_store.get_artifact(meta.artifact_id)
+    assert row is not None
+    assert row["run_id"] == seeded["run"]["id"]
+    assert row["task_session_id"] == seeded["session"]["id"]
+    assert row["sandbox_id"] == seeded["profile"]["sandbox_id"]
+    # Ingest must not persist caller/output payload metadata onto task_outputs.
+    with db.get_db() as conn:
+        raw = conn.execute(
+            "SELECT payload_json FROM task_outputs WHERE id = ?",
+            (seeded["output"]["id"],),
+        ).fetchone()
+    assert raw["payload_json"] == "{}"
+    derived = db.get_task_output(seeded["output"]["id"])
+    assert derived is not None
+    assert derived["payload"] == {
+        "artifact_id": meta.artifact_id,
+        "width": meta.width,
+        "height": meta.height,
+        "media_type": meta.media_type,
+        "sha256": meta.sha256,
+    }
+
+
+def test_lifespan_fails_closed_when_artifact_schema_init_fails(tmp_db, monkeypatch):
+    """Artifact schema/root init is mandatory; do not start browsers/maintenance."""
+    from unittest.mock import AsyncMock
+
+    from backend import main
+
+    boom = RuntimeError("artifact schema unavailable")
+    monkeypatch.setattr(main.artifact_store, "ensure_schema", lambda: (_ for _ in ()).throw(boom))
+    cleanup_stale = AsyncMock()
+    cleanup_all = AsyncMock()
+    auto_launch = AsyncMock()
+    monkeypatch.setattr(main.browser_mgr, "cleanup_stale", cleanup_stale)
+    monkeypatch.setattr(main.browser_mgr, "cleanup_all", cleanup_all)
+    monkeypatch.setattr(main.browser_mgr, "auto_launch_all", auto_launch)
+    monkeypatch.setattr(main.browser_mgr.vnc, "cleanup_stale", AsyncMock())
+
+    maintenance_called = {"value": False}
+
+    async def fake_maintenance(*_args, **_kwargs):
+        maintenance_called["value"] = True
+
+    monkeypatch.setattr(
+        main.workspace_maintenance_mod,
+        "run_daily_maintenance_loop",
+        fake_maintenance,
+    )
+
+    from starlette.testclient import TestClient
+
+    with pytest.raises(RuntimeError, match="artifact schema unavailable"):
+        with TestClient(main.app):
+            pass
+
+    cleanup_stale.assert_not_awaited()
+    auto_launch.assert_not_called()
+    assert maintenance_called["value"] is False

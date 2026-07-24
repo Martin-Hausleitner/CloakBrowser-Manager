@@ -338,6 +338,8 @@ def test_output_validation_rejects_secrets_and_unsafe_screenshot_payload(
         },
     )
     assert screenshot.status_code == 422
+    assert "future-ref" not in screenshot.text
+    assert "/tmp/secret.png" not in screenshot.text
 
     unknown_kind = append_internal_output(
         client_access,
@@ -351,11 +353,12 @@ def test_output_validation_rejects_secrets_and_unsafe_screenshot_payload(
     )
     assert unknown_kind.status_code == 422
 
-    safe_shot = append_internal_output(
+    # Screenshot artifact metadata is Manager-derived only; callers may not forge it.
+    forged_shot = append_internal_output(
         client_access,
         run["id"],
         {
-            "idempotency_key": "good-shot",
+            "idempotency_key": "forged-shot",
             "kind": "screenshot",
             "summary": "frame metadata",
             "payload": {
@@ -367,7 +370,35 @@ def test_output_validation_rejects_secrets_and_unsafe_screenshot_payload(
             },
         },
     )
-    assert safe_shot.status_code == 201, safe_shot.text
+    assert forged_shot.status_code == 422
+    assert forged_shot.json() == {"detail": "Invalid output payload"}
+    assert "opaque-ref" not in forged_shot.text
+    assert "a" * 64 not in forged_shot.text
+
+    empty_shot = append_internal_output(
+        client_access,
+        run["id"],
+        {
+            "idempotency_key": "good-shot",
+            "kind": "screenshot",
+            "summary": "frame pending upload",
+            "payload": {},
+        },
+    )
+    assert empty_shot.status_code == 201, empty_shot.text
+    body = empty_shot.json()
+    assert body["kind"] == "screenshot"
+    assert body["payload"] == {}
+    assert body["artifact_expired"] is False
+    stored = db.get_task_output(body["id"])
+    assert stored is not None
+    assert stored["payload"] == {}
+    with db.get_db() as conn:
+        raw = conn.execute(
+            "SELECT payload_json FROM task_outputs WHERE id = ?",
+            (body["id"],),
+        ).fetchone()
+    assert raw["payload_json"] in ("{}", "null") or raw["payload_json"] == "{}"
 
 
 def test_supported_output_kinds_accept_allowlisted_payloads(client_access: TestClient):
@@ -600,13 +631,21 @@ def test_output_allows_ordinary_prose_mentioning_token_word(client_access: TestC
     assert response.status_code == 201, response.text
 
 
-def test_screenshot_artifact_id_rejects_path_traversal(client_access: TestClient):
+def test_screenshot_output_rejects_any_caller_artifact_fields(client_access: TestClient):
+    """Internal screenshot append accepts only an empty payload (Task6 two-phase)."""
     run, _profile = create_queued_run(client_access)
-    for key, artifact_id in [
-        ("slash", "dir/secret"),
-        ("backslash", r"dir\secret"),
-        ("dotdot", "../secret"),
-    ]:
+    cases = [
+        ("slash", {"artifact_id": "dir/secret", "width": 10, "height": 10}),
+        ("backslash", {"artifact_id": r"dir\secret"}),
+        ("dotdot", {"artifact_id": "../secret"}),
+        ("width-only", {"width": 1280}),
+        ("height-only", {"height": 720}),
+        ("media-type", {"media_type": "image/png"}),
+        ("sha256", {"sha256": "b" * 64}),
+        ("filename", {"filename": "shot.png"}),
+        ("path", {"path": "/var/tmp/shot.png"}),
+    ]
+    for key, payload in cases:
         response = append_internal_output(
             client_access,
             run["id"],
@@ -614,16 +653,14 @@ def test_screenshot_artifact_id_rejects_path_traversal(client_access: TestClient
                 "idempotency_key": f"artifact-{key}",
                 "kind": "screenshot",
                 "summary": "frame metadata",
-                "payload": {
-                    "artifact_id": artifact_id,
-                    "width": 10,
-                    "height": 10,
-                    "media_type": "image/png",
-                    "sha256": "b" * 64,
-                },
+                "payload": payload,
             },
         )
         assert response.status_code == 422, (key, response.text)
+        assert response.json() == {"detail": "Invalid output payload"}
+        # Never echo rejected caller values.
+        for value in payload.values():
+            assert str(value) not in response.text
 
 
 def test_output_accepts_field_aware_browser_use_values(client_access: TestClient):

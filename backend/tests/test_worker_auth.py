@@ -376,6 +376,127 @@ def test_sync_rotates_worker_id_and_revokes_stale_identities(
     assert ok.status_code in {200, 204}
 
 
+def test_sync_rotates_worker_id_with_same_token_reassigns_digest_and_revokes_old_worker(
+    client_access: TestClient, monkeypatch
+):
+    """Old worker ID -> new worker ID with same token must not leave old ID active."""
+    from backend import main
+
+    create_queued_run(client_access)
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+    run_body = claimed.json()
+    run_id = run_body["id"]
+    profile_id = run_body["profile_id"]
+    cap = client_access.post(
+        f"/internal/task-runs/{run_id}/capability",
+        headers=worker_headers(),
+    )
+    assert cap.status_code == 200, cap.text
+    run_token = cap.json()["token"]
+
+    with db.get_db() as conn:
+        lease_row = conn.execute(
+            "SELECT id FROM automation_leases WHERE released_at IS NULL AND owner_id = ?",
+            (WORKER_ID,),
+        ).fetchone()
+    assert lease_row is not None
+    claimed_lease_id = str(lease_row["id"])
+    handle = main.direct_cdp_socket_registry.register(
+        lease_id=claimed_lease_id,
+        profile_id=profile_id,
+        owner_kind="worker",
+        owner_id=WORKER_ID,
+        expires_at=datetime.now(timezone.utc),
+    )
+
+    other_profile = db.create_profile("Unrelated same-token", sandbox_id="alpha")
+    unrelated = main.automation_lease_service.acquire_direct(
+        profile_id=other_profile["id"],
+        owner_kind="agent",
+        owner_id="agent-unrelated",
+    )
+    unrelated_lease_id = unrelated.lease_id
+
+    new_id = "browser-use-worker-2"
+    rotated = main.worker_runtime_service.sync_configured_worker(
+        worker_id=new_id, worker_token=WORKER_KEY
+    )
+    assert rotated.get("configured") is True
+    assert rotated.get("rotated") is True
+    assert rotated.get("worker_id") == new_id
+    assert claimed_lease_id in (rotated.get("lease_ids") or [])
+    assert unrelated_lease_id not in (rotated.get("lease_ids") or [])
+
+    main.close_direct_cdp_sockets_for_leases(list(rotated.get("lease_ids") or []))
+    assert handle.revoked.is_set()
+
+    with db.get_db() as conn:
+        rows = {
+            str(r["id"]): bool(r["active"])
+            for r in conn.execute("SELECT id, active FROM worker_identities").fetchall()
+        }
+        digest = access.hash_worker_key(WORKER_KEY)
+        matching_digest_rows = [
+            str(r["id"])
+            for r in conn.execute(
+                "SELECT id FROM worker_identities WHERE key_digest = ?",
+                (digest,),
+            ).fetchall()
+        ]
+        resolved = db.get_worker_identity_by_key_hash(digest)
+        run_row = conn.execute(
+            "SELECT status, claimed_by, capability_digest, lease_id FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        old_lease = conn.execute(
+            "SELECT released_at FROM automation_leases WHERE id = ?",
+            (claimed_lease_id,),
+        ).fetchone()
+        unrelated_row = conn.execute(
+            "SELECT released_at FROM automation_leases WHERE id = ?",
+            (unrelated_lease_id,),
+        ).fetchone()
+        old_history = conn.execute(
+            "SELECT key_digest FROM worker_identities WHERE id = ?",
+            (WORKER_ID,),
+        ).fetchone()
+    assert rows[new_id] is True
+    assert rows.get(WORKER_ID) is False
+    assert matching_digest_rows == [new_id]
+    assert resolved is not None
+    assert resolved["id"] == new_id
+    assert bool(resolved["active"])
+    assert old_history is not None
+    assert old_history["key_digest"] != access.hash_worker_key(WORKER_KEY)
+    assert WORKER_KEY not in str(old_history["key_digest"])
+    assert run_row["status"] == "revoked"
+    assert run_row["claimed_by"] is None
+    assert run_row["capability_digest"] is None
+    assert run_row["lease_id"] is None
+    assert old_lease["released_at"] is not None
+    assert unrelated_row["released_at"] is None
+
+    stale_hb = client_access.post(
+        f"/internal/task-runs/{run_id}/heartbeat",
+        headers=worker_headers(WORKER_KEY),
+    )
+    assert stale_hb.status_code == 404
+    stale_cdp = client_access.get(
+        f"/api/profiles/{profile_id}/cdp/json/version",
+        headers={"Authorization": f"Bearer {run_token}"},
+    )
+    assert stale_cdp.status_code == 404
+    current = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(WORKER_KEY),
+    )
+    assert current.status_code in {200, 204}
+
+
 def test_sync_same_id_digest_change_revokes_and_is_atomic(
     client_access: TestClient, monkeypatch
 ):

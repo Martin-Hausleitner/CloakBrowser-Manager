@@ -180,6 +180,14 @@ class WorkerRuntimeService:
                     and existing["key_digest"] != digest
                 )
                 # Workers that will lose active status (other IDs, or same-ID digest change).
+                digest_holder_rows = conn.execute(
+                    """
+                    SELECT id FROM worker_identities
+                    WHERE key_digest = ? AND id != ?
+                    """,
+                    (digest, wid),
+                ).fetchall()
+                digest_holder_ids = [str(row["id"]) for row in digest_holder_rows]
                 stale_rows = conn.execute(
                     """
                     SELECT id FROM worker_identities
@@ -192,6 +200,27 @@ class WorkerRuntimeService:
                     rotated = True
                 if stale_ids:
                     rotated = True
+                if digest_holder_ids:
+                    rotated = True
+
+                # key_digest is globally unique. If the configured token is
+                # intentionally reused with a new worker ID, retire the digest
+                # from the previous identity before upserting the configured
+                # worker. The retired digest is deterministic, non-secret, and
+                # keeps the historical row without preserving a bearer-valid
+                # digest on the old identity.
+                for digest_holder_id in digest_holder_ids:
+                    retired_digest = access.hash_worker_key(
+                        f"retired-worker-digest:{digest_holder_id}:{digest}"
+                    )
+                    conn.execute(
+                        """
+                        UPDATE worker_identities
+                        SET key_digest = ?, active = 0, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (retired_digest, _iso(now), digest_holder_id),
+                    )
 
                 if existing is None:
                     conn.execute(

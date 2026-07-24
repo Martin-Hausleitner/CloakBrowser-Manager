@@ -1287,6 +1287,45 @@ def update_task_session(
             raise OptimisticConcurrencyError(
                 f"Task session row_version conflict for {session_id}"
             )
+
+        # Couple artifact retention into the same BEGIN IMMEDIATE transaction.
+        if archived is not None:
+            artifacts_table = conn.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'task_artifacts'
+                """
+            ).fetchone()
+            if artifacts_table is not None:
+                if archived:
+                    raw_archived = str(updates["archived_at"])
+                    if raw_archived.endswith("Z"):
+                        raw_archived = raw_archived[:-1] + "+00:00"
+                    archived_at = datetime.datetime.fromisoformat(raw_archived)
+                    if archived_at.tzinfo is None:
+                        archived_at = archived_at.replace(tzinfo=datetime.timezone.utc)
+                    expires_at = (
+                        archived_at + datetime.timedelta(days=7)
+                    ).astimezone(datetime.timezone.utc).isoformat()
+                    conn.execute(
+                        """
+                        UPDATE task_artifacts
+                        SET expires_at = ?
+                        WHERE task_session_id = ?
+                          AND deleted_at IS NULL
+                        """,
+                        (expires_at, session_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE task_artifacts
+                        SET expires_at = NULL, delete_failed_at = NULL
+                        WHERE task_session_id = ?
+                          AND deleted_at IS NULL
+                        """,
+                        (session_id,),
+                    )
         conn.commit()
     return get_task_session(session_id)
 

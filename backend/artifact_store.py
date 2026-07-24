@@ -13,6 +13,7 @@ import secrets
 import sqlite3
 import stat
 import uuid
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -85,14 +86,119 @@ def normalize_sha256(value: str) -> str:
     return cleaned
 
 
+# PNG color-type -> legal bit depths and channel counts.
+_PNG_COLOR_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+_PNG_LEGAL_BIT_DEPTHS = {
+    0: frozenset({1, 2, 4, 8, 16}),
+    2: frozenset({8, 16}),
+    3: frozenset({1, 2, 4, 8}),
+    4: frozenset({8, 16}),
+    6: frozenset({8, 16}),
+}
+_PNG_CRITICAL = frozenset({b"IHDR", b"PLTE", b"IDAT", b"IEND"})
+_JPEG_SOF_MARKERS = frozenset(
+    {
+        0xC0,
+        0xC1,
+        0xC2,
+        0xC3,
+        0xC5,
+        0xC6,
+        0xC7,
+        0xC9,
+        0xCA,
+        0xCB,
+        0xCD,
+        0xCE,
+        0xCF,
+    }
+)
+_JPEG_STANDALONE = frozenset({0x01, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9})
+
+
+def _png_is_critical(tag: bytes) -> bool:
+    return len(tag) == 4 and (tag[0] & 0x20) == 0
+
+
+def _png_expected_raw_size(width: int, height: int, bit_depth: int, channels: int) -> int:
+    bits_per_pixel = bit_depth * channels
+    row_bytes = 1 + (width * bits_per_pixel + 7) // 8
+    return row_bytes * height
+
+
+def _validate_png_idat_stream(
+    idat: bytes, *, width: int, height: int, bit_depth: int, channels: int
+) -> None:
+    expected = _png_expected_raw_size(width, height, bit_depth, channels)
+    bits_per_pixel = bit_depth * channels
+    row_bytes = 1 + (width * bits_per_pixel + 7) // 8
+    decompressor = zlib.decompressobj()
+    pending = bytearray()
+    produced = 0
+
+    def _consume_complete_rows() -> None:
+        nonlocal produced
+        while len(pending) >= row_bytes:
+            if pending[0] > 4:
+                raise ArtifactValidationError("invalid png filter")
+            del pending[:row_bytes]
+            produced += row_bytes
+            if produced > expected:
+                raise ArtifactValidationError("png idat overflow")
+
+    try:
+        offset = 0
+        chunk_size = 64 * 1024
+        while offset < len(idat):
+            piece = idat[offset : offset + chunk_size]
+            offset += len(piece)
+            try:
+                out = decompressor.decompress(piece)
+            except zlib.error as exc:
+                raise ArtifactValidationError("invalid png idat zlib") from exc
+            if out:
+                pending.extend(out)
+                if len(pending) > expected - produced + row_bytes:
+                    raise ArtifactValidationError("png idat overflow")
+                _consume_complete_rows()
+            if decompressor.eof:
+                break
+        if not decompressor.eof:
+            try:
+                out = decompressor.flush()
+            except zlib.error as exc:
+                raise ArtifactValidationError("invalid png idat zlib") from exc
+            if out:
+                pending.extend(out)
+                _consume_complete_rows()
+        if not decompressor.eof:
+            raise ArtifactValidationError("truncated png idat")
+        if decompressor.unused_data or offset < len(idat):
+            raise ArtifactValidationError("trailing png idat compressed data")
+        if pending or produced != expected:
+            raise ArtifactValidationError("png idat size mismatch")
+    finally:
+        pending.clear()
+        del decompressor
+
+
 def _parse_png_dimensions(data: bytes) -> tuple[int, int]:
     if len(data) < 33 or not data.startswith(PNG_MAGIC):
         raise ArtifactValidationError("invalid png magic")
     offset = 8
-    saw_ihdr = False
-    saw_iend = False
     width = height = 0
-    while offset + 12 <= len(data):
+    bit_depth = color_type = -1
+    channels = 0
+    saw_ihdr = False
+    saw_plte = False
+    saw_idat = False
+    idat_finished = False
+    idat_parts: list[bytes] = []
+    idat_total = 0
+
+    while True:
+        if offset + 12 > len(data):
+            raise ArtifactValidationError("truncated png")
         length = int.from_bytes(data[offset : offset + 4], "big")
         tag = data[offset + 4 : offset + 8]
         data_start = offset + 8
@@ -100,26 +206,117 @@ def _parse_png_dimensions(data: bytes) -> tuple[int, int]:
         crc_end = data_end + 4
         if length < 0 or crc_end > len(data):
             raise ArtifactValidationError("truncated png")
-        if tag == b"IHDR":
-            if length < 13 or saw_ihdr:
+        chunk_data = data[data_start:data_end]
+        expected_crc = int.from_bytes(data[data_end:crc_end], "big")
+        actual_crc = zlib.crc32(tag + chunk_data) & 0xFFFFFFFF
+        if actual_crc != expected_crc:
+            raise ArtifactValidationError("invalid png crc")
+
+        if not saw_ihdr:
+            if tag != b"IHDR" or offset != 8:
+                raise ArtifactValidationError("png ihdr must be first")
+            if length != 13:
                 raise ArtifactValidationError("invalid png ihdr")
-            width = int.from_bytes(data[data_start : data_start + 4], "big")
-            height = int.from_bytes(data[data_start + 4 : data_start + 8], "big")
+            width = int.from_bytes(chunk_data[0:4], "big")
+            height = int.from_bytes(chunk_data[4:8], "big")
+            bit_depth = chunk_data[8]
+            color_type = chunk_data[9]
+            compression = chunk_data[10]
+            filter_method = chunk_data[11]
+            interlace = chunk_data[12]
+            if width <= 0 or height <= 0:
+                raise ArtifactValidationError("invalid dimensions")
+            if width > MAX_DIMENSION or height > MAX_DIMENSION:
+                raise ArtifactValidationError("dimensions exceed limit")
+            legal = _PNG_LEGAL_BIT_DEPTHS.get(color_type)
+            if legal is None or bit_depth not in legal:
+                raise ArtifactValidationError("invalid png color/bit depth")
+            if compression != 0 or filter_method != 0:
+                raise ArtifactValidationError("invalid png compression/filter method")
+            if interlace != 0:
+                raise ArtifactValidationError("interlaced png not allowed")
+            channels = _PNG_COLOR_CHANNELS[color_type]
             saw_ihdr = True
+        elif tag == b"IHDR":
+            raise ArtifactValidationError("duplicate png ihdr")
+        elif tag == b"PLTE":
+            if saw_idat or saw_plte:
+                raise ArtifactValidationError("invalid png plte ordering")
+            if length == 0 or length % 3 != 0 or length > 256 * 3:
+                raise ArtifactValidationError("invalid png plte")
+            saw_plte = True
+        elif tag == b"IDAT":
+            if idat_finished:
+                raise ArtifactValidationError("non-contiguous png idat")
+            if color_type == 3 and not saw_plte:
+                raise ArtifactValidationError("png plte required")
+            # Bound retained compressed IDAT memory to MAX_BYTES.
+            idat_total += length
+            if idat_total > MAX_BYTES:
+                raise ArtifactValidationError("png idat exceeds size limit")
+            idat_parts.append(chunk_data)
+            saw_idat = True
         elif tag == b"IEND":
-            saw_iend = True
-            break
+            if length != 0:
+                raise ArtifactValidationError("invalid png iend")
+            if not saw_idat:
+                raise ArtifactValidationError("png missing idat")
+            if crc_end != len(data):
+                raise ArtifactValidationError("trailing bytes after png iend")
+            concatenated = b"".join(idat_parts)
+            idat_parts.clear()
+            _validate_png_idat_stream(
+                concatenated,
+                width=width,
+                height=height,
+                bit_depth=bit_depth,
+                channels=channels,
+            )
+            return width, height
+        else:
+            if saw_idat:
+                idat_finished = True
+            if _png_is_critical(tag) and tag not in _PNG_CRITICAL:
+                raise ArtifactValidationError("unknown critical png chunk")
+            # Ancillary chunks allowed; PLTE already handled.
         offset = crc_end
-    if not saw_ihdr or not saw_iend:
-        raise ArtifactValidationError("truncated or incomplete png")
-    return width, height
+
+
+def _jpeg_skip_entropy(data: bytes, offset: int) -> int:
+    """Scan entropy-coded data until the next non-RST/non-stuffed marker."""
+    i = offset
+    n = len(data)
+    while i < n:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        if i + 1 >= n:
+            raise ArtifactValidationError("truncated jpeg")
+        nxt = data[i + 1]
+        if nxt == 0x00:
+            i += 2
+            continue
+        if 0xD0 <= nxt <= 0xD7:
+            i += 2
+            continue
+        if nxt == 0xFF:
+            i += 1
+            continue
+        return i
+    raise ArtifactValidationError("truncated jpeg")
 
 
 def _parse_jpeg_dimensions(data: bytes) -> tuple[int, int]:
-    if len(data) < 4 or not data.startswith(JPEG_MAGIC):
+    if len(data) < 4 or data[0] != 0xFF or data[1] != 0xD8:
+        raise ArtifactValidationError("invalid jpeg magic")
+    if not data.startswith(JPEG_MAGIC):
+        # Allow SOI followed by fill/FF before first marker byte already covered.
         raise ArtifactValidationError("invalid jpeg magic")
     offset = 2
-    while offset + 3 < len(data):
+    width = height = 0
+    saw_sof = False
+    saw_sos = False
+    while offset < len(data):
         if data[offset] != 0xFF:
             raise ArtifactValidationError("invalid jpeg marker")
         while offset < len(data) and data[offset] == 0xFF:
@@ -128,38 +325,58 @@ def _parse_jpeg_dimensions(data: bytes) -> tuple[int, int]:
             raise ArtifactValidationError("truncated jpeg")
         marker = data[offset]
         offset += 1
-        if marker in {0xD8, 0xD9}:
+        if marker == 0xD9:  # EOI
+            if not saw_sof or not saw_sos:
+                raise ArtifactValidationError("jpeg missing sof/sos")
+            if offset != len(data):
+                raise ArtifactValidationError("trailing bytes after jpeg eoi")
+            return width, height
+        if marker == 0xD8:  # stray SOI
+            raise ArtifactValidationError("invalid jpeg soi")
+        if marker in _JPEG_STANDALONE and marker not in {0xD8, 0xD9}:
+            # TEM / RSTn outside entropy are invalid here.
+            if 0xD0 <= marker <= 0xD7 or marker == 0x01:
+                raise ArtifactValidationError("invalid jpeg standalone marker")
             continue
-        if marker == 0xDA:  # SOS — dimensions must already be known
-            break
         if offset + 2 > len(data):
             raise ArtifactValidationError("truncated jpeg")
         segment_len = int.from_bytes(data[offset : offset + 2], "big")
         if segment_len < 2 or offset + segment_len > len(data):
             raise ArtifactValidationError("truncated jpeg")
-        # SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15
-        if marker in {
-            0xC0,
-            0xC1,
-            0xC2,
-            0xC3,
-            0xC5,
-            0xC6,
-            0xC7,
-            0xC9,
-            0xCA,
-            0xCB,
-            0xCD,
-            0xCE,
-            0xCF,
-        }:
-            if segment_len < 7:
+        segment = data[offset : offset + segment_len]
+        if marker in _JPEG_SOF_MARKERS:
+            if segment_len < 8:
                 raise ArtifactValidationError("invalid jpeg sof")
-            height = int.from_bytes(data[offset + 3 : offset + 5], "big")
-            width = int.from_bytes(data[offset + 5 : offset + 7], "big")
-            return width, height
+            precision = segment[2]
+            sof_height = int.from_bytes(segment[3:5], "big")
+            sof_width = int.from_bytes(segment[5:7], "big")
+            components = segment[7]
+            if precision < 1 or precision > 16:
+                raise ArtifactValidationError("invalid jpeg sof")
+            if components < 1 or components > 4:
+                raise ArtifactValidationError("invalid jpeg sof")
+            if segment_len != 8 + components * 3:
+                raise ArtifactValidationError("invalid jpeg sof")
+            if sof_width <= 0 or sof_height <= 0:
+                raise ArtifactValidationError("invalid dimensions")
+            if sof_width > MAX_DIMENSION or sof_height > MAX_DIMENSION:
+                raise ArtifactValidationError("dimensions exceed limit")
+            width, height = sof_width, sof_height
+            saw_sof = True
+        elif marker == 0xDA:  # SOS
+            if not saw_sof:
+                raise ArtifactValidationError("jpeg sos before sof")
+            if segment_len < 6:
+                raise ArtifactValidationError("invalid jpeg sos")
+            ns = segment[2]
+            if ns < 1 or ns > 4 or segment_len < 6 + 2 * ns:
+                raise ArtifactValidationError("invalid jpeg sos")
+            saw_sos = True
+            offset += segment_len
+            offset = _jpeg_skip_entropy(data, offset)
+            continue
         offset += segment_len
-    raise ArtifactValidationError("jpeg dimensions not found")
+    raise ArtifactValidationError("truncated jpeg")
 
 
 def validate_screenshot_bytes(*, body: bytes, media_type: str, sha256: str) -> tuple[str, str, int, int]:
@@ -349,6 +566,7 @@ class ArtifactStore:
         run_id = ""
         task_session_id = ""
         sandbox_id = ""
+        expires_at: str | None = None
         abs_final: Path | None = None
 
         with self._get_db() as conn:
@@ -382,6 +600,18 @@ class ArtifactStore:
                 run_id = str(run["id"])
                 task_session_id = str(run["task_session_id"])
                 sandbox_id = str(run["sandbox_id"])
+                task_row = conn.execute(
+                    """
+                    SELECT archived_at, status FROM task_sessions WHERE id = ?
+                    """,
+                    (task_session_id,),
+                ).fetchone()
+                expires_at = None
+                if task_row is not None:
+                    archived_at = _parse_dt(task_row["archived_at"])
+                    if archived_at is not None or str(task_row["status"]) == "archived":
+                        when = archived_at or now
+                        expires_at = _iso(when + ARTIFACT_RETENTION_AFTER_ARCHIVE)
                 rel_dir = secrets.token_hex(16)
                 rel_file = secrets.token_hex(16)
                 relpath = f"{rel_dir}/{rel_file}"
@@ -396,7 +626,7 @@ class ArtifactStore:
                         id, output_id, run_id, task_session_id, sandbox_id,
                         media_type, sha256, width, height, storage_relpath,
                         created_at, expires_at, deleted_at, delete_failed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
                     """,
                     (
                         artifact_id,
@@ -410,6 +640,7 @@ class ArtifactStore:
                         height,
                         relpath,
                         _iso(now),
+                        expires_at,
                     ),
                 )
                 # Screenshot metadata is derived from task_artifacts on read;
@@ -439,7 +670,15 @@ class ArtifactStore:
             width=width,
             height=height,
             created_at=_iso(now),
+            expires_at=expires_at,
         )
+
+    def _unlink_quiet(self, path: Path) -> None:
+        try:
+            if path.exists() or path.is_symlink():
+                os.unlink(path)
+        except OSError:
+            pass
 
     def _atomic_write(self, abs_dir: Path, abs_tmp: Path, abs_final: Path, body: bytes) -> None:
         if abs_dir.exists() and (abs_dir.is_symlink() or not abs_dir.is_dir()):
@@ -447,30 +686,60 @@ class ArtifactStore:
         abs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(abs_dir, 0o700)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-        fd = os.open(str(abs_tmp), flags, 0o600)
+        fd: int | None = None
+        renamed = False
+        write_error: BaseException | None = None
         try:
+            fd = os.open(str(abs_tmp), flags, 0o600)
             written = 0
             view = memoryview(body)
             while written < len(body):
-                written += os.write(fd, view[written:])
+                n = os.write(fd, view[written:])
+                if n <= 0:
+                    raise OSError("short write to artifact temp file")
+                written += n
             os.fsync(fd)
-        finally:
             os.close(fd)
-        os.chmod(abs_tmp, 0o600)
-        # Reject replacement with a symlink at the destination.
-        if abs_final.exists() or abs_final.is_symlink():
-            os.unlink(abs_tmp)
-            raise ArtifactValidationError("refusing to overwrite existing path")
-        os.rename(abs_tmp, abs_final)
-        # Confirm final is a regular file, not a symlink.
-        st = os.lstat(abs_final)
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            fd = None
+            os.chmod(abs_tmp, 0o600)
+            # Reject replacement with a symlink at the destination.
+            if abs_final.exists() or abs_final.is_symlink():
+                raise ArtifactValidationError("refusing to overwrite existing path")
+            os.rename(abs_tmp, abs_final)
+            renamed = True
+            # Confirm final is a regular file, not a symlink.
+            st = os.lstat(abs_final)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                raise ArtifactValidationError("refusing symlink artifact file")
+            os.chmod(abs_final, 0o600)
+            # Persist the directory entry before the caller commits metadata.
+            dir_fd = os.open(str(abs_dir), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
-                os.unlink(abs_final)
-            except OSError:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except BaseException as exc:
+            write_error = exc
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                fd = None
+            # Best-effort cleanup without masking the original error.
+            try:
+                self._unlink_quiet(abs_tmp)
+                if renamed:
+                    self._unlink_quiet(abs_final)
+                if abs_dir.exists() and abs_dir.is_dir() and not abs_dir.is_symlink():
+                    try:
+                        if not any(abs_dir.iterdir()):
+                            abs_dir.rmdir()
+                    except OSError:
+                        pass
+            except Exception:
                 pass
-            raise ArtifactValidationError("refusing symlink artifact file")
-        os.chmod(abs_final, 0o600)
+            raise write_error
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         self.ensure_schema()
@@ -526,6 +795,11 @@ class ArtifactStore:
         if len(body) > MAX_BYTES:
             raise ArtifactNotFound(output_id)
         media = str(row["media_type"])
+        digest = str(row["sha256"])
+        try:
+            validate_screenshot_bytes(body=body, media_type=media, sha256=digest)
+        except ArtifactValidationError as exc:
+            raise ArtifactNotFound(output_id) from exc
         filename = "screenshot.png" if media == "image/png" else "screenshot.jpg"
         return ScreenshotPayload(
             body=body,
@@ -636,9 +910,78 @@ class ArtifactStore:
         logger.info("artifact_deleted artifact_id=%s", artifact_id)
         return True
 
+    def repair_expiry_drift(self) -> dict[str, int]:
+        """Idempotently repair archived/active artifact expiry drift."""
+        self.ensure_schema()
+        repaired_archived = 0
+        cleared_active = 0
+        with self._get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                table = conn.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'task_artifacts'
+                    """
+                ).fetchone()
+                if table is None:
+                    conn.commit()
+                    return {"repaired_archived": 0, "cleared_active": 0}
+                archived_rows = conn.execute(
+                    """
+                    SELECT a.id AS artifact_id, s.archived_at AS archived_at, a.expires_at AS expires_at
+                    FROM task_artifacts a
+                    JOIN task_sessions s ON s.id = a.task_session_id
+                    WHERE a.deleted_at IS NULL
+                      AND s.archived_at IS NOT NULL
+                    """
+                ).fetchall()
+                for row in archived_rows:
+                    archived_at = _parse_dt(row["archived_at"])
+                    if archived_at is None:
+                        continue
+                    expected = _iso(archived_at + ARTIFACT_RETENTION_AFTER_ARCHIVE)
+                    current = row["expires_at"]
+                    if current != expected:
+                        conn.execute(
+                            "UPDATE task_artifacts SET expires_at = ? WHERE id = ?",
+                            (expected, row["artifact_id"]),
+                        )
+                        repaired_archived += 1
+                active_rows = conn.execute(
+                    """
+                    SELECT a.id AS artifact_id
+                    FROM task_artifacts a
+                    JOIN task_sessions s ON s.id = a.task_session_id
+                    WHERE a.deleted_at IS NULL
+                      AND a.expires_at IS NOT NULL
+                      AND s.archived_at IS NULL
+                      AND s.status != 'archived'
+                    """
+                ).fetchall()
+                for row in active_rows:
+                    conn.execute(
+                        """
+                        UPDATE task_artifacts
+                        SET expires_at = NULL, delete_failed_at = NULL
+                        WHERE id = ?
+                        """,
+                        (row["artifact_id"],),
+                    )
+                    cleared_active += 1
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "repaired_archived": repaired_archived,
+            "cleared_active": cleared_active,
+        }
+
     def expire_due_once(self) -> dict[str, int]:
         """Delete due screenshot bytes; keep metadata on failure for retry."""
         self.ensure_schema()
+        repair = self.repair_expiry_drift()
         now = self._clock()
         deleted = 0
         failures = 0
@@ -664,7 +1007,12 @@ class ArtifactStore:
             except Exception:
                 conn.rollback()
                 raise
-        return {"deleted": deleted, "delete_failures": failures}
+        return {
+            "deleted": deleted,
+            "delete_failures": failures,
+            "repaired_archived": int(repair.get("repaired_archived") or 0),
+            "cleared_active": int(repair.get("cleared_active") or 0),
+        }
 
     def task_has_pending_bytes(self, task_session_id: str) -> bool:
         self.ensure_schema()

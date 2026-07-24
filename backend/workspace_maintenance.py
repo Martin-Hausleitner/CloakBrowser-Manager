@@ -70,6 +70,7 @@ class WorkspaceMaintenance:
         self._artifact_store.ensure_schema()
         now = self._clock()
         archived = self._archive_inactive_temporary_tasks(now)
+        # Repair drift then delete due artifacts (repair runs inside expire_due_once).
         expired = self._artifact_store.expire_due_once()
         purged = self._purge_archived_temporary_tasks(now)
         result = {

@@ -193,6 +193,16 @@ def test_cross_sandbox_missing_and_expired_are_indistinguishable_404(client_acce
     assert cross.json() == missing.json()
 
     # Expire alpha screenshot bytes.
+    with db.get_db() as conn:
+        conn.execute(
+            """
+            UPDATE task_sessions
+            SET archived_at = ?, status = 'archived', updated_at = ?
+            WHERE id = ?
+            """,
+            (NOW.isoformat(), NOW.isoformat(), alpha["session"]["id"]),
+        )
+        conn.commit()
     store.mark_task_archived(alpha["session"]["id"], archived_at=NOW)
     from datetime import timedelta
 
@@ -222,6 +232,16 @@ def test_output_list_exposes_artifact_expired_without_weakening_payload(client_a
     assert shot["payload"]["media_type"] == seeded["artifact"].media_type
     assert shot["payload"]["sha256"] == seeded["artifact"].sha256
 
+    with db.get_db() as conn:
+        conn.execute(
+            """
+            UPDATE task_sessions
+            SET archived_at = ?, status = 'archived', updated_at = ?
+            WHERE id = ?
+            """,
+            (NOW.isoformat(), NOW.isoformat(), seeded["session"]["id"]),
+        )
+        conn.commit()
     store.mark_task_archived(seeded["session"]["id"], archived_at=NOW)
     from datetime import timedelta
 

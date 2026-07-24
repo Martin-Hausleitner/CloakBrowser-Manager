@@ -346,3 +346,68 @@ def test_cleanup_is_idempotent(maintenance):
     assert first["archived_tasks"] >= 1
     assert second["archived_tasks"] == 0
     assert db.get_task_session(seeded["session"]["id"])["archived_at"]
+
+
+def test_repair_sets_missing_expiry_on_archived_task_artifacts(maintenance):
+    """Archived artifacts with NULL/wrong expiry are repaired before deletion pass."""
+    maint, clock, store, _root, _audit = maintenance
+    seeded = _seed_task(retention_class="project", with_screenshot=True, title="repair-arch")
+    png = seeded["_png"]
+    meta = store.ingest_screenshot(
+        output_id=seeded["output"]["id"],
+        body=png,
+        media_type="image/png",
+        sha256=hashlib.sha256(png).hexdigest(),
+    )
+    archived = db.update_task_session(
+        seeded["session"]["id"],
+        expected_row_version=int(seeded["session"]["row_version"]),
+        archived=True,
+    )
+    assert archived is not None
+    with db.get_db() as conn:
+        conn.execute(
+            "UPDATE task_artifacts SET expires_at = NULL WHERE id = ?",
+            (meta.artifact_id,),
+        )
+        conn.commit()
+    assert store.get_artifact(meta.artifact_id)["expires_at"] is None
+
+    maint.cleanup_retention_once()
+    row = store.get_artifact(meta.artifact_id)
+    assert row is not None
+    assert row["expires_at"] is not None
+    expected = datetime.fromisoformat(archived["archived_at"]) + timedelta(days=7)
+    assert datetime.fromisoformat(row["expires_at"]) == expected
+    # Bytes still present; not yet due.
+    loaded = store.read_for_output(seeded["output"]["id"])
+    assert loaded.body == png
+
+
+def test_repair_clears_stale_expiry_on_reopened_task_artifacts(maintenance):
+    """Unarchived undeleted artifacts with stale expiry are cleared before deletion."""
+    maint, clock, store, _root, _audit = maintenance
+    seeded = _seed_task(retention_class="project", with_screenshot=True, title="repair-reopen")
+    png = seeded["_png"]
+    meta = store.ingest_screenshot(
+        output_id=seeded["output"]["id"],
+        body=png,
+        media_type="image/png",
+        sha256=hashlib.sha256(png).hexdigest(),
+    )
+    # Plant a stale expiry while the task remains active/unarchived.
+    stale = (clock() - timedelta(days=1)).isoformat()
+    with db.get_db() as conn:
+        conn.execute(
+            "UPDATE task_artifacts SET expires_at = ? WHERE id = ?",
+            (stale, meta.artifact_id),
+        )
+        conn.commit()
+
+    maint.cleanup_retention_once()
+    row = store.get_artifact(meta.artifact_id)
+    assert row is not None
+    assert row["expires_at"] is None
+    assert row["deleted_at"] is None
+    loaded = store.read_for_output(seeded["output"]["id"])
+    assert loaded.body == png

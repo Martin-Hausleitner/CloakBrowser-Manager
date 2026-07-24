@@ -2565,27 +2565,6 @@ async def update_task_session(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Task session not found")
-    if "archived" in body.model_dump(exclude_unset=True):
-        try:
-            if updated.get("archived_at"):
-                from datetime import datetime, timezone
-
-                raw = str(updated["archived_at"])
-                if raw.endswith("Z"):
-                    raw = raw[:-1] + "+00:00"
-                archived_at = datetime.fromisoformat(raw)
-                if archived_at.tzinfo is None:
-                    archived_at = archived_at.replace(tzinfo=timezone.utc)
-                artifact_store.mark_task_archived(
-                    str(updated["id"]), archived_at=archived_at
-                )
-            else:
-                artifact_store.mark_task_reopened(str(updated["id"]))
-        except Exception:
-            logging.getLogger("cloakbrowser.manager").exception(
-                "task_artifact_retention_hook_failed task_id=%s",
-                updated.get("id"),
-            )
     db.record_task_event(
         str(updated["id"]),
         "task_session.updated",

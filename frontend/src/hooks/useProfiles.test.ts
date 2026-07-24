@@ -121,6 +121,37 @@ describe("useProfiles", () => {
     expect(result.current.profiles).toHaveLength(0);
   });
 
+  it("stop returns true after stopping and refreshing", async () => {
+    mockApi.stopProfile.mockResolvedValue({ ok: true });
+
+    const { result } = renderHook(() => useProfiles());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let stopped: boolean | undefined;
+    await act(async () => {
+      stopped = await result.current.stop("abc-123");
+    });
+
+    expect(stopped).toBe(true);
+    expect(mockApi.stopProfile).toHaveBeenCalledWith("abc-123");
+    expect(mockApi.listProfiles).toHaveBeenCalled();
+  });
+
+  it("stop returns false when the stop request fails", async () => {
+    mockApi.stopProfile.mockRejectedValue(new Error("Stop failed"));
+
+    const { result } = renderHook(() => useProfiles());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let stopped: boolean | undefined;
+    await act(async () => {
+      stopped = await result.current.stop("abc-123");
+    });
+
+    expect(stopped).toBe(false);
+    expect(result.current.error).toBe("Stop failed");
+  });
+
   it("sets error on fetch failure", async () => {
     mockApi.listProfiles.mockRejectedValue(new Error("Network error"));
 

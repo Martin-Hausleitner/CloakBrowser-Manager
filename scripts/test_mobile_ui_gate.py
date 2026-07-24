@@ -65,6 +65,16 @@ class MobileUiGateTest(unittest.TestCase):
         self.assertNotIn("Queued locally:", script)
         self.assertNotIn("mode: 'unavailable'", script)
 
+    def test_remote_pointer_mapping_accounts_for_browser_chrome(self) -> None:
+        mapped = mobile_ui_gate.remote_target_center_on_canvas(
+            {"left": 0, "top": 102.3, "width": 506.3, "height": 284.8},
+            {"width": 1024, "height": 576},
+            {"left": 123, "top": 80, "width": 778, "height": 284},
+            {"width": 1024, "height": 443},
+        )
+
+        self.assertEqual(mapped, (253, 278))
+
     def test_access_dashboard_opens_browser_tools_before_access_controls(self) -> None:
         class FakeBrowser:
             def __init__(self) -> None:
@@ -81,6 +91,33 @@ class MobileUiGateTest(unittest.TestCase):
                 if "Browser access controls" in script and "button.click" in script:
                     self.events.append("click:access-controls")
                     return True
+                if "textContent?.trim() === 'Groups'" in script and "tab.click" in script:
+                    self.events.append("click:groups-tab")
+                    return True
+                if "configuredGroups" in script:
+                    return {
+                        "visible": True,
+                        "selected": True,
+                        "configuredGroups": True,
+                        "editorHidden": True,
+                        "overflowFree": True,
+                        "addTouchSafe": True,
+                    }
+                if "textContent?.trim() === 'Add group'" in script and "add.click" in script:
+                    self.events.append("click:add-group")
+                    return True
+                if "hasName" in script and "hasPermissions" in script:
+                    return {
+                        "visible": True,
+                        "hasName": True,
+                        "hasDescription": True,
+                        "hasActive": True,
+                        "hasMembers": True,
+                        "hasPermissions": True,
+                        "hasSave": True,
+                        "overflowFree": True,
+                        "offenders": [],
+                    }
                 if "ACCESS_DASHBOARD_SCRIPT" in script:
                     raise AssertionError("script constant name should not be passed to eval")
                 self.events.append("eval:access-dashboard")

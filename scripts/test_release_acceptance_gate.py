@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,7 +38,10 @@ def mobile_report() -> dict[str, object]:
             {
                 "name": "iphone-14-portrait",
                 "passed": True,
-                "checks": [{"name": "no overflow", "passed": True}],
+                "checks": [
+                    {"name": name, "passed": True}
+                    for name in sorted(release_gate.REQUIRED_MOBILE_CHECKS)
+                ],
                 "screenshots": [{"path": "/Users/example/private/screen.png"}],
             },
             {
@@ -61,12 +65,13 @@ def vision_report() -> dict[str, object]:
 def streaming_report() -> dict[str, object]:
     return {
         "finished_at": "2026-07-21T15:58:00+00:00",
+        "config": {"iterations": 3},
         "results": [
             {
                 "candidate": {"id": "kasm-vnc", "name": "Kasm VNC", "type": "websocket"},
                 "status": "measured",
                 "availability": "available",
-                "summary": {"runs": 3},
+                "summary": {"runs": 3, "success_rate_pct": 100.0},
             },
             {
                 "candidate": {"id": "selkies", "name": "Selkies", "type": "websocket"},
@@ -80,6 +85,26 @@ def streaming_report() -> dict[str, object]:
 
 
 class ReleaseAcceptanceGateTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("python3.11"), "Python 3.11 is not installed")
+    def test_release_gate_compiles_on_python_311(self) -> None:
+        python_311 = shutil.which("python3.11")
+        assert python_311
+        completed = subprocess.run(
+            [
+                python_311,
+                "-c",
+                "from pathlib import Path; "
+                "source = Path(__import__('sys').argv[1]).read_text(encoding='utf-8'); "
+                "compile(source, __import__('sys').argv[1], 'exec')",
+                str(RUNNER),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def run_gate(self, root: Path, *extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -119,7 +144,10 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
             report = json.loads((root / "release.json").read_text(encoding="utf-8"))
             markdown = (root / "release.md").read_text(encoding="utf-8")
             self.assertTrue(report["passed"])
-            self.assertEqual(report["gates"]["mobile_ui_ux"]["total_checks"], 2)
+            self.assertEqual(
+                report["gates"]["mobile_ui_ux"]["total_checks"],
+                len(release_gate.REQUIRED_MOBILE_CHECKS) + 1,
+            )
             self.assertEqual(report["gates"]["mobile_ui_ux"]["total_screenshots"], 2)
             self.assertEqual(report["gates"]["streaming"]["measured_candidates"], 1)
             combined = json.dumps(report) + markdown + completed.stdout
@@ -212,13 +240,46 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
                 24,
             )
 
+    def test_streaming_report_fails_when_measured_candidate_has_partial_sample_failure(self) -> None:
+        report = streaming_report()
+        report["config"] = {"iterations": 20}
+        first = report["results"][0]  # type: ignore[index]
+        assert isinstance(first, dict)
+        first["summary"] = {"runs": 20, "success_rate_pct": 95.0}
+
+        with self.assertRaises(release_gate.GateError):
+            release_gate.summarize_streaming(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
+    def test_streaming_report_passes_when_measured_candidate_has_all_samples_successful(self) -> None:
+        report = streaming_report()
+        report["config"] = {"iterations": 20}
+        first = report["results"][0]  # type: ignore[index]
+        assert isinstance(first, dict)
+        first["summary"] = {"runs": 20, "success_rate_pct": 100.0}
+
+        summary = release_gate.summarize_streaming(
+            report,
+            release_gate.parse_time(NOW, "now"),
+            24,
+        )
+
+        self.assertTrue(summary["passed"])
+        self.assertEqual(summary["measured_candidates"], 1)
+
     def test_mobile_summary_requires_authenticated_access_dashboard_evidence(self) -> None:
         report = mobile_report()
         report["access_dashboard_required"] = True
         report["authenticated_run"] = True
         report["access_dashboard"] = {
             "passed": True,
-            "checks": [{"name": "access controls", "passed": True}],
+            "checks": [
+                {"name": name, "passed": True}
+                for name in sorted(release_gate.REQUIRED_ACCESS_DASHBOARD_CHECKS)
+            ],
             "screenshots": [{"path": "/Users/example/private/access.png"}],
         }
 
@@ -228,12 +289,35 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
             24,
         )
 
-        self.assertEqual(summary["total_checks"], 3)
+        self.assertEqual(
+            summary["total_checks"],
+            len(release_gate.REQUIRED_MOBILE_CHECKS)
+            + len(release_gate.REQUIRED_ACCESS_DASHBOARD_CHECKS)
+            + 1,
+        )
         self.assertEqual(summary["total_screenshots"], 3)
         self.assertTrue(summary["authenticated_run"])
         assert isinstance(report["access_dashboard"], dict)
         report["access_dashboard"]["passed"] = False  # type: ignore[index]
         with self.assertRaises(release_gate.GateError):
+            release_gate.summarize_mobile(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
+    def test_mobile_summary_requires_critical_mobile_regression_checks(self) -> None:
+        report = mobile_report()
+        first_viewport = report["viewports"][0]  # type: ignore[index]
+        assert isinstance(first_viewport, dict)
+        checks = first_viewport["checks"]
+        assert isinstance(checks, list)
+        checks.pop()
+
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "mobile UI/UX gate is missing required checks",
+        ):
             release_gate.summarize_mobile(
                 report,
                 release_gate.parse_time(NOW, "now"),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, mock_open
+
 import pytest
 
 from backend.vnc_manager import VNCInstance, VNCManager
@@ -87,6 +89,27 @@ async def test_active_displays_after_allocate(vnc: VNCManager):
     await vnc.allocate()
     await vnc.allocate()
     assert sorted(vnc.active_displays) == [100, 101]
+
+
+@pytest.mark.asyncio
+async def test_start_vnc_keeps_reverse_proxy_transport_loopback_only(
+    vnc: VNCManager,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await vnc.allocate()
+    process = MagicMock()
+    process.poll.return_value = None
+    popen = MagicMock(return_value=process)
+    monkeypatch.setattr("backend.vnc_manager.subprocess.Popen", popen)
+    monkeypatch.setattr("backend.vnc_manager.open", mock_open(), raising=False)
+
+    await vnc.start_vnc(100, 6100, width=1024, height=576)
+
+    command = popen.call_args.args[0]
+    assert command[command.index("-interface") + 1] == "127.0.0.1"
+    assert command[command.index("-publicIP") + 1] == "127.0.0.1"
+    assert command[command.index("-websocketPort") + 1] == "6100"
+    assert command[command.index("-rfbport") + 1] == "-1"
 
 
 # ── BrowserManager.get_status ────────────────────────────────────────────────

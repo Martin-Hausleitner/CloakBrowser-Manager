@@ -16,14 +16,15 @@ import struct
 import shutil
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import starlette.requests
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -31,49 +32,129 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 if __package__:
     from . import access_control as access
     from . import database as db
+    from . import extensions
+    from . import live_diagnostics
     from .browser_manager import BrowserManager
+    from .profile_health import ProfileHealthProbe
     from .models import (
         ClipboardRequest,
         AccessAgentCreate,
         AccessAgentCreatedResponse,
         AccessAgentResponse,
         AccessAgentUpdate,
+        AccessGroupCreate,
+        AccessGroupResponse,
+        AccessGroupUpdate,
         AccessIdentityResponse,
         AccessUserCreate,
         AccessUserResponse,
         AccessUserUpdate,
+        ExtensionCatalogResponse,
+        ExtensionDefaultsResponse,
+        ExtensionDefaultsUpdate,
+        ExtensionTemplatesResponse,
+        ExtensionTemplateItem,
+        ExtensionInventoryResponse,
+        ExtensionItem,
+        ExtensionOpenSessionRequest,
+        ExtensionOpenSessionResponse,
+        ExtensionProfileSummary,
         LaunchResponse,
+        LiveMetricsResponse,
+        LiveMetricsSample,
         LoginRequest,
         ProfileCreate,
+        ProfileHealthResponse,
+        ProfileOpenLinksResponse,
         ProfileResponse,
         ProfileStatusResponse,
+        ProfileBulkOrganize,
+        ProfileTemplateCreate,
+        ProfileTemplateSummary,
         ProfileUpdate,
+        ProxyAutoProfileCreate,
+        ProxyInventoryIngest,
+        ProxyInventoryIngestResponse,
+        ProxyInventoryItem,
+        SessionOpenLinks,
         StatusResponse,
         TagResponse,
+        TaskCommandRequest,
+        TaskEventResponse,
+        TaskMessageCreate,
+        TaskMessageResponse,
+        TaskSessionCreate,
+        TaskSessionResponse,
     )
+    from . import proxy_inventory
+    from . import session_links
+    from . import session_views
+    from . import extension_catalog
+    from . import profile_templates
+    from . import stream_metrics
 else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
     import database as db
+    import extensions
+    import live_diagnostics
     from browser_manager import BrowserManager
+    from profile_health import ProfileHealthProbe
     from models import (
         ClipboardRequest,
         AccessAgentCreate,
         AccessAgentCreatedResponse,
         AccessAgentResponse,
         AccessAgentUpdate,
+        AccessGroupCreate,
+        AccessGroupResponse,
+        AccessGroupUpdate,
         AccessIdentityResponse,
         AccessUserCreate,
         AccessUserResponse,
         AccessUserUpdate,
+        ExtensionCatalogResponse,
+        ExtensionDefaultsResponse,
+        ExtensionDefaultsUpdate,
+        ExtensionTemplatesResponse,
+        ExtensionTemplateItem,
+        ExtensionInventoryResponse,
+        ExtensionItem,
+        ExtensionOpenSessionRequest,
+        ExtensionOpenSessionResponse,
+        ExtensionProfileSummary,
         LaunchResponse,
+        LiveMetricsResponse,
+        LiveMetricsSample,
         LoginRequest,
         ProfileCreate,
+        ProfileHealthResponse,
+        ProfileOpenLinksResponse,
         ProfileResponse,
         ProfileStatusResponse,
+        ProfileBulkOrganize,
+        ProfileTemplateCreate,
+        ProfileTemplateSummary,
         ProfileUpdate,
+        ProxyAutoProfileCreate,
+        ProxyInventoryIngest,
+        ProxyInventoryIngestResponse,
+        ProxyInventoryItem,
+        SessionOpenLinks,
         StatusResponse,
         TagResponse,
+        TaskCommandRequest,
+        TaskEventResponse,
+        TaskMessageCreate,
+        TaskMessageResponse,
+        TaskSessionCreate,
+        TaskSessionResponse,
     )
+    import proxy_inventory
+    import session_links
+    import session_views
+    import extension_catalog
+    import profile_templates
+    import stream_metrics
 
 logger = logging.getLogger("cloakbrowser.manager")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -102,6 +183,76 @@ _LOGIN_BACKOFF_SECONDS = 60.0
 _LOGIN_FAILURE_TTL_SECONDS = 10 * 60.0
 _LOGIN_FAILURE_MAX_KEYS = 1024
 _login_failures: dict[tuple[str, str], tuple[int, float, float]] = {}
+_TASK_METADATA_MAX_BYTES = 8_192
+_TASK_METADATA_MAX_DEPTH = 4
+_TASK_METADATA_MAX_LIST_ITEMS = 20
+_TASK_SENSITIVE_KEY_PARTS = (
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+)
+
+
+@dataclass(eq=False)
+class _WebSocketAccessLease:
+    """Process-local handle used to revoke an already-authorized WebSocket."""
+
+    identity_kind: str
+    identity_id: str
+    profile_id: str
+    revoked: asyncio.Event
+
+
+_active_websocket_access_leases: set[_WebSocketAccessLease] = set()
+
+
+def _register_websocket_access(
+    identity: access.AccessIdentity, profile_id: str
+) -> _WebSocketAccessLease | None:
+    """Track mutable principals without adding authorization work per frame."""
+    if (
+        not ACCESS_CONTROL_ENABLED
+        or identity.kind not in {"user", "agent"}
+        or not identity.id
+    ):
+        return None
+    lease = _WebSocketAccessLease(
+        identity_kind=identity.kind,
+        identity_id=identity.id,
+        profile_id=profile_id,
+        revoked=asyncio.Event(),
+    )
+    _active_websocket_access_leases.add(lease)
+    return lease
+
+
+def _unregister_websocket_access(lease: _WebSocketAccessLease | None) -> None:
+    if lease is not None:
+        _active_websocket_access_leases.discard(lease)
+
+
+def _revoke_websocket_access(
+    *,
+    identity_kind: str | None = None,
+    identity_id: str | None = None,
+    profile_id: str | None = None,
+) -> None:
+    """Signal matching proxy tasks after a principal or sandbox policy change."""
+    if identity_kind is None and identity_id is None and profile_id is None:
+        return
+    for lease in tuple(_active_websocket_access_leases):
+        if identity_kind is not None and lease.identity_kind != identity_kind:
+            continue
+        if identity_id is not None and lease.identity_id != identity_id:
+            continue
+        if profile_id is not None and lease.profile_id != profile_id:
+            continue
+        lease.revoked.set()
 
 _BENCHMARK_REPORT_ENV = "BENCHMARK_REPORT_PATH"
 _DEFAULT_BENCHMARK_REPORT_PATH = Path("/data/benchmark-report.json")
@@ -617,6 +768,20 @@ async def _reject_unauthenticated(scope: Scope, receive: Receive, send: Send) ->
 
 # Singleton browser manager
 browser_mgr = BrowserManager()
+_profile_health_allowed_hosts = {
+    host.strip()
+    for host in os.environ.get("PROXYCHECKER_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+}
+try:
+    profile_health_probe = ProfileHealthProbe(
+        proxychecker_url=os.environ.get("PROXYCHECKER_URL", ""),
+        allowed_proxychecker_hosts=_profile_health_allowed_hosts,
+    )
+except ValueError:
+    logger.error("Ignoring invalid PROXYCHECKER_URL; profile health enrichment is disabled")
+    profile_health_probe = ProfileHealthProbe()
+_profile_health_tasks: dict[str, asyncio.Task[None]] = {}
 
 # Frontend build directory (React production build)
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
@@ -666,6 +831,250 @@ def _build_server_cut_text(text: str) -> bytes:
     return struct.pack(">BxxxI", 3, len(text_bytes)) + text_bytes
 
 
+def _filter_vnc_server_message(
+    data: bytes, *, can_interact: bool
+) -> bytes | None:
+    """Translate a frame-aligned Kasm clipboard message for operators."""
+    if not data:
+        return data
+
+    if data[0] == 180:
+        if not can_interact:
+            return None
+        text = _parse_kasmvnc_clipboard(data)
+        return _build_server_cut_text(text) if text is not None else None
+
+    return data
+
+
+_RFB_SERVER_MAX_BUFFER = 64 * 1024 * 1024
+
+
+class _RfbServerProtocolError(ValueError):
+    """Raised when a viewer stream cannot be parsed without leaking data."""
+
+
+class _RfbServerStreamFilter:
+    """Stateful server→client RFB filter for view-only connections.
+
+    RFB is a byte stream, so WebSocket messages may split or coalesce RFB
+    messages. The filter buffers until it can identify complete top-level
+    messages and framebuffer rectangles. Clipboard messages are removed at
+    RFB boundaries; unknown message types or encodings fail closed instead of
+    forwarding bytes that might contain clipboard content.
+    """
+
+    def __init__(self, *, can_interact: bool, handshake_complete: bool = False):
+        self.can_interact = can_interact
+        self._phase = "normal" if handshake_complete else "protocol_version"
+        self._protocol_minor = 8
+        self._pixel_size = 4
+        self._buffer = bytearray()
+        self.last_dropped_clipboard = False
+        self.last_saw_framebuffer = False
+
+    @staticmethod
+    def _bounded_length(length: int, label: str) -> int:
+        if length < 0 or length > _RFB_SERVER_MAX_BUFFER:
+            raise _RfbServerProtocolError(f"Invalid {label} length")
+        return length
+
+    def _handshake_message_length(self) -> int | None:
+        data = self._buffer
+        if self._phase == "protocol_version":
+            if len(data) < 12:
+                return None
+            version = bytes(data[:12])
+            if not version.startswith(b"RFB 003.") or version[11:12] != b"\n":
+                raise _RfbServerProtocolError("Invalid RFB protocol version")
+            try:
+                self._protocol_minor = int(version[8:11])
+            except ValueError as exc:
+                raise _RfbServerProtocolError("Invalid RFB protocol version") from exc
+            self._phase = "security_types"
+            return 12
+
+        if self._phase == "security_types":
+            if self._protocol_minor <= 3:
+                if len(data) < 4:
+                    return None
+                security_type = struct.unpack_from(">I", data, 0)[0]
+                if security_type != _RFB_SECURITY_TYPE_NONE:
+                    raise _RfbServerProtocolError("Unsupported RFB security type")
+                self._phase = "server_init"
+                return 4
+
+            if not data:
+                return None
+            count = data[0]
+            if count == 0:
+                if len(data) < 5:
+                    return None
+                reason_length = self._bounded_length(
+                    struct.unpack_from(">I", data, 1)[0], "RFB failure reason"
+                )
+                total = 5 + reason_length
+                if len(data) < total:
+                    return None
+                self._phase = "failed"
+                return total
+            total = 1 + count
+            if len(data) < total:
+                return None
+            if _RFB_SECURITY_TYPE_NONE not in data[1:total]:
+                raise _RfbServerProtocolError("Unsupported RFB security types")
+            self._phase = "security_result"
+            return total
+
+        if self._phase == "security_result":
+            if len(data) < 4:
+                return None
+            result = struct.unpack_from(">I", data, 0)[0]
+            self._phase = "server_init" if result == 0 else "failed"
+            return 4
+
+        if self._phase == "server_init":
+            if len(data) < 24:
+                return None
+            name_length = self._bounded_length(
+                struct.unpack_from(">I", data, 20)[0], "RFB desktop name"
+            )
+            total = 24 + name_length
+            if len(data) < total:
+                return None
+            bits_per_pixel = data[4]
+            self._pixel_size = 1 if bits_per_pixel == 8 else 4
+            self._phase = "normal"
+            return total
+
+        if self._phase == "failed":
+            raise _RfbServerProtocolError("RFB negotiation failed")
+        return None
+
+    def _rectangle_payload_length(
+        self,
+        data: bytearray,
+        offset: int,
+        width: int,
+        height: int,
+        encoding: int,
+    ) -> int | None:
+        if encoding == 0:  # Raw
+            return self._bounded_length(
+                width * height * self._pixel_size, "Raw rectangle"
+            )
+        if encoding == 1:  # CopyRect
+            return 4
+        if encoding == 16:  # ZRLE
+            if len(data) < offset + 4:
+                return None
+            compressed = self._bounded_length(
+                struct.unpack_from(">I", data, offset)[0], "compressed rectangle"
+            )
+            return 4 + compressed
+        if encoding == -239:  # Cursor
+            return self._bounded_length(
+                width * height * self._pixel_size + ((width + 7) // 8) * height,
+                "cursor rectangle",
+            )
+        if encoding == -224:  # LastRect
+            return 0
+        raise _RfbServerProtocolError(f"Unsupported RFB encoding {encoding}")
+
+    def _framebuffer_update_length(self) -> int | None:
+        data = self._buffer
+        if len(data) < 4:
+            return None
+        rectangles = struct.unpack_from(">H", data, 2)[0]
+        cursor = 4
+        for _ in range(rectangles):
+            if len(data) < cursor + 12:
+                return None
+            width, height = struct.unpack_from(">HH", data, cursor + 4)
+            encoding = struct.unpack_from(">i", data, cursor + 8)[0]
+            cursor += 12
+            payload_length = self._rectangle_payload_length(
+                data, cursor, width, height, encoding
+            )
+            if payload_length is None or len(data) < cursor + payload_length:
+                return None
+            cursor += payload_length
+            if encoding == -224:  # LastRect terminates the update early.
+                break
+        return cursor
+
+    def _normal_message_length(self) -> int | None:
+        data = self._buffer
+        if not data:
+            return None
+        message_type = data[0]
+        if message_type == 0:
+            return self._framebuffer_update_length()
+        if message_type == 1:  # SetColourMapEntries
+            if len(data) < 6:
+                return None
+            colors = struct.unpack_from(">H", data, 4)[0]
+            return 6 + colors * 6
+        if message_type in {2, 150}:  # Bell / EndOfContinuousUpdates
+            return 1
+        if message_type == 3:  # ServerCutText, including extended clipboard
+            if len(data) < 8:
+                return None
+            signed_length = struct.unpack_from(">i", data, 4)[0]
+            return 8 + self._bounded_length(abs(signed_length), "ServerCutText")
+        if message_type == 248:  # ServerFence
+            if len(data) < 9:
+                return None
+            return 9 + data[8]
+        if message_type == 250:  # XVP
+            return 4
+        raise _RfbServerProtocolError(
+            f"Unsupported RFB server message {message_type}"
+        )
+
+    def filter(self, data: bytes) -> bytes:
+        self.last_dropped_clipboard = False
+        self.last_saw_framebuffer = False
+        if self.can_interact:
+            filtered = _filter_vnc_server_message(data, can_interact=True)
+            return filtered or b""
+
+        if len(self._buffer) + len(data) > _RFB_SERVER_MAX_BUFFER:
+            raise _RfbServerProtocolError("RFB server buffer limit exceeded")
+        self._buffer.extend(data)
+        result = bytearray()
+
+        while self._buffer:
+            if self._phase != "normal":
+                message_length = self._handshake_message_length()
+                if message_length is None:
+                    break
+                result.extend(self._buffer[:message_length])
+                del self._buffer[:message_length]
+                continue
+
+            # KasmVNC BinaryClipboard is a WebSocket-framed extension without
+            # a stream-level total length. Drop the complete buffered extension
+            # and any coalesced tail rather than risk forwarding clipboard data.
+            if self._buffer[0] == 180:
+                self.last_dropped_clipboard = True
+                self._buffer.clear()
+                break
+
+            message_length = self._normal_message_length()
+            if message_length is None or len(self._buffer) < message_length:
+                break
+            if self._buffer[0] == 3:
+                self.last_dropped_clipboard = True
+            else:
+                if self._buffer[0] == 0:
+                    self.last_saw_framebuffer = True
+                result.extend(self._buffer[:message_length])
+            del self._buffer[:message_length]
+
+        return bytes(result)
+
+
 # ---------------------------------------------------------------------------
 # RFB client message filter — strip extension types KasmVNC doesn't support
 # ---------------------------------------------------------------------------
@@ -712,6 +1121,18 @@ _ALLOWED_ENCODINGS: set[int] = {
     *range(-256, -246),  # compress levels 0-9
 }
 
+# View-only egress filtering needs deterministic server-message boundaries.
+# Keep one compressed framebuffer encoding (ZRLE), simple fallbacks, and the
+# two pseudo-encodings whose rectangle payloads are unambiguous. Interactive
+# connections retain the broader KasmVNC-compatible allow-list above.
+_VIEWER_ALLOWED_ENCODINGS: set[int] = {
+    0,     # Raw
+    1,     # CopyRect
+    16,    # ZRLE
+    -239,  # Cursor
+    -224,  # LastRect
+}
+
 
 def _rfb_msg_length(data: bytes, offset: int) -> int | None:
     """Return total length of the RFB message at offset, or None if unrecognized."""
@@ -735,15 +1156,22 @@ def _rfb_msg_length(data: bytes, offset: int) -> int | None:
     return None  # truly unknown type
 
 
-def _rewrite_set_encodings(data: bytes, offset: int, msg_len: int) -> bytes:
+def _rewrite_set_encodings(
+    data: bytes,
+    offset: int,
+    msg_len: int,
+    *,
+    allowed_encodings: set[int] | None = None,
+) -> bytes:
     """Keep only whitelisted encodings in a SetEncodings message."""
     _log = logging.getLogger("cloakbrowser.manager")
+    allowed = _ALLOWED_ENCODINGS if allowed_encodings is None else allowed_encodings
     num_enc = struct.unpack_from(">H", data, offset + 2)[0]
     kept = []
     stripped = []
     for i in range(num_enc):
         enc = struct.unpack_from(">i", data, offset + 4 + i * 4)[0]  # signed
-        if enc in _ALLOWED_ENCODINGS:
+        if enc in allowed:
             kept.append(enc)
         else:
             stripped.append(enc)
@@ -835,7 +1263,14 @@ def _filter_rfb_viewer_messages(data: bytes) -> bytes:
         if msg_type == 0:  # SetPixelFormat
             result.extend(data[offset:offset + msg_len])
         elif msg_type == 2:  # SetEncodings, with the same safe allow-list
-            result.extend(_rewrite_set_encodings(data, offset, msg_len))
+            result.extend(
+                _rewrite_set_encodings(
+                    data,
+                    offset,
+                    msg_len,
+                    allowed_encodings=_VIEWER_ALLOWED_ENCODINGS,
+                )
+            )
         elif msg_type == 3:  # FramebufferUpdateRequest
             result.extend(data[offset:offset + msg_len])
         offset += msg_len
@@ -910,6 +1345,94 @@ class _RfbClientStreamFilter:
         return bytes(result)
 
 
+async def _run_profile_health_probe(profile: dict[str, object], running: Any) -> None:
+    """Run and persist one normalized probe without exposing provider errors."""
+    profile_id = str(profile["id"])
+    if db.get_profile(profile_id) is None:
+        return
+    db.upsert_profile_health(
+        profile_id,
+        state="running",
+        proxy_configured=bool(profile.get("proxy")),
+        warnings=[],
+        blockers=[],
+        sources={},
+    )
+    try:
+        result = await profile_health_probe.run(profile, running)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error("Profile health probe failed for %s (%s)", profile_id, type(exc).__name__)
+        if db.get_profile(profile_id) is not None:
+            db.upsert_profile_health(
+                profile_id,
+                state="failed",
+                proxy_configured=bool(profile.get("proxy")),
+                warnings=[],
+                blockers=["profile_health_probe_failed"],
+                error_code="profile_health_probe_failed",
+                sources={},
+            )
+        return
+
+    if db.get_profile(profile_id) is not None:
+        db.upsert_profile_health(profile_id, **result.as_record())
+
+
+def _schedule_profile_health(
+    profile: dict[str, object],
+    running: Any,
+    *,
+    force: bool,
+) -> asyncio.Task[None] | None:
+    """Schedule at most one probe per profile and persist the pending state."""
+    profile_id = str(profile["id"])
+    existing_task = _profile_health_tasks.get(profile_id)
+    if existing_task is not None and not existing_task.done():
+        return existing_task
+    if existing_task is not None:
+        _profile_health_tasks.pop(profile_id, None)
+    if not force and db.get_profile_health(profile_id) is not None:
+        return None
+
+    db.upsert_profile_health(
+        profile_id,
+        state="pending",
+        proxy_configured=bool(profile.get("proxy")),
+        warnings=[],
+        blockers=[],
+        sources={},
+    )
+    task = asyncio.create_task(_run_profile_health_probe(profile, running))
+    _profile_health_tasks[profile_id] = task
+
+    def _forget(completed: asyncio.Task[None]) -> None:
+        if _profile_health_tasks.get(profile_id) is completed:
+            _profile_health_tasks.pop(profile_id, None)
+
+    task.add_done_callback(_forget)
+    return task
+
+
+async def _cancel_profile_health_task(profile_id: str) -> None:
+    task = _profile_health_tasks.pop(profile_id, None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def _cancel_all_profile_health_tasks() -> None:
+    tasks = list(_profile_health_tasks.values())
+    _profile_health_tasks.clear()
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
@@ -921,6 +1444,7 @@ async def lifespan(app: FastAPI):
     if browser_mgr._auto_launch_task and not browser_mgr._auto_launch_task.done():
         browser_mgr._auto_launch_task.cancel()
         await asyncio.gather(browser_mgr._auto_launch_task, return_exceptions=True)
+    await _cancel_all_profile_health_tasks()
     await browser_mgr.cleanup_all()
 
 
@@ -940,6 +1464,25 @@ def _require_admin(scope: Scope) -> access.AccessIdentity:
     if not identity.is_admin:
         raise HTTPException(status_code=403, detail="Administrator access required")
     return identity
+
+
+def _require_sandbox_permission(
+    scope: Scope, sandbox_id: str, permission: access.Permission
+) -> access.AccessIdentity:
+    """Authorize a sandbox-scoped action for agents/operators (not UI-only)."""
+    identity = _require_identity(scope)
+    sid = str(sandbox_id or "default")
+    if access.has_permission(identity, sid, permission):
+        return identity
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        f"sandbox.permission.{permission}",
+        "denied",
+        sid,
+        None,
+    )
+    raise HTTPException(status_code=403, detail="Sandbox permission required")
 
 
 def _require_profile_permission(
@@ -962,6 +1505,107 @@ def _require_profile_permission(
         # missing one. This applies equally to direct REST and WebSocket URLs.
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile, identity
+
+
+def _can_read_task_sessions(identity: access.AccessIdentity, profile: dict[str, object]) -> bool:
+    sandbox_id = str(profile.get("sandbox_id") or "default")
+    return identity.is_admin or access.has_permission(identity, sandbox_id, "view")
+
+
+def _can_write_task_sessions(identity: access.AccessIdentity, profile: dict[str, object]) -> bool:
+    sandbox_id = str(profile.get("sandbox_id") or "default")
+    return (
+        identity.is_admin
+        or access.has_permission(identity, sandbox_id, "interact")
+        or access.has_permission(identity, sandbox_id, "automate")
+    )
+
+
+def _require_task_profile(
+    scope: Scope, profile_id: str, permission: access.Permission = "interact"
+) -> tuple[dict[str, object], access.AccessIdentity]:
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    identity = _require_identity(scope)
+    allowed = (
+        _can_write_task_sessions(identity, profile)
+        if permission == "interact"
+        else _can_read_task_sessions(identity, profile)
+    )
+    if not allowed:
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            f"task_session.permission.{permission}",
+            "denied",
+            str(profile.get("sandbox_id") or "default"),
+            profile_id,
+        )
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile, identity
+
+
+def _require_task_session(
+    scope: Scope, session_id: str, permission: access.Permission = "view"
+) -> tuple[dict[str, object], dict[str, object], access.AccessIdentity]:
+    session = db.get_task_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Task session not found")
+    profile = db.get_profile(str(session["profile_id"]))
+    identity = _require_identity(scope)
+    allowed = False
+    if profile:
+        allowed = (
+            _can_write_task_sessions(identity, profile)
+            if permission == "interact"
+            else _can_read_task_sessions(identity, profile)
+        )
+    if not profile or not allowed:
+        if profile:
+            db.record_access_audit_event(
+                identity.kind,
+                identity.id,
+                f"task_session.permission.{permission}",
+                "denied",
+                str(profile.get("sandbox_id") or "default"),
+                str(profile.get("id") or session["profile_id"]),
+            )
+        raise HTTPException(status_code=404, detail="Task session not found")
+    return session, profile, identity
+
+
+def _sanitize_task_value(value: object, depth: int = 0) -> object:
+    if depth >= _TASK_METADATA_MAX_DEPTH:
+        return "[truncated]"
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, list):
+        return [
+            _sanitize_task_value(item, depth + 1)
+            for item in value[:_TASK_METADATA_MAX_LIST_ITEMS]
+        ]
+    if isinstance(value, dict):
+        sanitized: dict[str, object] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)[:120]
+            key_lower = key.lower()
+            if any(part in key_lower for part in _TASK_SENSITIVE_KEY_PARTS):
+                sanitized[key] = "[redacted]"
+            else:
+                sanitized[key] = _sanitize_task_value(raw_value, depth + 1)
+        return sanitized
+    return str(value)[:500]
+
+
+def _sanitize_task_metadata(metadata: dict[str, object] | None) -> dict[str, object]:
+    sanitized = _sanitize_task_value(metadata or {})
+    if not isinstance(sanitized, dict):
+        return {}
+    encoded = json.dumps(sanitized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) <= _TASK_METADATA_MAX_BYTES:
+        return sanitized
+    return {"truncated": True}
 
 
 async def _require_websocket_profile_permission(
@@ -1012,6 +1656,60 @@ def _profile_response(profile: dict[str, object], identity: access.AccessIdentit
     return ProfileResponse(**response)
 
 
+def _request_local_base(request: Request) -> str:
+    """Client-facing base URL (SSH tunnel Host or reverse-proxy Host)."""
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host")
+    return session_links.request_base_url(
+        scheme=request.url.scheme,
+        host=request.headers.get("host") or request.url.netloc,
+        forwarded_proto=forwarded_proto,
+        forwarded_host=forwarded_host,
+    )
+
+
+def _session_open_links(
+    request: Request,
+    profile: dict[str, object],
+    identity: access.AccessIdentity,
+    *,
+    prefer: str = "local",
+    mode: str = "cdp",
+) -> SessionOpenLinks:
+    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "automate"
+    )
+    payload = session_links.build_session_open_links(
+        str(profile["id"]),
+        local_base=_request_local_base(request),
+        include_cdp=include_cdp,
+        prefer=prefer,
+        mode=mode,
+    )
+    return SessionOpenLinks(**payload)
+
+
+def _profile_open_links_response(
+    request: Request,
+    profile: dict[str, object],
+    identity: access.AccessIdentity,
+    *,
+    prefer: str = "local",
+    mode: str = "cdp",
+) -> ProfileOpenLinksResponse:
+    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "automate"
+    )
+    payload = session_links.build_session_open_links(
+        str(profile["id"]),
+        local_base=_request_local_base(request),
+        include_cdp=include_cdp,
+        prefer=prefer,
+        mode=mode,
+    )
+    return ProfileOpenLinksResponse(**payload)
+
+
 def _access_user_response(user: dict[str, object]) -> AccessUserResponse:
     return AccessUserResponse(
         id=str(user["id"]),
@@ -1019,7 +1717,21 @@ def _access_user_response(user: dict[str, object]) -> AccessUserResponse:
         role=str(user["role"]),
         active=bool(user["active"]),
         created_at=str(user["created_at"]),
+        group_ids=[str(group_id) for group_id in user.get("group_ids", [])],
         grants=user.get("grants", []),
+        effective_grants=user.get("effective_grants", user.get("grants", [])),
+    )
+
+
+def _access_group_response(group: dict[str, object]) -> AccessGroupResponse:
+    return AccessGroupResponse(
+        id=str(group["id"]),
+        name=str(group["name"]),
+        description=group.get("description") or None,
+        active=bool(group["active"]),
+        created_at=str(group["created_at"]),
+        member_user_ids=[str(user_id) for user_id in group.get("member_user_ids", [])],
+        grants=group.get("grants", []),
     )
 
 
@@ -1032,6 +1744,51 @@ def _access_agent_response(agent: dict[str, object]) -> AccessAgentResponse:
         created_at=str(agent["created_at"]),
         grants=agent.get("grants", []),
     )
+
+
+def _normalize_access_grants(grants: list[object]) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    seen: set[tuple[object, object]] = set()
+    for grant in grants:
+        value = grant.model_dump() if hasattr(grant, "model_dump") else grant
+        if isinstance(value, dict):
+            key = (value.get("sandbox_id"), value.get("permission"))
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+    return normalized
+
+
+def _validate_access_group_member_ids(member_user_ids: list[str]) -> list[str]:
+    seen: set[str] = set()
+    valid_ids: list[str] = []
+    for user_id in member_user_ids:
+        if user_id in seen:
+            continue
+        if not db.get_access_user(user_id):
+            raise HTTPException(status_code=404, detail=f"User not found: {user_id}")
+        seen.add(user_id)
+        valid_ids.append(user_id)
+    return valid_ids
+
+
+def _validate_access_group_ids(group_ids: list[str]) -> list[str]:
+    seen: set[str] = set()
+    valid_ids: list[str] = []
+    for group_id in group_ids:
+        if group_id in seen:
+            continue
+        if not db.get_access_group(group_id):
+            raise HTTPException(status_code=404, detail=f"Group not found: {group_id}")
+        seen.add(group_id)
+        valid_ids.append(group_id)
+    return valid_ids
+
+
+def _revoke_user_websocket_access(user_ids: list[str]) -> None:
+    for user_id in set(user_ids):
+        _revoke_websocket_access(identity_kind="user", identity_id=user_id)
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
@@ -1130,7 +1887,8 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
             id=str(user["id"]),
             display_name=str(user["username"]),
             role=str(user["role"]),
-            grants=tuple(user.get("grants", [])),
+            grants=tuple(user.get("effective_grants", user.get("grants", []))),
+            group_ids=tuple(user.get("group_ids", [])),
         ).public(),
     }
 
@@ -1164,18 +1922,24 @@ async def list_access_users(request: Request):
 @app.post("/api/access/users", response_model=AccessUserResponse, status_code=201)
 async def create_access_user(body: AccessUserCreate, request: Request):
     actor = _require_admin(request.scope)
+    group_ids = _validate_access_group_ids(body.group_ids)
     try:
         user = db.create_access_user(
             body.username,
             access.hash_password(body.password),
             body.role,
             [grant.model_dump() for grant in body.grants],
+            group_ids,
         )
     except Exception as exc:
         if "UNIQUE constraint failed" in str(exc):
             raise HTTPException(status_code=409, detail="Username already exists") from exc
         raise
     db.record_access_audit_event(actor.kind, actor.id, "access_user.create", "allowed")
+    if group_ids:
+        db.record_access_audit_event(
+            actor.kind, actor.id, "access_user.groups.update", "allowed"
+        )
     return _access_user_response(user)
 
 
@@ -1194,11 +1958,81 @@ async def update_access_user(user_id: str, body: AccessUserUpdate, request: Requ
             grant.model_dump() if hasattr(grant, "model_dump") else grant
             for grant in data["grants"]
         ]
+    if "group_ids" in data and data["group_ids"] is not None:
+        data["group_ids"] = _validate_access_group_ids(data["group_ids"])
     user = db.update_access_user(user_id, **data)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if {"password_hash", "role", "active", "grants", "group_ids"}.intersection(data):
+        _revoke_websocket_access(identity_kind="user", identity_id=user_id)
+    if "group_ids" in data:
+        db.record_access_audit_event(
+            actor.kind, actor.id, "access_user.groups.update", "allowed"
+        )
     db.record_access_audit_event(actor.kind, actor.id, "access_user.update", "allowed")
     return _access_user_response(user)
+
+
+@app.get("/api/access/groups", response_model=list[AccessGroupResponse])
+async def list_access_groups(request: Request):
+    _require_admin(request.scope)
+    return [_access_group_response(group) for group in db.list_access_groups()]
+
+
+@app.post("/api/access/groups", response_model=AccessGroupResponse, status_code=201)
+async def create_access_group(body: AccessGroupCreate, request: Request):
+    actor = _require_admin(request.scope)
+    member_user_ids = _validate_access_group_member_ids(body.member_user_ids)
+    try:
+        group = db.create_access_group(
+            body.name,
+            body.description,
+            body.active,
+            member_user_ids,
+            _normalize_access_grants(body.grants),
+        )
+    except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(status_code=409, detail="Group name already exists") from exc
+        raise
+    _revoke_user_websocket_access(member_user_ids)
+    db.record_access_audit_event(actor.kind, actor.id, "access_group.create", "allowed")
+    return _access_group_response(group)
+
+
+@app.put("/api/access/groups/{group_id}", response_model=AccessGroupResponse)
+async def update_access_group(group_id: str, body: AccessGroupUpdate, request: Request):
+    actor = _require_admin(request.scope)
+    existing = db.get_access_group(group_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Group not found")
+    data = body.model_dump(exclude_unset=True)
+    prior_member_ids = [str(user_id) for user_id in existing.get("member_user_ids", [])]
+    if "member_user_ids" in data and data["member_user_ids"] is not None:
+        data["member_user_ids"] = _validate_access_group_member_ids(data["member_user_ids"])
+    if "grants" in data and data["grants"] is not None:
+        data["grants"] = _normalize_access_grants(data["grants"])
+    try:
+        group = db.update_access_group(group_id, **data)
+    except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(status_code=409, detail="Group name already exists") from exc
+        raise
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    current_member_ids = [str(user_id) for user_id in group.get("member_user_ids", [])]
+    if {"active", "member_user_ids", "grants"}.intersection(data):
+        _revoke_user_websocket_access(prior_member_ids + current_member_ids)
+    if "member_user_ids" in data:
+        db.record_access_audit_event(
+            actor.kind, actor.id, "access_group.members.update", "allowed"
+        )
+    if "grants" in data:
+        db.record_access_audit_event(
+            actor.kind, actor.id, "access_group.grants.update", "allowed"
+        )
+    db.record_access_audit_event(actor.kind, actor.id, "access_group.update", "allowed")
+    return _access_group_response(group)
 
 
 @app.get("/api/access/agents", response_model=list[AccessAgentResponse])
@@ -1233,8 +2067,22 @@ async def update_access_agent(agent_id: str, body: AccessAgentUpdate, request: R
     agent = db.update_access_agent(agent_id, **data)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    if {"active", "grants"}.intersection(data):
+        _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.update", "allowed")
     return _access_agent_response(agent)
+
+
+@app.delete("/api/access/agents/{agent_id}", status_code=204)
+async def delete_access_agent(agent_id: str, request: Request):
+    """Revoke an agent immediately: drop key/grants and close live WS leases."""
+    actor = _require_admin(request.scope)
+    deleted = db.delete_access_agent(agent_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
+    db.record_access_audit_event(actor.kind, actor.id, "access_agent.delete", "allowed")
+    return Response(status_code=204)
 
 
 @app.post("/api/access/agents/{agent_id}/rotate-key", response_model=AccessAgentCreatedResponse)
@@ -1244,21 +2092,426 @@ async def rotate_access_agent_key(agent_id: str, request: Request):
     agent = db.update_access_agent(agent_id, key_hash=access.hash_agent_key(key))
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.rotate_key", "allowed")
     return AccessAgentCreatedResponse(**_access_agent_response(agent).model_dump(), api_key=key)
 
 
 @app.get("/api/access/sandboxes")
 async def list_access_sandboxes(request: Request):
-    _require_admin(request.scope)
-    counts: dict[str, int] = {}
+    """List sandboxes visible to the caller (admin: all; agent/user: granted only)."""
+    identity = _require_identity(request.scope)
+    summaries: dict[str, dict[str, Any]] = {}
     for profile in db.list_profiles():
+        if not access.can_access_profile(identity, profile, "view"):
+            continue
         sandbox_id = str(profile.get("sandbox_id") or "default")
-        counts[sandbox_id] = counts.get(sandbox_id, 0) + 1
-    return [{"sandbox_id": key, "profile_count": counts[key]} for key in sorted(counts)]
+        summary = summaries.setdefault(
+            sandbox_id,
+            {
+                "profile_count": 0,
+                "project_ids": set(),
+                "folder_paths": set(),
+                "profile_names": set(),
+            },
+        )
+        summary["profile_count"] += 1
+        summary["project_ids"].add(str(profile.get("project_id") or "default"))
+        folder_path = str(profile.get("folder_path") or "")
+        if folder_path:
+            summary["folder_paths"].add(folder_path)
+        summary["profile_names"].add(str(profile.get("name") or "Unnamed profile"))
+
+    # Include empty granted sandboxes so agents can create the first profile there.
+    if not identity.is_admin:
+        for grant in identity.grants:
+            sid = str(grant.get("sandbox_id") or "")
+            if sid and sid not in summaries and access.has_permission(identity, sid, "view"):
+                summaries[sid] = {
+                    "profile_count": 0,
+                    "project_ids": set(),
+                    "folder_paths": set(),
+                    "profile_names": set(),
+                }
+
+    return [
+        {
+            "sandbox_id": sandbox_id,
+            "profile_count": summaries[sandbox_id]["profile_count"],
+            "project_ids": sorted(summaries[sandbox_id]["project_ids"]),
+            "folder_paths": sorted(summaries[sandbox_id]["folder_paths"]),
+            "profile_names": sorted(summaries[sandbox_id]["profile_names"]),
+        }
+        for sandbox_id in sorted(summaries)
+    ]
+
+
+# ── Task sessions ───────────────────────────────────────────────────────────
+
+
+@app.post("/api/task-sessions", response_model=TaskSessionResponse, status_code=201)
+async def create_task_session(body: TaskSessionCreate, request: Request):
+    profile, identity = _require_task_profile(request.scope, body.profile_id, "interact")
+    session = db.create_task_session(
+        str(profile["id"]),
+        str(profile.get("sandbox_id") or "default"),
+        identity.kind,
+        identity.id,
+        body.title,
+        _sanitize_task_metadata(body.metadata),
+    )
+    db.record_task_event(
+        str(session["id"]),
+        "task_session.created",
+        identity.kind,
+        identity.id,
+        {"profile_id": str(profile["id"]), "sandbox_id": str(profile.get("sandbox_id") or "default")},
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_session.create",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        str(profile["id"]),
+    )
+    return TaskSessionResponse(**session)
+
+
+@app.get("/api/task-sessions", response_model=list[TaskSessionResponse])
+async def list_task_sessions(
+    request: Request,
+    profile_id: str = Query(..., min_length=1, max_length=120),
+    limit: int = Query(100, ge=1, le=200),
+):
+    profile, _identity = _require_task_profile(request.scope, profile_id, "view")
+    return [
+        TaskSessionResponse(**session)
+        for session in db.list_task_sessions(str(profile["id"]), limit=limit)
+    ]
+
+
+@app.get("/api/task-sessions/{session_id}", response_model=TaskSessionResponse)
+async def get_task_session(session_id: str, request: Request):
+    session, _profile, _identity = _require_task_session(request.scope, session_id, "view")
+    return TaskSessionResponse(**session)
+
+
+def _append_task_user_message(
+    scope: Scope,
+    session_id: str,
+    text: str,
+    profile_id: str | None,
+    commands: list[object],
+    metadata: dict[str, object],
+) -> TaskMessageResponse:
+    session, profile, identity = _require_task_session(scope, session_id, "interact")
+    if profile_id and profile_id != str(session["profile_id"]):
+        requested_profile = db.get_profile(profile_id)
+        if requested_profile:
+            db.record_access_audit_event(
+                identity.kind,
+                identity.id,
+                "task_session.profile_mismatch",
+                "denied",
+                str(requested_profile.get("sandbox_id") or "default"),
+                profile_id,
+            )
+        raise HTTPException(status_code=404, detail="Task session not found")
+
+    command_payload = [
+        command.model_dump() if hasattr(command, "model_dump") else command
+        for command in commands
+    ]
+    stored_metadata_input = dict(metadata)
+    if command_payload:
+        stored_metadata_input["commands"] = command_payload
+    stored_metadata = _sanitize_task_metadata(stored_metadata_input)
+    message = db.append_task_message(
+        str(session["id"]),
+        "user",
+        text,
+        identity.kind,
+        identity.id,
+        stored_metadata,
+    )
+    host_command_count = sum(
+        1 for command in command_payload
+        if isinstance(command, dict) and command.get("scope") == "host"
+    )
+    db.record_task_event(
+        str(session["id"]),
+        "task_message.appended",
+        identity.kind,
+        identity.id,
+        {
+            "message_id": str(message["id"]),
+            "role": "user",
+            "command_count": len(command_payload),
+            "host_command_count": host_command_count,
+            "server_executed": False,
+        },
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_message.append",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        str(profile["id"]),
+    )
+    return TaskMessageResponse(**message)
+
+
+@app.post(
+    "/api/task-sessions/{session_id}/messages",
+    response_model=TaskMessageResponse,
+    status_code=201,
+)
+async def append_task_message(session_id: str, body: TaskMessageCreate, request: Request):
+    return _append_task_user_message(
+        request.scope,
+        session_id,
+        body.text,
+        body.profile_id,
+        body.commands,
+        body.metadata,
+    )
+
+
+@app.post(
+    "/api/task-sessions/{session_id}/commands",
+    response_model=TaskMessageResponse,
+    status_code=201,
+)
+async def append_task_command(session_id: str, body: TaskCommandRequest, request: Request):
+    return _append_task_user_message(
+        request.scope,
+        session_id,
+        body.content,
+        body.profile_id,
+        body.commands,
+        body.metadata,
+    )
+
+
+@app.get("/api/task-sessions/{session_id}/messages", response_model=list[TaskMessageResponse])
+async def list_task_messages(
+    session_id: str,
+    request: Request,
+    limit: int = Query(100, ge=1, le=200),
+):
+    session, _profile, _identity = _require_task_session(request.scope, session_id, "view")
+    return [
+        TaskMessageResponse(**message)
+        for message in db.list_task_messages(str(session["id"]), limit=limit)
+    ]
+
+
+@app.get("/api/task-sessions/{session_id}/events", response_model=list[TaskEventResponse])
+async def list_task_events(
+    session_id: str,
+    request: Request,
+    limit: int = Query(100, ge=1, le=200),
+):
+    session, _profile, _identity = _require_task_session(request.scope, session_id, "view")
+    return [
+        TaskEventResponse(**event)
+        for event in db.list_task_events(str(session["id"]), limit=limit)
+    ]
 
 
 # ── Profile CRUD ──────────────────────────────────────────────────────────────
+
+
+def _proxy_inventory_item(row: dict[str, object]) -> ProxyInventoryItem:
+    return ProxyInventoryItem(
+        id=str(row["id"]),
+        label=str(row.get("label") or "proxy"),
+        host_masked=str(row.get("host_masked") or "unknown"),
+        port=row.get("port") if isinstance(row.get("port"), int) else None,
+        username_masked=row.get("username_masked") if isinstance(row.get("username_masked"), str) else None,
+        has_credentials=bool(row.get("has_credentials")),
+        active=bool(row.get("active", True)),
+        check_state=str(row.get("check_state") or "missing"),  # type: ignore[arg-type]
+        reachable=row.get("reachable") if isinstance(row.get("reachable"), bool) else None,
+        latency_ms=row.get("latency_ms") if isinstance(row.get("latency_ms"), (int, float)) else None,
+        risk_score=row.get("risk_score") if isinstance(row.get("risk_score"), int) else None,
+        authenticity_score=(
+            row.get("authenticity_score") if isinstance(row.get("authenticity_score"), int) else None
+        ),
+        country_code=row.get("country_code") if isinstance(row.get("country_code"), str) else None,
+        timezone_hint=row.get("timezone_hint") if isinstance(row.get("timezone_hint"), str) else None,
+        locale_hint=row.get("locale_hint") if isinstance(row.get("locale_hint"), str) else None,
+        warnings=[str(item) for item in (row.get("warnings") or [])],
+        blockers=[str(item) for item in (row.get("blockers") or [])],
+        last_checked_at=row.get("last_checked_at") if isinstance(row.get("last_checked_at"), str) else None,
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+async def _proxychecker_check(proxy_url: str) -> dict[str, object]:
+    """Call VCVM-local proxychecker and reduce to redacted summary fields."""
+    base = getattr(profile_health_probe, "proxychecker_url", "") or ""
+    if not base:
+        return {
+            "reachable": None,
+            "latency_ms": None,
+            "risk_score": None,
+            "authenticity_score": None,
+            "country_code": None,
+            "timezone_hint": None,
+            "locale_hint": None,
+            "warnings": [],
+            "blockers": ["proxychecker_unavailable"],
+            "check_state": "unavailable",
+        }
+    try:
+        async with httpx.AsyncClient(timeout=getattr(profile_health_probe, "component_timeout_s", 20.0)) as client:
+            response = await client.post(
+                f"{base.rstrip('/')}/check",
+                json={
+                    "target": getattr(profile_health_probe, "ip_echo_url", "https://api.ipify.org"),
+                    "proxies": [proxy_url],
+                    "limit": 1,
+                    "scoring_profile": "default",
+                },
+            )
+            response.raise_for_status()
+            return proxy_inventory.summarize_check_payload(response.json())
+    except Exception:
+        return {
+            "reachable": None,
+            "latency_ms": None,
+            "risk_score": None,
+            "authenticity_score": None,
+            "country_code": None,
+            "timezone_hint": None,
+            "locale_hint": None,
+            "warnings": [],
+            "blockers": ["proxychecker_unavailable"],
+            "check_state": "unavailable",
+        }
+
+
+@app.get("/api/proxies", response_model=list[ProxyInventoryItem])
+async def list_proxies(request: Request):
+    identity = _require_admin(request.scope)
+    del identity  # admin gate only
+    return [_proxy_inventory_item(row) for row in db.list_proxy_inventory()]
+
+
+@app.post("/api/proxies/ingest", response_model=ProxyInventoryIngestResponse, status_code=201)
+async def ingest_proxies(req: ProxyInventoryIngest, request: Request):
+    identity = _require_admin(request.scope)
+    created = 0
+    updated = 0
+    rejected = 0
+    items: list[ProxyInventoryItem] = []
+
+    for raw in req.lines:
+        try:
+            proxy_url = proxy_inventory.parse_proxy_line(raw)
+        except proxy_inventory.ProxyParseError:
+            rejected += 1
+            continue
+        fingerprint = proxy_inventory.proxy_fingerprint(proxy_url)
+        with db.get_db() as conn:
+            existing = conn.execute(
+                "SELECT id FROM proxy_inventory WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+        redacted = proxy_inventory.redact_proxy_url(proxy_url)
+        row = db.upsert_proxy_inventory_entry(proxy_url, redacted=redacted)
+        if existing:
+            updated += 1
+        else:
+            created += 1
+        items.append(_proxy_inventory_item(row))
+
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "proxy.ingest",
+        "allowed",
+        None,
+        None,
+    )
+    return ProxyInventoryIngestResponse(
+        created=created,
+        updated=updated,
+        rejected=rejected,
+        items=items,
+    )
+
+
+@app.post("/api/proxies/{proxy_id}/check", response_model=ProxyInventoryItem)
+async def check_proxy(proxy_id: str, request: Request):
+    identity = _require_admin(request.scope)
+    secret_row = db.get_proxy_inventory_entry(proxy_id, include_secret=True)
+    if secret_row is None:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+    proxy_url = str(secret_row.get("proxy_url") or "")
+    summary = await _proxychecker_check(proxy_url)
+    updated = db.update_proxy_inventory_check(proxy_id, summary)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "proxy.check",
+        "allowed",
+        None,
+        None,
+    )
+    return _proxy_inventory_item(updated)
+
+
+@app.post("/api/proxies/{proxy_id}/profiles", response_model=ProfileResponse, status_code=201)
+async def create_profile_from_proxy(
+    proxy_id: str,
+    req: ProxyAutoProfileCreate,
+    request: Request,
+):
+    """Create a proxy-aligned anti-stealth profile without manual fingerprint tuning."""
+    identity = _require_admin(request.scope)
+    secret_row = db.get_proxy_inventory_entry(proxy_id, include_secret=True)
+    if secret_row is None:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+    proxy_url = str(secret_row.get("proxy_url") or "")
+    country = secret_row.get("country_code") if isinstance(secret_row.get("country_code"), str) else None
+    if country is None:
+        # Soft enrichment before profile create; degrade if checker is down.
+        summary = await _proxychecker_check(proxy_url)
+        db.update_proxy_inventory_check(proxy_id, summary)
+        country = summary.get("country_code") if isinstance(summary.get("country_code"), str) else None
+
+    defaults = proxy_inventory.build_auto_profile_defaults(
+        proxy_url=proxy_url,
+        country_code=country,
+        name=req.name,
+        project_id=req.project_id,
+        harness=req.harness,
+        sandbox_id=req.sandbox_id,
+    )
+    tags = defaults.pop("tags", [])
+    profile = db.create_profile(**defaults, tags=tags)
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "profile.create_from_proxy",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        str(profile.get("id") or ""),
+    )
+    if req.launch:
+        try:
+            running = await browser_mgr.launch(profile)
+            _schedule_profile_health(profile, running, force=False)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to launch profile") from exc
+    return _profile_response(profile, identity)
 
 
 @app.get("/api/profiles", response_model=list[ProfileResponse])
@@ -1273,8 +2526,10 @@ async def list_profiles(request: Request):
 
 @app.post("/api/profiles", response_model=ProfileResponse, status_code=201)
 async def create_profile(req: ProfileCreate, request: Request):
-    identity = _require_admin(request.scope)
+    """Create a profile in a sandbox the caller can operate (agent/CLI control plane)."""
     data = req.model_dump()
+    sandbox_id = str(data.get("sandbox_id") or "default")
+    identity = _require_sandbox_permission(request.scope, sandbox_id, "operate")
     tags = data.pop("tags", None)
     if tags:
         data["tags"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in tags]
@@ -1293,35 +2548,89 @@ async def get_profile(profile_id: str, request: Request):
     return _profile_response(profile, identity)
 
 
+
+@app.post("/api/profiles/bulk-organize", response_model=list[ProfileResponse])
+async def bulk_organize_profiles(req: ProfileBulkOrganize, request: Request):
+    """Move or pin profiles the caller can operate (sandbox-scoped; not UI-only)."""
+    identity = _require_identity(request.scope)
+    if req.project_id is None and req.folder_path is None and req.pinned is None:
+        raise HTTPException(status_code=400, detail="No organization fields provided")
+
+    # Authorize every requested profile for operate before mutating any of them.
+    authorized_ids: list[str] = []
+    for profile_id in req.profile_ids:
+        profile = db.get_profile(profile_id)
+        if not profile or not access.can_access_profile(identity, profile, "operate"):
+            db.record_access_audit_event(
+                identity.kind,
+                identity.id,
+                "profile.permission.operate",
+                "denied",
+                str((profile or {}).get("sandbox_id") or "default"),
+                profile_id,
+            )
+            raise HTTPException(status_code=404, detail="Profile not found")
+        authorized_ids.append(profile_id)
+
+    try:
+        updated = db.bulk_organize_profiles(
+            authorized_ids,
+            project_id=req.project_id,
+            folder_path=req.folder_path,
+            pinned=req.pinned,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    for row in updated:
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "profile.bulk_organize",
+            "allowed",
+            str(row.get("sandbox_id") or "default"),
+            str(row.get("id") or ""),
+        )
+    return [_profile_response(row, identity) for row in updated]
+
+
 @app.put("/api/profiles/{profile_id}", response_model=ProfileResponse)
 async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
-    identity = _require_admin(request.scope)
+    """Update profile details for callers with operate on the profile sandbox."""
+    profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
     # Only pass fields that were explicitly set
     data = req.model_dump(exclude_unset=True)
     tags = data.pop("tags", None)
     if tags is not None:
         data["tags"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in tags]
-    profile = db.update_profile(profile_id, **data)
-    if not profile:
+    if "sandbox_id" in data:
+        target_sandbox = str(data.get("sandbox_id") or "default")
+        current_sandbox = str(profile.get("sandbox_id") or "default")
+        if target_sandbox != current_sandbox:
+            _require_sandbox_permission(request.scope, target_sandbox, "operate")
+    updated = db.update_profile(profile_id, **data)
+    if not updated:
         raise HTTPException(status_code=404, detail="Profile not found")
+    if "sandbox_id" in data:
+        _revoke_websocket_access(profile_id=profile_id)
     db.record_access_audit_event(
-        identity.kind, identity.id, "profile.update", "allowed", str(profile.get("sandbox_id") or "default"), profile_id
+        identity.kind, identity.id, "profile.update", "allowed", str(updated.get("sandbox_id") or "default"), profile_id
     )
-    return _profile_response(profile, identity)
+    return _profile_response(updated, identity)
 
 
 @app.delete("/api/profiles/{profile_id}")
 async def delete_profile(profile_id: str, request: Request):
-    identity = _require_admin(request.scope)
+    profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
     # Stop browser if running
     if profile_id in browser_mgr.running:
         await browser_mgr.stop(profile_id)
+    await _cancel_profile_health_task(profile_id)
 
-    profile = db.get_profile(profile_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
-    user_data_dir = Path(profile["user_data_dir"])
+    user_data_dir = Path(str(profile["user_data_dir"]))
 
     # DB first — if this fails, filesystem is untouched
     db.delete_profile(profile_id)
@@ -1347,15 +2656,24 @@ async def launch_profile(profile_id: str, request: Request):
 
     try:
         running = await browser_mgr.launch(profile)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError:
+        # Validation errors can originate in URL-parsing or browser libraries
+        # and may contain embedded proxy credentials. Keep the API boundary
+        # intentionally generic while preserving the useful 400 classification.
+        raise HTTPException(status_code=400, detail="Invalid browser profile configuration")
     except Exception as exc:
-        logger.error("Failed to launch profile %s: %s", profile_id, exc)
+        # Third-party launch errors may echo the configured proxy URL. Log the
+        # exception class for diagnosis without persisting embedded credentials.
+        logger.error("Failed to launch profile %s (%s)", profile_id, type(exc).__name__)
         raise HTTPException(status_code=500, detail="Failed to launch browser")
 
     db.record_access_audit_event(
         identity.kind, identity.id, "profile.launch", "allowed", str(profile.get("sandbox_id") or "default"), profile_id
     )
+    try:
+        _schedule_profile_health(profile, running, force=False)
+    except Exception as exc:
+        logger.error("Could not schedule profile health for %s (%s)", profile_id, type(exc).__name__)
     return LaunchResponse(
         profile_id=profile_id,
         status="running",
@@ -1366,6 +2684,60 @@ async def launch_profile(profile_id: str, request: Request):
             if access.can_access_profile(identity, profile, "automate")
             else None
         ),
+        links=_session_open_links(request, profile, identity),
+    )
+
+
+@app.get("/api/profiles/{profile_id}/health", response_model=ProfileHealthResponse)
+async def get_profile_health(profile_id: str, request: Request):
+    profile, _identity = _require_profile_permission(request.scope, profile_id, "view")
+    stored = db.get_profile_health(profile_id)
+    if stored is None:
+        return ProfileHealthResponse(
+            profile_id=profile_id,
+            proxy_configured=bool(profile.get("proxy")),
+        )
+    return ProfileHealthResponse(**stored)
+
+
+@app.get("/api/profiles/{profile_id}/extensions", response_model=ExtensionInventoryResponse)
+async def get_profile_extensions(profile_id: str, request: Request):
+    profile, _identity = _require_profile_permission(request.scope, profile_id, "view")
+    ext_list = extensions.inspect_profile_extensions(profile)
+    return ExtensionInventoryResponse(profile_id=profile_id, extensions=ext_list)
+
+
+
+@app.post(
+    "/api/profiles/{profile_id}/health/run",
+    response_model=ProfileHealthResponse,
+    status_code=202,
+)
+async def run_profile_health(profile_id: str, request: Request):
+    profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
+    running = browser_mgr.running.get(profile_id)
+    if running is None:
+        raise HTTPException(status_code=409, detail="Profile is not running")
+
+    _schedule_profile_health(profile, running, force=True)
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "profile.health.run",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        profile_id,
+    )
+    stored = db.get_profile_health(profile_id)
+    return ProfileHealthResponse(
+        **(
+            stored
+            or {
+                "profile_id": profile_id,
+                "state": "pending",
+                "proxy_configured": bool(profile.get("proxy")),
+            }
+        )
     )
 
 
@@ -1392,7 +2764,316 @@ async def get_profile_status(profile_id: str, request: Request):
         status["vnc_ws_port"] = None
         if not access.can_access_profile(identity, profile, "automate"):
             status["cdp_url"] = None
-    return ProfileStatusResponse(**status)
+    links = _session_open_links(request, profile, identity)
+    return ProfileStatusResponse(**status, links=links)
+
+
+# ── Extension bootstrap (Chrome extension / agent one-click) ─────────────────
+
+
+# ── Extension bootstrap (Chrome extension / agent one-click) ─────────────────
+
+
+def _extension_catalog_payload(request: Request) -> ExtensionCatalogResponse:
+    identity = _require_identity(request.scope)
+    profiles: list[ExtensionProfileSummary] = []
+    for profile in db.list_profiles():
+        if not access.can_access_profile(identity, profile, "view"):
+            continue
+        status = browser_mgr.get_status(str(profile["id"]))
+        summary = session_links.extension_profile_summary(
+            profile,
+            status=str(status.get("status") or "stopped"),
+            running=str(status.get("status") or "") == "running",
+        )
+        profiles.append(ExtensionProfileSummary(**summary))
+
+    proxies: list[ProxyInventoryItem] = []
+    if identity.is_admin:
+        proxies = [_proxy_inventory_item(row) for row in db.list_proxy_inventory()]
+
+    local_base = _request_local_base(request)
+    cloud_base = session_links.cloud_base_url()
+    return ExtensionCatalogResponse(
+        bases={"local": local_base, "cloud": cloud_base},
+        endpoints=session_links.catalog_endpoint_map(),
+        profiles=profiles,
+        proxies=proxies,
+        capabilities={
+            "can_list_proxies": identity.is_admin,
+            "can_ingest_proxies": identity.is_admin,
+            "can_open_sessions": True,
+            "cloud_base_configured": bool(cloud_base),
+            "can_manage_extension_defaults": identity.is_admin,
+            "can_list_templates": True,
+            "cdp_live": True,
+            "live_metrics": True,
+        },
+    )
+
+
+@app.get("/api/extension/catalog", response_model=ExtensionCatalogResponse)
+async def get_extension_catalog(request: Request):
+    """List redacted profiles + proxies and stable endpoints for an extension."""
+    return _extension_catalog_payload(request)
+
+
+@app.post("/api/extension/catalog", response_model=ExtensionCatalogResponse)
+async def post_extension_catalog(request: Request):
+    """POST alias for catalog refresh (agent-friendly; same as GET)."""
+    return _extension_catalog_payload(request)
+
+
+@app.get("/api/extension/defaults", response_model=ExtensionDefaultsResponse)
+async def get_extension_defaults(request: Request):
+    """Selectable Comet-derived default extensions for new/template profiles."""
+    _require_identity(request.scope)
+    payload = extension_catalog.defaults_payload()
+    return ExtensionDefaultsResponse(**payload)
+
+
+@app.put("/api/extension/defaults", response_model=ExtensionDefaultsResponse)
+async def put_extension_defaults(req: ExtensionDefaultsUpdate, request: Request):
+    """Persist which catalog extensions install by default (admin/API parity)."""
+    identity = _require_identity(request.scope)
+    if ACCESS_CONTROL_ENABLED and not identity.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator required")
+    extension_catalog.save_selected_ids(list(req.selected_ids or []))
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "extension.defaults.update",
+        "allowed",
+        "default",
+        None,
+    )
+    return ExtensionDefaultsResponse(**extension_catalog.defaults_payload())
+
+
+@app.get("/api/extension/templates", response_model=ExtensionTemplatesResponse)
+async def get_extension_templates(request: Request):
+    """Lightweight template list for Chrome sync / agents."""
+    _require_identity(request.scope)
+    items = []
+    for template in profile_templates.list_templates():
+        items.append(
+            ExtensionTemplateItem(
+                id=str(template["id"]),
+                name=str(template["name"]),
+                project_id=str(template.get("project_id") or "default"),
+                folder_path=str(template.get("folder_path") or ""),
+                harness=template.get("harness") or "browser-use",
+                geoip=bool(template.get("geoip")) if "geoip" in template else None,
+                screen_width=template.get("screen_width"),
+                screen_height=template.get("screen_height"),
+                create_path="/api/profile-templates/{template_id}/profiles",
+                from_proxy_path="/api/proxies/{proxy_id}/profiles",
+            )
+        )
+    # Also expose the thin session_links templates for compatibility.
+    for template in session_links.profile_templates():
+        if any(item.id == template["id"] for item in items):
+            continue
+        items.append(ExtensionTemplateItem(**template))
+    return ExtensionTemplatesResponse(templates=items)
+
+
+@app.get("/api/profile-templates", response_model=list[ProfileTemplateSummary])
+async def list_profile_templates(request: Request):
+    """Full template cards including system prompts (agent + UI parity)."""
+    _require_identity(request.scope)
+    return [
+        ProfileTemplateSummary(
+            id=str(item["id"]),
+            name=str(item["name"]),
+            summary=str(item.get("summary") or ""),
+            system_prompt=str(item.get("system_prompt") or ""),
+            harness=item.get("harness") or "browser-use",
+            project_id=str(item.get("project_id") or "default"),
+            folder_path=str(item.get("folder_path") or ""),
+            platform=item.get("platform") or "windows",
+            apply_default_extensions=bool(item.get("apply_default_extensions", True)),
+            quick_options=list(item.get("quick_options") or []),
+        )
+        for item in profile_templates.list_templates()
+    ]
+
+
+@app.post(
+    "/api/profile-templates/{template_id}/profiles",
+    response_model=ProfileResponse,
+    status_code=201,
+)
+async def create_profile_from_template(
+    template_id: str,
+    request: Request,
+    req: ProfileTemplateCreate | None = None,
+):
+    """Materialize a prefabricated profile (includes selected default extensions)."""
+    identity = _require_identity(request.scope)
+    if ACCESS_CONTROL_ENABLED and not identity.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator required")
+    body = req or ProfileTemplateCreate(template_id=template_id)
+    try:
+        fields = profile_templates.build_profile_fields(
+            template_id,
+            overrides={
+                "name": body.name,
+                "project_id": body.project_id,
+                "harness": body.harness,
+                "proxy": body.proxy,
+            },
+            apply_extensions=body.apply_default_extensions,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Template not found") from None
+    # Strip agent-only metadata before DB write
+    fields.pop("system_prompt", None)
+    fields.pop("template_id", None)
+    profile = db.create_profile(**fields)
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "profile.create_from_template",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        str(profile["id"]),
+    )
+    if body.launch:
+        try:
+            await browser_mgr.launch(profile)
+        except Exception:
+            logger.error("Template profile launch failed for %s", profile["id"])
+    return _profile_response(profile, identity)
+
+
+@app.get("/session/{profile_id}/live")
+async def cdp_live_session(profile_id: str, request: Request):
+    """Browser-Use-style CDP screencast fullscreen page (snappy live URL)."""
+    from fastapi.responses import HTMLResponse
+
+    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
+    if profile_id not in browser_mgr.running:
+        raise HTTPException(status_code=409, detail="Profile is not running")
+    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "automate"
+    )
+    if not include_cdp:
+        raise HTTPException(status_code=403, detail="CDP live view requires automate permission")
+    local_base = _request_local_base(request)
+    ws_base = f"{session_links.ws_scheme_for(local_base)}://{local_base.split('://', 1)[-1]}"
+    cdp_ws = f"{ws_base}/api/profiles/{profile_id}/cdp"
+    cdp_list = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/cdp/json/list"
+    metrics = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/live-metrics"
+    interactive = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "interact"
+    )
+    html = session_views.render_cdp_live_html(
+        profile_id=profile_id,
+        profile_name=str(profile.get("name") or profile_id),
+        cdp_ws_url=cdp_ws,
+        cdp_list_url=cdp_list,
+        metrics_url=metrics,
+        interactive=interactive,
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/api/profiles/{profile_id}/open-links", response_model=ProfileOpenLinksResponse)
+async def get_profile_open_links(
+    profile_id: str,
+    request: Request,
+    prefer: str = Query(default="local"),
+    mode: str = Query(default="cdp"),
+):
+    """Steel-style local/cloud open URLs for a profile (extension/agent compatible)."""
+    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
+    prefer_key = prefer if prefer in {"local", "cloud"} else "local"
+    mode_key = mode if mode in {"cdp", "vnc", "shell"} else "cdp"
+    return _profile_open_links_response(
+        request, profile, identity, prefer=prefer_key, mode=mode_key
+    )
+
+
+@app.post("/api/extension/sessions/open", response_model=ExtensionOpenSessionResponse)
+async def extension_open_session(req: ExtensionOpenSessionRequest, request: Request):
+    """Launch (optional) and return local/cloud open links for one-click use."""
+    profile, identity = _require_profile_permission(request.scope, req.profile_id, "view")
+    already_running = req.profile_id in browser_mgr.running
+    launched = False
+    running = browser_mgr.running.get(req.profile_id)
+
+    if req.launch and not already_running:
+        _require_profile_permission(request.scope, req.profile_id, "operate")
+        try:
+            running = await browser_mgr.launch(profile)
+            launched = True
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid browser profile configuration")
+        except Exception:
+            logger.error("Extension open failed for profile %s", req.profile_id)
+            raise HTTPException(status_code=500, detail="Failed to launch browser")
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "profile.launch",
+            "allowed",
+            str(profile.get("sandbox_id") or "default"),
+            req.profile_id,
+        )
+        try:
+            _schedule_profile_health(profile, running, force=False)
+        except Exception as exc:
+            logger.error(
+                "Could not schedule profile health for %s (%s)",
+                req.profile_id,
+                type(exc).__name__,
+            )
+
+    links = _session_open_links(
+        request, profile, identity, prefer=req.prefer, mode=req.mode
+    )
+    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
+        identity, profile, "automate"
+    )
+    status = "running" if (already_running or launched or running) else "stopped"
+    return ExtensionOpenSessionResponse(
+        profile_id=req.profile_id,
+        status=status,
+        launched=launched,
+        already_running=already_running,
+        prefer=links.prefer,
+        mode=links.mode,
+        open_url=links.open_url,
+        links=links,
+        session_viewer_url=links.session_viewer_url,
+        vnc_fullscreen_url=links.vnc_fullscreen_url,
+        cdp_fullscreen_url=links.cdp_fullscreen_url,
+        live_url=links.live_url,
+        cdp_url=(f"/api/profiles/{req.profile_id}/cdp" if include_cdp and status == "running" else None),
+        vnc_ws_port=(
+            None
+            if ACCESS_CONTROL_ENABLED and not identity.is_admin
+            else (running.ws_port if running else None)
+        ),
+        display=(f":{running.display}" if running and (identity.is_admin or not ACCESS_CONTROL_ENABLED) else None),
+    )
+
+
+@app.get("/api/profiles/{profile_id}/live-metrics", response_model=LiveMetricsResponse)
+async def get_live_metrics(profile_id: str, request: Request):
+    """Poll CDP/VNC livestream metrics (fps, rtt, connection state)."""
+    _require_profile_permission(request.scope, profile_id, "view")
+    return LiveMetricsResponse(**stream_metrics.stream_metrics.snapshot(profile_id))
+
+
+@app.post("/api/profiles/{profile_id}/live-metrics", response_model=LiveMetricsResponse)
+async def post_live_metrics(profile_id: str, body: LiveMetricsSample, request: Request):
+    """Client/agent heartbeat for livestream quality metrics."""
+    _require_profile_permission(request.scope, profile_id, "view")
+    return LiveMetricsResponse(
+        **stream_metrics.stream_metrics.record(profile_id, body.model_dump())
+    )
 
 
 # ── System Status ─────────────────────────────────────────────────────────────
@@ -1414,6 +3095,20 @@ async def get_system_status(request: Request):
         running_count=len(browser_mgr.running),
         binary_version=CHROMIUM_VERSION,
         profiles_total=len(profiles),
+    )
+
+
+@app.get("/api/admin/live-diagnostics")
+async def get_live_diagnostics(request: Request) -> dict[str, Any]:
+    """Return administrator-only live launch and VNC counters.
+
+    Unmeasured timings are explicit ``unavailable`` values. The payload never
+    includes ports, display numbers, filesystem paths, URLs, proxy data, or
+    browser content. This endpoint does not start benchmarks or mutate runtime.
+    """
+    _require_admin(request.scope)
+    return live_diagnostics.live_diagnostics.snapshot(
+        running_profile_ids=set(browser_mgr.running.keys())
     )
 
 
@@ -1549,10 +3244,18 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
     # the server must not respond with a subprotocol the client didn't request.
     requested = websocket.scope.get("subprotocols", [])
     subprotocol = "binary" if "binary" in requested else None
-    await websocket.accept(subprotocol=subprotocol)
-
     import websockets
 
+    access_lease = _register_websocket_access(identity, profile_id)
+    diagnostics_session_id: int | None = None
+    try:
+        await websocket.accept(subprotocol=subprotocol)
+    except BaseException:
+        _unregister_websocket_access(access_lease)
+        raise
+
+    diagnostics_session_id = live_diagnostics.live_diagnostics.begin_vnc_session(profile_id)
+    framebuffer_detector = live_diagnostics.FirstFramebufferDetector()
     vnc_url = f"ws://127.0.0.1:{running.ws_port}/websockify"
 
     try:
@@ -1565,6 +3268,9 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
             ping_timeout=None,
             compression=None,  # KasmVNC can't handle permessage-deflate
         ) as vnc_ws:
+            live_diagnostics.live_diagnostics.mark_vnc_websocket_open(
+                profile_id, diagnostics_session_id
+            )
             logger.info(
                 "VNC proxy: connected to KasmVNC for %s (subprotocol=%s)",
                 profile_id, vnc_ws.subprotocol,
@@ -1628,27 +3334,38 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
 
             async def vnc_to_client():
                 count = 0
+                dropped = 0
+                rfb_filter = _RfbServerStreamFilter(can_interact=can_interact)
                 try:
                     async for msg in vnc_ws:
                         count += 1
-                        if isinstance(msg, bytes) and len(msg) > 0:
-                            msg_type = msg[0]
-                            if msg_type == 180:
-                                # KasmVNC BinaryClipboard → convert to standard
-                                # ServerCutText (type 3) so noVNC can handle it
-                                text = _parse_kasmvnc_clipboard(msg)
-                                if text:
-                                    logger.info("VNC proxy [v->c]: clipboard %d chars", len(text))
-                                    await websocket.send_bytes(_build_server_cut_text(text))
-                                else:
-                                    logger.info("VNC proxy [v->c]: dropped type 180 (no text/plain)")
+                        if isinstance(msg, bytes):
+                            filtered = rfb_filter.filter(msg)
+                            saw_framebuffer = False
+                            if diagnostics_session_id is not None and not framebuffer_detector.seen:
+                                saw_framebuffer = framebuffer_detector.observe(msg)
+                                if rfb_filter.last_saw_framebuffer:
+                                    saw_framebuffer = True
+                                    framebuffer_detector.seen = True
+                                if saw_framebuffer:
+                                    live_diagnostics.live_diagnostics.mark_vnc_first_framebuffer(
+                                        profile_id, diagnostics_session_id
+                                    )
+                            if rfb_filter.last_dropped_clipboard:
+                                dropped += 1
+                                logger.info(
+                                    "VNC proxy [v->c]: dropped clipboard message for %s",
+                                    identity.kind,
+                                )
+                            if not filtered:
                                 continue
-                            await websocket.send_bytes(msg)
-                        elif isinstance(msg, bytes):
-                            await websocket.send_bytes(msg)
+                            await websocket.send_bytes(filtered)
                         else:
+                            if not can_interact:
+                                dropped += 1
+                                continue
                             await websocket.send_text(msg)
-                    logger.info("VNC proxy [v->c]: KasmVNC stream ended after %d msgs (close_code=%s)", count, vnc_ws.close_code)
+                    logger.info("VNC proxy [v->c]: KasmVNC stream ended after %d msgs (%d dropped, close_code=%s)", count, dropped, vnc_ws.close_code)
                 except WebSocketDisconnect as exc:
                     logger.info("VNC proxy [v->c]: client disconnect code=%s after %d msgs", exc.code, count)
                 except Exception as exc:
@@ -1656,11 +3373,19 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
 
             c2v = asyncio.create_task(client_to_vnc(), name="c2v")
             v2c = asyncio.create_task(vnc_to_client(), name="v2c")
+            proxy_tasks = [c2v, v2c]
+            revocation_task = None
+            if access_lease is not None:
+                revocation_task = asyncio.create_task(
+                    access_lease.revoked.wait(), name="access-revocation"
+                )
+                proxy_tasks.append(revocation_task)
 
             done, pending = await asyncio.wait(
-                [c2v, v2c],
+                proxy_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            access_revoked = revocation_task is not None and revocation_task in done
             finished = [t.get_name() for t in done]
             still_running = [t.get_name() for t in pending]
 
@@ -1684,10 +3409,20 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
 
             for task in pending:
                 task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if access_revoked:
+                logger.info("VNC proxy: access revoked for %s", profile_id)
+                await websocket.close(code=4403, reason="Access revoked")
 
     except Exception as exc:
         logger.error("VNC proxy connect error for %s: %s: %s", profile_id, type(exc).__name__, exc)
     finally:
+        if diagnostics_session_id is not None:
+            live_diagnostics.live_diagnostics.end_vnc_session(
+                profile_id, diagnostics_session_id
+            )
+        _unregister_websocket_access(access_lease)
         try:
             await websocket.close()
         except Exception as exc:
@@ -1772,7 +3507,10 @@ async def cdp_json_list(profile_id: str, request: Request):
 
 
 async def _proxy_cdp_websocket(
-    websocket: WebSocket, target_url: str, label: str,
+    websocket: WebSocket,
+    target_url: str,
+    label: str,
+    access_lease: _WebSocketAccessLease | None = None,
 ) -> None:
     """Bidirectional WebSocket proxy between a FastAPI client and a CDP target.
 
@@ -1815,11 +3553,24 @@ async def _proxy_cdp_websocket(
 
             c2d = asyncio.create_task(client_to_cdp(), name="c2d")
             d2c = asyncio.create_task(cdp_to_client(), name="d2c")
+            proxy_tasks = [c2d, d2c]
+            revocation_task = None
+            if access_lease is not None:
+                revocation_task = asyncio.create_task(
+                    access_lease.revoked.wait(), name="access-revocation"
+                )
+                proxy_tasks.append(revocation_task)
             done, pending = await asyncio.wait(
-                [c2d, d2c], return_when=asyncio.FIRST_COMPLETED
+                proxy_tasks, return_when=asyncio.FIRST_COMPLETED
             )
+            access_revoked = revocation_task is not None and revocation_task in done
             for task in pending:
                 task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if access_revoked:
+                logger.info("%s: access revoked", label)
+                await websocket.close(code=4403, reason="Access revoked")
             logger.info("%s: disconnected", label)
 
     except Exception as exc:
@@ -1840,27 +3591,34 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
     access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
     if not access_result:
         return
+    _profile, identity = access_result
 
     running = browser_mgr.running.get(profile_id)
     if not running:
         await websocket.close(code=4004, reason="Profile not running")
         return
 
-    await websocket.accept()
-
-    # Get browser-level CDP WebSocket URL from Chrome
+    access_lease = _register_websocket_access(identity, profile_id)
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"http://127.0.0.1:{running.cdp_port}/json/version", timeout=5
-            )
-            ws_url = resp.json()["webSocketDebuggerUrl"]
-    except Exception as exc:
-        logger.error("CDP proxy: failed to get WS URL for %s: %s", profile_id, exc)
-        await websocket.close(code=4005, reason="CDP not available")
-        return
+        await websocket.accept()
 
-    await _proxy_cdp_websocket(websocket, ws_url, f"CDP proxy [{profile_id}]")
+        # Get browser-level CDP WebSocket URL from Chrome
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"http://127.0.0.1:{running.cdp_port}/json/version", timeout=5
+                )
+                ws_url = resp.json()["webSocketDebuggerUrl"]
+        except Exception as exc:
+            logger.error("CDP proxy: failed to get WS URL for %s: %s", profile_id, exc)
+            await websocket.close(code=4005, reason="CDP not available")
+            return
+
+        await _proxy_cdp_websocket(
+            websocket, ws_url, f"CDP proxy [{profile_id}]", access_lease
+        )
+    finally:
+        _unregister_websocket_access(access_lease)
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp/devtools/{path:path}")
@@ -1872,16 +3630,22 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
     if not access_result:
         return
+    _profile, identity = access_result
 
     running = browser_mgr.running.get(profile_id)
     if not running:
         await websocket.close(code=4004, reason="Profile not running")
         return
 
-    await websocket.accept()
-
-    target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
-    await _proxy_cdp_websocket(websocket, target_url, f"CDP page proxy [{profile_id}]")
+    access_lease = _register_websocket_access(identity, profile_id)
+    try:
+        await websocket.accept()
+        target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
+        await _proxy_cdp_websocket(
+            websocket, target_url, f"CDP page proxy [{profile_id}]", access_lease
+        )
+    finally:
+        _unregister_websocket_access(access_lease)
 
 
 # ── Static Frontend ───────────────────────────────────────────────────────────

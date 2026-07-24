@@ -67,14 +67,18 @@
 
   .mobile-split-root {
     @apply flex h-dvh w-screen max-w-full flex-col overflow-hidden;
+    box-sizing: border-box;
+    height: var(--mobile-visual-viewport-height, 100dvh);
+    max-height: var(--mobile-visual-viewport-height, 100dvh);
     padding-top: env(safe-area-inset-top);
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
+    transition: height 120ms ease-out, max-height 120ms ease-out;
   }
 
   .mobile-live-pane {
     @apply flex w-full min-w-0 shrink-0 flex-col border-b border-border bg-surface-1;
-    flex-basis: var(--mobile-live-pane-basis, 42%);
+    flex-basis: var(--mobile-live-pane-basis, 68%);
     min-height: 16rem;
     max-height: 82dvh;
   }
@@ -83,16 +87,22 @@
     min-height: clamp(20rem, 60dvh, 40rem);
   }
 
+  .mobile-live-pane-fit:not(.mobile-live-pane-fullscreen) {
+    flex: 0 0 var(--mobile-live-pane-basis, 68%);
+    min-height: 0;
+    max-height: none;
+  }
+
   .mobile-live-header {
-    @apply flex min-h-11 shrink-0 items-center justify-between gap-2 border-b border-border/70 bg-surface-1 px-2 py-0;
+    @apply flex min-h-9 shrink-0 items-center justify-between gap-1.5 border-b border-border/70 bg-surface-1 px-1.5 py-0;
   }
 
   .mobile-top-profile-select {
-    @apply h-11 w-full min-w-0 appearance-none truncate border-0 bg-transparent p-0 text-sm font-semibold text-gray-100 focus:outline-none focus:ring-0;
+    @apply h-9 w-full min-w-0 appearance-none truncate border-0 bg-transparent p-0 text-sm font-semibold text-gray-100 focus:outline-none focus:ring-0;
   }
 
   .mobile-connection-pill {
-    @apply inline-flex h-8 shrink-0 items-center rounded-md border px-2 text-[11px] font-semibold;
+    @apply inline-flex h-7 shrink-0 items-center rounded border px-1.5 text-[10px] font-semibold;
   }
 
   .mobile-connection-live {
@@ -121,6 +131,32 @@
     overscroll-behavior: contain;
   }
 
+  .mobile-workspace-collapsed .mobile-live-pane:not(.mobile-live-pane-fullscreen) {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+  }
+
+  .mobile-workspace-collapsed .mobile-live-pane-fit:not(.mobile-live-pane-fullscreen) {
+    flex: 0 0 var(--mobile-live-pane-basis, 68%);
+  }
+
+  .mobile-workspace-collapsed .mobile-control-pane {
+    flex: 0 0 auto;
+  }
+
+  /*
+   * When a real tool panel is open, reserve enough visible space for its
+   * primary action instead of leaving the editor below the fold. The live
+   * browser remains visible above it and returns to its dominant size as soon
+   * as the detail panel closes.
+   */
+  .mobile-detail-panel-open .mobile-live-pane:not(.mobile-live-pane-fullscreen) {
+    flex: 0 0 min(var(--mobile-live-pane-basis, 52%), 52%);
+    min-height: 0;
+    max-height: 52%;
+  }
+
   .mobile-browser-frame {
     @apply flex h-full min-h-48 flex-col overflow-hidden rounded-md border border-border bg-black;
     touch-action: manipulation;
@@ -147,12 +183,12 @@
   }
 
   .mobile-browser-content > .relative > div:first-child {
-    @apply min-h-10 px-1 py-0;
+    @apply min-h-9 px-1 py-0;
   }
 
   .mobile-browser-content > .relative > div:first-child button {
-    min-width: 44px;
-    min-height: 44px;
+    min-width: 36px;
+    min-height: 36px;
   }
 
   .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar {
@@ -160,13 +196,13 @@
   }
 
   .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar > div:first-child {
-    @apply pointer-events-auto min-w-0 rounded-md border border-border/70 bg-black/70 px-2 py-1 shadow-lg backdrop-blur;
-    min-height: 2rem;
+    @apply pointer-events-auto min-w-0 rounded border border-border/70 bg-black/70 px-1.5 py-0.5 shadow-lg backdrop-blur;
+    min-height: 1.75rem;
   }
 
   .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar > div:last-child {
-    @apply pointer-events-auto rounded-md border border-border/70 bg-black/70 p-0.5 shadow-lg backdrop-blur;
-    min-height: 2rem;
+    @apply pointer-events-auto rounded border border-border/70 bg-black/70 p-0 shadow-lg backdrop-blur;
+    min-height: 1.75rem;
   }
 
   .mobile-browser-content .profile-viewer-compact .profile-viewer-toolbar-hidden {
@@ -174,30 +210,30 @@
   }
 
   .mobile-vnc-tools-toggle {
-    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .profile-viewer-compact .mobile-vnc-tools-drawer {
-    @apply absolute right-2 top-12 z-40 grid gap-1 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
-    width: min(17rem, calc(100% - 1rem));
+    @apply absolute right-1.5 top-10 z-40 grid gap-1 rounded border border-border bg-surface-0/95 p-1.5 shadow-lg backdrop-blur;
+    width: min(15rem, calc(100% - 0.75rem));
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .mobile-vnc-tool-button {
-    @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-2 px-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-3 disabled:cursor-not-allowed disabled:text-gray-600 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex min-h-9 min-w-0 items-center justify-center gap-1 rounded border border-border bg-surface-2 px-1.5 text-[11px] font-medium text-gray-200 transition-colors hover:bg-surface-3 disabled:cursor-not-allowed disabled:text-gray-600 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-vnc-tools-portal {
-    @apply grid gap-2;
+    @apply grid gap-1;
   }
 
   .mobile-vnc-tools-portal-grid {
-    @apply grid gap-1.5;
-    grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+    @apply grid gap-1;
+    grid-template-columns: repeat(auto-fit, minmax(5rem, 1fr));
   }
 
   .mobile-vnc-paste-panel {
-    @apply rounded-md border border-border bg-surface-1 p-2;
+    @apply rounded border border-border bg-surface-1 p-1.5;
   }
 
   .mobile-browser-chrome {
@@ -213,15 +249,15 @@
   }
 
   .mobile-icon-button {
-    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-toolbar {
-    @apply flex items-center gap-2 border-b border-border px-3 py-3;
+    @apply flex items-center gap-1.5 border-b border-border px-2 py-1.5;
   }
 
   .mobile-session-bar {
-    @apply flex shrink-0 items-center gap-2 border-b border-border bg-surface-0 px-3 py-2;
+    @apply flex shrink-0 items-center gap-1.5 border-b border-border bg-surface-0 px-2 py-1;
   }
 
   .mobile-session-actions {
@@ -237,19 +273,19 @@
   }
 
   .mobile-session-select {
-    @apply h-11 w-full min-w-0 appearance-none truncate border-0 bg-transparent p-0 text-sm font-semibold text-gray-100 focus:outline-none focus:ring-0;
+    @apply h-9 w-full min-w-0 appearance-none truncate border-0 bg-transparent p-0 text-sm font-semibold text-gray-100 focus:outline-none focus:ring-0;
   }
 
   .mobile-session-run-button {
-    @apply inline-flex h-11 shrink-0 items-center gap-1.5 px-3;
+    @apply inline-flex h-9 shrink-0 items-center gap-1 px-2;
   }
 
   .mobile-select {
-    @apply h-11 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply h-9 w-full rounded border border-border bg-surface-2 px-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-session-bar .mobile-select {
-    @apply h-11 appearance-none border-0 bg-transparent p-0 text-sm font-semibold focus:ring-0;
+    @apply h-9 appearance-none border-0 bg-transparent p-0 text-sm font-semibold focus:ring-0;
   }
 
   .mobile-viewport-editor .input,
@@ -258,21 +294,32 @@
     min-height: 44px;
   }
 
+  .mobile-split-root input,
+  .mobile-split-root select,
+  .mobile-split-root textarea {
+    font-size: 16px;
+  }
+
   .mobile-viewport-editor {
-    @apply space-y-3 border-b border-border px-2 py-2;
+    @apply space-y-1 border-b border-border px-1.5 py-1.5;
   }
 
   .mobile-viewport-editor-note {
     @apply text-[11px] leading-4 text-gray-400;
   }
 
+  .mobile-viewport-apply-row {
+    @apply sticky z-20 flex items-center justify-between gap-2 border-t border-border bg-surface-0 py-0.5;
+    bottom: -0.375rem;
+  }
+
   .mobile-command-dock {
-    @apply grid shrink-0 gap-1 border-b border-border bg-surface-0 px-2 py-1;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    @apply grid shrink-0 gap-1;
+    grid-template-columns: repeat(auto-fit, minmax(2.75rem, 1fr));
   }
 
   .mobile-command-button {
-    @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-1.5 text-[11px] font-medium text-gray-300 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-11 w-11 min-w-11 items-center justify-center rounded border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-command-button-active {
@@ -280,15 +327,15 @@
   }
 
   .mobile-live-control-drawer {
-    @apply absolute inset-x-2 top-2 z-40 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
+    @apply absolute inset-x-1.5 top-1.5 z-40 rounded border border-border bg-surface-0/95 p-1.5 shadow-lg backdrop-blur;
   }
 
   .mobile-live-control-cluster {
-    @apply grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.75rem] items-stretch gap-2;
+    @apply grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.25rem] items-stretch gap-1;
   }
 
   .mobile-live-slider {
-    @apply flex min-w-0 flex-col justify-center rounded-md border border-border bg-surface-1 px-2 py-1;
+    @apply flex min-w-0 flex-col justify-center rounded border border-border bg-surface-1 px-1.5 py-0.5;
   }
 
   .mobile-live-slider-label {
@@ -300,15 +347,15 @@
   }
 
   .mobile-live-slider input[type="range"] {
-    @apply min-h-11 w-full accent-accent;
+    @apply min-h-9 w-full accent-accent;
   }
 
   .mobile-live-reset-button {
-    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-preset-button {
-    @apply min-h-11 shrink-0 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-xs text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply min-h-11 shrink-0 rounded border border-border bg-surface-2 px-2 py-1 text-[11px] text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-phone-fit-button {
@@ -316,28 +363,97 @@
   }
 
   .mobile-fullscreen-strip {
-    @apply absolute left-2 right-2 z-[60] grid items-stretch gap-1 rounded-md border border-border bg-surface-0/95 p-1 shadow-lg backdrop-blur;
-    grid-template-columns: repeat(auto-fit, minmax(4rem, 1fr));
-    top: max(0.5rem, env(safe-area-inset-top));
+    @apply absolute right-1.5 z-[60] grid w-auto items-stretch gap-0.5 rounded border border-border bg-surface-0/90 p-0.5 shadow-lg backdrop-blur;
+    grid-auto-flow: column;
+    grid-auto-columns: 2.75rem;
+    bottom: max(0.25rem, env(safe-area-inset-bottom));
   }
 
   .mobile-fullscreen-tools-panel {
-    @apply absolute left-2 right-2 z-[60] grid items-stretch gap-2 rounded-md border border-border bg-surface-0/95 p-2 shadow-lg backdrop-blur;
-    top: max(4rem, calc(env(safe-area-inset-top) + 3.5rem));
+    @apply absolute left-1.5 right-1.5 z-[60] grid items-stretch gap-1 rounded border border-border bg-surface-0/95 p-1 shadow-lg backdrop-blur;
+    bottom: max(3rem, calc(env(safe-area-inset-bottom) + 2.75rem));
   }
 
   .mobile-fullscreen-viewport-editor {
-    @apply absolute left-2 right-2 z-[60] overflow-y-auto rounded-md border border-border bg-surface-0/95 shadow-lg backdrop-blur;
-    top: max(4rem, calc(env(safe-area-inset-top) + 3.5rem));
-    max-height: calc(100dvh - 5rem);
+    @apply absolute left-1.5 right-1.5 z-[60] grid gap-1 space-y-0 overflow-hidden rounded border border-border bg-surface-0/95 p-1 shadow-lg backdrop-blur;
+    bottom: max(3rem, calc(env(safe-area-inset-bottom) + 2.75rem));
+    max-height: min(8.5rem, calc(var(--mobile-visual-viewport-height, 100dvh) - 4.25rem));
+  }
+
+  .mobile-fullscreen-sessions-panel {
+    @apply absolute left-1.5 right-1.5 z-[60] grid gap-1 overflow-y-auto rounded border border-border bg-surface-0/95 p-1 shadow-lg backdrop-blur;
+    bottom: max(3rem, calc(env(safe-area-inset-bottom) + 2.75rem));
+    max-height: min(12rem, calc(var(--mobile-visual-viewport-height, 100dvh) - 4.25rem));
+  }
+
+  .mobile-fullscreen-session {
+    @apply grid min-h-11 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded border border-border bg-surface-1 px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    box-shadow: inset 3px 0 0 var(--profile-accent, transparent);
+  }
+
+  .mobile-fullscreen-session-active {
+    @apply border-accent/50 bg-accent/10;
+  }
+
+  .mobile-fullscreen-session-main {
+    @apply flex min-w-0 items-center gap-2;
+  }
+
+  .mobile-fullscreen-session-state {
+    @apply rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-gray-400;
+  }
+
+  .mobile-fullscreen-fit-row {
+    @apply grid grid-cols-3 gap-1;
+  }
+
+  .mobile-fullscreen-fit-button {
+    @apply inline-flex min-h-11 items-center justify-center rounded border border-border bg-surface-2 px-1.5 text-[11px] font-medium text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-fullscreen-fit-button[aria-pressed="true"] {
+    @apply border-accent/50 bg-accent/20 text-indigo-100;
+  }
+
+  .mobile-fullscreen-viewport-fields {
+    @apply grid items-center gap-1;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  }
+
+  .mobile-fullscreen-viewport-fields label {
+    @apply min-w-0;
+  }
+
+  .mobile-fullscreen-viewport-fields .input {
+    @apply min-h-11 min-w-0 px-1.5 text-center text-base;
+  }
+
+  .mobile-fullscreen-viewport-times {
+    @apply text-xs text-gray-500;
+  }
+
+  .mobile-fullscreen-viewport-apply {
+    @apply min-h-11 shrink-0 px-2 text-[11px];
+  }
+
+  .mobile-fullscreen-preset-row {
+    @apply flex gap-1 overflow-x-auto;
+  }
+
+  .mobile-fullscreen-preset-row .mobile-preset-button {
+    @apply min-h-11 px-2;
+  }
+
+  .mobile-fullscreen-viewport-status {
+    @apply truncate px-0.5 text-[10px] leading-3 text-gray-500;
   }
 
   .mobile-fullscreen-zoom {
-    @apply grid min-w-0 flex-1 grid-cols-[auto_minmax(5rem,1fr)_3rem] items-center gap-2;
+    @apply grid min-w-0 flex-1 grid-cols-[auto_minmax(4rem,1fr)_2.5rem] items-center gap-1.5;
   }
 
   .mobile-fullscreen-zoom input[type="range"] {
-    @apply min-h-11 w-full accent-accent;
+    @apply min-h-9 w-full accent-accent;
   }
 
   .mobile-fullscreen-zoom output {
@@ -345,23 +461,28 @@
   }
 
   .mobile-fullscreen-action {
-    @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-2 px-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-11 w-11 min-w-0 items-center justify-center rounded border border-border bg-surface-2 text-[11px] font-medium text-gray-200 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-fullscreen-action > span {
+    @apply sr-only;
   }
 
   .mobile-header-tools {
-    @apply flex shrink-0 gap-1 border-b border-border bg-surface-0 px-2 py-1;
+    @apply flex shrink-0 gap-1 border-b border-border bg-surface-0 px-1.5 py-1;
   }
 
   .mobile-header-tool-button {
-    @apply inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-md border border-border bg-surface-1 px-3 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex min-h-9 flex-1 items-center justify-center gap-1 rounded border border-border bg-surface-1 px-2 text-[11px] font-medium text-gray-200 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-grid {
-    @apply grid grid-cols-1 gap-1.5 border-b border-border bg-surface-0 px-2 py-2;
+    @apply grid grid-cols-1 gap-1 border-b border-border bg-surface-0 px-1.5 py-1.5;
   }
 
   .mobile-grid-tile {
-    @apply grid min-h-11 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-border bg-surface-1 px-2 py-1.5 text-left transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply grid min-h-10 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded border border-border bg-surface-1 px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    box-shadow: inset 3px 0 0 var(--profile-accent, transparent);
   }
 
   .mobile-grid-tile-active {
@@ -381,16 +502,16 @@
   }
 
   .mobile-chat-header {
-    @apply flex shrink-0 items-center gap-2 px-3 py-1.5;
+    @apply flex shrink-0 items-center gap-1.5 px-2 py-1;
   }
 
   .mobile-chat-collapse-button {
-    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-1 text-gray-300 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border border-border bg-surface-1 text-gray-300 transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-chat-log {
-    @apply flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto border-t border-border px-3 py-2;
-    scroll-padding-bottom: 7rem;
+    @apply flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto border-t border-border px-2 py-1.5;
+    scroll-padding-bottom: 5rem;
   }
 
   .mobile-step-feed {
@@ -398,7 +519,7 @@
   }
 
   .mobile-step-toggle {
-    @apply grid min-h-11 w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-3 text-left text-xs transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply grid min-h-9 w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1.5 px-2 text-left text-xs transition-colors hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-step-count {
@@ -418,7 +539,7 @@
   }
 
   .mobile-message {
-    @apply max-w-[88%] rounded-md px-3 py-2 text-sm leading-5;
+    @apply max-w-[88%] rounded px-2 py-1.5 text-[13px] leading-4;
   }
 
   .mobile-message-task {
@@ -438,12 +559,17 @@
   }
 
   .mobile-chat-form {
-    @apply sticky bottom-0 z-10 flex w-full max-w-full shrink-0 flex-col gap-2 border-t border-border bg-surface-1 px-2 py-2;
-    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+    @apply relative z-10 grid w-full max-w-full shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-1 border-t border-border bg-surface-1 px-1.5 py-1;
+    padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
+  }
+
+  .mobile-chat-form textarea {
+    @apply min-h-11;
+    height: 2.75rem;
   }
 
   .mobile-composer-toolbar {
-    @apply grid w-full items-center gap-2;
+    @apply grid w-auto items-center gap-1;
     grid-template-columns: 2.75rem;
   }
 
@@ -452,49 +578,60 @@
   }
 
   .mobile-composer-button {
-    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border border-border bg-surface-2 text-gray-300 transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-logout-button {
-    @apply inline-flex h-11 min-w-11 items-center justify-center rounded-md px-3 text-xs text-gray-500 underline transition-colors hover:bg-surface-2 hover:text-gray-300 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex h-9 min-w-9 items-center justify-center rounded px-2 text-[11px] text-gray-500 underline transition-colors hover:bg-surface-2 hover:text-gray-300 focus:outline-none focus:ring-2 focus:ring-accent/50;
+  }
+
+  .mobile-account-row {
+    @apply flex min-h-9 items-center justify-between gap-1.5 border-t border-border pt-1;
   }
 
   .mobile-composer-select {
-    @apply h-11 w-full min-w-0 truncate rounded-md border border-border bg-surface-2 px-2 text-xs text-gray-200 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply h-9 w-full min-w-0 truncate rounded border border-border bg-surface-2 px-1.5 text-base text-gray-200 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-send-button {
-    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-accent text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-accent/50;
-  }
-
-  .mobile-chat-form-collapsed {
-    @apply grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2;
-  }
-
-  .mobile-chat-form-collapsed textarea {
-    @apply min-h-11;
-    height: 2.75rem;
-  }
-
-  .mobile-chat-form-collapsed .mobile-composer-toolbar {
-    @apply w-auto gap-1;
-    grid-template-columns: 2.75rem;
+    @apply inline-flex h-11 w-11 shrink-0 items-center justify-center rounded bg-accent text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-tools-sheet {
-    @apply grid shrink-0 gap-2 border-b border-border bg-surface-0 px-2 py-2;
-    max-height: min(44dvh, 24rem);
+    @apply grid shrink-0 gap-1 border-b border-border bg-surface-0 px-1.5 py-1.5;
+    max-height: min(34dvh, 16rem);
     overflow-y: auto;
     overscroll-behavior: contain;
+    scroll-padding-bottom: 2.75rem;
   }
 
   .mobile-tools-row {
-    @apply grid gap-1.5;
-    grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr));
+    @apply grid gap-1;
+    grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
+  }
+
+  .mobile-tools-row-primary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mobile-tool-section {
+    @apply grid gap-1;
+  }
+
+  .mobile-tool-section-header {
+    @apply flex items-center justify-between gap-2 px-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500;
+  }
+
+  .mobile-pinned-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .mobile-admin-tools {
+    @apply border-t border-border pt-1;
   }
 
   .mobile-tool-action {
-    @apply inline-flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-xs font-medium text-gray-200 transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-gray-600 focus:outline-none focus:ring-2 focus:ring-accent/50;
+    @apply inline-flex min-h-9 min-w-0 items-center justify-center gap-1 rounded border border-border bg-surface-1 px-1.5 text-[11px] font-medium text-gray-200 transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-gray-600 focus:outline-none focus:ring-2 focus:ring-accent/50;
   }
 
   .mobile-tool-action-primary {
@@ -506,7 +643,7 @@
   }
 
   .mobile-tool-select {
-    @apply grid min-h-11 min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded-md border border-border bg-surface-1 px-2 text-xs text-gray-300;
+    @apply grid min-h-9 min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-1.5 rounded border border-border bg-surface-1 px-1.5 text-[11px] text-gray-300;
   }
 
   .mobile-tool-select > span:last-child {
@@ -514,29 +651,108 @@
   }
 
   .mobile-tools-meta {
-    @apply text-[11px] leading-4 text-gray-500;
+    @apply text-[10px] leading-3 text-gray-500;
   }
 
   .mobile-run-settings {
-    @apply grid shrink-0 gap-2 border-t border-border bg-surface-1 px-3 py-2;
+    @apply grid shrink-0 gap-1 border-t border-border bg-surface-1 px-2 py-1.5;
   }
 
   .mobile-run-settings label {
-    min-height: 44px;
+    min-height: 36px;
   }
 
   .mobile-live-pane-fullscreen {
     @apply fixed inset-0 z-50 flex min-h-0 flex-col border-0 bg-black;
+    height: var(--mobile-visual-viewport-height, 100dvh);
     max-height: none;
     padding-top: env(safe-area-inset-top);
   }
 
   .mobile-live-pane-fullscreen .mobile-browser-wrap {
-    @apply min-h-0 flex-1 px-0 pb-0;
+    @apply flex min-h-0 flex-1 items-center justify-center px-0 pb-0;
+    position: static;
   }
 
   .mobile-live-pane-fullscreen .mobile-browser-frame {
-    @apply h-full min-h-0 rounded-none border-x-0 border-b-0;
+    @apply min-h-0 shrink-0 rounded-none border-x-0 border-b-0;
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
+    transition: width 120ms ease-out, height 120ms ease-out;
+  }
+
+  .mobile-live-pane-fullscreen[data-fullscreen-fit="width"] .mobile-browser-frame {
+    width: 100%;
+    height: auto;
+    max-height: none;
+    aspect-ratio: var(--mobile-remote-aspect, 16 / 9);
+  }
+
+  .mobile-live-pane-fullscreen[data-fullscreen-fit="width"] .mobile-browser-wrap {
+    align-items: center;
+    justify-content: flex-start;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .mobile-live-pane-fullscreen[data-fullscreen-fit="height"] .mobile-browser-frame {
+    width: auto;
+    height: 100%;
+    max-width: none;
+    aspect-ratio: var(--mobile-remote-aspect, 16 / 9);
+  }
+
+  .mobile-live-pane-fullscreen[data-fullscreen-fit="height"] .mobile-browser-wrap {
+    align-items: flex-start;
+    justify-content: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .mobile-keyboard-open .mobile-live-pane:not(.mobile-live-pane-fullscreen),
+  .mobile-keyboard-open.mobile-workspace-collapsed .mobile-live-pane-fit:not(.mobile-live-pane-fullscreen) {
+    flex: 0 1 clamp(7rem, 36%, 11rem);
+    min-height: 7rem;
+    max-height: 42%;
+  }
+
+  .mobile-split-root.mobile-keyboard-open {
+    transition: none;
+  }
+
+  .mobile-keyboard-open .mobile-live-header {
+    min-height: 2rem;
+  }
+
+  .mobile-keyboard-open .mobile-live-header p {
+    display: none;
+  }
+
+  .mobile-keyboard-open .mobile-browser-frame {
+    min-height: 0;
+  }
+
+  .mobile-keyboard-open .mobile-command-dock {
+    display: none;
+  }
+
+  .mobile-keyboard-open .mobile-control-pane {
+    min-height: 0;
+    flex: 1 1 auto;
+  }
+
+  .mobile-keyboard-open .mobile-tools-sheet {
+    max-height: min(45%, 12rem);
+  }
+
+  .mobile-keyboard-open .mobile-chat-log {
+    scroll-padding-bottom: 3rem;
+  }
+
+  .mobile-keyboard-open .mobile-chat-form {
+    padding-bottom: 0.25rem;
   }
 }
 
@@ -571,6 +787,39 @@
     flex: 1 1 42%;
   }
 
+  .mobile-workspace-collapsed .mobile-live-pane:not(.mobile-live-pane-fullscreen) {
+    flex: 1 1 auto;
+    max-width: none;
+  }
+
+  .mobile-workspace-collapsed .mobile-control-pane {
+    width: clamp(15rem, 32vw, 18rem);
+    flex: 0 0 clamp(15rem, 32vw, 18rem);
+  }
+
+  .mobile-split-root.mobile-keyboard-open {
+    flex-direction: column;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .mobile-keyboard-open .mobile-live-pane:not(.mobile-live-pane-fullscreen),
+  .mobile-keyboard-open.mobile-workspace-collapsed .mobile-live-pane:not(.mobile-live-pane-fullscreen) {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    flex: 0 1 clamp(6.5rem, 42%, 9rem);
+    border-right: 0;
+    border-bottom: 1px solid #2a2a2a;
+  }
+
+  .mobile-keyboard-open .mobile-control-pane,
+  .mobile-keyboard-open.mobile-workspace-collapsed .mobile-control-pane {
+    width: 100%;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
   .mobile-toolbar,
   .mobile-chat-form {
     padding-top: 0.5rem;
@@ -587,8 +836,8 @@
 @media (max-height: 700px) and (orientation: portrait) {
   /*
    * A short iPhone still needs the visible VNC controls, task history, and
-   * composer in one screen. Keep every tap target at 44px, but reclaim only
-   * surplus padding and the remote frame's desktop-sized minimum height.
+   * composer in one screen. Compact controls stay at 36px while inputs retain
+   * a 16px font to avoid Safari's disruptive focus zoom.
    */
   .mobile-live-pane-running {
     min-height: 0;
@@ -596,6 +845,10 @@
 
   .mobile-live-pane-running .mobile-browser-frame {
     min-height: 10.25rem;
+  }
+
+  .mobile-keyboard-open .mobile-live-pane-running .mobile-browser-frame {
+    min-height: 0;
   }
 
   .mobile-live-header,

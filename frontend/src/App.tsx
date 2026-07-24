@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Plus, Users, KeyRound } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import {
   api,
@@ -8,21 +8,82 @@ import {
   type AccessPermission,
   type Profile,
   type ProfileCreateData,
+  type ProfileHarness,
 } from "./lib/api";
 import { hasAccessPermission } from "./lib/accessPermissions";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
+import { CreateProfileFlow } from "./components/CreateProfileFlow";
 import { ProfileViewer } from "./components/ProfileViewer";
 import { LaunchButton } from "./components/LaunchButton";
 import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
 import { MobileSplitScreen } from "./components/mobile/MobileSplitScreen";
 import { AccessDashboard } from "./components/AccessDashboard";
+import { ProfileHealthSummary } from "./components/ProfileHealthSummary";
+import { BrowserUseHome } from "./components/BrowserUseHome";
+import { ProxyOverview } from "./components/ProxyOverview";
+import { ProfilesWorkspace } from "./components/ProfilesWorkspace";
+import { AccountsOverview } from "./components/AccountsOverview";
+import { LiveDevPanel } from "./components/LiveDevPanel";
+import { SessionStreamButtons } from "./components/SessionStreamButtons";
 
 type AuthState = "checking" | "required" | "ok" | "error";
-type View = "empty" | "create" | "edit" | "view" | "access";
+type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies" | "profiles" | "accounts";
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 type MobileConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
+const FIXED_PROJECTS = ["default", "proxied", "mobile", "research"] as const;
+
+interface ApplyProfileViewportOptions {
+  profile: Profile | null;
+  width: number;
+  height: number;
+  canManageProfiles: boolean;
+  canOperateProfile: boolean;
+  update: (id: string, data: Partial<ProfileCreateData>) => Promise<Profile | undefined>;
+  stop: (id: string) => Promise<boolean>;
+  launch: (id: string) => Promise<unknown>;
+}
+
+export async function applyProfileViewport({
+  profile,
+  width,
+  height,
+  canManageProfiles,
+  canOperateProfile,
+  update,
+  stop,
+  launch,
+}: ApplyProfileViewportOptions) {
+  if (!profile || !canManageProfiles) return false;
+  if (profile.status === "running" && !canOperateProfile) return false;
+
+  const updatedProfile = await update(profile.id, { screen_width: width, screen_height: height });
+  if (!updatedProfile) return false;
+  if (profile.status !== "running") return true;
+
+  const stopped = await stop(profile.id);
+  if (!stopped) return false;
+
+  const result = await launch(updatedProfile.id);
+  return !!result;
+}
+
+interface ToggleProfilePinOptions {
+  profile: Profile | null;
+  canManageProfiles: boolean;
+  update: (id: string, data: Partial<ProfileCreateData>) => Promise<Profile | undefined>;
+}
+
+export async function toggleProfilePin({
+  profile,
+  canManageProfiles,
+  update,
+}: ToggleProfilePinOptions) {
+  if (!profile || !canManageProfiles) return false;
+  const updated = await update(profile.id, { pinned: !profile.pinned });
+  return Boolean(updated);
+}
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
@@ -107,25 +168,74 @@ interface AppContentProps {
 }
 
 function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: AppContentProps) {
-  const { profiles, loading, error, create, update, remove, launch, stop } = useProfiles();
+  const { profiles, loading, error, refresh, create, update, remove, launch, stop } = useProfiles();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [view, setView] = useState<View>("empty");
+  const [view, setView] = useState<View>("home");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileFullscreenOpen, setMobileFullscreenOpen] = useState(false);
   const [mobileBrowserZoom, setMobileBrowserZoom] = useState(100);
   const [mobileRemoteToolsOpen, setMobileRemoteToolsOpen] = useState(false);
   const [mobileConnectionStatus, setMobileConnectionStatus] = useState<MobileConnectionStatus>("connecting");
+  const [projectId, setProjectId] = useState<string>("default");
+  const [harness, setHarness] = useState<ProfileHarness>("browser-use");
+  const [taskDraft, setTaskDraft] = useState("");
   const isMobile = useIsMobile();
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
   const canManageProfiles = isAdministrator(identity);
   const canOperateSelected = Boolean(selected && canAccess(identity, selected, "operate"));
   const canInteractSelected = Boolean(selected && canAccess(identity, selected, "interact"));
+  const projects = Array.from(
+    new Set<string>([
+      ...FIXED_PROJECTS,
+      ...profiles.map((profile) => profile.project_id || "default"),
+    ]),
+  );
+
+  useEffect(() => {
+    if (!isMobile || loading || profiles.length === 0) return;
+
+    const selectedStillExists = selectedId
+      ? profiles.some((profile) => profile.id === selectedId)
+      : false;
+    if (selectedStillExists) return;
+
+    const nextProfile = profiles.find((profile) => profile.status === "running") ?? profiles[0];
+    if (!nextProfile) return;
+
+    setSelectedId(nextProfile.id);
+    setView("view");
+  }, [isMobile, loading, profiles, selectedId]);
+
+  // Deep-link from the Cloak Profile Sync extension (?profile=<id>).
+  useEffect(() => {
+    if (loading || profiles.length === 0) return;
+    const params = new URLSearchParams(window.location.search);
+    const profileParam = params.get("profile");
+    if (!profileParam) return;
+    const match = profiles.find((profile) => profile.id === profileParam);
+    if (!match) return;
+    setSelectedId(match.id);
+    if (match.project_id) setProjectId(match.project_id);
+    if (match.harness) setHarness(match.harness);
+    const viewParam = params.get("view");
+    const wantFullscreen = params.get("fullscreen") === "1";
+    if (match.status === "running") {
+      setView("view");
+      if (wantFullscreen || viewParam === "vnc") {
+        setMobileFullscreenOpen(true);
+      }
+    } else {
+      setView("home");
+    }
+  }, [loading, profiles]);
 
   const handleSelect = useCallback((id: string) => {
     setSelectedId(id);
     const profile = profiles.find((p) => p.id === id);
-    setView(isMobile ? "view" : profile?.status === "running" ? "view" : canManageProfiles ? "edit" : "empty");
+    if (profile?.project_id) setProjectId(profile.project_id);
+    if (profile?.harness) setHarness(profile.harness);
+    setView(isMobile ? "view" : profile?.status === "running" ? "view" : canManageProfiles ? "edit" : "home");
   }, [canManageProfiles, isMobile, profiles]);
 
   const handleNew = useCallback(() => {
@@ -136,12 +246,16 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
 
   const handleCreate = useCallback(async (data: ProfileCreateData) => {
     if (!canManageProfiles) return;
-    const profile = await create(data);
+    const profile = await create({
+      ...data,
+      project_id: data.project_id || projectId,
+      harness: data.harness || harness,
+    });
     if (profile) {
       setSelectedId(profile.id);
       setView("edit");
     }
-  }, [canManageProfiles, create]);
+  }, [canManageProfiles, create, harness, projectId]);
 
   const handleUpdate = useCallback(async (data: ProfileCreateData) => {
     if (!selectedId || !canManageProfiles) return;
@@ -152,7 +266,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     if (!selectedId || !canManageProfiles) return;
     await remove(selectedId);
     setSelectedId(null);
-    setView("empty");
+    setView("home");
   }, [canManageProfiles, selectedId, remove]);
 
   const handleLaunch = useCallback(async () => {
@@ -164,21 +278,38 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const handleStop = useCallback(async () => {
     if (!selectedId || !canAccess(identity, profiles.find((profile) => profile.id === selectedId) ?? null, "operate")) return;
     await stop(selectedId);
-    setView("edit");
-  }, [identity, profiles, selectedId, stop]);
+    setView(canManageProfiles ? "edit" : "home");
+  }, [canManageProfiles, identity, profiles, selectedId, stop]);
 
   const handleVncDisconnect = useCallback(() => {
-    setView(canManageProfiles ? "edit" : "empty");
-  }, [canManageProfiles]);
+    setView(isMobile ? "view" : canManageProfiles ? "edit" : "home");
+  }, [canManageProfiles, isMobile]);
 
   const handleViewportApply = useCallback(async (width: number, height: number) => {
-    if (!selectedId || !canManageProfiles) return false;
-    const profile = await update(selectedId, { screen_width: width, screen_height: height });
-    return !!profile;
-  }, [canManageProfiles, selectedId, update]);
+    return applyProfileViewport({
+      profile: selected,
+      width,
+      height,
+      canManageProfiles,
+      canOperateProfile: canOperateSelected,
+      update,
+      stop,
+      launch,
+    });
+  }, [canManageProfiles, canOperateSelected, launch, selected, stop, update]);
+
+
+  const handleTogglePin = useCallback(async (id: string) => {
+    const profile = profiles.find((candidate) => candidate.id === id) ?? null;
+    await toggleProfilePin({
+      profile,
+      canManageProfiles,
+      update,
+    });
+  }, [canManageProfiles, profiles, update]);
 
   if (view === "access" && canManageProfiles && accessControlEnabled) {
-    return <AccessDashboard onClose={() => setView(selected ? "view" : "empty")} />;
+    return <AccessDashboard onClose={() => setView(selected ? "view" : "home")} />;
   }
 
   if (loading) {
@@ -288,16 +419,78 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
 
   return (
     <div className="h-screen flex">
-      {/* Sidebar */}
+      {/* Compact Browser-Use style sidebar */}
       {sidebarOpen && (
-        <div className="w-64 border-r border-border bg-surface-1 flex-shrink-0">
-          <ProfileList
-            profiles={profiles}
-            selectedId={selectedId}
-            onSelect={handleSelect}
-            onNew={handleNew}
-            canCreate={canManageProfiles}
-          />
+        <div className="w-48 border-r border-border bg-surface-1 flex-shrink-0 flex flex-col">
+          <div className="border-b border-border px-2 py-2">
+            <div className="px-1 text-xs font-semibold tracking-tight">Browser Use</div>
+            <div className="mt-1.5 space-y-0.5">
+              <button
+                type="button"
+                onClick={() => setView("home")}
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                  view === "home" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <LayoutGrid className="h-3 w-3" />
+                Agent home
+              </button>
+              {canManageProfiles ? (
+                <button
+                  type="button"
+                  onClick={() => setView("proxies")}
+                  className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                    view === "proxies" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                  }`}
+                >
+                  <Globe2 className="h-3 w-3" />
+                  Proxies
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setView("profiles")}
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                  view === "profiles" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <Users className="h-3 w-3" />
+                Profiles
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("accounts")}
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                  view === "accounts" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <KeyRound className="h-3 w-3" />
+                Accounts
+              </button>
+              {canManageProfiles ? (
+                <button
+                  type="button"
+                  onClick={handleNew}
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] text-gray-400 hover:bg-surface-2"
+                >
+                  <Plus className="h-3 w-3" />
+                  New profile
+                </button>
+              ) : null}
+            </div>
+          </div>
+          <div className="min-h-0 flex-1">
+            <ProfileList
+              profiles={profiles}
+              selectedId={selectedId}
+              onSelect={handleSelect}
+              onNew={handleNew}
+              canCreate={canManageProfiles}
+              canManage={canManageProfiles}
+              onTogglePin={handleTogglePin}
+              compact
+            />
+          </div>
         </div>
       )}
 
@@ -313,16 +506,24 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             >
               {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
             </button>
-            {selected && (
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && (
               <div className="flex items-center gap-2">
                 <StatusIndicator status={selected.status} size="md" />
                 <span className="text-sm font-medium">{selected.name}</span>
                 <span className="text-xs text-gray-500 capitalize">{selected.platform}</span>
+                <ProfileHealthSummary
+                  profileId={selected.id}
+                  canRun={canOperateSelected}
+                  running={selected.status === "running"}
+                />
               </div>
             )}
           </div>
           <div className="flex items-center gap-2">
-            {selected && (
+            {selected && selected.status === "running" ? (
+              <SessionStreamButtons profileId={selected.id} running />
+            ) : null}
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && (
               canOperateSelected && (
               <LaunchButton
                 status={selected.status}
@@ -365,8 +566,97 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           </div>
         )}
 
+        {selected && view === "view" ? (
+          <LiveDevPanel
+            profileId={selected.id}
+            running={selected.status === "running"}
+            connectionStatus={mobileConnectionStatus}
+          />
+        ) : null}
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto overscroll-contain">
+          {view === "home" && (
+            <BrowserUseHome
+              projects={projects}
+              projectId={projectId}
+              harness={harness}
+              profiles={profiles}
+              task={taskDraft}
+              canManage={canManageProfiles}
+              selectedProfile={selected}
+              onProjectChange={setProjectId}
+              onHarnessChange={setHarness}
+              onTaskChange={setTaskDraft}
+              onOpenProxies={() => setView("proxies")}
+              onOpenProfiles={() => setView("profiles")}
+              onOpenAccounts={() => setView("accounts")}
+              onCreateProjectProfile={handleNew}
+              onOpenSettings={(profileId) => {
+                if (!profileId) {
+                  handleNew();
+                  return;
+                }
+                setSelectedId(profileId);
+                setView(canManageProfiles ? "edit" : "home");
+              }}
+              onLaunchSelected={async () => {
+                if (!selected) return;
+                if (selected.status === "running") {
+                  setView("view");
+                  return;
+                }
+                await handleLaunch();
+              }}
+            />
+          )}
+
+          {view === "proxies" && canManageProfiles && (
+            <ProxyOverview
+              harness={harness}
+              projectId={projectId || "proxied"}
+              onProfileCreated={async (profile) => {
+                await refresh();
+                setSelectedId(profile.id);
+                setProjectId(profile.project_id || "proxied");
+                setHarness(profile.harness);
+                setView("edit");
+              }}
+            />
+          )}
+
+          {view === "profiles" && (
+            <ProfilesWorkspace
+              profiles={profiles}
+              selectedId={selectedId}
+              canManage={canManageProfiles}
+              onSelect={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+              }}
+              onEdit={(profileId) => {
+                setSelectedId(profileId);
+                setView(canManageProfiles ? "edit" : "profiles");
+              }}
+            />
+          )}
+
+          {view === "accounts" && (
+            <AccountsOverview
+              profiles={profiles}
+              selectedId={selectedId}
+              onSelect={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+                setView(canManageProfiles ? "edit" : "accounts");
+              }}
+            />
+          )}
+
           {view === "empty" && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
@@ -376,10 +666,16 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           )}
 
           {view === "create" && canManageProfiles && (
-            <ProfileForm
-              profile={null}
+            <CreateProfileFlow
+              projectId={projectId}
+              harness={harness}
+              onCancel={() => setView("home")}
               onSave={handleCreate}
-              onCancel={() => setView("empty")}
+              onCreated={async (profileId) => {
+                await refresh();
+                setSelectedId(profileId);
+                setView("edit");
+              }}
             />
           )}
 
@@ -390,7 +686,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
               onDelete={handleDelete}
               onCancel={() => {
                 setSelectedId(null);
-                setView("empty");
+                setView("home");
               }}
             />
           )}

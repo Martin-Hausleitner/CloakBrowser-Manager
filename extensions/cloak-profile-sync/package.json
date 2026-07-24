@@ -1,0 +1,6 @@
+{
+  "name": "cloak-profile-sync",
+  "private": true,
+  "type": "module",
+  "description": "Chrome extension sources — load unpacked via manifest.json, not npm."
+}

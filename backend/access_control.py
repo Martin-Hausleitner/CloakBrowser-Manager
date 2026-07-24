@@ -44,6 +44,7 @@ class AccessIdentity:
     display_name: str
     role: str
     grants: tuple[dict[str, str], ...] = ()
+    group_ids: tuple[str, ...] = ()
 
     @property
     def is_admin(self) -> bool:
@@ -56,6 +57,8 @@ class AccessIdentity:
             "display_name": self.display_name,
             "role": self.role,
             "grants": [dict(grant) for grant in self.grants],
+            "group_ids": list(self.group_ids),
+            "effective_grants": [dict(grant) for grant in self.grants],
         }
 
 
@@ -213,7 +216,8 @@ def resolve_identity(scope: Scope, auth_token: str | None) -> AccessIdentity | N
                         id=user["id"],
                         display_name=user["username"],
                         role=user["role"],
-                        grants=tuple(user.get("grants", [])),
+                        grants=tuple(user.get("effective_grants", user.get("grants", []))),
+                        group_ids=tuple(user.get("group_ids", [])),
                     )
 
         if bearer and bearer.startswith("cbm_agent_"):

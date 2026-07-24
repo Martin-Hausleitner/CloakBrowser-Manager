@@ -15,8 +15,10 @@ from typing import Any
 from cloakbrowser import launch_persistent_context_async
 
 if __package__:
+    from . import live_diagnostics
     from .vnc_manager import VNCManager
 else:  # Support importing browser_manager as a top-level module.
+    import live_diagnostics
     from vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
@@ -69,15 +71,20 @@ def _validate_proxy(url: str) -> None:
     """Validate that a normalized proxy URL has scheme, host, and port."""
     from urllib.parse import urlparse
 
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ValueError("Invalid proxy URL") from None
     if parsed.scheme not in ("http", "https", "socks5"):
         raise ValueError(
             f"Invalid proxy scheme '{parsed.scheme}'. Must be http, https, or socks5."
         )
-    if not parsed.hostname:
-        raise ValueError(f"Proxy URL missing hostname: {url}")
-    if not parsed.port:
-        raise ValueError(f"Proxy URL missing port: {url}")
+    if not hostname:
+        raise ValueError("Proxy URL missing hostname")
+    if not port:
+        raise ValueError("Proxy URL missing port")
 
 
 def _init_profile_defaults(user_data_dir: Path, search_engine: str | None = None) -> None:
@@ -192,6 +199,7 @@ class BrowserManager:
         self._launching: set[str] = set()  # profile IDs currently being launched
         self.vnc = VNCManager()
         self._lock = asyncio.Lock()
+        self._process_env_lock = asyncio.Lock()
         self._next_cdp_port = BASE_CDP_PORT
         self._auto_launch_task: asyncio.Task | None = None
 
@@ -203,6 +211,7 @@ class BrowserManager:
             if profile_id in self.running or profile_id in self._launching:
                 raise RuntimeError(f"Profile {profile_id} is already running")
             self._launching.add(profile_id)
+            live_diagnostics.live_diagnostics.mark_launch_started(profile_id)
 
         display, ws_port = await self.vnc.allocate()
 
@@ -211,6 +220,7 @@ class BrowserManager:
         except ValueError:
             async with self._lock:
                 self._launching.discard(profile_id)
+            live_diagnostics.live_diagnostics.mark_launch_failed(profile_id)
             await self.vnc.stop_vnc(display)
             raise
 
@@ -239,30 +249,47 @@ class BrowserManager:
 
             # Normalize proxy format (host:port:user:pass → http://user:pass@host:port)
             raw_proxy = profile.get("proxy") or None
+            if isinstance(raw_proxy, str) and not raw_proxy.strip():
+                raw_proxy = None
             proxy = _normalize_proxy(raw_proxy) if raw_proxy else None
+            if raw_proxy and not proxy:
+                raise ValueError("Profile proxy is configured but could not be applied")
             if proxy:
                 _validate_proxy(proxy)
+                # Also pin Chromium proxy flags so Playwright env gaps cannot
+                # silently launch without the assigned proxy.
+                extra_args.append(f"--proxy-server={proxy}")
 
-            # Launch CloakBrowser on that display
-            # DISPLAY is passed via env kwarg to avoid process-wide os.environ mutation
-            context = await launch_persistent_context_async(
-                user_data_dir=profile["user_data_dir"],
-                headless=bool(profile.get("headless", False)),
-                proxy=proxy,
-                args=extra_args,
-                timezone=profile.get("timezone") or None,
-                locale=profile.get("locale") or None,
-                humanize=bool(profile.get("humanize", False)),
-                human_preset=profile.get("human_preset", "default"),
-                geoip=bool(profile.get("geoip", False)),
-                color_scheme=profile.get("color_scheme") or None,
-                user_agent=profile.get("user_agent") or None,
-                viewport={
-                    "width": profile.get("screen_width", 1920),
-                    "height": profile.get("screen_height", 1080) - 133,
-                },
-                env={**os.environ, "DISPLAY": f":{display}"},
-            )
+            # Some CloakBrowser builds do not forward Playwright's env kwarg to
+            # Chromium, so set DISPLAY around the launch and restore it after.
+            display_value = f":{display}"
+            async with self._process_env_lock:
+                previous_display = os.environ.get("DISPLAY")
+                os.environ["DISPLAY"] = display_value
+                try:
+                    context = await launch_persistent_context_async(
+                        user_data_dir=profile["user_data_dir"],
+                        headless=bool(profile.get("headless", False)),
+                        proxy=proxy,
+                        args=extra_args,
+                        timezone=profile.get("timezone") or None,
+                        locale=profile.get("locale") or None,
+                        humanize=bool(profile.get("humanize", False)),
+                        human_preset=profile.get("human_preset", "default"),
+                        geoip=bool(profile.get("geoip", False)),
+                        color_scheme=profile.get("color_scheme") or None,
+                        user_agent=profile.get("user_agent") or None,
+                        viewport={
+                            "width": profile.get("screen_width", 1920),
+                            "height": profile.get("screen_height", 1080) - 133,
+                        },
+                        env={**os.environ, "DISPLAY": display_value},
+                    )
+                finally:
+                    if previous_display is None:
+                        os.environ.pop("DISPLAY", None)
+                    else:
+                        os.environ["DISPLAY"] = previous_display
 
             await self._fit_window_to_vnc(
                 context,
@@ -309,6 +336,7 @@ class BrowserManager:
             async with self._lock:
                 self.running[profile_id] = running
                 self._launching.discard(profile_id)
+            live_diagnostics.live_diagnostics.mark_launch_succeeded(profile_id)
 
             logger.info(
                 "Launched profile %s on display :%d (ws_port=%d, cdp_port=%d)",
@@ -320,6 +348,7 @@ class BrowserManager:
         except BaseException:
             async with self._lock:
                 self._launching.discard(profile_id)
+            live_diagnostics.live_diagnostics.mark_launch_failed(profile_id)
             await self.vnc.stop_vnc(display)
             raise
 
@@ -330,6 +359,7 @@ class BrowserManager:
 
         if running:
             logger.info("Browser closed for profile %s, cleaning up", profile_id)
+            live_diagnostics.live_diagnostics.mark_stopped(profile_id)
             await self.vnc.stop_vnc(running.display)
 
     async def stop(self, profile_id: str):
@@ -342,6 +372,7 @@ class BrowserManager:
             return
 
         logger.info("Stopping profile %s", profile_id)
+        live_diagnostics.live_diagnostics.mark_stopped(profile_id)
 
         try:
             await running.context.close()
@@ -435,8 +466,8 @@ class BrowserManager:
                 logger.info("Auto-launched profile %s (%s)", profile["name"], profile["id"])
             except Exception as exc:
                 logger.error(
-                    "Auto-launch failed for profile %s (%s): %s",
-                    profile["name"], profile["id"], exc,
+                    "Auto-launch failed for profile %s (%s) (%s)",
+                    profile["name"], profile["id"], type(exc).__name__,
                 )
         logger.info("Auto-launch complete: %d running", len(self.running))
 

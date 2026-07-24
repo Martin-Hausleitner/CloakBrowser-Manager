@@ -12,10 +12,10 @@ describe("LoginPage", () => {
   it("keeps every account-login control at the shared mobile touch-target height", () => {
     render(<LoginPage accessControlEnabled onSuccess={vi.fn()} />);
 
-    expect(screen.getByLabelText("Username").className).toContain("min-h-11");
-    expect(screen.getByLabelText("Password").className).toContain("min-h-11");
-    expect(screen.getByRole("button", { name: "Sign in" }).className).toContain("min-h-11");
-    expect(screen.getByRole("button", { name: "Use an administrator token" }).className).toContain("min-h-11");
+    expect(screen.getByLabelText("Username").className).toContain("min-h-9");
+    expect(screen.getByLabelText("Password").className).toContain("min-h-9");
+    expect(screen.getByRole("button", { name: "Sign in" }).className).toContain("min-h-9");
+    expect(screen.getByRole("button", { name: "Use an administrator token" }).className).toContain("min-h-9");
   });
 
   it("keeps token mode touch-friendly after switching authentication modes", () => {
@@ -23,7 +23,7 @@ describe("LoginPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Use an administrator token" }));
 
-    expect(screen.getByPlaceholderText("Access token").className).toContain("min-h-11");
-    expect(screen.getByRole("button", { name: "Unlock" }).className).toContain("min-h-11");
+    expect(screen.getByPlaceholderText("Access token").className).toContain("min-h-9");
+    expect(screen.getByRole("button", { name: "Unlock" }).className).toContain("min-h-9");
   });
 });

@@ -2,17 +2,92 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import struct
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from backend import access_control as access
 from backend import database as db
-from backend.main import _RfbClientStreamFilter, _filter_rfb_viewer_messages
+from backend.main import (
+    _RfbClientStreamFilter,
+    _build_server_cut_text,
+    _filter_rfb_viewer_messages,
+)
+
+
+class _BlockingWebSocketUpstream:
+    """Minimal fake upstream that stays open until the proxy cancels it."""
+
+    def __init__(
+        self,
+        subprotocol: str | None = None,
+        messages: tuple[bytes | str, ...] = (),
+    ):
+        self.subprotocol = subprotocol
+        self.close_code = None
+        self.sent: list[bytes | str] = []
+        self.messages = list(messages)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        self.close_code = 1000
+        return False
+
+    async def send(self, message: bytes | str):
+        self.sent.append(message)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.messages:
+            return self.messages.pop(0)
+        await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+
+def _receive_websocket_message(session, timeout: float = 2.0):
+    async def receive_with_timeout():
+        with anyio.fail_after(timeout):
+            return await session._send_rx.receive()
+
+    return session.portal.call(receive_with_timeout)
+
+
+def _kasm_server_clipboard(text: str) -> bytes:
+    mime = b"text/plain"
+    payload = text.encode("utf-8")
+    return (
+        bytes([180, 0])
+        + b"\0" * 4
+        + bytes([len(mime)])
+        + mime
+        + struct.pack(">I", len(payload))
+        + payload
+    )
+
+
+def _rfb_server_handshake() -> bytes:
+    name = b"Viewer test desktop"
+    pixel_format = struct.pack(
+        ">BBBBHHHBBBxxx", 32, 24, 0, 1, 255, 255, 255, 16, 8, 0
+    )
+    server_init = (
+        struct.pack(">HH", 1024, 768)
+        + pixel_format
+        + struct.pack(">I", len(name))
+        + name
+    )
+    return b"RFB 003.008\n" + b"\x01\x01" + b"\0\0\0\0" + server_init
 
 
 @pytest.fixture()
@@ -37,6 +112,43 @@ def create_scoped_profiles():
     alpha = db.create_profile("Alpha browser", sandbox_id="alpha", proxy="http://secret-proxy:8080")
     beta = db.create_profile("Beta browser", sandbox_id="beta", proxy="http://other-proxy:8080")
     return alpha, beta
+
+
+def test_admin_access_sandbox_summary_includes_only_redacted_organization_context(
+    client_access: TestClient,
+):
+    db.create_profile(
+        "Checkout QA",
+        sandbox_id="research",
+        project_id="commerce",
+        folder_path="checkout/us",
+        proxy="http://secret-proxy-user:secret-password@example.invalid:8080",
+        fingerprint_seed=12345,
+        launch_args=["--private-diagnostic-flag"],
+    )
+    db.create_profile(
+        "Payments QA",
+        sandbox_id="research",
+        project_id="commerce",
+        folder_path="payments",
+    )
+
+    response = client_access.get("/api/access/sandboxes", headers=bootstrap_headers())
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "sandbox_id": "research",
+            "profile_count": 2,
+            "project_ids": ["commerce"],
+            "folder_paths": ["checkout/us", "payments"],
+            "profile_names": ["Checkout QA", "Payments QA"],
+        }
+    ]
+    serialized = json.dumps(response.json())
+    assert "secret-password" not in serialized
+    assert "private-diagnostic" not in serialized
+    assert "fingerprint_seed" not in serialized
 
 
 def test_password_hashing_is_salted_and_verifiable():
@@ -67,13 +179,20 @@ def test_viewer_rfb_filter_allows_only_display_negotiation():
 def test_viewer_rfb_filter_keeps_safe_encoding_negotiation():
     # Viewers still need the normal noVNC display-negotiation sequence.  This
     # catches a regression where a view grant would connect but remain black.
-    set_encodings = struct.pack(">BBHii", 2, 0, 2, 7, -239)
+    advertised = [7, 16, 21, -260, 1, 0, -239, -224, -308, -307, -258]
+    set_encodings = struct.pack(">BBH", 2, 0, len(advertised)) + b"".join(
+        struct.pack(">i", encoding) for encoding in advertised
+    )
+    viewer_encodings = [16, 1, 0, -239, -224]
+    expected_encodings = struct.pack(">BBH", 2, 0, len(viewer_encodings)) + b"".join(
+        struct.pack(">i", encoding) for encoding in viewer_encodings
+    )
     frame_request = bytes([3]) + b"\0" * 9
     key_event = bytes([4]) + b"\0" * 7
 
     filtered = _filter_rfb_viewer_messages(set_encodings + frame_request + key_event)
 
-    assert filtered == set_encodings + frame_request
+    assert filtered == expected_encodings + frame_request
 
 
 def test_viewer_rfb_stream_filter_drops_appended_input_in_early_frames():
@@ -127,7 +246,8 @@ def test_viewer_rfb_stream_filter_preserves_handshake_and_display_negotiation():
     version = b"RFB 003.008\n"
     security_none = b"\x01"
     client_init = b"\x01"
-    set_encodings = struct.pack(">BBHii", 2, 0, 2, 7, -239)
+    set_encodings = struct.pack(">BBHiii", 2, 0, 3, 7, 16, -239)
+    viewer_encodings = struct.pack(">BBHii", 2, 0, 2, 16, -239)
     frame_request = bytes([3]) + b"\0" * 9
     key_event = bytes([4]) + b"\0" * 7
 
@@ -136,7 +256,7 @@ def test_viewer_rfb_stream_filter_preserves_handshake_and_display_negotiation():
     assert rfb_filter.filter(security_none) == security_none
     assert rfb_filter.filter(client_init) == client_init
     assert rfb_filter.filter(set_encodings + frame_request + key_event) == (
-        set_encodings + frame_request
+        viewer_encodings + frame_request
     )
 
 
@@ -196,7 +316,393 @@ def test_scoped_viewer_only_sees_granted_sandbox_and_no_sensitive_config(client_
     assert ("profile.permission.interact", "alpha", alpha["id"], "denied") in denied_events
 
 
-def test_operator_can_operate_only_its_scoped_profile(client_access: TestClient):
+def test_admin_can_create_list_and_update_access_group(client_access: TestClient):
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "group-member",
+            "password": "group-member-password-123",
+            "grants": [],
+        },
+    ).json()
+
+    created = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Alpha viewers",
+            "description": "Alpha sandbox access",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    )
+    assert created.status_code == 201
+    group = created.json()
+    assert group["name"] == "Alpha viewers"
+    assert group["member_user_ids"] == [user["id"]]
+    assert group["grants"] == [{"sandbox_id": "alpha", "permission": "view"}]
+
+    listed = client_access.get("/api/access/groups", headers=bootstrap_headers())
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [group["id"]]
+
+    updated = client_access.put(
+        f"/api/access/groups/{group['id']}",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Beta operators",
+            "description": None,
+            "active": False,
+            "member_user_ids": [],
+            "grants": [{"sandbox_id": "beta", "permission": "operate"}],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Beta operators"
+    assert updated.json()["description"] is None
+    assert updated.json()["active"] is False
+    assert updated.json()["member_user_ids"] == []
+    assert updated.json()["grants"] == [{"sandbox_id": "beta", "permission": "operate"}]
+
+
+def test_group_only_access_allows_granted_sandbox_and_hides_other(client_access: TestClient):
+    alpha, beta = create_scoped_profiles()
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "group-only",
+            "password": "group-only-password-123",
+            "grants": [],
+        },
+    ).json()
+    client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Alpha group only",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    )
+
+    client_access.cookies.clear()
+    login = client_access.post(
+        "/api/auth/login",
+        json={"username": "group-only", "password": "group-only-password-123"},
+    )
+    assert login.status_code == 200
+    assert login.json()["identity"]["grants"] == [{"sandbox_id": "alpha", "permission": "view"}]
+    listed = client_access.get("/api/profiles")
+    assert listed.status_code == 200
+    assert [profile["id"] for profile in listed.json()] == [alpha["id"]]
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 200
+    assert client_access.get(f"/api/profiles/{beta['id']}").status_code == 404
+
+
+@pytest.mark.parametrize("payload", [{"name": None}, {"active": None}])
+def test_group_update_rejects_null_required_fields(
+    client_access: TestClient,
+    payload: dict[str, object],
+):
+    group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={"name": "Required group fields"},
+    ).json()
+
+    response = client_access.put(
+        f"/api/access/groups/{group['id']}",
+        headers=bootstrap_headers(),
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
+def test_group_create_deduplicates_duplicate_grants(client_access: TestClient):
+    response = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Deduplicated grants",
+            "grants": [
+                {"sandbox_id": "alpha", "permission": "operate"},
+                {"sandbox_id": "alpha", "permission": "operate"},
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["grants"] == [
+        {"sandbox_id": "alpha", "permission": "operate"}
+    ]
+
+
+def test_user_create_payload_group_ids_updates_effective_access(client_access: TestClient):
+    alpha, beta = create_scoped_profiles()
+    group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Frontend create group",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+
+    created = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "frontend-create-member",
+            "password": "frontend-create-member-password-123",
+            "grants": [],
+            "group_ids": [group["id"]],
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["group_ids"] == [group["id"]]
+    assert created.json()["grants"] == []
+    assert created.json()["effective_grants"] == [
+        {"sandbox_id": "alpha", "permission": "view"}
+    ]
+
+    listed_group = client_access.get("/api/access/groups", headers=bootstrap_headers()).json()[0]
+    assert listed_group["member_user_ids"] == [created.json()["id"]]
+
+    client_access.cookies.clear()
+    login = client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "frontend-create-member",
+            "password": "frontend-create-member-password-123",
+        },
+    )
+    assert login.status_code == 200
+    assert login.json()["identity"]["group_ids"] == [group["id"]]
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 200
+    assert client_access.get(f"/api/profiles/{beta['id']}").status_code == 404
+
+
+def test_user_update_payload_group_ids_replaces_effective_access_and_audits(
+    client_access: TestClient,
+):
+    alpha, beta = create_scoped_profiles()
+    alpha_group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Frontend update alpha",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    beta_group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Frontend update beta",
+            "grants": [{"sandbox_id": "beta", "permission": "view"}],
+        },
+    ).json()
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "frontend-update-member",
+            "password": "frontend-update-member-password-123",
+            "grants": [],
+            "group_ids": [alpha_group["id"]],
+        },
+    ).json()
+
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "frontend-update-member",
+            "password": "frontend-update-member-password-123",
+        },
+    ).status_code == 200
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 200
+    assert client_access.get(f"/api/profiles/{beta['id']}").status_code == 404
+
+    updated = client_access.put(
+        f"/api/access/users/{user['id']}",
+        headers=bootstrap_headers(),
+        json={"group_ids": [beta_group["id"]]},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["group_ids"] == [beta_group["id"]]
+    assert updated.json()["effective_grants"] == [
+        {"sandbox_id": "beta", "permission": "view"}
+    ]
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 404
+    assert client_access.get(f"/api/profiles/{beta['id']}").status_code == 200
+
+    with db.get_db() as conn:
+        group_update_count = conn.execute(
+            """SELECT COUNT(*) AS count FROM access_audit_events
+            WHERE action = 'access_user.groups.update' AND outcome = 'allowed'"""
+        ).fetchone()["count"]
+    assert group_update_count == 2
+
+
+def test_inactive_group_removes_user_access(client_access: TestClient):
+    alpha, _beta = create_scoped_profiles()
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "inactive-group-user",
+            "password": "inactive-group-user-password-123",
+            "grants": [],
+        },
+    ).json()
+    group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Temporarily active",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "inactive-group-user", "password": "inactive-group-user-password-123"},
+    ).status_code == 200
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 200
+
+    updated = client_access.put(
+        f"/api/access/groups/{group['id']}",
+        headers=bootstrap_headers(),
+        json={"active": False},
+    )
+    assert updated.status_code == 200
+    assert client_access.get(f"/api/profiles/{alpha['id']}").status_code == 404
+
+
+def test_direct_and_multiple_group_grants_are_deduplicated_union(client_access: TestClient):
+    alpha, beta = create_scoped_profiles()
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "grant-union",
+            "password": "grant-union-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    first_group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Alpha interactors",
+            "member_user_ids": [user["id"]],
+            "grants": [
+                {"sandbox_id": "alpha", "permission": "view"},
+                {"sandbox_id": "alpha", "permission": "interact"},
+            ],
+        },
+    ).json()
+    second_group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Beta automators",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "beta", "permission": "automate"}],
+        },
+    ).json()
+
+    users = client_access.get("/api/access/users", headers=bootstrap_headers()).json()
+    listed_user = next(item for item in users if item["id"] == user["id"])
+    assert listed_user["group_ids"] == [first_group["id"], second_group["id"]]
+    assert listed_user["grants"] == [{"sandbox_id": "alpha", "permission": "view"}]
+    assert listed_user["effective_grants"] == [
+        {"sandbox_id": "alpha", "permission": "interact"},
+        {"sandbox_id": "alpha", "permission": "view"},
+        {"sandbox_id": "beta", "permission": "automate"},
+    ]
+
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login", json={"username": "grant-union", "password": "grant-union-password-123"}
+    ).status_code == 200
+    assert client_access.post(
+        "/api/task-sessions",
+        json={"profile_id": alpha["id"], "title": "group interact"},
+    ).status_code == 201
+    assert client_access.get(f"/api/profiles/{beta['id']}/cdp").status_code in {404, 409}
+
+
+def test_access_group_management_is_admin_only_and_validates_members(client_access: TestClient):
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "group-non-admin",
+            "password": "group-non-admin-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "group-non-admin", "password": "group-non-admin-password-123"},
+    ).status_code == 200
+    assert client_access.get("/api/access/groups").status_code == 403
+    assert client_access.post(
+        "/api/access/groups",
+        json={"name": "Forbidden group", "member_user_ids": [user["id"]], "grants": []},
+    ).status_code == 403
+
+    blank_name = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={"name": "   ", "member_user_ids": [], "grants": []},
+    )
+    assert blank_name.status_code == 422
+
+    missing_group = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "missing-group-member",
+            "password": "missing-group-member-password-123",
+            "group_ids": ["missing-group-id"],
+        },
+    )
+    assert missing_group.status_code == 404
+    assert missing_group.json()["detail"] == "Group not found: missing-group-id"
+
+    missing_member = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Bad members",
+            "member_user_ids": ["missing-user-id"],
+            "grants": [],
+        },
+    )
+    assert missing_member.status_code == 404
+    assert missing_member.json()["detail"] == "User not found: missing-user-id"
+
+
+def test_operator_can_operate_only_its_scoped_profile(
+    client_access: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend import main
+
+    monkeypatch.setattr(
+        main.browser_mgr,
+        "launch",
+        AsyncMock(side_effect=RuntimeError("launch unavailable in policy test")),
+    )
     alpha, beta = create_scoped_profiles()
     created = client_access.post(
         "/api/access/users",
@@ -214,12 +720,156 @@ def test_operator_can_operate_only_its_scoped_profile(client_access: TestClient)
     assert client_access.post(
         "/api/auth/login", json={"username": "operator", "password": "operator-password-123"}
     ).status_code == 200
-    # No running browser is expected in this test. The error proves the policy
-    # allowed the request to reach the lifecycle handler.
+    # The controlled lifecycle error proves policy allowed the request to reach
+    # the handler without depending on whether CloakBrowser is installed in the
+    # test image.
     allowed = client_access.post(f"/api/profiles/{alpha['id']}/launch")
     assert allowed.status_code in {409, 500}
     denied = client_access.post(f"/api/profiles/{beta['id']}/launch")
     assert denied.status_code == 404
+
+
+def test_interact_user_can_create_task_session_with_redacted_metadata(client_access: TestClient):
+    alpha, _beta = create_scoped_profiles()
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "interact-task",
+            "password": "interact-task-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "interact"}],
+        },
+    )
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={"username": "interact-task", "password": "interact-task-password-123"},
+    ).status_code == 200
+
+    created = client_access.post(
+        "/api/task-sessions",
+        json={
+            "profile_id": alpha["id"],
+            "title": "Scoped harness task",
+            "metadata": {
+                "source": "vcvm-e2e",
+                "authorization": "Bearer should-not-persist",
+                "nested": {"password": "should-not-persist"},
+            },
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["metadata"] == {
+        "source": "vcvm-e2e",
+        "authorization": "[redacted]",
+        "nested": {"password": "[redacted]"},
+    }
+
+
+def test_interact_user_cannot_create_task_session_outside_granted_sandbox(
+    client_access: TestClient,
+):
+    _alpha, beta = create_scoped_profiles()
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "interact-task-denied",
+            "password": "interact-task-denied-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "interact"}],
+        },
+    )
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "interact-task-denied",
+            "password": "interact-task-denied-password-123",
+        },
+    ).status_code == 200
+
+    denied = client_access.post(
+        "/api/task-sessions",
+        json={"profile_id": beta["id"], "title": "Out of scope"},
+    )
+
+    assert denied.status_code == 404
+    assert denied.json()["detail"] == "Profile not found"
+
+
+def test_interact_user_cannot_operate_or_automate_profile(client_access: TestClient):
+    alpha, _beta = create_scoped_profiles()
+    client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "interact-no-lifecycle",
+            "password": "interact-no-lifecycle-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "interact"}],
+        },
+    )
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "interact-no-lifecycle",
+            "password": "interact-no-lifecycle-password-123",
+        },
+    ).status_code == 200
+
+    launch_denied = client_access.post(f"/api/profiles/{alpha['id']}/launch")
+    cdp_denied = client_access.get(f"/api/profiles/{alpha['id']}/cdp")
+
+    assert launch_denied.status_code == 404
+    assert cdp_denied.status_code == 404
+
+
+def test_paperclip_agent_command_metadata_is_redacted(client_access: TestClient):
+    alpha, _beta = create_scoped_profiles()
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Paperclip task agent",
+            "paperclip_agent_id": "paperclip-agent-task",
+            "grants": [
+                {"sandbox_id": "alpha", "permission": "interact"},
+                {"sandbox_id": "alpha", "permission": "automate"},
+            ],
+        },
+    )
+    agent_headers = {"Authorization": f"Bearer {created.json()['api_key']}"}
+    identity = client_access.get("/api/access/me", headers=agent_headers)
+    assert identity.status_code == 200, identity.text
+    assert identity.json()["kind"] == "agent"
+    visible = client_access.get("/api/profiles", headers=agent_headers)
+    assert visible.status_code == 200, visible.text
+    assert [profile["id"] for profile in visible.json()] == [alpha["id"]]
+    session = client_access.post(
+        "/api/task-sessions",
+        headers=agent_headers,
+        json={"profile_id": alpha["id"], "title": "Agent task"},
+    )
+    assert session.status_code == 201, session.text
+
+    command = client_access.post(
+        f"/api/task-sessions/{session.json()['id']}/commands",
+        headers=agent_headers,
+        json={
+            "content": "type into browser",
+            "metadata": {
+                "harness": "paperclip",
+                "cookie": "should-not-persist",
+                "api_key": "should-not-persist",
+            },
+        },
+    )
+
+    assert command.status_code == 201
+    assert command.json()["metadata"]["harness"] == "paperclip"
+    assert command.json()["metadata"]["cookie"] == "[redacted]"
+    assert command.json()["metadata"]["api_key"] == "[redacted]"
 
 
 def test_admin_can_update_a_user_grants_from_the_access_dashboard_payload(client_access: TestClient):
@@ -313,6 +963,295 @@ def test_paperclip_agent_key_is_scoped_and_rotation_revokes_old_key(client_acces
     assert rotated.status_code == 200
     assert rotated.json()["api_key"] != agent["api_key"]
     assert client_access.get("/api/profiles", headers=agent_headers).status_code == 401
+
+
+def test_delete_access_agent_revokes_key_immediately(client_access: TestClient):
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Disposable Paperclip agent",
+            "paperclip_agent_id": "paperclip-agent-delete",
+            "grants": [{"sandbox_id": "beta", "permission": "view"}],
+        },
+    )
+    assert created.status_code == 201
+    agent = created.json()
+    agent_headers = {"Authorization": f"Bearer {agent['api_key']}"}
+    assert client_access.get("/api/access/me", headers=agent_headers).status_code == 200
+
+    deleted = client_access.delete(
+        f"/api/access/agents/{agent['id']}", headers=bootstrap_headers()
+    )
+    assert deleted.status_code == 204
+    assert client_access.get("/api/access/me", headers=agent_headers).status_code == 401
+    assert (
+        client_access.get(f"/api/access/agents/{agent['id']}", headers=bootstrap_headers()).status_code
+        in {404, 405}
+    )
+    missing = client_access.delete(
+        f"/api/access/agents/{agent['id']}", headers=bootstrap_headers()
+    )
+    assert missing.status_code == 404
+
+
+def test_open_vnc_closes_immediately_after_agent_key_rotation(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Rotating VNC", sandbox_id="alpha")
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Rotating VNC agent",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    agent_headers = {"Authorization": f"Bearer {created['api_key']}"}
+    upstream = _BlockingWebSocketUpstream(subprotocol="binary")
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6102, cdp_port=5102, display=102
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/vnc", headers=agent_headers
+        ) as websocket:
+            rotated = client_access.post(
+                f"/api/access/agents/{created['id']}/rotate-key",
+                headers=bootstrap_headers(),
+            )
+            assert rotated.status_code == 200
+            message = _receive_websocket_message(websocket)
+            assert message == {
+                "type": "websocket.close",
+                "code": 4403,
+                "reason": "Access revoked",
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_open_viewer_vnc_filters_split_and_coalesced_server_clipboard(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Filtered viewer VNC", sandbox_id="alpha")
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Filtered viewer agent",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    agent_headers = {"Authorization": f"Bearer {created['api_key']}"}
+    handshake = _rfb_server_handshake()
+    framebuffer_update = b"\0\0\0\0"
+    clipboard = _build_server_cut_text("never-send-to-viewer")
+    bell = b"\x02"
+    upstream = _BlockingWebSocketUpstream(
+        subprotocol="binary",
+        messages=(
+            handshake,
+            framebuffer_update + clipboard[:5],
+            clipboard[5:] + bell,
+        ),
+    )
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6105, cdp_port=5105, display=105
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/vnc", headers=agent_headers
+        ) as websocket:
+            assert _receive_websocket_message(websocket) == {
+                "type": "websocket.send",
+                "bytes": handshake,
+            }
+            assert _receive_websocket_message(websocket) == {
+                "type": "websocket.send",
+                "bytes": framebuffer_update,
+            }
+            assert _receive_websocket_message(websocket) == {
+                "type": "websocket.send",
+                "bytes": bell,
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+@pytest.mark.parametrize(
+    "update_payload",
+    [
+        pytest.param({"active": False}, id="principal-deactivated"),
+        pytest.param({"grants": []}, id="sandbox-grant-revoked"),
+    ],
+)
+def test_open_cdp_closes_immediately_after_agent_access_revoked(
+    client_access: TestClient, monkeypatch, update_payload
+):
+    from backend import main
+
+    profile = db.create_profile("Revocable CDP", sandbox_id="alpha")
+    created = client_access.post(
+        "/api/access/agents",
+        headers=bootstrap_headers(),
+        json={
+            "display_name": "Revocable CDP agent",
+            "grants": [{"sandbox_id": "alpha", "permission": "automate"}],
+        },
+    ).json()
+    agent_headers = {"Authorization": f"Bearer {created['api_key']}"}
+    upstream = _BlockingWebSocketUpstream()
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6103, cdp_port=5103, display=103
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/cdp/devtools/page/REVOCABLE",
+            headers=agent_headers,
+        ) as websocket:
+            updated = client_access.put(
+                f"/api/access/agents/{created['id']}",
+                headers=bootstrap_headers(),
+                json=update_payload,
+            )
+            assert updated.status_code == 200
+            message = _receive_websocket_message(websocket)
+            assert message == {
+                "type": "websocket.close",
+                "code": 4403,
+                "reason": "Access revoked",
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_open_vnc_closes_immediately_after_user_deactivation(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Revocable user VNC", sandbox_id="alpha")
+    created = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "revocable-viewer",
+            "password": "revocable-viewer-password-123",
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "revocable-viewer",
+            "password": "revocable-viewer-password-123",
+        },
+    ).status_code == 200
+    upstream = _BlockingWebSocketUpstream(subprotocol="binary")
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6104, cdp_port=5104, display=104
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/vnc"
+        ) as websocket:
+            updated = client_access.put(
+                f"/api/access/users/{created['id']}",
+                headers=bootstrap_headers(),
+                json={"active": False},
+            )
+            assert updated.status_code == 200
+            message = _receive_websocket_message(websocket)
+            assert message == {
+                "type": "websocket.close",
+                "code": 4403,
+                "reason": "Access revoked",
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_open_vnc_closes_after_access_group_grant_revoked_and_audits_update(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Group revocable VNC", sandbox_id="alpha")
+    user = client_access.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": "group-revocable-viewer",
+            "password": "group-revocable-viewer-password-123",
+            "grants": [],
+        },
+    ).json()
+    group = client_access.post(
+        "/api/access/groups",
+        headers=bootstrap_headers(),
+        json={
+            "name": "Revocable group viewers",
+            "member_user_ids": [user["id"]],
+            "grants": [{"sandbox_id": "alpha", "permission": "view"}],
+        },
+    ).json()
+    client_access.cookies.clear()
+    assert client_access.post(
+        "/api/auth/login",
+        json={
+            "username": "group-revocable-viewer",
+            "password": "group-revocable-viewer-password-123",
+        },
+    ).status_code == 200
+    upstream = _BlockingWebSocketUpstream(subprotocol="binary")
+    monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6105, cdp_port=5105, display=105
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/vnc"
+        ) as websocket:
+            updated = client_access.put(
+                f"/api/access/groups/{group['id']}",
+                headers=bootstrap_headers(),
+                json={"grants": []},
+            )
+            assert updated.status_code == 200
+            message = _receive_websocket_message(websocket)
+            assert message == {
+                "type": "websocket.close",
+                "code": 4403,
+                "reason": "Access revoked",
+            }
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+    with db.get_db() as conn:
+        actions = {
+            row["action"]
+            for row in conn.execute(
+                "SELECT action FROM access_audit_events WHERE outcome = 'allowed'"
+            ).fetchall()
+        }
+    assert "access_group.create" in actions
+    assert "access_group.grants.update" in actions
+    assert "access_group.update" in actions
 
 
 def test_scoped_user_cannot_reach_out_of_scope_vnc_upstream(client_access: TestClient, monkeypatch):

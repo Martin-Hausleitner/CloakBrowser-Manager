@@ -1,6 +1,6 @@
 # Paperclip-gestützte Browser-Zugriffskontrolle
 
-Stand: 2026-07-21 · Status: r51 lokal implementiert und Ende-zu-Ende geprüft; bereit für Fork-Review
+Stand: 2026-07-21 · Status: r63 auf der VCVM implementiert und Ende-zu-Ende geprüft; bereit für Fork-Review
 
 ## Kurzentscheidung
 
@@ -18,24 +18,26 @@ Die erste, lokale Policy-Schicht ist in diesem Fork umgesetzt. Sie bleibt absich
 - Menschen erhalten lokale Passwort-Logins mit scrypt-Hash und kurzlebigem, signiertem `HttpOnly`-Cookie.
 - Paperclip-Agenten erhalten einen individuellen, hochentropischen Bearer-Key; nur dessen Hash wird persistiert. Der Klartext erscheint ausschließlich bei Anlage oder Rotation.
 - Die Policy wird serverseitig vor Profilauflistung, Einzelprofil, VNC, Clipboard, Lifecycle, CDP-REST und CDP-WebSocket geprüft. Nicht freigegebene Profile erscheinen als `404`.
-- VNC mit `view` bleibt tatsächlich lesbar: nur RFB-Displayverhandlung und Frame-Requests werden weitergereicht; Tastatur, Maus und Clipboard-Eingaben werden serverseitig verworfen.
+- VNC mit `view` bleibt tatsächlich lesbar: Die stateful RFB-Filterung erlaubt nur Displayverhandlung, eine kleine sichere Encoding-Menge und Frame-Requests; Tastatur, Maus und Clipboard-Eingaben werden serverseitig verworfen.
+- Bereits aktive VNC- und CDP-WebSockets erhalten eine widerrufbare Lease. Deaktivierung, Grant-/Rollenänderung, Passwortwechsel oder Agent-Key-Rotation trennt bestehende Verbindungen sofort statt erst beim nächsten Request.
 - Das Dashboard verwaltet Profile-Sandboxes, Personen, Paperclip-Agenten, Grants, Deaktivierung und Key-Rotation. Browsersteuerung und CDP-Automation sind getrennt, damit zum Beispiel `operate + automate` auf derselben Sandbox möglich ist. Eine kompakte Vorschau zeigt die tatsächlich sichtbaren Profile und effektiven Fähigkeiten. Nichtadministratoren erhalten weder Profil-Administration noch Zugang zur Access-Verwaltung.
 - Erlaubte Lifecycle-/CDP-Aktionen und abgelehnte REST-/WebSocket-Policyentscheidungen erzeugen Audit-Metadaten. Credentials, Clipboard, CDP-Nutzdaten und Browserinhalte werden nicht in den Audit-Events gespeichert.
 
 Die Live-Abnahme lief isoliert gegen eine frische lokale Datenbank: zwei Sandboxes (`research`, `finance`), ein `view`-Nutzer und ein `automate`-Agent. Der Nutzer sah nur `research`; direkte `finance`-, Lifecycle- und Admin-Anfragen wurden mit `404` beziehungsweise `403` abgewiesen. Der Agent sah per eigenem Bearer-Key nur `research`; sein alter Key lieferte nach Rotation `401`.
 
-## Frische r51-Browser-E2E-Abnahme (21. Juli 2026)
+## Frische r63-Browser-E2E-Abnahme (21. Juli 2026)
 
 Die Policy wurde zusätzlich in einem nur auf `127.0.0.1` gebundenen Container mit isolierten Testprofilen und lokalen Wegwerf-Credentials geprüft. Nutzerbereitgestellte Zugangsdaten wurden nicht verwendet oder persistiert.
 
-- Der authentifizierte Mobile-Gate prüfte fünf Viewports plus Access-Dashboard und bestand **276/276 Checks** mit **23 Screenshots**.
-- Codex Computer Use meldete sich als `view`-Nutzer an, sah ausschließlich das laufende `beta`-Profil, erreichte einen echten verbundenen VNC-Canvas und fand weder Access- noch Launch-/Stop-Aktionen. Die iPhone-14-Ansicht hatte bei 390 px keinen horizontalen Overflow.
-- Codex Computer Use meldete sich danach als Wegwerf-Admin an und vergab dem Paperclip-Testagenten im echten Dashboard kombiniert `operate + automate`. Die effektive Vorschau zeigte genau das `beta`-Profil mit `Operate + CDP automation`.
+- Der authentifizierte Mobile-Gate prüfte fünf Viewports plus Access-Dashboard und bestand **307/307 Checks** mit **25 Screenshots**. Konto/Logout blieb außerhalb des Tool-Sheets verborgen; der Composer blieb in allen Viewports einzeilig und vollständig sichtbar. Der Keyboard-Gate bestätigte zusätzlich Visual-Viewport-Anpassung ohne Überlappung von VNC, Composer oder Send-Aktion.
+- Ein kurzlebiger echter `view`-Nutzer meldete sich am laufenden VCVM-Produkt an, sah ausschließlich das zugewiesene Profil, erreichte genau einen verbundenen 1024 × 576 VNC-Canvas und fand weder Profil- noch Access-Administration. Der Screenshot zeigte echten Browserinhalt statt einer schwarzen oder statischen Fläche.
+- Die Deaktivierung dieses Nutzers trennte den bereits verbundenen VNC-WebSocket sofort. Das Wegwerfkonto blieb danach inaktiv; es wurden keine Nutzerzugangsdaten in Reports oder Screenshots geschrieben.
+- Ein früherer isolierter Adminpfad vergab dem Paperclip-Testagenten im echten Dashboard kombiniert `operate + automate`. Die effektive Vorschau zeigte genau das freigegebene Profil mit `Operate + CDP automation`.
 - Derselbe Agent sah per rotiertem Wegwerf-Key genau ein `beta`-Profil. Ein Lifecycle-Aufruf erreichte die erlaubte „bereits laufend“-Antwort, CDP lieferte HTTP 200 und ein direkter `alpha`-Aufruf HTTP 404.
 - Abgelehnte REST- und VNC-WebSocket-Entscheidungen werden als `profile.permission.<action>` mit Sandbox-/Profilkennung und `denied` protokolliert, ohne Secrets oder Browserinhalt.
-- Die vollständige Backend-Suite lief mit **223 bestanden**; die Frontend-Suite mit **75 bestanden**, gefolgt von einem erfolgreichen Produktions-Build.
+- Die vollständige Backend-Suite lief mit **250 bestanden**; die Frontend-Suite mit **106 bestanden**, ergänzt um **18** Release-/Mobile-/Benchmark-Skripttests und einen erfolgreichen Produktions-Build.
 
-Diese Abnahme belegt die lokale Produktoberfläche und die serverseitige Entscheidung gemeinsam. Sie ersetzt keine externe Production-Abnahme, veröffentlicht keine Test- oder Produktions-Credentials und enthält keine Browserinhalte.
+Diese Abnahme belegt die VCVM-Produktoberfläche und die serverseitige Entscheidung gemeinsam. Der deterministische Mobile-Gate prüft nur den injizierten `codex-computer-use`-Hostvertrag; er behauptet keinen produktiven Codex Computer Use Browser auf der VCVM. Die Abnahme ersetzt keine externe Production-Abnahme und veröffentlicht keine Test- oder Produktions-Credentials. Lokale Vision-Artefakte mit Browserinhalt bleiben unversioniert.
 
 ## Zielbild
 

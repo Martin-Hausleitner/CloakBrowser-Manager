@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CloakBrowser Profile Sync</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <div class="brand">CloakBrowser</div>
+        <div class="sub" id="statusLine">Profile Sync</div>
+      </div>
+      <div class="top-actions">
+        <button type="button" class="ghost" id="refreshBtn" title="Refresh">↻</button>
+        <button type="button" class="ghost" id="settingsBtn" title="Settings">⚙</button>
+      </div>
+    </header>
+
+    <section id="authPanel" class="panel hidden">
+      <label class="label">Manager URL</label>
+      <input id="managerBase" class="input" spellcheck="false" />
+      <div class="row">
+        <label class="radio"><input type="radio" name="authMode" value="token" checked /> Token</label>
+        <label class="radio"><input type="radio" name="authMode" value="password" /> User/pass</label>
+      </div>
+      <div id="tokenFields">
+        <label class="label">Bearer token</label>
+        <input id="token" class="input" type="password" autocomplete="off" spellcheck="false" />
+      </div>
+      <div id="passwordFields" class="hidden">
+        <label class="label">Username</label>
+        <input id="username" class="input" autocomplete="username" />
+        <label class="label">Password</label>
+        <input id="password" class="input" type="password" autocomplete="current-password" />
+      </div>
+      <label class="label">Local bridge URL</label>
+      <input id="bridgeBase" class="input" spellcheck="false" />
+      <div class="row gap">
+        <button type="button" class="btn primary" id="saveAuthBtn">Save & connect</button>
+        <button type="button" class="btn" id="clearAuthBtn">Clear secrets</button>
+      </div>
+      <p class="hint">
+        Token preferred (from <code>~/.config/cloakbrowser/vcvm-auth-token</code>).
+        Passwords stay in session storage only.
+      </p>
+    </section>
+
+    <nav class="tabs" id="tabs">
+      <button type="button" class="tab active" data-tab="profiles">Profiles</button>
+      <button type="button" class="tab" data-tab="proxies">Proxies</button>
+    </nav>
+
+    <main id="main" class="main">
+      <div id="errorBox" class="error hidden"></div>
+      <div id="profilesView" class="view"></div>
+      <div id="proxiesView" class="view hidden"></div>
+    </main>
+
+    <footer class="foot">
+      <span id="bridgeLine">Bridge: …</span>
+      <span id="sourceLine"></span>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

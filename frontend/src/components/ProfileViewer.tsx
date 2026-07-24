@@ -652,13 +652,13 @@ export function ProfileViewer({
             setPastePanelOpen(false);
             setPasteError(null);
           }}
-          className="min-h-11 rounded px-3 py-1 text-xs text-gray-400 hover:bg-surface-2"
+          className="min-h-9 rounded px-2 py-1 text-[11px] text-gray-400 hover:bg-surface-2"
         >
           Cancel
         </button>
         <button
           type="submit"
-          className="min-h-11 rounded bg-accent px-3 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          className="min-h-9 rounded bg-accent px-2 py-1 text-[11px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
           aria-label="Send pasted text to remote browser"
           disabled={!pasteText || pasting}
         >

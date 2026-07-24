@@ -2,10 +2,124 @@
  * API client for CloakBrowser Manager backend.
  */
 
+export type ProfileHarness =
+  | "codex"
+  | "antigravity"
+  | "claude-code"
+  | "opencode"
+  | "browser-use"
+  | "browser-harness"
+  | "unbrowse"
+  | "stagehand";
+
+export type ProxyCheckState = "missing" | "passed" | "warning" | "failed" | "unavailable";
+
+export interface ExtensionDefaultItem {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  tags?: string[];
+  recommended?: boolean;
+  default_selected?: boolean;
+  selectable?: boolean;
+  selected?: boolean;
+  available?: boolean;
+  path?: string | null;
+  icon_url?: string | null;
+  store_url?: string | null;
+}
+
+export interface ExtensionDefaults {
+  source: string;
+  source_label?: string;
+  catalog_dir_configured?: boolean;
+  selected_ids: string[];
+  extensions: ExtensionDefaultItem[];
+  items?: ExtensionDefaultItem[];
+  count?: number;
+}
+
+export interface ProfileTemplate {
+  id: string;
+  name: string;
+  summary: string;
+  system_prompt: string;
+  harness: ProfileHarness;
+  project_id: string;
+  folder_path: string;
+  platform: string;
+  apply_default_extensions: boolean;
+  quick_options: string[];
+}
+
+export interface ProfileOpenLinks {
+  profile_id: string;
+  prefer: "local" | "cloud";
+  mode?: "cdp" | "vnc" | "shell";
+  open_url: string;
+  session_viewer_url: string;
+  vnc_fullscreen_url?: string | null;
+  cdp_fullscreen_url?: string | null;
+  live_url?: string | null;
+  websocket_url?: string;
+  cdp_url?: string | null;
+  live_metrics_url?: string | null;
+  local_url?: string;
+  cloud_url?: string | null;
+}
+
+export interface LiveMetrics {
+  profile_id: string;
+  transport?: "cdp" | "vnc" | null;
+  connection_state?: "connecting" | "connected" | "reconnecting" | "failed" | "idle";
+  fps?: number | null;
+  rtt_ms?: number | null;
+  frames_received?: number | null;
+  reconnect_count?: number | null;
+  dropped_frames?: number | null;
+  updated_at?: string | null;
+}
+
+export interface ProxyInventoryItem {
+  id: string;
+  label: string;
+  host_masked: string;
+  port: number | null;
+  username_masked: string | null;
+  has_credentials: boolean;
+  active: boolean;
+  check_state: ProxyCheckState;
+  reachable: boolean | null;
+  latency_ms: number | null;
+  risk_score: number | null;
+  authenticity_score: number | null;
+  country_code: string | null;
+  timezone_hint: string | null;
+  locale_hint: string | null;
+  warnings: string[];
+  blockers: string[];
+  last_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProxyInventoryIngestResult {
+  created: number;
+  updated: number;
+  rejected: number;
+  items: ProxyInventoryItem[];
+}
+
 export interface Profile {
   id: string;
   name: string;
   sandbox_id: string;
+  project_id: string;
+  folder_path: string;
+  pinned: boolean;
+  accent_color: string | null;
+  harness: ProfileHarness;
   fingerprint_seed: number;
   proxy: string | null;
   timezone: string | null;
@@ -39,6 +153,11 @@ export interface Profile {
 export interface ProfileCreateData {
   name: string;
   sandbox_id?: string;
+  project_id?: string;
+  folder_path?: string;
+  pinned?: boolean;
+  accent_color?: string | null;
+  harness?: ProfileHarness;
   fingerprint_seed?: number | null;
   proxy?: string | null;
   timezone?: string | null;
@@ -75,6 +194,27 @@ export interface SystemStatus {
   running_count: number;
   binary_version: string;
   profiles_total: number;
+}
+
+export type ProfileHealthState = "pending" | "running" | "passed" | "warning" | "failed" | "unavailable";
+export type ProfileHealthSourceState = "missing" | "measured" | "derived" | "unavailable" | "skipped";
+
+export interface ProfileHealth {
+  profile_id: string;
+  state: ProfileHealthState;
+  checked_at: string | null;
+  proxy_configured: boolean;
+  proxy_reachable: boolean | null;
+  outbound_ip_masked: string | null;
+  proxy_latency_ms: number | null;
+  proxy_risk_score: number | null;
+  proxy_authenticity_score: number | null;
+  fingerprint_consistency_score: number | null;
+  browser_scan_score: number | null;
+  warnings: string[];
+  blockers: string[];
+  error_code: string | null;
+  sources: Record<string, ProfileHealthSourceState>;
 }
 
 export interface BenchmarkMetricSet {
@@ -204,6 +344,18 @@ export interface AccessUser {
   active: boolean;
   created_at: string;
   grants: AccessGrant[];
+  group_ids: string[];
+  effective_grants: AccessGrant[];
+}
+
+export interface AccessGroup {
+  id: string;
+  name: string;
+  description: string | null;
+  active: boolean;
+  created_at: string;
+  member_user_ids: string[];
+  grants: AccessGrant[];
 }
 
 export interface AccessAgent {
@@ -219,9 +371,46 @@ export interface AccessAgentCreated extends AccessAgent {
   api_key: string;
 }
 
+export interface TaskHarnessSession {
+  id: string;
+  profile_id: string;
+  sandbox_id: string;
+  title: string | null;
+  status: "active" | "archived";
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface TaskHarnessMessage {
+  id: string;
+  session_id: string;
+  role: "user" | "assistant" | "tool" | "system";
+  content: string;
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface TaskHarnessEvent {
+  id: string;
+  session_id: string;
+  type: string;
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  payload: Record<string, unknown>;
+}
+
 export interface AccessSandbox {
   sandbox_id: string;
   profile_count: number;
+  project_ids: string[];
+  folder_paths: string[];
+  profile_names: string[];
 }
 
 export type LoginCredentials =
@@ -291,7 +480,18 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
+    bulkOrganizeProfiles: (data: {
+    profile_ids: string[];
+    project_id?: string | null;
+    folder_path?: string | null;
+    pinned?: boolean | null;
+  }) =>
+    request<Profile[]>("/api/profiles/bulk-organize", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
     request<Profile>(`/api/profiles/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
@@ -306,7 +506,79 @@ export const api = {
   stopProfile: (id: string) =>
     request<{ ok: boolean }>(`/api/profiles/${id}/stop`, { method: "POST" }),
 
+  getProfileHealth: (id: string) =>
+    request<ProfileHealth>(`/api/profiles/${encodeURIComponent(id)}/health`),
+
+  runProfileHealth: (id: string) =>
+    request<ProfileHealth>(`/api/profiles/${encodeURIComponent(id)}/health/run`, { method: "POST" }),
+
   getStatus: () => request<SystemStatus>("/api/status"),
+
+  listProxies: () => request<ProxyInventoryItem[]>("/api/proxies"),
+
+  ingestProxies: (lines: string[]) =>
+    request<ProxyInventoryIngestResult>("/api/proxies/ingest", {
+      method: "POST",
+      body: JSON.stringify({ lines }),
+    }),
+
+  checkProxy: (id: string) =>
+    request<ProxyInventoryItem>(`/api/proxies/${encodeURIComponent(id)}/check`, {
+      method: "POST",
+    }),
+
+  createProfileFromProxy: (
+    id: string,
+    data?: {
+      name?: string | null;
+      project_id?: string;
+      sandbox_id?: string;
+      harness?: ProfileHarness;
+      launch?: boolean;
+    },
+  ) =>
+    request<Profile>(`/api/proxies/${encodeURIComponent(id)}/profiles`, {
+      method: "POST",
+      body: JSON.stringify(data ?? {}),
+    }),
+
+  getExtensionDefaults: () => request<ExtensionDefaults>("/api/extension/defaults"),
+
+  updateExtensionDefaults: (selected_ids: string[]) =>
+    request<ExtensionDefaults>("/api/extension/defaults", {
+      method: "PUT",
+      body: JSON.stringify({ selected_ids }),
+    }),
+
+  listProfileTemplates: () => request<ProfileTemplate[]>("/api/profile-templates"),
+
+  createProfileFromTemplate: (
+    templateId: string,
+    data?: {
+      name?: string | null;
+      project_id?: string;
+      harness?: ProfileHarness;
+      proxy?: string | null;
+      apply_default_extensions?: boolean;
+      launch?: boolean;
+    },
+  ) =>
+    request<Profile>(`/api/profile-templates/${encodeURIComponent(templateId)}/profiles`, {
+      method: "POST",
+      body: JSON.stringify({ template_id: templateId, ...(data ?? {}) }),
+    }),
+
+  getProfileOpenLinks: (
+    id: string,
+    prefer: "local" | "cloud" = "local",
+    mode: "cdp" | "vnc" | "shell" = "cdp",
+  ) =>
+    request<ProfileOpenLinks>(
+      `/api/profiles/${encodeURIComponent(id)}/open-links?prefer=${encodeURIComponent(prefer)}&mode=${encodeURIComponent(mode)}`,
+    ),
+
+  getLiveMetrics: (id: string) =>
+    request<LiveMetrics>(`/api/profiles/${encodeURIComponent(id)}/live-metrics`),
 
   getBenchmarkReport: (url = DEFAULT_BENCHMARK_REPORT_URL) =>
     request<BenchmarkReport>(url),
@@ -329,6 +601,7 @@ export const api = {
     password: string;
     role: AccessRole;
     grants: AccessGrant[];
+    group_ids?: string[];
   }) =>
     request<AccessUser>("/api/access/users", {
       method: "POST",
@@ -340,8 +613,35 @@ export const api = {
     role: AccessRole;
     active: boolean;
     grants: AccessGrant[];
+    group_ids: string[];
   }>) =>
     request<AccessUser>(`/api/access/users/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  listAccessGroups: () => request<AccessGroup[]>("/api/access/groups"),
+
+  createAccessGroup: (data: {
+    name: string;
+    description: string | null;
+    active: boolean;
+    member_user_ids: string[];
+    grants: AccessGrant[];
+  }) =>
+    request<AccessGroup>("/api/access/groups", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateAccessGroup: (id: string, data: Partial<{
+    name: string;
+    description: string | null;
+    active: boolean;
+    member_user_ids: string[];
+    grants: AccessGrant[];
+  }>) =>
+    request<AccessGroup>(`/api/access/groups/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
@@ -373,6 +673,74 @@ export const api = {
     request<AccessAgentCreated>(`/api/access/agents/${id}/rotate-key`, {
       method: "POST",
     }),
+
+  createTaskSession: (data: {
+    profile_id: string;
+    title?: string | null;
+    metadata?: Record<string, unknown>;
+  }, options?: { signal?: AbortSignal }) => request<TaskHarnessSession>("/api/task-sessions", {
+    method: "POST",
+    signal: options?.signal,
+    body: JSON.stringify(data),
+  }),
+
+  listTaskSessions: (
+    profileId: string,
+    options?: { limit?: number; signal?: AbortSignal },
+  ) => request<TaskHarnessSession[]>(
+    `/api/task-sessions?profile_id=${encodeURIComponent(profileId)}${
+      options?.limit ? `&limit=${encodeURIComponent(String(options.limit))}` : ""
+    }`,
+    { signal: options?.signal },
+  ),
+
+  getTaskSession: (sessionId: string, options?: { signal?: AbortSignal }) =>
+    request<TaskHarnessSession>(
+      `/api/task-sessions/${encodeURIComponent(sessionId)}`,
+      { signal: options?.signal },
+    ),
+
+  appendTaskMessage: (sessionId: string, data: {
+    text: string;
+    profile_id?: string | null;
+    commands?: ReadonlyArray<
+      {
+        id: string;
+        label: string;
+        kind: string;
+        scope: string;
+        args?: Record<string, string | number | boolean | null>;
+      }
+    >;
+    metadata?: Record<string, unknown>;
+  }, options?: { signal?: AbortSignal }) => request<TaskHarnessMessage>(
+    `/api/task-sessions/${encodeURIComponent(sessionId)}/messages`,
+    {
+      method: "POST",
+      signal: options?.signal,
+      body: JSON.stringify(data),
+    },
+  ),
+
+  listTaskSessionMessages: (
+    sessionId: string,
+    options?: { limit?: number; signal?: AbortSignal },
+  ) => request<TaskHarnessMessage[]>(
+    `/api/task-sessions/${encodeURIComponent(sessionId)}/messages${
+      options?.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : ""
+    }`,
+    { signal: options?.signal },
+  ),
+
+  listTaskSessionEvents: (
+    sessionId: string,
+    options?: { limit?: number; signal?: AbortSignal },
+  ) => request<TaskHarnessEvent[]>(
+    `/api/task-sessions/${encodeURIComponent(sessionId)}/events${
+      options?.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : ""
+    }`,
+    { signal: options?.signal },
+  ),
 
   listAccessSandboxes: () => request<AccessSandbox[]>("/api/access/sandboxes"),
 };

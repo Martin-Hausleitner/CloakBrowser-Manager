@@ -1,16 +1,19 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AccessDashboard } from "./AccessDashboard";
 
 const apiMock = vi.hoisted(() => ({
   listAccessUsers: vi.fn(),
   listAccessAgents: vi.fn(),
+  listAccessGroups: vi.fn(),
   listAccessSandboxes: vi.fn(),
   listProfiles: vi.fn(),
   createAccessUser: vi.fn(),
   updateAccessUser: vi.fn(),
   createAccessAgent: vi.fn(),
   updateAccessAgent: vi.fn(),
+  createAccessGroup: vi.fn(),
+  updateAccessGroup: vi.fn(),
   rotateAccessAgentKey: vi.fn(),
 }));
 
@@ -20,12 +23,15 @@ describe("AccessDashboard", () => {
   beforeEach(() => {
     apiMock.listAccessUsers.mockReset();
     apiMock.listAccessAgents.mockReset();
+    apiMock.listAccessGroups.mockReset();
     apiMock.listAccessSandboxes.mockReset();
     apiMock.listProfiles.mockReset();
     apiMock.createAccessUser.mockReset();
     apiMock.updateAccessUser.mockReset();
     apiMock.createAccessAgent.mockReset();
     apiMock.updateAccessAgent.mockReset();
+    apiMock.createAccessGroup.mockReset();
+    apiMock.updateAccessGroup.mockReset();
     apiMock.rotateAccessAgentKey.mockReset();
 
     apiMock.listAccessUsers.mockResolvedValue([
@@ -36,26 +42,78 @@ describe("AccessDashboard", () => {
         active: true,
         created_at: "2026-07-20T00:00:00Z",
         grants: [{ sandbox_id: "research", permission: "view" }],
+        group_ids: ["group-1"],
+        effective_grants: [
+          { sandbox_id: "research", permission: "view" },
+          { sandbox_id: "private", permission: "operate" },
+        ],
       },
     ]);
     apiMock.listAccessAgents.mockResolvedValue([]);
+    apiMock.listAccessGroups.mockResolvedValue([
+      {
+        id: "group-1",
+        name: "Research team",
+        description: null,
+        active: true,
+        created_at: "2026-07-20T00:00:00Z",
+        member_user_ids: ["user-1"],
+        grants: [{ sandbox_id: "private", permission: "operate" }],
+      },
+    ]);
     apiMock.listAccessSandboxes.mockResolvedValue([
-      { sandbox_id: "research", profile_count: 2 },
+      {
+        sandbox_id: "research",
+        profile_count: 2,
+        project_ids: ["commerce"],
+        folder_paths: ["checkout", "payments"],
+        profile_names: ["Research browser", "Research reports"],
+      },
+      {
+        sandbox_id: "private",
+        profile_count: 1,
+        project_ids: ["security"],
+        folder_paths: ["audit"],
+        profile_names: ["Private browser"],
+      },
     ]);
     apiMock.listProfiles.mockResolvedValue([
       {
         id: "profile-1",
         name: "Research browser",
         sandbox_id: "research",
+        project_id: "commerce",
+        folder_path: "checkout",
         status: "running",
       },
       {
         id: "profile-2",
         name: "Private browser",
         sandbox_id: "private",
+        project_id: "security",
+        folder_path: "audit",
         status: "stopped",
       },
     ]);
+  });
+
+  it("defaults to identities and hides add/edit forms until explicit actions", async () => {
+    render(<AccessDashboard onClose={vi.fn()} />);
+
+    expect(await screen.findByText("alice")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Identities" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByLabelText("Username")).toBeNull();
+    expect(screen.queryByLabelText("Display name")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add person" }));
+    expect(screen.getByLabelText("Username")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByLabelText("Username")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit alice" }));
+    expect(screen.getByLabelText("Username")).toBeTruthy();
+    expect((screen.getByLabelText("Username") as HTMLInputElement).disabled).toBe(true);
   });
 
   it("loads existing scopes and creates a Paperclip key with an explicit grant", async () => {
@@ -72,16 +130,17 @@ describe("AccessDashboard", () => {
     render(<AccessDashboard onClose={vi.fn()} />);
 
     expect(await screen.findByText("alice")).toBeTruthy();
-    expect(screen.getByText(/research: View/)).toBeTruthy();
+    expect(screen.getByText(/Direct: research: View/)).toBeTruthy();
 
+    fireEvent.click(screen.getByRole("button", { name: "Create agent key" }));
     fireEvent.change(screen.getByLabelText("Display name"), {
       target: { value: "Research helper" },
     });
-    fireEvent.change(screen.getAllByLabelText("Browser control for research")[1], {
+    fireEvent.change(screen.getByLabelText("Browser control for research"), {
       target: { value: "operate" },
     });
-    fireEvent.click(screen.getAllByLabelText("CDP automation for research")[1]);
-    fireEvent.click(screen.getByRole("button", { name: "Create agent key" }));
+    fireEvent.click(screen.getByLabelText("CDP automation for research"));
+    fireEvent.click(screen.getByRole("button", { name: "Create key" }));
 
     await waitFor(() => expect(apiMock.createAccessAgent).toHaveBeenCalledWith({
       display_name: "Research helper",
@@ -93,6 +152,73 @@ describe("AccessDashboard", () => {
     }));
     expect((await screen.findByLabelText("New Paperclip agent key") as HTMLInputElement).value)
       .toBe("test-agent-key-only");
+  });
+
+  it("creates and updates groups with membership and sandbox grants", async () => {
+    apiMock.createAccessGroup.mockResolvedValue({
+      id: "group-2",
+      name: "Ops",
+      description: "Operators",
+      active: true,
+      created_at: "2026-07-21T00:00:00Z",
+      member_user_ids: ["user-1"],
+      grants: [{ sandbox_id: "research", permission: "operate" }],
+    });
+
+    render(<AccessDashboard onClose={vi.fn()} />);
+
+    expect(await screen.findByText("alice")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Groups" }));
+    expect(screen.getByText("Research team")).toBeTruthy();
+    expect(screen.queryByText("Shared private research browsers")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+    expect((screen.getByLabelText("Group name") as HTMLInputElement).maxLength).toBe(120);
+    expect((screen.getByLabelText("Short description") as HTMLTextAreaElement).maxLength).toBe(500);
+    fireEvent.change(screen.getByLabelText("Group name"), { target: { value: "Ops" } });
+    fireEvent.change(screen.getByLabelText("Short description"), { target: { value: "Operators" } });
+    fireEvent.click(screen.getByLabelText("Group member alice"));
+    fireEvent.change(screen.getByLabelText("Browser control for research"), {
+      target: { value: "operate" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create group" }));
+
+    await waitFor(() => expect(apiMock.createAccessGroup).toHaveBeenCalledWith({
+      name: "Ops",
+      description: "Operators",
+      active: true,
+      member_user_ids: ["user-1"],
+      grants: [{ sandbox_id: "research", permission: "operate" }],
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit group Research team" }));
+    expect((screen.getByLabelText("Short description") as HTMLTextAreaElement).value).toBe("");
+    fireEvent.click(screen.getByLabelText("Group active"));
+    fireEvent.click(screen.getByRole("button", { name: "Save group" }));
+
+    await waitFor(() => expect(apiMock.updateAccessGroup).toHaveBeenCalledWith("group-1", {
+      name: "Research team",
+      description: null,
+      active: false,
+      member_user_ids: ["user-1"],
+      grants: [{ sandbox_id: "private", permission: "operate" }],
+    }));
+  });
+
+  it("updates user group assignments in person payloads", async () => {
+    render(<AccessDashboard onClose={vi.fn()} />);
+
+    expect(await screen.findByText("alice")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit alice" }));
+    fireEvent.click(screen.getByLabelText("User group Research team"));
+    fireEvent.click(screen.getByRole("button", { name: "Save person" }));
+
+    await waitFor(() => expect(apiMock.updateAccessUser).toHaveBeenCalledWith("user-1", {
+      role: "viewer",
+      active: true,
+      grants: [{ sandbox_id: "research", permission: "view" }],
+      group_ids: [],
+    }));
   });
 
   it("keeps mobile access controls at touch-target size", async () => {
@@ -114,21 +240,24 @@ describe("AccessDashboard", () => {
     for (const buttonName of ["Refresh", "Close", "Add person", "Create agent key"]) {
       expect(screen.getByRole("button", { name: buttonName }).className).toContain("min-h-11");
     }
+    expect(screen.getByRole("button", { name: "Edit alice" }).className).toContain("h-11");
+    expect(screen.getByRole("button", { name: "Rotate key for Research helper" }).className).toContain("h-11");
+    expect(screen.getByRole("button", { name: "Edit Research helper" }).className).toContain("h-11");
 
-    for (const permissionSelect of screen.getAllByLabelText("Browser control for research")) {
-      expect(permissionSelect.className).toContain("h-11");
-    }
-    for (const automationToggle of screen.getAllByLabelText("CDP automation for research")) {
-      expect(automationToggle.closest("label")?.className).toContain("min-h-11");
-    }
+    fireEvent.click(screen.getByRole("button", { name: "Add person" }));
     expect(screen.getByLabelText("Username").className).toContain("min-h-11");
     expect(screen.getByLabelText("Password").className).toContain("min-h-11");
     expect(screen.getByLabelText("Role").className).toContain("h-11");
-    expect(screen.getByLabelText("Display name").className).toContain("min-h-11");
-    expect(screen.getByLabelText("Paperclip agent ID (optional)").className).toContain("min-h-11");
-    expect(screen.getByRole("button", { name: "Edit alice" }).className).toBe("mobile-icon-button");
-    expect(screen.getByRole("button", { name: "Rotate key for Research helper" }).className).toBe("mobile-icon-button");
-    expect(screen.getByRole("button", { name: "Edit Research helper" }).className).toBe("mobile-icon-button");
+    expect(screen.getByLabelText("Browser control for research").className).toContain("h-11");
+    expect(screen.getByLabelText("CDP automation for research").closest("label")?.className).toContain("min-h-11");
+    expect(screen.getByLabelText("User group Research team").closest("label")?.className).toContain("min-h-11");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Groups" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+    expect(screen.getByLabelText("Group name").className).toContain("min-h-11");
+    expect(screen.getByLabelText("Short description").className).toContain("min-h-11");
+    expect(screen.getByLabelText("Group active").closest("label")?.className).toContain("min-h-11");
+    expect(screen.getByLabelText("Group member alice").closest("label")?.className).toContain("min-h-11");
   });
 
   it("allows long sandbox identifiers to shrink instead of widening a mobile form", async () => {
@@ -138,27 +267,43 @@ describe("AccessDashboard", () => {
 
     render(<AccessDashboard onClose={vi.fn()} />);
 
+    expect(await screen.findByText("alice")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add person" }));
+
     const longSandbox = "paperclip-automation-sandbox-with-a-long-name";
-    const permission = await screen.findAllByLabelText(`Browser control for ${longSandbox}`);
-    const grantFieldset = permission[0].closest("fieldset");
-    const peopleSection = screen.getByRole("heading", { name: "People" }).closest("section");
-    const dashboardGrid = peopleSection?.parentElement;
+    const permission = screen.getByLabelText(`Browser control for ${longSandbox}`);
+    const grantFieldset = permission.closest("fieldset");
+    const identitiesPanel = screen.getByRole("tabpanel", { name: "Identities" });
 
     expect(grantFieldset?.className).toContain("min-w-0");
-    expect(permission[0].parentElement?.className).toContain("min-w-0");
-    expect(permission[0].className).toContain("shrink-0");
-    expect(peopleSection?.className).toContain("min-w-0");
-    expect(dashboardGrid?.className).toContain("grid-cols-1");
+    expect(permission.parentElement?.className).toContain("min-w-0");
+    expect(permission.className).toContain("shrink-0");
+    expect(identitiesPanel.className).toContain("min-w-0");
   });
 
-  it("shows the effective profile scope and keeps unrelated sandboxes hidden", async () => {
+  it("uses inherited effective grants for people access preview", async () => {
     render(<AccessDashboard onClose={vi.fn()} />);
 
     expect(await screen.findByText("alice")).toBeTruthy();
-    expect(screen.getByText("Effective access · 1 browser")).toBeTruthy();
+    expect(screen.getByText("Effective access · 2 browsers")).toBeTruthy();
     const preview = screen.getByLabelText("Effective browser access for alice");
     expect(preview.textContent).toContain("Research browser");
-    expect(preview.textContent).toContain("View");
-    expect(preview.textContent).not.toContain("Private browser");
+    expect(preview.textContent).toContain("Private browser");
+    expect(preview.textContent).toContain("commerce / checkout");
+    expect(preview.textContent).toContain("security / audit");
+    expect(preview.textContent).toContain("Operate");
+    expect(within(screen.getByLabelText("Groups for alice")).getByText("Research team")).toBeTruthy();
+  });
+
+  it("shows redacted project and folder context beside sandbox grants", async () => {
+    render(<AccessDashboard onClose={vi.fn()} />);
+
+    expect(await screen.findByText("alice")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add person" }));
+
+    const researchGrant = screen.getByLabelText("Browser control for research").closest("div");
+    expect(researchGrant?.textContent).toContain("Projects: commerce");
+    expect(researchGrant?.textContent).toContain("Folders: checkout, payments");
+    expect(researchGrant?.textContent).not.toContain("proxy");
   });
 });

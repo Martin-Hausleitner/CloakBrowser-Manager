@@ -25,6 +25,25 @@ from urllib.parse import urlsplit, urlunsplit
 SCHEMA_VERSION = 1
 DEFAULT_MAX_AGE_HOURS = 24.0
 
+REQUIRED_MOBILE_CHECKS = frozenset(
+    {
+        "compact primary controls are Full Tools Chat and Send",
+        "fullscreen local controls available",
+        "fullscreen fit control applies selected mode without clipping",
+        "fullscreen Phone fit applies current mobile viewport",
+        "fullscreen session switcher shows honest touch-safe sessions",
+        "open mobile keyboard keeps browser visible and composer above keyboard",
+    }
+)
+REQUIRED_ACCESS_DASHBOARD_CHECKS = frozenset(
+    {
+        "access dashboard rendered",
+        "access dashboard has no horizontal overflow",
+        "access dashboard compact 44px visible touch targets",
+        "access dashboard groups are compact and progressively disclosed",
+    }
+)
+
 
 class GateError(RuntimeError):
     """A deterministic release gate failure."""
@@ -228,6 +247,7 @@ def summarize_mobile(report: dict[str, Any], now: datetime, max_age_hours: float
     viewport_summaries: list[dict[str, Any]] = []
     total_checks = 0
     total_screenshots = 0
+    passed_check_names: set[str] = set()
     for item in viewports:
         if not isinstance(item, dict) or item.get("passed") is not True:
             raise GateError("mobile UI/UX gate has a failed viewport")
@@ -235,8 +255,15 @@ def summarize_mobile(report: dict[str, Any], now: datetime, max_age_hours: float
         screenshots = item.get("screenshots")
         if not isinstance(checks, list) or not checks:
             raise GateError("mobile UI/UX viewport has no checks")
+        if any(not isinstance(check, dict) or check.get("passed") is not True for check in checks):
+            raise GateError("mobile UI/UX viewport contains a failed or malformed check")
         if not isinstance(screenshots, list) or not screenshots:
             raise GateError("mobile UI/UX viewport has no screenshots")
+        passed_check_names.update(
+            str(check.get("name"))
+            for check in checks
+            if isinstance(check.get("name"), str) and check.get("name")
+        )
         total_checks += len(checks)
         total_screenshots += len(screenshots)
         viewport_summaries.append(
@@ -245,6 +272,12 @@ def summarize_mobile(report: dict[str, Any], now: datetime, max_age_hours: float
                 "checks": len(checks),
                 "screenshots": len(screenshots),
             }
+        )
+    missing_mobile_checks = sorted(REQUIRED_MOBILE_CHECKS - passed_check_names)
+    if missing_mobile_checks:
+        raise GateError(
+            "mobile UI/UX gate is missing required checks: "
+            + ", ".join(missing_mobile_checks)
         )
     access_dashboard_required = report.get("access_dashboard_required") is True
     authenticated_run = report.get("authenticated_run") is True
@@ -259,6 +292,24 @@ def summarize_mobile(report: dict[str, Any], now: datetime, max_age_hours: float
         access_screenshots = access_dashboard.get("screenshots")
         if not isinstance(access_checks, list) or not access_checks:
             raise GateError("mobile access dashboard gate has no checks")
+        if any(
+            not isinstance(check, dict) or check.get("passed") is not True
+            for check in access_checks
+        ):
+            raise GateError("mobile access dashboard contains a failed or malformed check")
+        access_check_names = {
+            str(check.get("name"))
+            for check in access_checks
+            if isinstance(check.get("name"), str) and check.get("name")
+        }
+        missing_access_checks = sorted(
+            REQUIRED_ACCESS_DASHBOARD_CHECKS - access_check_names
+        )
+        if missing_access_checks:
+            raise GateError(
+                "mobile access dashboard is missing required checks: "
+                + ", ".join(missing_access_checks)
+            )
         if not isinstance(access_screenshots, list) or not access_screenshots:
             raise GateError("mobile access dashboard gate has no screenshots")
         total_checks += len(access_checks)
@@ -305,6 +356,10 @@ def summarize_streaming(report: dict[str, Any], now: datetime, max_age_hours: fl
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise GateError("streaming benchmark report has no candidates")
+    expected_runs = None
+    config = report.get("config")
+    if isinstance(config, dict) and isinstance(config.get("iterations"), int):
+        expected_runs = config["iterations"]
     candidate_summaries: list[dict[str, Any]] = []
     measured = 0
     failed = 0
@@ -318,6 +373,15 @@ def summarize_streaming(report: dict[str, Any], now: datetime, max_age_hours: fl
         if status == "measured":
             measured += 1
             if availability != "available":
+                failed += 1
+            summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+            runs = summary.get("runs", 0)
+            success_rate = summary.get("success_rate_pct")
+            if expected_runs is not None and runs != expected_runs:
+                failed += 1
+            if expected_runs is not None and success_rate != 100.0:
+                failed += 1
+            elif success_rate is not None and success_rate != 100.0:
                 failed += 1
         candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
         candidate_summaries.append(
@@ -371,7 +435,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             evidence = f"{gate.get('measured_candidates', 0)} measured candidates"
         else:
             evidence = str(gate)
-        lines.append(f"| `{name}` | `{gate_status}` | {redact_text(evidence).replace('|', '\\|')} |")
+        safe_evidence = redact_text(evidence).replace("|", "\\|")
+        lines.append(f"| `{name}` | `{gate_status}` | {safe_evidence} |")
     if report.get("failures"):
         lines.extend(["", "## Failures", ""])
         for failure in report["failures"]:

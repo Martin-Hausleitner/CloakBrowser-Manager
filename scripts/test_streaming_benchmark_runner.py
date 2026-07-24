@@ -33,6 +33,24 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
+class FlakyOnceHandler(http.server.BaseHTTPRequestHandler):
+    calls = 0
+
+    def do_GET(self) -> None:
+        type(self).calls += 1
+        if type(self).calls == 1:
+            self.send_response(503)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
+
+    def log_message(self, *_args: object) -> None:
+        return
+
+
 class StreamingBenchmarkRunnerTest(unittest.TestCase):
     def test_public_report_distinguishes_measured_and_unmeasured_candidates(self) -> None:
         with socketserver.TCPServer(("127.0.0.1", 0), HealthHandler) as server:
@@ -135,6 +153,107 @@ class StreamingBenchmarkRunnerTest(unittest.TestCase):
                 ):
                     self.assertNotIn(private_value, serialized_report)
                     self.assertNotIn(private_value, serialized_events)
+            server.shutdown()
+
+    def test_strict_fails_when_measured_candidate_has_one_failed_sample(self) -> None:
+        FlakyOnceHandler.calls = 0
+        with socketserver.TCPServer(("127.0.0.1", 0), FlakyOnceHandler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                config = root / "config.json"
+                output = root / "out"
+                config.write_text(
+                    json.dumps(
+                        {
+                            "candidates": [
+                                {
+                                    "id": "flaky-http",
+                                    "name": "Flaky HTTP",
+                                    "type": "http",
+                                    "url": f"http://127.0.0.1:{server.server_address[1]}/health",
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(RUNNER),
+                        "--config",
+                        str(config),
+                        "--output-dir",
+                        str(output),
+                        "--iterations",
+                        "20",
+                        "--strict",
+                    ],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+
+                self.assertEqual(completed.returncode, 1, completed.stderr)
+                report = json.loads((output / "streaming-benchmark-report.json").read_text())
+                result = report["results"][0]
+                self.assertEqual(result["status"], "measured")
+                self.assertEqual(result["availability"], "unavailable")
+                self.assertEqual(result["summary"]["runs"], 20)
+                self.assertEqual(result["summary"]["success_rate_pct"], 95.0)
+            server.shutdown()
+
+    def test_strict_passes_when_measured_candidate_has_all_samples_successful(self) -> None:
+        with socketserver.TCPServer(("127.0.0.1", 0), HealthHandler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                config = root / "config.json"
+                output = root / "out"
+                config.write_text(
+                    json.dumps(
+                        {
+                            "candidates": [
+                                {
+                                    "id": "stable-http",
+                                    "name": "Stable HTTP",
+                                    "type": "http",
+                                    "url": f"http://127.0.0.1:{server.server_address[1]}/health",
+                                    "headers": {"X-Benchmark-Test": "ok"},
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(RUNNER),
+                        "--config",
+                        str(config),
+                        "--output-dir",
+                        str(output),
+                        "--iterations",
+                        "20",
+                        "--strict",
+                    ],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                report = json.loads((output / "streaming-benchmark-report.json").read_text())
+                result = report["results"][0]
+                self.assertEqual(result["availability"], "available")
+                self.assertEqual(result["summary"]["runs"], 20)
+                self.assertEqual(result["summary"]["success_rate_pct"], 100.0)
             server.shutdown()
 
 

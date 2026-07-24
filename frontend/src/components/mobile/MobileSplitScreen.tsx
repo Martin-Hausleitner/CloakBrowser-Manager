@@ -3,7 +3,10 @@ import type { CSSProperties, ChangeEvent, FormEvent, ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowRight,
+  Camera,
   ChevronUp,
+  ClipboardCopy,
+  ClipboardPaste,
   Expand,
   Grid2X2,
   Globe2,
@@ -19,11 +22,16 @@ import {
   Shrink,
   Square,
 } from "lucide-react";
-import type { Profile } from "../../lib/api";
+import type { Profile, ProfileHarness } from "../../lib/api";
+import { compareOrganizedProfiles, profileOrganizationLabel } from "../../lib/profileOrganization";
 import {
+  cloakServerProvider,
+  codexComputerUseProvider,
   createTaskHarness,
   taskHarnessReadyEvent,
+  type TaskHarnessAction,
   type TaskHarnessCapabilities,
+  type TaskHarnessMessage,
 } from "../../lib/taskHarness";
 import { StatusIndicator } from "../StatusIndicator";
 
@@ -56,7 +64,7 @@ interface MobileSplitScreenProps {
 }
 
 interface ChatMessage {
-  id: number;
+  id: string;
   role: "task" | "assistant" | "user" | "tool";
   text: string;
 }
@@ -67,17 +75,63 @@ const presets = [
   { label: "Desktop", width: 1440, height: 900 },
 ] as const;
 
-const defaultPreviewPanePercent = 42;
+const defaultPreviewPanePercent = 68;
 // The running browser is the primary control surface; chat and settings are
 // now collapsed into a compact dock by default.
 const defaultLivePanePercent = 68;
 const compactLivePanePercent = 65;
 const compactLivePaneMaximumHeight = 700;
 const defaultBrowserZoom = 100;
-const collapsedLivePanePercent = 82;
 const collapsedLandscapeLivePanePercent = 74;
+const collapsedLivePaneHeaderHeight = 44;
+const livePaneLowerControlsReserveHeight = 156;
+const minimumAspectFitPaneHeight = 220;
 const minimumPhoneFitWidth = 320;
 const minimumPhoneFitHeight = 480;
+
+type FullscreenFitMode = "contain" | "width" | "height";
+
+const harnessNames: Record<ProfileHarness, string> = {
+  codex: "Codex",
+  antigravity: "Antigravity",
+  "claude-code": "Claude Code",
+  opencode: "OpenCode",
+  "browser-use": "Browser Use",
+  "browser-harness": "Browser Harness",
+  unbrowse: "Unbrowse",
+  stagehand: "Stagehand",
+};
+
+type PinnedHarnessAction = Omit<TaskHarnessAction, "kind"> & {
+  kind: "screenshot" | "copy" | "paste";
+};
+
+const pinnedHarnessActions = [
+  {
+    id: "capture-browser",
+    label: "Capture",
+    kind: "screenshot",
+    scope: "host",
+  },
+  {
+    id: "copy-browser-selection",
+    label: "Copy",
+    kind: "copy",
+    scope: "host",
+  },
+  {
+    id: "paste-into-browser",
+    label: "Paste",
+    kind: "paste",
+    scope: "host",
+  },
+] satisfies readonly PinnedHarnessAction[];
+
+const pinnedHarnessPrompts: Record<PinnedHarnessAction["kind"], string> = {
+  screenshot: "Capture the current browser view.",
+  copy: "Copy the current browser selection.",
+  paste: "Paste the clipboard into the focused browser field.",
+};
 
 function usesCompactLivePane() {
   return (
@@ -92,13 +146,48 @@ function defaultPanePercent(isLiveBrowser: boolean, compactLivePane: boolean) {
   return compactLivePane ? compactLivePanePercent : defaultLivePanePercent;
 }
 
-const initialMessages: ChatMessage[] = [
-  {
-    id: 1,
-    role: "assistant",
-    text: "Codex Computer Use Bridge status appears here while browser control stays visible.",
-  },
-];
+function currentLiveViewportSize() {
+  if (typeof window === "undefined") {
+    return { width: presets[0].width, height: presets[0].height };
+  }
+
+  const visualViewport = window.visualViewport;
+  return {
+    width: Math.round(visualViewport?.width ?? window.innerWidth ?? presets[0].width),
+    height: Math.round(visualViewport?.height ?? window.innerHeight ?? presets[0].height),
+  };
+}
+
+function collapsedLivePaneBasis(
+  width: number | null | undefined,
+  height: number | null | undefined,
+  liveViewportSize: { width: number; height: number },
+  compactWorkspace: boolean,
+) {
+  if (
+    !width ||
+    !height ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return `${defaultLivePanePercent}%`;
+  }
+
+  const fittedBrowserHeight = Math.round(liveViewportSize.width * (height / width));
+  const paneHeight = fittedBrowserHeight + collapsedLivePaneHeaderHeight;
+  if (liveViewportSize.height >= liveViewportSize.width) {
+    const maximumPaneHeight = Math.max(
+      minimumAspectFitPaneHeight,
+      liveViewportSize.height - livePaneLowerControlsReserveHeight,
+    );
+    const compactMinimumPaneHeight = compactWorkspace
+      ? Math.round(liveViewportSize.height * 0.7)
+      : minimumAspectFitPaneHeight;
+    return `${Math.min(Math.max(paneHeight, compactMinimumPaneHeight), maximumPaneHeight)}px`;
+  }
+
+  return `${paneHeight}px`;
+}
 
 function isInteractiveShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
@@ -111,6 +200,28 @@ function isInteractiveShortcutTarget(target: EventTarget | null) {
     return true;
   }
   return Boolean(target.closest("canvas, .mobile-browser-frame, .profile-viewer"));
+}
+
+function isKeyboardEntryTarget(target: Element | null) {
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+  if (target instanceof HTMLInputElement) {
+    return !["button", "checkbox", "file", "hidden", "radio", "range", "reset", "submit"].includes(
+      target.type,
+    );
+  }
+  return target instanceof HTMLElement && target.isContentEditable;
+}
+
+function toChatMessage(message: TaskHarnessMessage): ChatMessage {
+  return {
+    id: message.id,
+    role: message.role === "assistant"
+      ? "assistant"
+      : message.role === "user"
+        ? "user"
+        : "tool",
+    text: message.content,
+  };
 }
 
 export function MobileSplitScreen({
@@ -144,15 +255,24 @@ export function MobileSplitScreen({
     width: selected?.screen_width ?? presets[0].width,
     height: selected?.screen_height ?? presets[0].height,
   });
-  const [messages, setMessages] = useState(initialMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [historyPending, setHistoryPending] = useState(false);
+  const [harnessNotice, setHarnessNotice] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [gridOpen, setGridOpen] = useState(false);
   const [viewportOpen, setViewportOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [viewportApplying, setViewportApplying] = useState(false);
   const [viewportSaved, setViewportSaved] = useState(false);
   const [viewportSaveFailed, setViewportSaveFailed] = useState(false);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [fullscreenViewOpen, setFullscreenViewOpen] = useState(false);
   const [fullscreenViewportOpen, setFullscreenViewportOpen] = useState(false);
+  const [fullscreenSessionsOpen, setFullscreenSessionsOpen] = useState(false);
+  const [fullscreenFitMode, setFullscreenFitMode] = useState<FullscreenFitMode>("contain");
+  const [liveViewportSize, setLiveViewportSize] = useState(currentLiveViewportSize);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [compactLivePane, setCompactLivePane] = useState(usesCompactLivePane);
   const [panePercent, setPanePercent] = useState(() =>
     defaultPanePercent(selected?.status === "running", usesCompactLivePane()),
@@ -168,25 +288,39 @@ export function MobileSplitScreen({
   const viewportProfileIdRef = useRef(selected?.id);
   const chatAdjustedRef = useRef(false);
   const taskHarnessRef = useRef<ReturnType<typeof createTaskHarness> | null>(null);
+  const keyboardBaselineHeightRef = useRef(liveViewportSize.height);
+  const keyboardEntryFocusedRef = useRef(false);
 
-  const runningProfiles = useMemo(
-    () => profiles.filter((profile) => profile.status === "running"),
+  const organizedProfiles = useMemo(
+    () => [...profiles].sort(compareOrganizedProfiles),
     [profiles],
+  );
+  const runningProfiles = useMemo(
+    () => organizedProfiles.filter((profile) => profile.status === "running"),
+    [organizedProfiles],
   );
   const liveLabel = selected?.status === "running" ? "Live browser" : "Preview";
   const browserUrl = selected?.cdp_url ?? "Browser preview";
   const isLiveBrowser = selected?.status === "running";
   const preferredPanePercent = defaultPanePercent(isLiveBrowser, compactLivePane);
-  const collapsedPanePercent =
-    typeof window !== "undefined" && window.innerHeight <= 500 && window.innerWidth > window.innerHeight
-      ? collapsedLandscapeLivePanePercent
-      : collapsedLivePanePercent;
+  const toolPanelOpen = viewportOpen || gridOpen || adminOpen;
+  const detailPanelOpen = remoteToolsOpen && toolPanelOpen;
+  const compactWorkspace = chatCollapsed && !remoteToolsOpen && !fullscreenOpen;
+  const collapsedPaneBasis =
+    liveViewportSize.height <= 500 && liveViewportSize.width > liveViewportSize.height
+      ? `${collapsedLandscapeLivePanePercent}%`
+      : collapsedLivePaneBasis(selected?.screen_width, selected?.screen_height, liveViewportSize, compactWorkspace);
+  const fitLivePaneToBrowser = isLiveBrowser && !paneAdjusted;
   const effectivePanePercent =
-    isLiveBrowser && chatCollapsed && !remoteToolsOpen && !paneAdjusted
-      ? collapsedPanePercent
-      : panePercent;
+    fitLivePaneToBrowser
+      ? collapsedPaneBasis
+      : `${panePercent}%`;
   const livePaneStyle = {
-    "--mobile-live-pane-basis": `${effectivePanePercent}%`,
+    "--mobile-live-pane-basis": effectivePanePercent,
+    "--mobile-remote-aspect": `${selected?.screen_width || presets[0].width} / ${selected?.screen_height || presets[0].height}`,
+  } as CSSProperties;
+  const rootStyle = {
+    "--mobile-visual-viewport-height": `${liveViewportSize.height}px`,
   } as CSSProperties;
   const connectionLabel =
     browserConnectionStatus === "connected"
@@ -204,23 +338,45 @@ export function MobileSplitScreen({
       : browserConnectionStatus === "failed"
         ? "mobile-connection-failed"
         : "mobile-connection-pending";
-  const harnessReady = harnessCapabilities?.chat === true;
+  const harnessProvider = harnessCapabilities?.metadata?.provider;
+  const codexHostReady = Boolean(
+    harnessCapabilities?.chat && harnessProvider === codexComputerUseProvider,
+  );
+  const serverHistoryReady = Boolean(
+    harnessCapabilities?.chat && harnessProvider === cloakServerProvider,
+  );
+  const harnessReady = codexHostReady || serverHistoryReady;
+  const composerReady = Boolean(harnessReady && canInteract && selected);
+  const selectedHarnessName = selected ? harnessNames[selected.harness] : "Codex";
   const harnessLabel = harnessCapabilities === null
-    ? "Codex Computer Use Bridge · checking"
-    : harnessCapabilities.chat === false
-      ? "Codex Computer Use Bridge · unavailable"
-      : "Codex Computer Use Bridge · connected";
-  const harnessUnavailable = harnessCapabilities?.chat === false;
+    ? "Task connection · checking"
+    : codexHostReady
+      ? selected?.harness === "codex"
+        ? "Codex Computer Use"
+        : `${selectedHarnessName} · via Codex Computer Use`
+      : serverHistoryReady
+        ? selected?.harness === "codex"
+          ? "Server history · save only"
+          : `${selectedHarnessName} · saved only`
+        : "Task connection · unavailable";
   const harnessPlaceholder = harnessCapabilities === null
-    ? "Checking Codex Computer Use Bridge..."
-    : harnessUnavailable
-    ? "Codex Computer Use Bridge unavailable"
-    : "Ask Codex Computer Use...";
-
+    ? "Checking task connection..."
+    : !selected
+      ? "Select a browser profile"
+      : !canInteract
+        ? "View-only access"
+        : codexHostReady
+          ? selected?.harness === "codex"
+            ? "Ask Codex Computer Use..."
+            : `Ask ${selectedHarnessName} via Codex Computer Use...`
+          : serverHistoryReady
+            ? "Save task to server history..."
+            : "Task connection unavailable";
   const closeTools = () => {
     onRemoteToolsOpenChange(false);
     setViewportOpen(false);
     setGridOpen(false);
+    setAdminOpen(false);
   };
 
   const openTools = () => {
@@ -236,6 +392,7 @@ export function MobileSplitScreen({
       const currentRequestId = ++requestId;
       const harness = createTaskHarness(window);
       taskHarnessRef.current = harness;
+      setHarnessCapabilities(null);
       harness.capabilities()
         .then((capabilities) => {
           if (!cancelled && currentRequestId === requestId) {
@@ -265,6 +422,49 @@ export function MobileSplitScreen({
   }, []);
 
   useEffect(() => {
+    const profileId = selected?.id;
+    const harness = taskHarnessRef.current;
+    const controller = new AbortController();
+    let cancelled = false;
+
+    setMessages([]);
+    setConversationId(null);
+    setHarnessNotice(null);
+    setHarnessError(null);
+
+    if (!profileId || !harness || !harnessCapabilities?.chat) {
+      setHistoryPending(false);
+      return () => controller.abort();
+    }
+
+    setHistoryPending(true);
+    void harness.listConversations(profileId, { signal: controller.signal })
+      .then(async (conversations) => {
+        if (cancelled) return;
+        const latest = conversations.find((conversation) => conversation.status === "active")
+          ?? conversations[0];
+        if (!latest) return;
+        const history = await harness.listMessages(latest.id, { signal: controller.signal });
+        if (cancelled) return;
+        setConversationId(latest.id);
+        setMessages(history.map(toChatMessage));
+      })
+      .catch((err) => {
+        if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
+        console.warn("[task-harness] history failed:", err);
+        setHarnessNotice("History is temporarily unavailable.");
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryPending(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [harnessCapabilities, selected?.id]);
+
+  useEffect(() => {
     if (viewportProfileIdRef.current !== selected?.id) {
       setViewportSaved(false);
       setViewportSaveFailed(false);
@@ -277,10 +477,55 @@ export function MobileSplitScreen({
   }, [selected?.id, selected?.screen_height, selected?.screen_width]);
 
   useEffect(() => {
-    const updateCompactLivePane = () => setCompactLivePane(usesCompactLivePane());
-    updateCompactLivePane();
-    window.addEventListener("resize", updateCompactLivePane);
-    return () => window.removeEventListener("resize", updateCompactLivePane);
+    const updateLiveViewport = () => {
+      const nextSize = currentLiveViewportSize();
+      const visualViewport = window.visualViewport;
+      const activeEntry = keyboardEntryFocusedRef.current || isKeyboardEntryTarget(document.activeElement);
+      const layoutHeight = Math.max(window.innerHeight || 0, keyboardBaselineHeightRef.current);
+      const occludedHeight = Math.max(
+        0,
+        layoutHeight - nextSize.height - Math.max(0, visualViewport?.offsetTop ?? 0),
+      );
+      const shrunkFromBaseline = keyboardBaselineHeightRef.current - nextSize.height >= 80;
+      const keyboardOccludesViewport = occludedHeight >= 80 || shrunkFromBaseline;
+
+      setLiveViewportSize((current) =>
+        current.width === nextSize.width && current.height === nextSize.height ? current : nextSize,
+      );
+      // Keep keyboard mode through the close animation after blur. Releasing
+      // it while the visual viewport is still short makes the dock flash back
+      // over the composer on Mobile Safari.
+      setKeyboardOpen((current) => keyboardOccludesViewport && (activeEntry || current));
+      setCompactLivePane(usesCompactLivePane());
+      if (!activeEntry && occludedHeight < 80) {
+        keyboardBaselineHeightRef.current = nextSize.height;
+      }
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      if (isKeyboardEntryTarget(event.target as Element | null)) {
+        keyboardEntryFocusedRef.current = true;
+      }
+      updateLiveViewport();
+    };
+    const handleFocusOut = (event: FocusEvent) => {
+      if (isKeyboardEntryTarget(event.target as Element | null)) {
+        keyboardEntryFocusedRef.current = false;
+      }
+      window.requestAnimationFrame(updateLiveViewport);
+    };
+    updateLiveViewport();
+    window.addEventListener("resize", updateLiveViewport);
+    window.visualViewport?.addEventListener("resize", updateLiveViewport);
+    window.visualViewport?.addEventListener("scroll", updateLiveViewport);
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("focusout", handleFocusOut);
+    return () => {
+      window.removeEventListener("resize", updateLiveViewport);
+      window.visualViewport?.removeEventListener("resize", updateLiveViewport);
+      window.visualViewport?.removeEventListener("scroll", updateLiveViewport);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("focusout", handleFocusOut);
+    };
   }, []);
 
   useEffect(() => {
@@ -289,7 +534,7 @@ export function MobileSplitScreen({
   }, [paneAdjusted, preferredPanePercent, selected?.id, selected?.status]);
 
   useEffect(() => {
-    if (chatAdjustedRef.current) return;
+    chatAdjustedRef.current = false;
     setChatCollapsed(true);
   }, [selected?.id]);
 
@@ -308,6 +553,7 @@ export function MobileSplitScreen({
         setFullscreenOpen(false);
         setFullscreenViewOpen(false);
         setFullscreenViewportOpen(false);
+        setFullscreenSessionsOpen(false);
       }
     };
     document.addEventListener("keydown", closeOnEscape);
@@ -347,6 +593,7 @@ export function MobileSplitScreen({
         openTools();
         setGridOpen((open) => !open);
         setViewportOpen(false);
+        setAdminOpen(false);
         return;
       }
       if (key === "k") {
@@ -364,11 +611,13 @@ export function MobileSplitScreen({
   });
 
   const openFullscreen = () => {
+    if (!isLiveBrowser) return;
     restoreFullscreenFocusRef.current = true;
     setGridOpen(false);
     setViewportOpen(false);
     setFullscreenViewOpen(false);
     setFullscreenViewportOpen(false);
+    setFullscreenSessionsOpen(false);
     closeTools();
     setFullscreenOpen(true);
   };
@@ -377,13 +626,18 @@ export function MobileSplitScreen({
     setFullscreenOpen(false);
     setFullscreenViewOpen(false);
     setFullscreenViewportOpen(false);
+    setFullscreenSessionsOpen(false);
   };
 
-  const sendMessage = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const text = draft.trim();
-    if (!text || harnessPending || !harnessReady) return;
-    const userMessage: ChatMessage = { id: Date.now(), role: "user", text };
+  const selectFullscreenSession = (profileId: string) => {
+    onSelect(profileId);
+    setFullscreenSessionsOpen(false);
+  };
+
+  const runHarnessTask = async (text: string, commands?: readonly TaskHarnessAction[]) => {
+    if (!text || harnessPending || !composerReady) return;
+    const localMessageId = `local-${Date.now()}`;
+    const userMessage: ChatMessage = { id: localMessageId, role: "user", text };
     chatAdjustedRef.current = true;
     closeTools();
     setChatCollapsed(false);
@@ -394,38 +648,57 @@ export function MobileSplitScreen({
     setDraft("");
     setHarnessPending(true);
     setHarnessError(null);
+    setHarnessNotice(null);
     try {
       const reply = await (taskHarnessRef.current ?? createTaskHarness(window)).send({
         text,
+        ...(commands ? { commands } : {}),
         profile_id: selected?.id ?? null,
+        ...(conversationId ? { conversation_id: conversationId } : {}),
         metadata: {
-          runner: "codex-computer-use",
-          preferred_surface: "codex-computer-use",
+          runner: codexHostReady ? codexComputerUseProvider : cloakServerProvider,
+          selected_runner: codexHostReady ? codexComputerUseProvider : cloakServerProvider,
+          selected_profile_id: selected?.id ?? null,
+          selected_profile_name: selected?.name ?? null,
+          preferred_harness: selected?.harness ?? null,
+          execution_provider: codexHostReady ? codexComputerUseProvider : cloakServerProvider,
+          execution_bridge: codexHostReady ? codexComputerUseProvider : null,
+          execution: codexHostReady ? "host" : "persist-only",
           browser_visible: true,
+          ...(commands ? { source: "pinned-action" } : {}),
         },
       });
-      setMessages((current) => [
-        ...current,
-        {
-          id: Date.now() + 1,
-          role: reply.role === "tool" ? "tool" : "assistant",
-          text: reply.content,
-        },
-      ]);
+      if (reply.role === "user") {
+        setMessages((current) => current.map((message) => (
+          message.id === localMessageId ? toChatMessage(reply) : message
+        )));
+        setHarnessNotice(
+          serverHistoryReady
+            ? "Saved to server history · not executed."
+            : "Task recorded · no execution result received.",
+        );
+      } else {
+        setMessages((current) => [...current, toChatMessage(reply)]);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Task harness request failed";
       setHarnessError(message);
-      setMessages((current) => [
-        ...current,
-        {
-          id: Date.now() + 1,
-          role: "assistant",
-          text: `Codex Computer Use could not queue that task: ${message}`,
-        },
-      ]);
     } finally {
       setHarnessPending(false);
     }
+  };
+
+  const sendMessage = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text || harnessPending || !composerReady) return;
+    setDraft("");
+    await runHarnessTask(text);
+  };
+
+  const runPinnedHarnessAction = async (action: PinnedHarnessAction) => {
+    if (!codexHostReady || !harnessCapabilities?.browser_actions.includes(action.kind)) return;
+    await runHarnessTask(pinnedHarnessPrompts[action.kind], [action]);
   };
 
   const updateDraft = (event: ChangeEvent<HTMLTextAreaElement>) => {
@@ -437,12 +710,30 @@ export function MobileSplitScreen({
   const resetLiveViewport = () => {
     setPaneAdjusted(false);
     setPanePercent(preferredPanePercent);
+    setFullscreenFitMode("contain");
     onBrowserZoomChange(defaultBrowserZoom);
   };
 
   const updatePanePercent = (value: number) => {
     setPaneAdjusted(true);
     setPanePercent(value);
+  };
+
+  const applyViewportSize = async (nextViewport: { width: number; height: number }) => {
+    if (viewportApplying) return;
+
+    setViewportSaved(false);
+    setViewportSaveFailed(false);
+    if (!selected || !canManageProfiles) return;
+
+    setViewportApplying(true);
+    try {
+      const saved = await onViewportApply(nextViewport.width, nextViewport.height);
+      setViewportSaved(saved);
+      setViewportSaveFailed(!saved);
+    } finally {
+      setViewportApplying(false);
+    }
   };
 
   const applyPhoneFitViewport = async () => {
@@ -452,26 +743,16 @@ export function MobileSplitScreen({
       height: Math.round(
         Math.max(
           minimumPhoneFitHeight,
-          (visualViewport?.height ?? window.innerHeight ?? presets[0].height) - (isLiveBrowser ? 96 : 0),
+          visualViewport?.height ?? window.innerHeight ?? presets[0].height,
         ),
       ),
     };
     setViewport(nextViewport);
-    setViewportSaved(false);
-    setViewportSaveFailed(false);
-    if (!selected || !canManageProfiles) return;
-
-    const saved = await onViewportApply(nextViewport.width, nextViewport.height);
-    setViewportSaved(saved);
-    setViewportSaveFailed(!saved);
+    await applyViewportSize(nextViewport);
   };
 
   const applyViewport = async () => {
-    if (!selected || !canManageProfiles) return;
-
-    const saved = await onViewportApply(viewport.width, viewport.height);
-    setViewportSaved(saved);
-    setViewportSaveFailed(!saved);
+    await applyViewportSize(viewport);
   };
 
   const renderViewportEditor = (surface: "inline" | "fullscreen") => {
@@ -479,6 +760,27 @@ export function MobileSplitScreen({
     const editorId = fullscreen ? "mobile-fullscreen-viewport-settings" : "mobile-viewport-settings";
     const widthInputId = fullscreen ? "mobile-fullscreen-viewport-width" : "mobile-viewport-width";
     const heightInputId = fullscreen ? "mobile-fullscreen-viewport-height" : "mobile-viewport-height";
+    const viewportStatus = viewportApplying
+      ? selected?.status === "running"
+        ? "Restarting live browser..."
+        : "Saving viewport..."
+      : viewportSaveFailed
+        ? selected?.status === "running"
+          ? "Could not apply viewport"
+          : "Could not save viewport"
+        : viewportSaved
+          ? "Saved"
+          : selected?.status === "running"
+            ? "Restarts live browser to apply"
+            : "Applied when this profile launches";
+    const setViewportDimension = (dimension: "width" | "height", value: string) => {
+      setViewport((current) => ({
+        ...current,
+        [dimension]: Number(value) || current[dimension],
+      }));
+      setViewportSaved(false);
+      setViewportSaveFailed(false);
+    };
 
     return (
       <div
@@ -486,29 +788,59 @@ export function MobileSplitScreen({
         className={`mobile-viewport-editor ${fullscreen ? "mobile-fullscreen-viewport-editor" : ""}`}
         aria-label={fullscreen ? "Fullscreen viewport controls" : "Viewport controls"}
       >
-        {fullscreen ? (
-          <p className="mobile-viewport-editor-note">
-            Save the next browser viewport without leaving the live viewer.
-          </p>
-        ) : null}
-        {!fullscreen && !isLiveBrowser ? (
+        {!fullscreen ? (
           <>
             {renderLiveViewControls()}
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-[11px] text-gray-500">Preview controls update this viewer immediately.</p>
-              <button type="button" className="btn-secondary min-h-11 shrink-0" onClick={resetLiveViewport}>
-                Reset view
-              </button>
-            </div>
+            <p className="mobile-viewport-editor-note">Pane and zoom update this viewer immediately.</p>
           </>
         ) : null}
-        {canManageProfiles ? (
+        {canManageProfiles && fullscreen ? (
           <>
-            <div className="flex gap-1 overflow-x-auto">
+            <div className="mobile-fullscreen-viewport-fields">
+              <label htmlFor={widthInputId}>
+                <span className="sr-only">Viewport width</span>
+                <input
+                  id={widthInputId}
+                  aria-label="Fullscreen viewport width"
+                  className="input no-spin"
+                  type="number"
+                  min={240}
+                  max={2560}
+                  value={viewport.width}
+                  onChange={(event) => setViewportDimension("width", event.target.value)}
+                  disabled={viewportApplying}
+                />
+              </label>
+              <span className="mobile-fullscreen-viewport-times" aria-hidden="true">×</span>
+              <label htmlFor={heightInputId}>
+                <span className="sr-only">Viewport height</span>
+                <input
+                  id={heightInputId}
+                  aria-label="Fullscreen viewport height"
+                  className="input no-spin"
+                  type="number"
+                  min={320}
+                  max={1600}
+                  value={viewport.height}
+                  onChange={(event) => setViewportDimension("height", event.target.value)}
+                  disabled={viewportApplying}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn-primary mobile-fullscreen-viewport-apply"
+                disabled={!selected || viewportApplying}
+                onClick={applyViewport}
+              >
+                {viewportApplying ? "Wait" : "Apply"}
+              </button>
+            </div>
+            <div className="mobile-fullscreen-preset-row" aria-label="Fullscreen viewport presets">
               <button
                 type="button"
                 onClick={applyPhoneFitViewport}
                 className="mobile-preset-button mobile-phone-fit-button"
+                disabled={viewportApplying}
               >
                 Phone fit
               </button>
@@ -522,6 +854,36 @@ export function MobileSplitScreen({
                     setViewportSaveFailed(false);
                   }}
                   className="mobile-preset-button"
+                  disabled={viewportApplying}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            <p className="mobile-fullscreen-viewport-status" aria-live="polite">{viewportStatus}</p>
+          </>
+        ) : canManageProfiles ? (
+          <>
+            <div className="flex gap-1 overflow-x-auto">
+              <button
+                type="button"
+                onClick={applyPhoneFitViewport}
+                className="mobile-preset-button mobile-phone-fit-button"
+                disabled={viewportApplying}
+              >
+                Phone fit
+              </button>
+              {presets.map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => {
+                    setViewport({ width: preset.width, height: preset.height });
+                    setViewportSaved(false);
+                    setViewportSaveFailed(false);
+                  }}
+                  className="mobile-preset-button"
+                  disabled={viewportApplying}
                 >
                   {preset.label}
                 </button>
@@ -538,14 +900,8 @@ export function MobileSplitScreen({
                   min={240}
                   max={2560}
                   value={viewport.width}
-                  onChange={(event) => {
-                    setViewport((current) => ({
-                      ...current,
-                      width: Number(event.target.value) || current.width,
-                    }));
-                    setViewportSaved(false);
-                    setViewportSaveFailed(false);
-                  }}
+                  onChange={(event) => setViewportDimension("width", event.target.value)}
+                  disabled={viewportApplying}
                 />
               </label>
               <label htmlFor={heightInputId}>
@@ -558,34 +914,22 @@ export function MobileSplitScreen({
                   min={320}
                   max={1600}
                   value={viewport.height}
-                  onChange={(event) => {
-                    setViewport((current) => ({
-                      ...current,
-                      height: Number(event.target.value) || current.height,
-                    }));
-                    setViewportSaved(false);
-                    setViewportSaveFailed(false);
-                  }}
+                  onChange={(event) => setViewportDimension("height", event.target.value)}
+                  disabled={viewportApplying}
                 />
               </label>
             </div>
-            <div className="flex items-center justify-between gap-3">
+            <div className="mobile-viewport-apply-row">
               <p className="text-[11px] text-gray-500">
-                {viewportSaveFailed
-                  ? "Could not save viewport"
-                  : viewportSaved
-                    ? "Saved"
-                    : selected?.status === "running"
-                      ? "Saves for the next launch; visual zoom changes now"
-                      : "Applied when this profile launches"}
+                {viewportStatus}
               </p>
               <button
                 type="button"
-                className="btn-primary min-h-11 shrink-0"
-                disabled={!selected}
+                className="btn-primary min-h-11 shrink-0 px-2 text-[11px]"
+                disabled={!selected || viewportApplying}
                 onClick={applyViewport}
               >
-                Apply
+                {viewportApplying ? "Applying..." : "Apply"}
               </button>
             </div>
           </>
@@ -651,23 +995,24 @@ export function MobileSplitScreen({
 
   const renderFullscreenViewControls = () => (
     <div id="mobile-fullscreen-view-controls" className="mobile-fullscreen-tools-panel" aria-label="Fullscreen view controls">
-      <label className="mobile-fullscreen-zoom" htmlFor="mobile-fullscreen-pane-size">
-        <span className="text-[10px] font-semibold uppercase text-gray-500">Pane</span>
-        <input
-          id="mobile-fullscreen-pane-size"
-          type="range"
-          min={42}
-          max={82}
-          step={1}
-          value={panePercent}
-          onChange={(event) => updatePanePercent(Number(event.target.value))}
-          aria-label="Fullscreen browser pane"
-          aria-valuetext={`${panePercent}% of the workspace`}
-        />
-        <output htmlFor="mobile-fullscreen-pane-size" aria-label="Fullscreen browser pane size" aria-live="polite">
-          {panePercent}%
-        </output>
-      </label>
+      <div className="mobile-fullscreen-fit-row" role="group" aria-label="Fullscreen browser fit mode">
+        {([
+          ["contain", "Fit"],
+          ["width", "Width"],
+          ["height", "Height"],
+        ] as const).map(([mode, label]) => (
+          <button
+            key={mode}
+            type="button"
+            className="mobile-fullscreen-fit-button"
+            aria-label={`Fit fullscreen browser to ${mode === "contain" ? "screen" : mode}`}
+            aria-pressed={fullscreenFitMode === mode}
+            onClick={() => setFullscreenFitMode(mode)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <label className="mobile-fullscreen-zoom" htmlFor="mobile-fullscreen-browser-zoom">
         <span className="text-[10px] font-semibold uppercase text-gray-500">Zoom</span>
         <input
@@ -688,6 +1033,41 @@ export function MobileSplitScreen({
     </div>
   );
 
+  const renderFullscreenSessions = () => (
+    <div id="mobile-fullscreen-sessions" className="mobile-fullscreen-sessions-panel" aria-label="Fullscreen running sessions">
+      {(runningProfiles.length > 0 ? runningProfiles : organizedProfiles.slice(0, 4)).map((profile) => (
+        <button
+          key={profile.id}
+          type="button"
+          onClick={() => selectFullscreenSession(profile.id)}
+          className={`mobile-fullscreen-session ${profile.id === selectedId ? "mobile-fullscreen-session-active" : ""}`}
+          style={{ "--profile-accent": profile.accent_color ?? "transparent" } as CSSProperties}
+        >
+          <span className="mobile-fullscreen-session-main">
+            <StatusIndicator status={profile.status} />
+            <span className="min-w-0">
+              <span className="block truncate text-xs font-semibold text-gray-100">{profile.name}</span>
+              <span className="block truncate text-[11px] text-gray-500">
+                {profileOrganizationLabel(profile)}
+              </span>
+              <span className="block truncate text-[10px] text-gray-600">
+                {profile.screen_width} x {profile.screen_height}
+              </span>
+            </span>
+          </span>
+          <span className="mobile-fullscreen-session-state">
+            {profile.pinned ? "Pinned · " : ""}{profile.status === "running" ? "Live" : profile.status}
+          </span>
+        </button>
+      ))}
+      {profiles.length === 0 ? (
+        <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-gray-500">
+          Running sessions will appear here.
+        </div>
+      ) : null}
+    </div>
+  );
+
   const renderFullscreenControls = () => (
     <>
       <div className="mobile-fullscreen-strip" aria-label="Fullscreen browser controls">
@@ -697,6 +1077,7 @@ export function MobileSplitScreen({
           aria-label="Reset fullscreen browser view"
           onClick={() => {
             setFullscreenViewportOpen(false);
+            setFullscreenSessionsOpen(false);
             resetLiveViewport();
           }}
         >
@@ -712,6 +1093,7 @@ export function MobileSplitScreen({
           onClick={() => {
             setFullscreenViewOpen((open) => !open);
             setFullscreenViewportOpen(false);
+            setFullscreenSessionsOpen(false);
           }}
         >
           <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
@@ -726,6 +1108,7 @@ export function MobileSplitScreen({
             aria-controls="mobile-fullscreen-viewport-settings"
             onClick={() => {
               setFullscreenViewOpen(false);
+              setFullscreenSessionsOpen(false);
               setFullscreenViewportOpen((open) => !open);
             }}
           >
@@ -733,6 +1116,21 @@ export function MobileSplitScreen({
             <span>Viewport</span>
           </button>
         ) : null}
+        <button
+          type="button"
+          className="mobile-fullscreen-action"
+          aria-label="Switch fullscreen browser session"
+          aria-expanded={fullscreenSessionsOpen}
+          aria-controls="mobile-fullscreen-sessions"
+          onClick={() => {
+            setFullscreenViewOpen(false);
+            setFullscreenViewportOpen(false);
+            setFullscreenSessionsOpen((open) => !open);
+          }}
+        >
+          <Grid2X2 className="h-4 w-4" aria-hidden="true" />
+          <span>Sessions</span>
+        </button>
         <button
           ref={fullscreenCloseButtonRef}
           type="button"
@@ -747,6 +1145,7 @@ export function MobileSplitScreen({
 
       {fullscreenViewOpen ? renderFullscreenViewControls() : null}
       {canManageProfiles && fullscreenViewportOpen ? renderViewportEditor("fullscreen") : null}
+      {fullscreenSessionsOpen ? renderFullscreenSessions() : null}
     </>
   );
 
@@ -786,10 +1185,15 @@ export function MobileSplitScreen({
   );
 
   return (
-    <main className="mobile-split-root bg-surface-0 text-gray-100">
+    <main
+      className={`mobile-split-root ${compactWorkspace ? "mobile-workspace-collapsed" : ""} ${detailPanelOpen ? "mobile-detail-panel-open" : ""} ${keyboardOpen ? "mobile-keyboard-open" : ""} bg-surface-0 text-gray-100`}
+      style={rootStyle}
+      data-keyboard-open={keyboardOpen ? "true" : "false"}
+    >
       <section
-        className={`mobile-live-pane ${isLiveBrowser ? "mobile-live-pane-running" : ""} ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
+        className={`mobile-live-pane ${isLiveBrowser ? "mobile-live-pane-running" : ""} ${fitLivePaneToBrowser ? "mobile-live-pane-fit" : ""} ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
         style={livePaneStyle}
+        data-fullscreen-fit={fullscreenOpen ? fullscreenFitMode : undefined}
         role={fullscreenOpen ? "dialog" : undefined}
         aria-modal={fullscreenOpen ? true : undefined}
         aria-label={fullscreenOpen ? "Fullscreen browser viewer" : undefined}
@@ -810,9 +1214,9 @@ export function MobileSplitScreen({
                       <option value="" disabled>
                         Select profile
                       </option>
-                      {profiles.map((profile) => (
+                      {organizedProfiles.map((profile) => (
                         <option key={profile.id} value={profile.id}>
-                          {profile.name}
+                          {profile.name} · {profileOrganizationLabel(profile)}
                         </option>
                       ))}
                     </select>
@@ -831,7 +1235,7 @@ export function MobileSplitScreen({
         ) : null}
 
         <div className={`mobile-browser-wrap ${isLiveBrowser ? "mobile-browser-wrap-live" : "px-3 pb-2"}`}>
-          {isLiveBrowser && fullscreenOpen ? renderFullscreenControls() : null}
+          {fullscreenOpen ? renderFullscreenControls() : null}
           {renderBrowserSurface()}
         </div>
       </section>
@@ -847,156 +1251,165 @@ export function MobileSplitScreen({
           </div>
         ) : null}
 
-        <div className="mobile-command-dock" aria-label="Browser command dock">
-          <button
-            ref={fullscreenOpenButtonRef}
-            type="button"
-            onClick={openFullscreen}
-            className="mobile-command-button"
-            aria-label="Open fullscreen browser"
-            title="Fullscreen browser (Ctrl+B)"
-          >
-            <Expand className="h-4 w-4" aria-hidden="true" />
-            <span>Full</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (remoteToolsOpen) {
-                closeTools();
-              } else {
-                openTools();
-              }
-            }}
-            className={`mobile-command-button ${remoteToolsOpen ? "mobile-command-button-active" : ""}`}
-            aria-label={remoteToolsOpen ? "Close browser tools" : "Open browser tools"}
-            aria-expanded={remoteToolsOpen}
-            aria-controls="mobile-tools-sheet"
-            title="Browser tools (Ctrl+K)"
-          >
-            <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
-            <span>Tools</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              chatAdjustedRef.current = true;
-              closeTools();
-              setChatCollapsed((collapsed) => !collapsed);
-            }}
-            className={`mobile-command-button ${!chatCollapsed ? "mobile-command-button-active" : ""}`}
-            aria-label={chatCollapsed ? "Expand task chat" : "Collapse task chat"}
-            aria-expanded={!chatCollapsed}
-            aria-controls="mobile-task-chat-panel"
-            title="Toggle chat (Ctrl+J)"
-          >
-            <MessageSquareText className="h-4 w-4" aria-hidden="true" />
-            <span>Chat</span>
-          </button>
-        </div>
-
         {remoteToolsOpen ? (
           <div id="mobile-tools-sheet" className="mobile-tools-sheet" aria-label="Browser tools">
+            {!toolPanelOpen && canOperate ? (
+              <div className="mobile-tools-row mobile-tools-row-primary">
+                {selected?.status === "running" ? (
+                  <button type="button" onClick={onStop} className="mobile-tool-action mobile-tool-action-danger">
+                    <Square className="h-4 w-4" />
+                    <span>Stop</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={onLaunch}
+                    className="mobile-tool-action mobile-tool-action-primary"
+                    disabled={!selected}
+                  >
+                    <Play className="h-4 w-4" />
+                    <span>Launch</span>
+                  </button>
+                )}
+              </div>
+            ) : null}
+
+            {!toolPanelOpen ? (
+              <section className="mobile-tool-section" aria-label="Pinned browser actions">
+                <div className="mobile-tool-section-header">
+                  <span>Quick actions</span>
+                  <span>
+                    {codexHostReady
+                      ? "Codex ready"
+                      : serverHistoryReady
+                        ? "Save only"
+                        : "Unavailable"}
+                  </span>
+                </div>
+                <div className="mobile-tools-row mobile-pinned-actions">
+                  {pinnedHarnessActions.map((action) => {
+                    const available = Boolean(
+                      codexHostReady && harnessCapabilities?.browser_actions.includes(action.kind),
+                    );
+                    return (
+                      <button
+                        key={action.id}
+                        type="button"
+                        className="mobile-tool-action"
+                        aria-label={`Run ${action.label} with Codex Computer Use`}
+                        disabled={!available || harnessPending}
+                        title={available ? `${action.label} with Codex Computer Use` : `${action.label} is unavailable in this host`}
+                        onClick={() => void runPinnedHarnessAction(action)}
+                      >
+                        {action.kind === "screenshot" ? <Camera className="h-4 w-4" aria-hidden="true" /> : null}
+                        {action.kind === "copy" ? <ClipboardCopy className="h-4 w-4" aria-hidden="true" /> : null}
+                        {action.kind === "paste" ? <ClipboardPaste className="h-4 w-4" aria-hidden="true" /> : null}
+                        <span>{action.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
+
+            <div id="mobile-remote-browser-tools-portal" className={toolPanelOpen ? "hidden" : undefined} />
+
             <div className="mobile-tools-row">
-              {canOperate && selected?.status === "running" ? (
-                <button type="button" onClick={onStop} className="mobile-tool-action mobile-tool-action-danger">
-                  <Square className="h-4 w-4" />
-                  <span>Stop</span>
-                </button>
-              ) : canOperate ? (
-                <button
-                  type="button"
-                  onClick={onLaunch}
-                  className="mobile-tool-action mobile-tool-action-primary"
-                  disabled={!selected}
-                >
-                  <Play className="h-4 w-4" />
-                  <span>Launch</span>
-                </button>
-              ) : null}
-              {canManageProfiles ? (
-                <button type="button" onClick={onNew} className="mobile-tool-action" aria-label="New profile">
-                  <Plus className="h-4 w-4" />
-                  <span>New</span>
-                </button>
-              ) : null}
-              {canManageProfiles && selected ? (
-                <button type="button" onClick={onEdit} className="mobile-tool-action" aria-label="Edit selected profile">
-                  <Pencil className="h-4 w-4" />
-                  <span>Edit</span>
-                </button>
-              ) : null}
-              {canManageAccess ? (
-                <button type="button" onClick={onAccessControls} className="mobile-tool-action" aria-label="Browser access controls">
-                  <ShieldCheck className="h-4 w-4" />
-                  <span>Access</span>
-                </button>
-              ) : null}
-            </div>
-
-            <div id="mobile-remote-browser-tools-portal" />
-
-            {isLiveBrowser ? renderLiveViewControls() : null}
-
-            <div className="mobile-tools-row">
-              {canManageProfiles ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setViewportOpen((open) => !open);
-                    setGridOpen(false);
-                  }}
-                  className={`mobile-tool-action ${viewportOpen ? "mobile-command-button-active" : ""}`}
-                  aria-label="Edit browser viewport"
-                  aria-expanded={viewportOpen}
-                  aria-controls="mobile-viewport-settings"
-                >
-                  <MonitorSmartphone className="h-4 w-4" />
-                  <span>Viewport</span>
-                </button>
-              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  setViewportOpen((open) => !open);
+                  setGridOpen(false);
+                  setAdminOpen(false);
+                }}
+                className={`mobile-tool-action ${viewportOpen ? "mobile-command-button-active" : ""}`}
+                aria-label="Edit browser viewport"
+                aria-expanded={viewportOpen}
+                aria-controls="mobile-viewport-settings"
+              >
+                <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+                <span>View</span>
+              </button>
               <button
                 type="button"
                 onClick={() => {
                   setGridOpen((open) => !open);
                   setViewportOpen(false);
+                  setAdminOpen(false);
                 }}
                 className={`mobile-tool-action ${gridOpen ? "mobile-command-button-active" : ""}`}
                 aria-expanded={gridOpen}
                 aria-controls="mobile-running-grid"
                 aria-label="Toggle grid view"
               >
-                <Grid2X2 className="h-4 w-4" />
-                <span>Grid</span>
+                <Grid2X2 className="h-4 w-4" aria-hidden="true" />
+                <span>Sessions</span>
               </button>
-              <label className="mobile-tool-select">
-                <span>Computer Use</span>
-                <span className="truncate text-right text-xs font-medium text-gray-100">{harnessLabel}</span>
-              </label>
+              {canManageProfiles || canManageAccess ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdminOpen((open) => !open);
+                    setViewportOpen(false);
+                    setGridOpen(false);
+                  }}
+                  className={`mobile-tool-action ${adminOpen ? "mobile-command-button-active" : ""}`}
+                  aria-label="Toggle browser administration"
+                  aria-expanded={adminOpen}
+                  aria-controls="mobile-admin-tools"
+                >
+                  <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                  <span>Admin</span>
+                </button>
+              ) : null}
             </div>
 
-            {canManageProfiles && viewportOpen ? renderViewportEditor("inline") : null}
+            {viewportOpen ? renderViewportEditor("inline") : null}
+
+            {adminOpen ? (
+              <div id="mobile-admin-tools" className="mobile-tools-row mobile-admin-tools" aria-label="Browser administration">
+                {canManageProfiles ? (
+                  <button type="button" onClick={onNew} className="mobile-tool-action" aria-label="New profile">
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    <span>New</span>
+                  </button>
+                ) : null}
+                {canManageProfiles && selected ? (
+                  <button type="button" onClick={onEdit} className="mobile-tool-action" aria-label="Edit selected profile">
+                    <Pencil className="h-4 w-4" aria-hidden="true" />
+                    <span>Edit</span>
+                  </button>
+                ) : null}
+                {canManageAccess ? (
+                  <button type="button" onClick={onAccessControls} className="mobile-tool-action" aria-label="Browser access controls">
+                    <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                    <span>Access</span>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
 
             {gridOpen ? (
               <div id="mobile-running-grid" className="mobile-grid" aria-label="Running browser grid">
-                {(runningProfiles.length > 0 ? runningProfiles : profiles.slice(0, 4)).map((profile) => (
+                {(runningProfiles.length > 0 ? runningProfiles : organizedProfiles.slice(0, 4)).map((profile) => (
                   <button
                     key={profile.id}
                     type="button"
                     onClick={() => onSelect(profile.id)}
                     className={`mobile-grid-tile ${profile.id === selectedId ? "mobile-grid-tile-active" : ""}`}
+                    style={{ "--profile-accent": profile.accent_color ?? "transparent" } as CSSProperties}
                   >
                     <span className="mobile-grid-card-main">
                       <StatusIndicator status={profile.status} />
                       <span className="min-w-0">
                         <span className="block truncate text-xs font-semibold text-gray-100">{profile.name}</span>
                         <span className="block truncate text-[11px] text-gray-500">
-                          {profile.platform} · {profile.screen_width} x {profile.screen_height}
+                          {profileOrganizationLabel(profile)} · {profile.screen_width} x {profile.screen_height}
                         </span>
                       </span>
                     </span>
                     <span className="mobile-grid-card-state">
-                      {profile.status === "running" ? "Live" : profile.status}
+                      {profile.pinned ? "Pinned · " : ""}{profile.status === "running" ? "Live" : profile.status}
                     </span>
                   </button>
                 ))}
@@ -1009,10 +1422,26 @@ export function MobileSplitScreen({
             ) : null}
 
             <p className="mobile-tools-meta">
-              {harnessUnavailable
-                ? "A verified Codex Computer Use Bridge must be injected by the host before tasks can run."
-                : "Tasks run only through the verified Codex Computer Use host; browser credentials stay outside the chat UI."}
+              {codexHostReady
+                ? "Tasks run through the verified Codex Computer Use host; browser credentials stay outside the chat UI."
+                : serverHistoryReady
+                  ? "Tasks are saved to scoped server history only. Nothing executes until a verified Codex host attaches."
+                  : "A verified Codex Computer Use host or the scoped server history is required."}
             </p>
+
+            {authRequired ? (
+              <div className="mobile-account-row">
+                {identityName ? <span className="truncate text-xs text-gray-500">Signed in as {identityName}</span> : <span />}
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  className="mobile-logout-button"
+                  aria-label="Log out"
+                >
+                  Log out
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -1025,7 +1454,7 @@ export function MobileSplitScreen({
             <div className="mobile-chat-header">
               <MessageSquareText className="h-4 w-4 text-accent" aria-hidden="true" />
               <span className="text-sm font-semibold">Task chat</span>
-              <span className="ml-auto truncate text-[11px] text-gray-500">
+              <span className="ml-auto truncate text-[11px] text-gray-500" aria-live="polite">
                 {harnessLabel}
               </span>
               <button
@@ -1042,6 +1471,11 @@ export function MobileSplitScreen({
               </button>
             </div>
             <div className="mobile-chat-log" aria-label="Chat history">
+              {!historyPending && messages.length === 0 ? (
+                <div className="mobile-message mobile-message-tool">
+                  No saved tasks for this browser yet.
+                </div>
+              ) : null}
               {messages.map((message) => (
                 <div
                   key={message.id}
@@ -1055,44 +1489,96 @@ export function MobileSplitScreen({
                   {harnessError}
                 </div>
               ) : null}
+              {harnessNotice ? (
+                <div className="mobile-message mobile-message-tool" aria-live="polite">
+                  {harnessNotice}
+                </div>
+              ) : null}
             </div>
           </section>
         ) : null}
 
         <form className={`mobile-chat-form ${chatCollapsed ? "mobile-chat-form-collapsed" : ""}`} onSubmit={sendMessage}>
+          <div className="mobile-command-dock" aria-label="Browser command dock">
+            {isLiveBrowser ? (
+              <button
+                ref={fullscreenOpenButtonRef}
+                type="button"
+                onClick={openFullscreen}
+                className="mobile-command-button"
+                aria-label="Open fullscreen browser"
+                title="Fullscreen browser (Ctrl+B)"
+              >
+                <Expand className="h-4 w-4" aria-hidden="true" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => {
+                if (remoteToolsOpen) {
+                  closeTools();
+                } else {
+                  openTools();
+                }
+              }}
+              className={`mobile-command-button ${remoteToolsOpen ? "mobile-command-button-active" : ""}`}
+              aria-label={remoteToolsOpen ? "Close browser tools" : "Open browser tools"}
+              aria-expanded={remoteToolsOpen}
+              aria-controls="mobile-tools-sheet"
+              title="Browser tools (Ctrl+K)"
+            >
+              <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                chatAdjustedRef.current = true;
+                closeTools();
+                setChatCollapsed((collapsed) => !collapsed);
+              }}
+              className={`mobile-command-button ${!chatCollapsed ? "mobile-command-button-active" : ""}`}
+              aria-label={chatCollapsed ? "Expand task chat" : "Collapse task chat"}
+              aria-expanded={!chatCollapsed}
+              aria-controls="mobile-task-chat-panel"
+              title="Toggle chat (Ctrl+J)"
+            >
+              <MessageSquareText className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
           <label className="sr-only" htmlFor="mobile-task-input">
-            Message
+            Browser task
           </label>
           <textarea
             id="mobile-task-input"
             value={draft}
             onChange={updateDraft}
+            onFocus={(event) => {
+              keyboardEntryFocusedRef.current = true;
+              if (remoteToolsOpen) closeTools();
+              const target = event.currentTarget;
+              window.requestAnimationFrame(() => target.scrollIntoView?.({ block: "nearest" }));
+            }}
+            onBlur={() => {
+              keyboardEntryFocusedRef.current = false;
+            }}
             className="input min-h-9 resize-none overflow-y-auto"
             rows={1}
+            enterKeyHint="send"
             placeholder={harnessPlaceholder}
-            disabled={harnessPending || !harnessReady}
+            disabled={harnessPending || !composerReady}
           />
           <div className="mobile-composer-toolbar">
-            <span className="sr-only">Codex Computer Use</span>
-            <button type="submit" className="mobile-send-button" aria-label="Run task" disabled={harnessPending || !harnessReady || !draft.trim()}>
+            {chatCollapsed ? (
+              <span className="sr-only" aria-live="polite">
+                {harnessLabel}
+              </span>
+            ) : null}
+            <button type="submit" className="mobile-send-button" aria-label="Run task" disabled={harnessPending || !composerReady || !draft.trim()}>
               <Send className="h-4 w-4" />
             </button>
           </div>
         </form>
 
-        {authRequired ? (
-          <div className="mx-3 mb-3 flex items-center justify-between gap-2">
-            {identityName ? <span className="truncate text-xs text-gray-500">Signed in as {identityName}</span> : <span />}
-            <button
-              type="button"
-              onClick={onLogout}
-              className="mobile-logout-button"
-              aria-label="Log out"
-            >
-              Log out
-            </button>
-          </div>
-        ) : null}
       </section>
 
     </main>

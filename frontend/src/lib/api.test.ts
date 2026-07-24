@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { api } from "./api";
+import { api, type ProfileCreateData, type ProfileHarness } from "./api";
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -86,6 +86,24 @@ describe("api.createProfile", () => {
     expect(options.method).toBe("POST");
     expect(JSON.parse(options.body)).toEqual({ name: "New" });
   });
+
+  it("serializes profile organization and preferred harness metadata", async () => {
+    const harness: ProfileHarness = "browser-use";
+    const payload = {
+      name: "Buyer research",
+      project_id: "marketplace",
+      folder_path: "buyers/us",
+      pinned: true,
+      accent_color: "#06b6d4",
+      harness,
+    } satisfies ProfileCreateData;
+    mockFetch.mockResolvedValueOnce(jsonResponse({ id: "3", ...payload }));
+
+    await api.createProfile(payload);
+
+    const [, options] = mockFetch.mock.calls[0];
+    expect(JSON.parse(options.body)).toEqual(payload);
+  });
 });
 
 // ── updateProfile ───────────────────────────────────────────────────────────
@@ -135,6 +153,45 @@ describe("api.stopProfile", () => {
   });
 });
 
+describe("profile health API", () => {
+  it("fetches the latest redacted health summary", async () => {
+    const health = {
+      profile_id: "profile/1",
+      state: "unavailable",
+      checked_at: null,
+      proxy_configured: false,
+      proxy_reachable: null,
+      outbound_ip_masked: null,
+      proxy_latency_ms: null,
+      proxy_risk_score: null,
+      proxy_authenticity_score: null,
+      fingerprint_consistency_score: null,
+      browser_scan_score: null,
+      warnings: [],
+      blockers: [],
+      error_code: null,
+      sources: {},
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse(health));
+
+    await expect(api.getProfileHealth("profile/1")).resolves.toEqual(health);
+    expect(mockFetch).toHaveBeenCalledWith("/api/profiles/profile%2F1/health", {
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+
+  it("requests an asynchronous health rerun without a client supplied target", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ profile_id: "profile-1", state: "pending" }, 202));
+
+    await api.runProfileHealth("profile-1");
+
+    expect(mockFetch).toHaveBeenCalledWith("/api/profiles/profile-1/health/run", {
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+  });
+});
+
 // ── setClipboard ────────────────────────────────────────────────────────────
 
 describe("api.setClipboard", () => {
@@ -155,6 +212,180 @@ describe("api.getClipboard", () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ text: "copied" }));
     const result = await api.getClipboard("1");
     expect(result.text).toBe("copied");
+  });
+});
+
+describe("api.createTaskSession", () => {
+  it("creates a task session with the configured provider payload", async () => {
+    const session = {
+      id: "server-session-1",
+      profile_id: "1",
+      sandbox_id: "default",
+      title: null,
+      status: "active" as const,
+      created_by_kind: "user",
+      created_by_id: "owner",
+      created_at: "2026-07-21T10:00:00.000Z",
+      updated_at: "2026-07-21T10:00:00.000Z",
+      metadata: { source: "test" },
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse(session));
+
+    const result = await api.createTaskSession({
+      profile_id: "1",
+      metadata: { source: "test" },
+    });
+
+    expect(mockFetch).toHaveBeenCalledWith("/api/task-sessions", {
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+      signal: undefined,
+      body: JSON.stringify({
+        profile_id: "1",
+        metadata: { source: "test" },
+      }),
+    });
+    expect(result).toEqual(session);
+  });
+});
+
+describe("api.listTaskSessions", () => {
+  it("lists task sessions for a profile", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse([]));
+
+    const sessions = await api.listTaskSessions("profile 1", { limit: 25 });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/task-sessions?profile_id=profile%201&limit=25",
+      {
+        headers: { "Content-Type": "application/json" },
+        signal: undefined,
+      },
+    );
+    expect(sessions).toEqual([]);
+  });
+});
+
+describe("api.getTaskSession", () => {
+  it("fetches one task session", async () => {
+    const session = {
+      id: "server-session-1",
+      profile_id: "1",
+      sandbox_id: "default",
+      title: "Run",
+      status: "active" as const,
+      created_by_kind: "user",
+      created_by_id: "owner",
+      created_at: "2026-07-21T10:00:00.000Z",
+      updated_at: "2026-07-21T10:00:00.000Z",
+      metadata: {},
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse(session));
+
+    const result = await api.getTaskSession("server/session");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/task-sessions/server%2Fsession",
+      {
+        headers: { "Content-Type": "application/json" },
+        signal: undefined,
+      },
+    );
+    expect(result).toEqual(session);
+  });
+});
+
+describe("api.appendTaskMessage", () => {
+  it("posts task messages to the active session and returns the persisted user message", async () => {
+    const reply = {
+      id: "server-msg-1",
+      session_id: "server-session-1",
+      role: "user" as const,
+      content: "Run task",
+      created_by_kind: "user",
+      created_by_id: "owner",
+      created_at: "2026-07-21T10:00:00.000Z",
+      metadata: {},
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse(reply));
+
+    const message = await api.appendTaskMessage("server-session-1", {
+      text: "Run task",
+      profile_id: "1",
+      commands: [],
+    });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/task-sessions/server-session-1/messages",
+      {
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+        signal: undefined,
+        body: JSON.stringify({
+          text: "Run task",
+          profile_id: "1",
+          commands: [],
+        }),
+      },
+    );
+    expect(message).toEqual(reply);
+  });
+});
+
+describe("api.listTaskSessionMessages", () => {
+  it("fetches server message history for a task session", async () => {
+    const reply = [
+      {
+        id: "server-msg-1",
+        session_id: "server-session-1",
+        role: "assistant" as const,
+        content: "started",
+        created_by_kind: "user",
+        created_by_id: "owner",
+        created_at: "2026-07-21T10:00:00.000Z",
+        metadata: {},
+      },
+    ];
+    mockFetch.mockResolvedValueOnce(jsonResponse(reply));
+
+    const messages = await api.listTaskSessionMessages("server-session-1");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/task-sessions/server-session-1/messages",
+      {
+        headers: { "Content-Type": "application/json" },
+        signal: undefined,
+      },
+    );
+    expect(messages).toEqual(reply);
+  });
+});
+
+describe("api.listTaskSessionEvents", () => {
+  it("fetches task events for a session", async () => {
+    const reply = [
+      {
+        id: "event-1",
+        session_id: "server-session-1",
+        type: "task_command.appended",
+        created_by_kind: "user",
+        created_by_id: "owner",
+        created_at: "2026-07-21T10:00:00.000Z",
+        payload: { message_id: "server-msg-1" },
+      },
+    ];
+    mockFetch.mockResolvedValueOnce(jsonResponse(reply));
+
+    const events = await api.listTaskSessionEvents("server-session-1", { limit: 10 });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/task-sessions/server-session-1/events?limit=10",
+      {
+        headers: { "Content-Type": "application/json" },
+        signal: undefined,
+      },
+    );
+    expect(events).toEqual(reply);
   });
 });
 

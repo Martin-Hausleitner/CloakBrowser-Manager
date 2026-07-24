@@ -266,7 +266,7 @@ export function StreamingBenchmarkPanel({
           <div className="flex flex-wrap items-center gap-2">
             <a
               href={effectiveReportUrl}
-              className="btn-secondary inline-flex min-h-11 items-center gap-2"
+              className="btn-secondary inline-flex min-h-9 items-center gap-1.5"
               download
             >
               <Download className="h-4 w-4" aria-hidden="true" />
@@ -274,7 +274,7 @@ export function StreamingBenchmarkPanel({
             </a>
             <a
               href={effectiveReportUrl}
-              className="btn-secondary inline-flex min-h-11 items-center gap-2"
+              className="btn-secondary inline-flex min-h-9 items-center gap-1.5"
               target="_blank"
               rel="noreferrer"
             >
@@ -284,7 +284,7 @@ export function StreamingBenchmarkPanel({
             <button
               type="button"
               onClick={() => void refresh()}
-              className="btn-primary inline-flex min-h-11 items-center gap-2"
+              className="btn-primary inline-flex min-h-9 items-center gap-1.5"
               aria-label="Refresh benchmark report"
             >
               <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />

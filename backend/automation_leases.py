@@ -412,6 +412,76 @@ class AutomationLeaseService:
                 conn.rollback()
                 raise
 
+    def revoke_by_owner(
+        self,
+        *,
+        owner_kind: str,
+        owner_id: str | None,
+        reason: str = "access_revoked",
+    ) -> list[str]:
+        """Transactionally release all active leases for an owner; return lease IDs."""
+        owner = _normalize_owner_id(owner_id)
+        now = self._clock()
+        with self._get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT id FROM automation_leases
+                    WHERE owner_kind = ? AND owner_id = ? AND released_at IS NULL
+                    """,
+                    (owner_kind, owner),
+                ).fetchall()
+                lease_ids = [str(row["id"]) for row in rows]
+                for lease_id in lease_ids:
+                    conn.execute(
+                        """
+                        UPDATE automation_leases
+                        SET released_at = ?, release_reason = ?
+                        WHERE id = ? AND released_at IS NULL
+                        """,
+                        (_iso(now), reason, lease_id),
+                    )
+                conn.commit()
+                return lease_ids
+            except Exception:
+                conn.rollback()
+                raise
+
+    def revoke_by_profile(
+        self,
+        profile_id: str,
+        *,
+        reason: str = "profile_revoked",
+    ) -> list[str]:
+        """Transactionally release active leases on a profile; return lease IDs."""
+        now = self._clock()
+        with self._get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT id FROM automation_leases
+                    WHERE profile_id = ? AND released_at IS NULL
+                    """,
+                    (profile_id,),
+                ).fetchall()
+                lease_ids = [str(row["id"]) for row in rows]
+                for lease_id in lease_ids:
+                    conn.execute(
+                        """
+                        UPDATE automation_leases
+                        SET released_at = ?, release_reason = ?
+                        WHERE id = ? AND released_at IS NULL
+                        """,
+                        (_iso(now), reason, lease_id),
+                    )
+                conn.commit()
+                return lease_ids
+            except Exception:
+                conn.rollback()
+                raise
+
     def _retire_expired_locked(
         self, conn: sqlite3.Connection, now: datetime
     ) -> list[tuple[str, str]]:

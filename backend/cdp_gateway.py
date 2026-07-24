@@ -39,9 +39,74 @@ OBSERVER_ALLOWED_METHODS = frozenset(
     }
 )
 
+CDP_VERSION_ALLOWED_KEYS = frozenset(
+    {
+        "Browser",
+        "Protocol-Version",
+        "User-Agent",
+        "V8-Version",
+        "WebKit-Version",
+        "webSocketDebuggerUrl",
+    }
+)
+CDP_LIST_SAFE_KEYS = frozenset(
+    {
+        "description",
+        "faviconUrl",
+        "id",
+        "parentId",
+        "title",
+        "type",
+        "url",
+        "webSocketDebuggerUrl",
+    }
+)
+
 
 class ObserverFrameRejected(ValueError):
     """Client or upstream observer frame failed allowlist validation."""
+
+
+def sanitize_cdp_version_discovery(
+    data: Any,
+    *,
+    manager_ws_url: str,
+) -> dict[str, Any]:
+    """Return allowlisted /json/version fields with Manager-only WS URL."""
+    source = data if isinstance(data, dict) else {}
+    sanitized: dict[str, Any] = {}
+    for key in CDP_VERSION_ALLOWED_KEYS:
+        if key == "webSocketDebuggerUrl":
+            continue
+        if key in source and isinstance(source[key], (str, int, float, bool)):
+            sanitized[key] = source[key]
+    sanitized["webSocketDebuggerUrl"] = manager_ws_url
+    return sanitized
+
+
+def sanitize_cdp_list_discovery(
+    data: Any,
+    *,
+    manager_ws_url_for_entry: Callable[[dict[str, Any]], str | None],
+) -> list[dict[str, Any]]:
+    """Return allowlisted /json/list entries with Manager-only WS URLs."""
+    if not isinstance(data, list):
+        return []
+    pages: list[dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        item: dict[str, Any] = {}
+        for key in CDP_LIST_SAFE_KEYS:
+            if key == "webSocketDebuggerUrl":
+                continue
+            if key in entry and isinstance(entry[key], (str, int, float, bool)):
+                item[key] = entry[key]
+        manager_ws = manager_ws_url_for_entry(entry)
+        if manager_ws:
+            item["webSocketDebuggerUrl"] = manager_ws
+        pages.append(item)
+    return pages
 
 
 def query_has_token_like_key(query_params: Iterable[str] | dict[str, Any]) -> bool:

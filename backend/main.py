@@ -302,6 +302,30 @@ def _revoke_websocket_access(
             continue
         lease.revoked.set()
 
+
+def _revoke_identity_access(
+    *,
+    identity_kind: str,
+    identity_id: str,
+    reason: str = "access_revoked",
+) -> None:
+    """Close live sockets and transactionally retire automation leases for a principal."""
+    _revoke_websocket_access(identity_kind=identity_kind, identity_id=identity_id)
+    lease_ids = automation_lease_service.revoke_by_owner(
+        owner_kind=identity_kind,
+        owner_id=identity_id,
+        reason=reason,
+    )
+    close_direct_cdp_sockets_for_leases(lease_ids)
+
+
+def _revoke_profile_access(profile_id: str, *, reason: str = "profile_revoked") -> None:
+    """Close live sockets and retire automation leases bound to a profile."""
+    _revoke_websocket_access(profile_id=profile_id)
+    lease_ids = automation_lease_service.revoke_by_profile(profile_id, reason=reason)
+    close_direct_cdp_sockets_for_leases(lease_ids)
+    direct_cdp_socket_registry.revoke_profile(profile_id)
+
 _BENCHMARK_REPORT_ENV = "BENCHMARK_REPORT_PATH"
 _DEFAULT_BENCHMARK_REPORT_PATH = Path("/data/benchmark-report.json")
 _BENCHMARK_REPORT_MAX_BYTES = 1_048_576
@@ -1987,7 +2011,7 @@ def _validate_access_group_ids(group_ids: list[str]) -> list[str]:
 
 def _revoke_user_websocket_access(user_ids: list[str]) -> None:
     for user_id in set(user_ids):
-        _revoke_websocket_access(identity_kind="user", identity_id=user_id)
+        _revoke_identity_access(identity_kind="user", identity_id=user_id)
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
@@ -2163,7 +2187,7 @@ async def update_access_user(user_id: str, body: AccessUserUpdate, request: Requ
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if {"password_hash", "role", "active", "grants", "group_ids"}.intersection(data):
-        _revoke_websocket_access(identity_kind="user", identity_id=user_id)
+        _revoke_identity_access(identity_kind="user", identity_id=user_id)
     if "group_ids" in data:
         db.record_access_audit_event(
             actor.kind, actor.id, "access_user.groups.update", "allowed"
@@ -2267,7 +2291,7 @@ async def update_access_agent(agent_id: str, body: AccessAgentUpdate, request: R
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     if {"active", "grants"}.intersection(data):
-        _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
+        _revoke_identity_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.update", "allowed")
     return _access_agent_response(agent)
 
@@ -2279,7 +2303,7 @@ async def delete_access_agent(agent_id: str, request: Request):
     deleted = db.delete_access_agent(agent_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agent not found")
-    _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
+    _revoke_identity_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.delete", "allowed")
     return Response(status_code=204)
 
@@ -2291,7 +2315,7 @@ async def rotate_access_agent_key(agent_id: str, request: Request):
     agent = db.update_access_agent(agent_id, key_hash=access.hash_agent_key(key))
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
+    _revoke_identity_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.rotate_key", "allowed")
     return AccessAgentCreatedResponse(**_access_agent_response(agent).model_dump(), api_key=key)
 
@@ -3149,7 +3173,7 @@ async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
     if not updated:
         raise HTTPException(status_code=404, detail="Profile not found")
     if "sandbox_id" in data:
-        _revoke_websocket_access(profile_id=profile_id)
+        _revoke_profile_access(profile_id, reason="sandbox_moved")
     db.record_access_audit_event(
         identity.kind, identity.id, "profile.update", "allowed", str(updated.get("sandbox_id") or "default"), profile_id
     )
@@ -4092,11 +4116,10 @@ async def cdp_json_version(profile_id: str, request: Request):
         logger.error("CDP proxy: failed to reach Chrome CDP for %s: %s", profile_id, exc)
         raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
 
-    # Rewrite webSocketDebuggerUrl to point through our proxy
     host = request.headers.get("host", "localhost:8080")
     ws_scheme = "wss" if _is_https(request) else "ws"
-    data["webSocketDebuggerUrl"] = f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp"
-    return data
+    manager_ws = f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp"
+    return cdp_gateway.sanitize_cdp_version_discovery(data, manager_ws_url=manager_ws)
 
 
 @app.get("/api/profiles/{profile_id}/cdp/json/list/")
@@ -4128,13 +4151,19 @@ async def cdp_json_list(profile_id: str, request: Request):
 
     host = request.headers.get("host", "localhost:8080")
     ws_scheme = "wss" if _is_https(request) else "ws"
-    for entry in data:
-        if "webSocketDebuggerUrl" in entry:
-            ws_path = entry["webSocketDebuggerUrl"].split("/devtools/")[-1]
-            entry["webSocketDebuggerUrl"] = (
-                f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp/devtools/{ws_path}"
-            )
-    return data
+
+    def _manager_ws_for_entry(entry: dict) -> str | None:
+        raw = entry.get("webSocketDebuggerUrl")
+        if not isinstance(raw, str) or not raw:
+            return None
+        ws_path = raw.split("/devtools/")[-1]
+        return (
+            f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp/devtools/{ws_path}"
+        )
+
+    return cdp_gateway.sanitize_cdp_list_discovery(
+        data, manager_ws_url_for_entry=_manager_ws_for_entry
+    )
 
 
 @app.get("/api/profiles/{profile_id}/cdp-observer/json/list/")
@@ -4159,23 +4188,29 @@ async def cdp_observer_json_list(profile_id: str, request: Request):
 
     host = request.headers.get("host", "localhost:8080")
     ws_scheme = "wss" if _is_https(request) else "ws"
-    pages: list[dict[str, object]] = []
+    pages_raw: list[dict] = []
     if isinstance(data, list):
         for entry in data:
             if not isinstance(entry, dict) or entry.get("type") != "page":
                 continue
-            item = dict(entry)
-            if "webSocketDebuggerUrl" in item:
-                target_id = str(item.get("id") or "")
-                ws_tail = str(item["webSocketDebuggerUrl"]).split("/devtools/")[-1]
-                if target_id and "/page/" not in f"/devtools/{ws_tail}":
-                    ws_tail = f"page/{target_id}"
-                item["webSocketDebuggerUrl"] = (
-                    f"{ws_scheme}://{host}/api/profiles/{profile_id}/"
-                    f"cdp-observer/devtools/{ws_tail}"
-                )
-            pages.append(item)
-    return pages
+            pages_raw.append(entry)
+
+    def _manager_ws_for_entry(entry: dict) -> str | None:
+        raw = entry.get("webSocketDebuggerUrl")
+        if not isinstance(raw, str) or not raw:
+            return None
+        target_id = str(entry.get("id") or "")
+        ws_tail = raw.split("/devtools/")[-1]
+        if target_id and "/page/" not in f"/devtools/{ws_tail}":
+            ws_tail = f"page/{target_id}"
+        return (
+            f"{ws_scheme}://{host}/api/profiles/{profile_id}/"
+            f"cdp-observer/devtools/{ws_tail}"
+        )
+
+    return cdp_gateway.sanitize_cdp_list_discovery(
+        pages_raw, manager_ws_url_for_entry=_manager_ws_for_entry
+    )
 
 
 async def _proxy_cdp_websocket(

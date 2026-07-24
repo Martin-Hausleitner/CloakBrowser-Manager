@@ -161,6 +161,67 @@ def test_observer_validators_allow_only_screencast_commands():
         cdp_gateway.validate_observer_client_message(b"\xff\xfe not json")
 
 
+def test_sanitize_discovery_allowlists_safe_fields_only():
+    from backend import cdp_gateway
+
+    version = cdp_gateway.sanitize_cdp_version_discovery(
+        {
+            "Browser": "Chrome/test",
+            "Protocol-Version": "1.3",
+            "User-Agent": "UA",
+            "V8-Version": "1",
+            "WebKit-Version": "2",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/x",
+            "devtoolsFrontendUrl": "http://127.0.0.1:9222/devtools/inspector.html",
+            "extraLeak": "ws://127.0.0.1:9222/json",
+        },
+        manager_ws_url="ws://manager/api/profiles/p1/cdp",
+    )
+    assert version == {
+        "Browser": "Chrome/test",
+        "Protocol-Version": "1.3",
+        "User-Agent": "UA",
+        "V8-Version": "1",
+        "WebKit-Version": "2",
+        "webSocketDebuggerUrl": "ws://manager/api/profiles/p1/cdp",
+    }
+
+    listing = cdp_gateway.sanitize_cdp_list_discovery(
+        [
+            {
+                "id": "page1",
+                "type": "page",
+                "title": "T",
+                "url": "https://example.com/",
+                "description": "",
+                "faviconUrl": "https://example.com/f.ico",
+                "parentId": "browser",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/ABC",
+                "devtoolsFrontendUrl": "http://127.0.0.1:9222/devtools/inspector.html?ws=127.0.0.1:9222/devtools/page/ABC",
+                "leak": "http://127.0.0.1:9222/json",
+            }
+        ],
+        manager_ws_url_for_entry=lambda entry: (
+            f"ws://manager/api/profiles/p1/cdp/devtools/page/{entry['id']}"
+        ),
+    )
+    assert listing == [
+        {
+            "id": "page1",
+            "type": "page",
+            "title": "T",
+            "url": "https://example.com/",
+            "description": "",
+            "faviconUrl": "https://example.com/f.ico",
+            "parentId": "browser",
+            "webSocketDebuggerUrl": "ws://manager/api/profiles/p1/cdp/devtools/page/page1",
+        }
+    ]
+    blob = json.dumps(listing) + json.dumps(version)
+    assert "9222" not in blob
+    assert "devtoolsFrontendUrl" not in blob
+
+
 def test_observer_upstream_filter_allows_only_acks_and_screencast_frames():
     from backend import cdp_gateway
 
@@ -249,6 +310,73 @@ def test_observer_http_works_with_view_and_without_automation_lease(
             f"ws://testserver/api/profiles/{profile['id']}/cdp-observer/devtools/page/PAGE1"
         )
         assert "5200" not in resp.text
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_observer_discovery_strips_devtools_and_upstream_url_fields(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Observer sanitize", sandbox_id="alpha")
+    _create_user(
+        client_access,
+        username="observer-sanitize",
+        password="observer-sanitize-password-123",
+        permission="view",
+    )
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6202, cdp_port=5202, display=202
+    )
+
+    chrome_list = MagicMock()
+    chrome_list.json.return_value = [
+        {
+            "id": "page1",
+            "type": "page",
+            "title": "Observer page",
+            "url": "https://example.com/view",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:5202/devtools/page/PAGE1",
+            "devtoolsFrontendUrl": (
+                "http://127.0.0.1:5202/devtools/inspector.html"
+                "?ws=127.0.0.1:5202/devtools/page/PAGE1"
+            ),
+            "faviconUrl": "https://example.com/favicon.ico",
+            "upstreamLeak": "ws://10.1.2.3:5202/devtools/page/PAGE1",
+        },
+        {
+            "id": "worker",
+            "type": "service_worker",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:5202/devtools/worker/W1",
+            "devtoolsFrontendUrl": "http://127.0.0.1:5202/devtools/worker.html",
+        },
+    ]
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=chrome_list)
+
+    try:
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            resp = client_access.get(
+                f"/api/profiles/{profile['id']}/cdp-observer/json/list"
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["title"] == "Observer page"
+        assert data[0]["url"] == "https://example.com/view"
+        assert data[0]["faviconUrl"] == "https://example.com/favicon.ico"
+        assert data[0]["webSocketDebuggerUrl"] == (
+            f"ws://testserver/api/profiles/{profile['id']}/"
+            "cdp-observer/devtools/page/PAGE1"
+        )
+        assert "devtoolsFrontendUrl" not in data[0]
+        assert "upstreamLeak" not in data[0]
+        assert "5202" not in resp.text
+        assert "127.0.0.1" not in resp.text
+        assert "devtoolsFrontendUrl" not in resp.text
     finally:
         main.browser_mgr.running.pop(profile["id"], None)
 

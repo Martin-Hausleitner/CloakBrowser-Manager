@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from backend import database as db
+
+
+def _receive_websocket_message(session, timeout: float = 2.0):
+    async def receive_with_timeout():
+        with anyio.fail_after(timeout):
+            return await session._send_rx.receive()
+
+    return session.portal.call(receive_with_timeout)
 
 
 @pytest.fixture()
@@ -499,3 +509,225 @@ def test_open_links_advertise_cdp_path_without_token(client_access: TestClient):
     # May be null when stopped; when present must be Manager path only.
     if body.get("cdp_url"):
         assert body["cdp_url"].endswith(f"/api/profiles/{profile['id']}/cdp")
+
+
+@pytest.mark.parametrize(
+    "revoke_action",
+    [
+        pytest.param("rotate-key", id="key-rotation"),
+        pytest.param("disable", id="principal-disabled"),
+        pytest.param("grants-cleared", id="grant-removed"),
+        pytest.param("delete", id="principal-deleted"),
+    ],
+)
+def test_access_revocation_retires_automation_lease_and_blocks_reconnect(
+    client_access: TestClient, monkeypatch, revoke_action: str
+):
+    from backend import main
+
+    profile = db.create_profile("Lease revoke profile", sandbox_id="alpha")
+    agent = _create_agent(client_access, name=f"Revoke {revoke_action}")
+    other = _create_agent(client_access, name=f"Successor {revoke_action}")
+    lease = _acquire_lease(client_access, profile["id"], agent)
+    old_token = lease["token"]
+    old_headers = _lease_headers(agent, old_token)
+
+    class _Upstream:
+        def __init__(self):
+            self.close_code = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            self.close_code = 1000
+            return False
+
+        async def send(self, _message):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    upstream = _Upstream()
+    monkeypatch.setattr("websockets.connect", lambda *_a, **_k: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6110, cdp_port=5110, display=110
+    )
+
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/cdp/devtools/page/REVOKEME",
+            headers=old_headers,
+        ) as websocket:
+            if revoke_action == "rotate-key":
+                rotated = client_access.post(
+                    f"/api/access/agents/{agent['id']}/rotate-key",
+                    headers=bootstrap_headers(),
+                )
+                assert rotated.status_code == 200
+                new_key = rotated.json()["api_key"]
+            elif revoke_action == "disable":
+                assert (
+                    client_access.put(
+                        f"/api/access/agents/{agent['id']}",
+                        headers=bootstrap_headers(),
+                        json={"active": False},
+                    ).status_code
+                    == 200
+                )
+                new_key = None
+            elif revoke_action == "grants-cleared":
+                assert (
+                    client_access.put(
+                        f"/api/access/agents/{agent['id']}",
+                        headers=bootstrap_headers(),
+                        json={"grants": []},
+                    ).status_code
+                    == 200
+                )
+                new_key = agent["api_key"]
+            else:
+                assert (
+                    client_access.delete(
+                        f"/api/access/agents/{agent['id']}",
+                        headers=bootstrap_headers(),
+                    ).status_code
+                    == 204
+                )
+                new_key = None
+
+            message = _receive_websocket_message(websocket)
+            assert message == {
+                "type": "websocket.close",
+                "code": 4403,
+                "reason": "Access revoked",
+            }
+
+        # Old lease token must no longer authorize CDP, and must not leak.
+        discovery = client_access.get(
+            f"/api/profiles/{profile['id']}/cdp/json/version",
+            headers=old_headers,
+        )
+        assert discovery.status_code in {401, 403, 404}
+        assert old_token not in discovery.text
+
+        if new_key:
+            still_blocked = client_access.get(
+                f"/api/profiles/{profile['id']}/cdp/json/version",
+                headers={
+                    "Authorization": f"Bearer {new_key}",
+                    "X-CBM-Automation-Lease": old_token,
+                },
+            )
+            assert still_blocked.status_code in {401, 403, 404}
+            assert old_token not in still_blocked.text
+            with pytest.raises(WebSocketDisconnect):
+                with client_access.websocket_connect(
+                    f"/api/profiles/{profile['id']}/cdp",
+                    headers={
+                        "Authorization": f"Bearer {new_key}",
+                        "X-CBM-Automation-Lease": old_token,
+                    },
+                ):
+                    pass
+
+        # Profile is no longer busy for a different automate actor.
+        successor = _acquire_lease(client_access, profile["id"], other)
+        assert successor["lease_id"] != lease["lease_id"]
+        assert successor["token"] != old_token
+        assert old_token not in json.dumps(successor)
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_cdp_discovery_strips_devtools_and_upstream_url_fields(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("Sanitize discovery", sandbox_id="alpha")
+    agent = _create_agent(client_access, name="Sanitize discovery agent")
+    lease = _acquire_lease(client_access, profile["id"], agent)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6111, cdp_port=5111, display=111
+    )
+
+    chrome_version = MagicMock()
+    chrome_version.json.return_value = {
+        "Browser": "Chrome/test",
+        "Protocol-Version": "1.3",
+        "webSocketDebuggerUrl": "ws://127.0.0.1:5111/devtools/browser/abc",
+        "devtoolsFrontendUrl": "http://127.0.0.1:5111/devtools/inspector.html?ws=127.0.0.1:5111/devtools/browser/abc",
+        "wsUrl": "ws://127.0.0.1:5111/devtools/browser/abc",
+        "suspiciousUrl": "http://127.0.0.1:5111/secret",
+    }
+    chrome_list = MagicMock()
+    chrome_list.json.return_value = [
+        {
+            "id": "page1",
+            "type": "page",
+            "title": "Safe title",
+            "url": "https://example.com/",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:5111/devtools/page/DEADBEEF",
+            "devtoolsFrontendUrl": (
+                "https://chrome-devtools-frontend.appspot.com/serve_rev/@hash/"
+                "inspector.html?ws=127.0.0.1:5111/devtools/page/DEADBEEF"
+            ),
+            "faviconUrl": "https://example.com/favicon.ico",
+            "leakPort": "http://10.0.0.9:5111/json",
+        }
+    ]
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    async def fake_get(url, *args, **kwargs):
+        if url.endswith("/json/version"):
+            return chrome_version
+        return chrome_list
+
+    mock_client.get = AsyncMock(side_effect=fake_get)
+
+    try:
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            version = client_access.get(
+                f"/api/profiles/{profile['id']}/cdp/json/version",
+                headers=_lease_headers(agent, lease["token"]),
+            )
+            listing = client_access.get(
+                f"/api/profiles/{profile['id']}/cdp/json/list",
+                headers=_lease_headers(agent, lease["token"]),
+            )
+        assert version.status_code == 200
+        assert listing.status_code == 200
+        version_body = version.json()
+        list_body = listing.json()
+        assert version_body["Browser"] == "Chrome/test"
+        assert version_body["Protocol-Version"] == "1.3"
+        assert version_body["webSocketDebuggerUrl"] == (
+            f"ws://testserver/api/profiles/{profile['id']}/cdp"
+        )
+        assert "devtoolsFrontendUrl" not in version_body
+        assert "wsUrl" not in version_body
+        assert "suspiciousUrl" not in version_body
+        assert list_body[0]["title"] == "Safe title"
+        assert list_body[0]["url"] == "https://example.com/"
+        assert list_body[0]["faviconUrl"] == "https://example.com/favicon.ico"
+        assert list_body[0]["webSocketDebuggerUrl"] == (
+            f"ws://testserver/api/profiles/{profile['id']}/cdp/devtools/page/DEADBEEF"
+        )
+        assert "devtoolsFrontendUrl" not in list_body[0]
+        assert "leakPort" not in list_body[0]
+        for text in (version.text, listing.text):
+            assert "5111" not in text
+            assert "127.0.0.1" not in text
+            assert "devtoolsFrontendUrl" not in text
+            assert lease["token"] not in text
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)

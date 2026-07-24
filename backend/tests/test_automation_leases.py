@@ -335,3 +335,51 @@ def test_partial_unique_index_enforces_one_unreleased_lease(
                 ),
             )
             conn.commit()
+
+
+def test_revoke_by_owner_releases_active_leases_and_frees_profile(
+    service, profile_id: str, tmp_db: Path
+):
+    acquired = service.acquire_direct(profile_id, owner_kind="agent", owner_id="agent-a")
+    other_profile = db.create_profile(name="Other lease profile", sandbox_id="alpha")["id"]
+    other = service.acquire_direct(
+        other_profile, owner_kind="agent", owner_id="agent-b"
+    )
+
+    revoked = service.revoke_by_owner(
+        owner_kind="agent", owner_id="agent-a", reason="access_revoked"
+    )
+    assert revoked == [acquired.lease_id]
+    assert (
+        service.validate(
+            acquired.lease_id,
+            acquired.token,
+            profile_id,
+            owner_kind="agent",
+            owner_id="agent-a",
+        )
+        is None
+    )
+    assert service.validate(
+        other.lease_id,
+        other.token,
+        other_profile,
+        owner_kind="agent",
+        owner_id="agent-b",
+    )
+
+    with db.get_db() as conn:
+        row = conn.execute(
+            "SELECT released_at, release_reason, token_digest FROM automation_leases WHERE id = ?",
+            (acquired.lease_id,),
+        ).fetchone()
+    assert row["released_at"] is not None
+    assert row["release_reason"] == "access_revoked"
+    assert acquired.token not in str(row["token_digest"])
+    assert "cbm_lease_" not in str(row["token_digest"])
+
+    replacement = service.acquire_direct(
+        profile_id, owner_kind="agent", owner_id="agent-c"
+    )
+    assert replacement.lease_id != acquired.lease_id
+    assert service.revoke_by_owner(owner_kind="agent", owner_id="missing") == []

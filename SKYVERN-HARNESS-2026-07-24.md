@@ -1,4 +1,4 @@
-[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T03:22+02:00
+[ L-CLOAK · R040 ] 🟣 cursor-grok · Modell: cursor-grok-4.5 · 🧠 IDR: nein · 🕐 2026-07-24T03:30+02:00
 > 🧠 NotebookLM: n/a (kein IDR-Auftrag in dieser Lane; Architektur aus Skyvern README + CloakBrowser-Manager CDP API)
 
 # SKYVERN-HARNESS — CloakBrowser × Skyvern (2026-07-24)
@@ -67,9 +67,9 @@ Docking-Punkt ist bewusst **CDP**, nicht ein zweiter Chromium-Launch: Skyvern st
 
 ![Skyvern harness through CloakBrowser CDP — example.com](.proof/2026-07-24-skyvern-harness.png)
 
-Live-Lauf (re-verified 2026-07-24T03:22+02:00, lane cursor-grok-4.5):
+Live-Lauf (re-verified 2026-07-24T03:30+02:00, lane cursor-grok-4.5):
 
-- Manager: `http://127.0.0.1:18115` (container `cloakbrowser-manager-vcvm`, binary `146.0.7680.177.5`)
+- Manager: `http://127.0.0.1:18115` (container `cloakbrowser-manager-vcvm`)
 - Profile: `a8b99a1f-bd77-4249-917f-0ad681ea5519` (VCVM Mobile Demo, running)
 - Mode: `Skyvern.local+SkyvernBrowser.connect_over_cdp`
 - CDP: `http://127.0.0.1:18115/api/profiles/.../cdp` · `headers_applied: true`

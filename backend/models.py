@@ -1268,4 +1268,5 @@ class TaskOutputResponse(BaseModel):
     summary: str
     payload: dict[str, object] = Field(default_factory=dict)
     created_at: str
+    artifact_expired: bool = False
 

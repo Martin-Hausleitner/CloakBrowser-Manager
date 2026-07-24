@@ -1443,7 +1443,74 @@ def _task_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
 def _task_output_from_row(row: sqlite3.Row) -> dict[str, Any]:
     output = dict(row)
     output["payload"] = _json_object(output.pop("payload_json", None))
+    # Prefer SQL-computed artifact_expired when present; default False.
+    if "artifact_expired" in output:
+        output["artifact_expired"] = bool(output["artifact_expired"])
+    else:
+        output["artifact_expired"] = False
     return output
+
+
+def _artifact_expired_sql(now_iso: str) -> str:
+    """Expression that is 1 when screenshot bytes are expired or deleted."""
+    # Bound the now literal carefully — callers pass a server ISO timestamp.
+    safe_now = now_iso.replace("'", "''")
+    return f"""
+        CASE
+            WHEN a.id IS NULL THEN 0
+            WHEN a.deleted_at IS NOT NULL THEN 1
+            WHEN a.expires_at IS NOT NULL AND a.expires_at < '{safe_now}' THEN 1
+            ELSE 0
+        END
+    """
+
+
+def _task_artifacts_table_exists(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_artifacts'"
+    ).fetchone()
+    return row is not None
+
+
+def _select_task_output_sql(conn: sqlite3.Connection, *, now_iso: str | None = None) -> str:
+    if not _task_artifacts_table_exists(conn):
+        return "SELECT o.*, 0 AS artifact_expired FROM task_outputs o"
+    stamp = now_iso or _now()
+    return f"""
+        SELECT o.*, {_artifact_expired_sql(stamp)} AS artifact_expired
+        FROM task_outputs o
+        LEFT JOIN task_artifacts a ON a.output_id = o.id
+    """
+
+
+def get_task_output(output_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        sql = _select_task_output_sql(conn)
+        row = conn.execute(
+            f"{sql} WHERE o.id = ?",
+            (output_id,),
+        ).fetchone()
+        return _task_output_from_row(row) if row else None
+
+
+def list_task_outputs(
+    run_id: str,
+    *,
+    after_sequence: int = 0,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_after = max(0, int(after_sequence))
+    safe_limit = max(1, min(int(limit), 200))
+    with get_db() as conn:
+        sql = _select_task_output_sql(conn)
+        rows = conn.execute(
+            f"""{sql}
+            WHERE o.run_id = ? AND o.sequence > ?
+            ORDER BY o.sequence ASC
+            LIMIT ?""",
+            (run_id, safe_after, safe_limit),
+        ).fetchall()
+        return [_task_output_from_row(row) for row in rows]
 
 
 def _status_from_health_decision(decision: dict[str, Any]) -> str:
@@ -1978,34 +2045,6 @@ def append_task_output(
     if output is None:  # pragma: no cover
         raise RuntimeError("task output insert did not create a row")
     return output
-
-
-def get_task_output(output_id: str) -> dict[str, Any] | None:
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM task_outputs WHERE id = ?",
-            (output_id,),
-        ).fetchone()
-        return _task_output_from_row(row) if row else None
-
-
-def list_task_outputs(
-    run_id: str,
-    *,
-    after_sequence: int = 0,
-    limit: int = 100,
-) -> list[dict[str, Any]]:
-    safe_after = max(0, int(after_sequence))
-    safe_limit = max(1, min(int(limit), 200))
-    with get_db() as conn:
-        rows = conn.execute(
-            """SELECT * FROM task_outputs
-            WHERE run_id = ? AND sequence > ?
-            ORDER BY sequence ASC
-            LIMIT ?""",
-            (run_id, safe_after, safe_limit),
-        ).fetchall()
-        return [_task_output_from_row(row) for row in rows]
 
 
 # ── Access control persistence ───────────────────────────────────────────────

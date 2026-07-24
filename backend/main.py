@@ -31,11 +31,13 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 if __package__:
     from . import access_control as access
+    from . import artifact_store as artifact_store_mod
     from . import automation_leases
     from . import cdp_gateway
     from . import database as db
     from . import extensions
     from . import live_diagnostics
+    from . import workspace_maintenance as workspace_maintenance_mod
     from .browser_manager import BrowserManager
     from .profile_health import ProfileHealthProbe
     from .models import (
@@ -107,11 +109,13 @@ if __package__:
     from . import stream_metrics
 else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
+    import artifact_store as artifact_store_mod
     import automation_leases
     import cdp_gateway
     import database as db
     import extensions
     import live_diagnostics
+    import workspace_maintenance as workspace_maintenance_mod
     from browser_manager import BrowserManager
     from profile_health import ProfileHealthProbe
     from models import (
@@ -241,9 +245,15 @@ class _WebSocketAccessLease:
 _active_websocket_access_leases: set[_WebSocketAccessLease] = set()
 
 automation_lease_service = automation_leases.AutomationLeaseService()
+artifact_store = artifact_store_mod.ArtifactStore()
+workspace_maintenance_service = workspace_maintenance_mod.WorkspaceMaintenance(
+    artifact_store=artifact_store,
+)
 direct_cdp_socket_registry = cdp_gateway.DirectCdpSocketRegistry(
     poll_interval_seconds=0.25
 )
+_workspace_maintenance_stop: asyncio.Event | None = None
+_workspace_maintenance_task: asyncio.Task | None = None
 
 
 def close_direct_cdp_sockets_for_leases(
@@ -1522,13 +1532,32 @@ async def _cancel_all_profile_health_tasks() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _workspace_maintenance_stop, _workspace_maintenance_task
     db.init_db()
     automation_lease_service.ensure_schema()
+    try:
+        artifact_store.ensure_schema()
+    except Exception:
+        logging.getLogger("cloakbrowser.manager").exception(
+            "artifact_store_schema_failed"
+        )
     await browser_mgr.cleanup_stale()
     browser_mgr._auto_launch_task = asyncio.create_task(browser_mgr.auto_launch_all())
+    _workspace_maintenance_stop = asyncio.Event()
+    _workspace_maintenance_task = asyncio.create_task(
+        workspace_maintenance_mod.run_daily_maintenance_loop(
+            workspace_maintenance_service,
+            stop_event=_workspace_maintenance_stop,
+        )
+    )
     logger.info("CloakBrowser Manager started")
     yield
     logger.info("Shutting down — stopping all browsers...")
+    if _workspace_maintenance_stop is not None:
+        _workspace_maintenance_stop.set()
+    if _workspace_maintenance_task is not None and not _workspace_maintenance_task.done():
+        _workspace_maintenance_task.cancel()
+        await asyncio.gather(_workspace_maintenance_task, return_exceptions=True)
     if browser_mgr._auto_launch_task and not browser_mgr._auto_launch_task.done():
         browser_mgr._auto_launch_task.cancel()
         await asyncio.gather(browser_mgr._auto_launch_task, return_exceptions=True)
@@ -2540,6 +2569,27 @@ async def update_task_session(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Task session not found")
+    if "archived" in body.model_dump(exclude_unset=True):
+        try:
+            if updated.get("archived_at"):
+                from datetime import datetime, timezone
+
+                raw = str(updated["archived_at"])
+                if raw.endswith("Z"):
+                    raw = raw[:-1] + "+00:00"
+                archived_at = datetime.fromisoformat(raw)
+                if archived_at.tzinfo is None:
+                    archived_at = archived_at.replace(tzinfo=timezone.utc)
+                artifact_store.mark_task_archived(
+                    str(updated["id"]), archived_at=archived_at
+                )
+            else:
+                artifact_store.mark_task_reopened(str(updated["id"]))
+        except Exception:
+            logging.getLogger("cloakbrowser.manager").exception(
+                "task_artifact_retention_hook_failed task_id=%s",
+                updated.get("id"),
+            )
     db.record_task_event(
         str(updated["id"]),
         "task_session.updated",
@@ -2892,6 +2942,46 @@ async def append_internal_task_run_output(run_id: str, request: Request):
     except db.TaskOutputConflictError as exc:
         raise HTTPException(status_code=409, detail="Output idempotency conflict") from exc
     return TaskOutputResponse(**output)
+
+
+@app.get("/api/task-outputs/{output_id}/screenshot")
+async def get_task_output_screenshot(output_id: str, request: Request):
+    """Authorized private screenshot bytes. Never exposes storage paths."""
+    identity = _require_identity(request.scope)
+    output = db.get_task_output(output_id)
+    if output is None:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    run = db.get_task_run(str(output["run_id"]))
+    if run is None:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    sandbox_id = str(run.get("sandbox_id") or "default")
+    if not _can_read_task_sessions(identity, sandbox_id):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "task_output.screenshot.view",
+            "denied",
+            sandbox_id,
+            str(run.get("profile_id") or run.get("profile_id_snapshot") or ""),
+        )
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    try:
+        payload = artifact_store.read_for_output(output_id)
+    except (artifact_store_mod.ArtifactNotFound, artifact_store_mod.ArtifactExpired):
+        raise HTTPException(status_code=404, detail="Screenshot not found") from None
+    except Exception:
+        raise HTTPException(status_code=404, detail="Screenshot not found") from None
+    if payload.sandbox_id != sandbox_id:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    return Response(
+        content=payload.body,
+        media_type=payload.media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{payload.filename}"',
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 # ── Profile CRUD ──────────────────────────────────────────────────────────────

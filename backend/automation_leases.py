@@ -412,6 +412,44 @@ class AutomationLeaseService:
                 conn.rollback()
                 raise
 
+    def release_by_id(
+        self,
+        lease_id: str,
+        *,
+        reason: str = "websocket_closed",
+    ) -> bool:
+        """Idempotently release an active lease by id (server-side, no token)."""
+        now = self._clock()
+        with self._get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    """
+                    SELECT released_at FROM automation_leases
+                    WHERE id = ?
+                    """,
+                    (lease_id,),
+                ).fetchone()
+                if row is None:
+                    conn.commit()
+                    return False
+                if row["released_at"] is not None:
+                    conn.commit()
+                    return True
+                conn.execute(
+                    """
+                    UPDATE automation_leases
+                    SET released_at = ?, release_reason = ?
+                    WHERE id = ? AND released_at IS NULL
+                    """,
+                    (_iso(now), reason, lease_id),
+                )
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+
     def revoke_by_owner(
         self,
         *,

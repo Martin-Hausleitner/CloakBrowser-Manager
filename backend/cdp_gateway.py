@@ -28,6 +28,7 @@ TOKEN_QUERY_KEYS = frozenset(
 OBSERVER_CLIENT_MAX_BYTES = 16_384
 OBSERVER_UPSTREAM_MAX_BYTES = 6_000_000
 OBSERVER_FRAME_DATA_MAX_CHARS = 5_500_000
+OBSERVER_PENDING_MAX_IDS = 32
 OBSERVER_ALLOWED_START_KEYS = frozenset(
     {"format", "quality", "maxWidth", "maxHeight", "everyNthFrame"}
 )
@@ -38,6 +39,7 @@ OBSERVER_ALLOWED_METHODS = frozenset(
         "Page.stopScreencast",
     }
 )
+OBSERVER_UNTRACKED_METHODS = frozenset({"Page.screencastFrameAck"})
 
 CDP_VERSION_ALLOWED_KEYS = frozenset(
     {
@@ -240,10 +242,39 @@ _METADATA_KEYS = frozenset(
 )
 
 
+class ObserverPendingRequests:
+    """Bounded pending CDP request-id tracker for the screencast observer."""
+
+    def __init__(self, *, max_pending: int = OBSERVER_PENDING_MAX_IDS) -> None:
+        self.max_pending = max_pending
+        self._ids: set[int] = set()
+
+    def __len__(self) -> int:
+        return len(self._ids)
+
+    def __contains__(self, msg_id: object) -> bool:
+        return isinstance(msg_id, int) and msg_id in self._ids
+
+    def register(self, msg_id: int, method: str) -> None:
+        if msg_id in self._ids:
+            raise ObserverFrameRejected("duplicate id")
+        if method in OBSERVER_UNTRACKED_METHODS:
+            return
+        if len(self._ids) >= self.max_pending:
+            raise ObserverFrameRejected("too many pending")
+        self._ids.add(msg_id)
+
+    def consume(self, msg_id: int) -> bool:
+        if msg_id not in self._ids:
+            return False
+        self._ids.discard(msg_id)
+        return True
+
+
 def filter_observer_upstream_message(
     raw: str | bytes,
     *,
-    accepted_ids: set[int],
+    pending_ids: ObserverPendingRequests,
 ) -> str | None:
     """Return sanitized upstream JSON text, or None to drop."""
     if isinstance(raw, bytes):
@@ -271,7 +302,7 @@ def filter_observer_upstream_message(
         msg_id = payload.get("id")
         if not isinstance(msg_id, int) or isinstance(msg_id, bool):
             return None
-        if msg_id not in accepted_ids:
+        if not pending_ids.consume(msg_id):
             return None
         # Responses may contain result or error only.
         keys = set(payload)

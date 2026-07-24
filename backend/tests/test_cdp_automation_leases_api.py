@@ -731,3 +731,129 @@ def test_cdp_discovery_strips_devtools_and_upstream_url_fields(
             assert lease["token"] not in text
     finally:
         main.browser_mgr.running.pop(profile["id"], None)
+
+
+@pytest.mark.parametrize(
+    "ws_path_builder",
+    [
+        pytest.param(
+            lambda profile_id: f"/api/profiles/{profile_id}/cdp",
+            id="browser-route",
+        ),
+        pytest.param(
+            lambda profile_id: f"/api/profiles/{profile_id}/cdp/devtools/page/CLOSEME",
+            id="page-route",
+        ),
+    ],
+)
+def test_direct_cdp_websocket_close_retires_lease_and_frees_profile(
+    client_access: TestClient, monkeypatch, ws_path_builder
+):
+    from backend import main
+
+    profile = db.create_profile("WS close retires", sandbox_id="alpha")
+    agent = _create_agent(client_access, name="WS close agent")
+    other = _create_agent(client_access, name="WS close successor")
+    lease = _acquire_lease(client_access, profile["id"], agent)
+    old_token = lease["token"]
+    upstream = _BlockingWebSocketUpstream()
+    monkeypatch.setattr("websockets.connect", lambda *_a, **_k: upstream)
+
+    version_resp = MagicMock()
+    version_resp.json.return_value = {
+        "webSocketDebuggerUrl": f"ws://127.0.0.1:9222/devtools/browser/{profile['id']}"
+    }
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=version_resp)
+    monkeypatch.setattr("httpx.AsyncClient", lambda *a, **k: mock_client)
+
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6120, cdp_port=5120, display=120
+    )
+    try:
+        with client_access.websocket_connect(
+            ws_path_builder(profile["id"]),
+            headers=_lease_headers(agent, old_token),
+        ):
+            pass
+
+        with db.get_db() as conn:
+            row = conn.execute(
+                "SELECT released_at, release_reason FROM automation_leases WHERE id = ?",
+                (lease["lease_id"],),
+            ).fetchone()
+        assert row["released_at"] is not None
+        assert row["release_reason"] == "websocket_closed"
+
+        discovery = client_access.get(
+            f"/api/profiles/{profile['id']}/cdp/json/version",
+            headers=_lease_headers(agent, old_token),
+        )
+        assert discovery.status_code in {401, 403, 404}
+        assert old_token not in discovery.text
+
+        with pytest.raises(WebSocketDisconnect):
+            with client_access.websocket_connect(
+                f"/api/profiles/{profile['id']}/cdp",
+                headers=_lease_headers(agent, old_token),
+            ):
+                pass
+
+        successor = _acquire_lease(client_access, profile["id"], other)
+        assert successor["lease_id"] != lease["lease_id"]
+        assert successor["token"] != old_token
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_direct_cdp_websocket_close_closes_sibling_sockets(
+    client_access: TestClient, monkeypatch
+):
+    from backend import main
+
+    profile = db.create_profile("WS sibling close", sandbox_id="alpha")
+    agent = _create_agent(client_access, name="Sibling agent")
+    lease = _acquire_lease(client_access, profile["id"], agent)
+    monkeypatch.setattr(
+        "websockets.connect", lambda *_a, **_k: _BlockingWebSocketUpstream()
+    )
+
+    version_resp = MagicMock()
+    version_resp.json.return_value = {
+        "webSocketDebuggerUrl": f"ws://127.0.0.1:9222/devtools/browser/{profile['id']}"
+    }
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=version_resp)
+    monkeypatch.setattr("httpx.AsyncClient", lambda *a, **k: mock_client)
+
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6121, cdp_port=5121, display=121
+    )
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/cdp",
+            headers=_lease_headers(agent, lease["token"]),
+        ) as browser_ws:
+            with client_access.websocket_connect(
+                f"/api/profiles/{profile['id']}/cdp/devtools/page/SIBLING",
+                headers=_lease_headers(agent, lease["token"]),
+            ) as page_ws:
+                # Closing the page socket must retire the lease and force the browser sibling down.
+                page_ws.close()
+                message = _receive_websocket_message(browser_ws, timeout=3.0)
+                assert message["type"] == "websocket.close"
+                assert message["code"] in {4400, 4403}
+
+        with db.get_db() as conn:
+            row = conn.execute(
+                "SELECT released_at, release_reason FROM automation_leases WHERE id = ?",
+                (lease["lease_id"],),
+            ).fetchone()
+        assert row["released_at"] is not None
+        assert row["release_reason"] == "websocket_closed"
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)

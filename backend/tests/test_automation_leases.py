@@ -383,3 +383,37 @@ def test_revoke_by_owner_releases_active_leases_and_frees_profile(
     )
     assert replacement.lease_id != acquired.lease_id
     assert service.revoke_by_owner(owner_kind="agent", owner_id="missing") == []
+
+
+def test_release_by_id_is_idempotent_and_sets_websocket_closed_reason(
+    service, profile_id: str
+):
+    acquired = service.acquire_direct(profile_id, owner_kind="agent", owner_id="agent-a")
+    assert service.release_by_id(acquired.lease_id, reason="websocket_closed") is True
+    assert (
+        service.validate(
+            acquired.lease_id,
+            acquired.token,
+            profile_id,
+            owner_kind="agent",
+            owner_id="agent-a",
+        )
+        is None
+    )
+    with db.get_db() as conn:
+        row = conn.execute(
+            "SELECT released_at, release_reason FROM automation_leases WHERE id = ?",
+            (acquired.lease_id,),
+        ).fetchone()
+    assert row["released_at"] is not None
+    assert row["release_reason"] == "websocket_closed"
+
+    # Idempotent: second call keeps original reason and succeeds.
+    assert service.release_by_id(acquired.lease_id, reason="websocket_closed") is True
+    with db.get_db() as conn:
+        row = conn.execute(
+            "SELECT release_reason FROM automation_leases WHERE id = ?",
+            (acquired.lease_id,),
+        ).fetchone()
+    assert row["release_reason"] == "websocket_closed"
+    assert service.release_by_id("missing-lease", reason="websocket_closed") is False

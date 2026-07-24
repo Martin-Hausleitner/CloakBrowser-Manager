@@ -259,6 +259,21 @@ def close_direct_cdp_sockets_for_leases(
     direct_cdp_socket_registry.revoke_leases(lease_ids)
 
 
+def retire_direct_automation_lease_on_websocket_close(
+    lease_id: str,
+    *,
+    reason: str = "websocket_closed",
+) -> None:
+    """Atomically retire a direct lease on WS termination and close siblings.
+
+    Idempotent: safe when the lease was already released (explicit release,
+    expiry, access revocation) or when multiple sockets for the same lease
+    close concurrently.
+    """
+    automation_lease_service.release_by_id(lease_id, reason=reason)
+    close_direct_cdp_sockets_for_leases([lease_id])
+
+
 def _register_websocket_access(
     identity: access.AccessIdentity, profile_id: str
 ) -> _WebSocketAccessLease | None:
@@ -4312,10 +4327,13 @@ async def _proxy_observer_cdp_websocket(
     """Screencast-only observer proxy — never a generic CDP tunnel."""
     import websockets
 
-    accepted_ids: set[int] = set()
+    pending_ids = cdp_gateway.ObserverPendingRequests()
     try:
         async with websockets.connect(
-            target_url, max_size=None, ping_interval=None, ping_timeout=None
+            target_url,
+            max_size=cdp_gateway.OBSERVER_UPSTREAM_MAX_BYTES,
+            ping_interval=None,
+            ping_timeout=None,
         ) as cdp_ws:
             async def client_to_cdp():
                 try:
@@ -4328,13 +4346,10 @@ async def _proxy_observer_cdp_websocket(
                             continue
                         try:
                             sanitized = cdp_gateway.validate_observer_client_message(raw)
+                            pending_ids.register(int(sanitized["id"]), sanitized["method"])
                         except cdp_gateway.ObserverFrameRejected:
                             await websocket.close(code=4400, reason="Observer command denied")
                             return
-                        if sanitized["id"] in accepted_ids:
-                            await websocket.close(code=4400, reason="Observer command denied")
-                            return
-                        accepted_ids.add(int(sanitized["id"]))
                         await cdp_ws.send(json.dumps(sanitized, separators=(",", ":")))
                 except WebSocketDisconnect:
                     pass
@@ -4346,7 +4361,7 @@ async def _proxy_observer_cdp_websocket(
                     async for msg in cdp_ws:
                         filtered = cdp_gateway.filter_observer_upstream_message(
                             msg if isinstance(msg, (str, bytes)) else str(msg),
-                            accepted_ids=accepted_ids,
+                            pending_ids=pending_ids,
                         )
                         if filtered is None:
                             continue
@@ -4438,8 +4453,11 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
             automation_handle,
         )
     finally:
-        direct_cdp_socket_registry.unregister(automation_handle)
-        _unregister_websocket_access(access_lease)
+        try:
+            retire_direct_automation_lease_on_websocket_close(lease.lease_id)
+        finally:
+            direct_cdp_socket_registry.unregister(automation_handle)
+            _unregister_websocket_access(access_lease)
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp/devtools/{path:path}")
@@ -4484,8 +4502,11 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
             automation_handle,
         )
     finally:
-        direct_cdp_socket_registry.unregister(automation_handle)
-        _unregister_websocket_access(access_lease)
+        try:
+            retire_direct_automation_lease_on_websocket_close(lease.lease_id)
+        finally:
+            direct_cdp_socket_registry.unregister(automation_handle)
+            _unregister_websocket_access(access_lease)
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp-observer/devtools/{path:path}")

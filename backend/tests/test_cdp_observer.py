@@ -225,10 +225,12 @@ def test_sanitize_discovery_allowlists_safe_fields_only():
 def test_observer_upstream_filter_allows_only_acks_and_screencast_frames():
     from backend import cdp_gateway
 
-    accepted = {1, 2}
+    pending = cdp_gateway.ObserverPendingRequests()
+    pending.register(1, "Page.startScreencast")
+    pending.register(2, "Page.stopScreencast")
     ok_result = cdp_gateway.filter_observer_upstream_message(
         json.dumps({"id": 1, "result": {}}),
-        accepted_ids=accepted,
+        pending_ids=pending,
     )
     assert ok_result is not None
 
@@ -243,21 +245,21 @@ def test_observer_upstream_filter_allows_only_acks_and_screencast_frames():
                 },
             }
         ),
-        accepted_ids=accepted,
+        pending_ids=pending,
     )
     assert frame is not None
 
     assert (
         cdp_gateway.filter_observer_upstream_message(
             json.dumps({"method": "Runtime.consoleAPICalled", "params": {}}),
-            accepted_ids=accepted,
+            pending_ids=pending,
         )
         is None
     )
     assert (
         cdp_gateway.filter_observer_upstream_message(
             json.dumps({"id": 99, "result": {}}),
-            accepted_ids=accepted,
+            pending_ids=pending,
         )
         is None
     )
@@ -556,3 +558,240 @@ def test_session_live_html_uses_observer_endpoints_only():
         "/api/profiles/prof-1/cdp\"",
     ):
         assert forbidden not in html
+
+
+def test_observer_upstream_filter_consumes_pending_ids():
+    from backend import cdp_gateway
+
+    pending = cdp_gateway.ObserverPendingRequests()
+    pending.register(1, "Page.startScreencast")
+    pending.register(2, "Page.stopScreencast")
+    assert len(pending) == 2
+
+    ok = cdp_gateway.filter_observer_upstream_message(
+        json.dumps({"id": 1, "result": {}}),
+        pending_ids=pending,
+    )
+    assert ok is not None
+    assert len(pending) == 1
+    assert 1 not in pending
+    assert 2 in pending
+
+    # Unknown / already-consumed ids stay dropped.
+    assert (
+        cdp_gateway.filter_observer_upstream_message(
+            json.dumps({"id": 1, "result": {}}),
+            pending_ids=pending,
+        )
+        is None
+    )
+
+
+def test_observer_pending_skips_ack_tracking_and_rejects_duplicates():
+    from backend import cdp_gateway
+
+    pending = cdp_gateway.ObserverPendingRequests(max_pending=2)
+    pending.register(1, "Page.startScreencast")
+    # Ack responses are not consumed by the viewer; do not retain ack ids.
+    pending.register(99, "Page.screencastFrameAck")
+    pending.register(100, "Page.screencastFrameAck")
+    assert len(pending) == 1
+    assert 99 not in pending
+    assert 100 not in pending
+
+    with pytest.raises(cdp_gateway.ObserverFrameRejected):
+        pending.register(1, "Page.stopScreencast")
+    with pytest.raises(cdp_gateway.ObserverFrameRejected):
+        pending.register(1, "Page.screencastFrameAck")
+
+    pending.register(2, "Page.stopScreencast")
+    with pytest.raises(cdp_gateway.ObserverFrameRejected):
+        pending.register(3, "Page.startScreencast")
+
+
+def test_observer_upstream_connect_uses_configured_max_size(
+    client_access: TestClient, monkeypatch
+):
+    from backend import cdp_gateway, main
+
+    profile = db.create_profile("Observer max_size", sandbox_id="alpha")
+    _create_user(
+        client_access,
+        username="observer-max-size",
+        password="observer-max-size-password-123",
+        permission="view",
+    )
+    upstream = _ScriptedUpstream([json.dumps({"id": 1, "result": {}})])
+    captured: dict = {}
+
+    def fake_connect(*_a, **kwargs):
+        captured.update(kwargs)
+        return upstream
+
+    monkeypatch.setattr("websockets.connect", fake_connect)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6210, cdp_port=5210, display=210
+    )
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/cdp-observer/devtools/page/PAGE1",
+            headers={"origin": "http://testserver"},
+        ) as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "id": 1,
+                        "method": "Page.startScreencast",
+                        "params": {
+                            "format": "jpeg",
+                            "quality": 35,
+                            "maxWidth": 800,
+                            "maxHeight": 600,
+                            "everyNthFrame": 1,
+                        },
+                    }
+                )
+            )
+            assert websocket.receive_json()["id"] == 1
+            websocket.close()
+        assert captured.get("max_size") == cdp_gateway.OBSERVER_UPSTREAM_MAX_BYTES
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
+
+
+def test_observer_filter_drops_oversized_upstream_frames():
+    from backend import cdp_gateway
+
+    pending = cdp_gateway.ObserverPendingRequests()
+    pending.register(1, "Page.startScreencast")
+    oversized = b"x" * (cdp_gateway.OBSERVER_UPSTREAM_MAX_BYTES + 1)
+    assert (
+        cdp_gateway.filter_observer_upstream_message(
+            oversized,
+            pending_ids=pending,
+        )
+        is None
+    )
+    # Pending id must remain until a valid matching response arrives.
+    assert 1 in pending
+
+
+def test_observer_ws_ack_stream_does_not_grow_pending_unbounded(
+    client_access: TestClient, monkeypatch
+):
+    from backend import cdp_gateway, main
+
+    profile = db.create_profile("Observer ack stream", sandbox_id="alpha")
+    _create_user(
+        client_access,
+        username="observer-ack-stream",
+        password="observer-ack-stream-password-123",
+        permission="view",
+    )
+    frame = json.dumps(
+        {
+            "method": "Page.screencastFrame",
+            "params": {
+                "data": "qq",
+                "sessionId": 7,
+                "metadata": {
+                    "offsetTop": 0,
+                    "pageScaleFactor": 1,
+                    "deviceWidth": 10,
+                    "deviceHeight": 10,
+                    "scrollOffsetX": 0,
+                    "scrollOffsetY": 0,
+                    "timestamp": 1.0,
+                },
+            },
+        }
+    )
+
+    class _AckAwareUpstream(_ScriptedUpstream):
+        async def send(self, message: bytes | str):
+            self.sent.append(message)
+            payload = json.loads(message if isinstance(message, str) else message.decode())
+            method = payload.get("method")
+            msg_id = payload.get("id")
+            if method == "Page.startScreencast":
+                self._queue.put_nowait(json.dumps({"id": msg_id, "result": {}}))
+                self._queue.put_nowait(frame)
+                # Unrelated event must remain filtered from the client.
+                self._queue.put_nowait(
+                    json.dumps({"method": "Runtime.consoleAPICalled", "params": {"type": "log"}})
+                )
+            elif method == "Page.stopScreencast":
+                self._queue.put_nowait(json.dumps({"id": msg_id, "result": {}}))
+            # screencastFrameAck: no tracked response; do not emit one.
+
+    upstream = _AckAwareUpstream()
+    pending_sizes: list[int] = []
+    real_pending_cls = cdp_gateway.ObserverPendingRequests
+
+    class TrackingPending(real_pending_cls):
+        def register(self, msg_id: int, method: str) -> None:
+            super().register(msg_id, method)
+            pending_sizes.append(len(self))
+
+        def consume(self, msg_id: int) -> bool:
+            ok = super().consume(msg_id)
+            pending_sizes.append(len(self))
+            return ok
+
+    monkeypatch.setattr(cdp_gateway, "ObserverPendingRequests", TrackingPending)
+    monkeypatch.setattr("websockets.connect", lambda *_a, **_k: upstream)
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6211, cdp_port=5211, display=211
+    )
+    try:
+        with client_access.websocket_connect(
+            f"/api/profiles/{profile['id']}/cdp-observer/devtools/page/PAGE1",
+            headers={"origin": "http://testserver"},
+        ) as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "id": 1,
+                        "method": "Page.startScreencast",
+                        "params": {
+                            "format": "jpeg",
+                            "quality": 35,
+                            "maxWidth": 800,
+                            "maxHeight": 600,
+                            "everyNthFrame": 1,
+                        },
+                    }
+                )
+            )
+            assert websocket.receive_json()["id"] == 1
+            assert websocket.receive_json()["method"] == "Page.screencastFrame"
+
+            for i in range(2, 402):
+                websocket.send_text(
+                    json.dumps(
+                        {
+                            "id": i,
+                            "method": "Page.screencastFrameAck",
+                            "params": {"sessionId": 7},
+                        }
+                    )
+                )
+
+            websocket.send_text(
+                json.dumps({"id": 5000, "method": "Page.stopScreencast", "params": {}})
+            )
+            stop = websocket.receive_json()
+            assert stop["id"] == 5000
+            websocket.close()
+
+        assert pending_sizes
+        assert max(pending_sizes) <= 2
+        assert pending_sizes[-1] == 0
+        # Ack commands were forwarded, but responses for untracked ack ids stay filtered out.
+        assert len(upstream.sent) == 402  # start + 400 acks + stop
+        methods = [json.loads(item)["method"] for item in upstream.sent]
+        assert methods[0] == "Page.startScreencast"
+        assert methods[-1] == "Page.stopScreencast"
+        assert methods.count("Page.screencastFrameAck") == 400
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)

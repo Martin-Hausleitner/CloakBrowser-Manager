@@ -43,7 +43,10 @@ Open [http://localhost:8080](http://localhost:8080) in your browser. Create a pr
 
 ## Fork development status
 
-Status date: **23 July 2026** (late night). This section describes the active development branch `integrate-pr-47-27-26` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
+Status date: **25 July 2026**. This section describes the active development branch `feature/browser-use-agent-workspace` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
+
+> **Fresh VCVM checkpoint:** [current implementation/UI report with live Tailnet URL and screenshots](docs/reports/VCVM-CURRENT-IMPLEMENTATION-UI-STATUS-2026-07-25.md). The Browser-Use worker foundation is green; the real sidecar/harness E2E and final deployment remain open.
+
 
 ### Repository boundaries
 
@@ -73,7 +76,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Area | State | Fresh or historical evidence |
 | --- | --- | --- |
-| Profile schema, migration, API, organization, access, health, extension inventory & proxy pool | Implemented; full local suite passed | **371/371 backend tests passed** on 23 July 2026 (proxy inventory + auto profile + prior suites). |
+| Profile schema, migration, API, organization, access, health, extension inventory, proxy pool, runs, outputs, artifacts, worker auth, claims and capabilities | Implemented on the feature branch; full backend suite passed | **692/692 backend tests passed** on 25 July 2026. Task 7 received independent specification and security approval. |
 | Desktop/mobile organization, Browser-Use shell, access dashboard, harness boundary and compact health UI | Implemented; full local suite passed | **133/133 frontend tests passed** and the production build passed on 23 July 2026. |
 | Release, mobile, streaming and deployment scripts | Full local script suite passed | **26/26 script tests passed**, including an explicit Python 3.11 compilation regression check. |
 | Compact mobile workspace and scoped live browser control | Proven on the current automated VCVM Chromium surface | The authenticated release run passed **316 checks** across five viewports plus the access dashboard and captured **31 screenshots**. |

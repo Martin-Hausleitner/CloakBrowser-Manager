@@ -6,7 +6,7 @@ import hashlib
 import io
 import struct
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -343,6 +343,72 @@ def test_blocked_capability_retry_releases_claim_and_requeues_for_next_worker(
     assert row["capability_digest"] is None
     assert row["claim_eligible_at"] is not None
     assert active_leases == 0
+
+    reclaimed = client_access.post("/internal/task-runs/claim", headers=worker_headers())
+    assert reclaimed.status_code == 200, reclaimed.text
+    assert reclaimed.json()["id"] == run["id"]
+
+
+@pytest.mark.parametrize("action", ["override-health", "retry-health"])
+def test_health_requeue_waits_for_same_profile_direct_lease_before_eligibility(
+    client_access: TestClient,
+    action: str,
+):
+    from backend import main
+
+    run, profile = create_and_claim(client_access)
+    seed_blocked_health(profile["id"])
+    blocked = issue_capability(client_access, run["id"])
+    assert blocked.status_code == 409
+
+    direct = main.automation_lease_service.acquire_direct(
+        profile_id=profile["id"],
+        owner_kind="agent",
+        owner_id="agent-direct",
+    )
+    lease_clock = datetime.now(timezone.utc)
+    with db.get_db() as conn:
+        conn.execute(
+            "UPDATE automation_leases SET expires_at = ? WHERE id = ?",
+            ((lease_clock + timedelta(minutes=10)).isoformat(), direct.lease_id),
+        )
+        conn.commit()
+
+    seed_passed_health(profile["id"])
+    kwargs = {"headers": bootstrap_headers()}
+    if action == "override-health":
+        kwargs["json"] = {"reason": "operator accepted current health risk"}
+    requeued = client_access.post(
+        f"/api/task-runs/{run['id']}/{action}",
+        **kwargs,
+    )
+    assert requeued.status_code == 200, requeued.text
+    assert requeued.json()["status"] == "queued"
+    assert requeued.json()["claim_eligible_at"] is None
+
+    main.worker_runtime_service._clock = lambda: lease_clock + timedelta(seconds=61)
+    main.worker_runtime_service.maintain_once()
+    waiting = client_access.get(
+        f"/api/task-runs/{run['id']}",
+        headers=bootstrap_headers(),
+    ).json()
+    assert waiting["status"] == "queued"
+    assert waiting["claim_eligible_at"] is None
+    assert waiting.get("error_code") is None
+
+    main.automation_lease_service.release(
+        direct.lease_id,
+        direct.token,
+        profile["id"],
+        owner_kind="agent",
+        owner_id="agent-direct",
+    )
+    main.worker_runtime_service.refresh_claim_eligibility()
+    eligible = client_access.get(
+        f"/api/task-runs/{run['id']}",
+        headers=bootstrap_headers(),
+    ).json()
+    assert eligible["claim_eligible_at"] is not None
 
     reclaimed = client_access.post("/internal/task-runs/claim", headers=worker_headers())
     assert reclaimed.status_code == 200, reclaimed.text

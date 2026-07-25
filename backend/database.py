@@ -1979,6 +1979,89 @@ def cancel_task_run(run_id: str) -> dict[str, Any] | None:
 
 
 
+def _active_profile_automation_lease_on_conn(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    *,
+    now: str,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT expires_at
+        FROM automation_leases
+        WHERE profile_id = ? AND released_at IS NULL
+        LIMIT 1
+        """,
+        (profile_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    raw_expires = str(row["expires_at"])
+    raw_now = str(now)
+    if raw_expires.endswith("Z"):
+        raw_expires = raw_expires[:-1] + "+00:00"
+    if raw_now.endswith("Z"):
+        raw_now = raw_now[:-1] + "+00:00"
+    expires_at = datetime.datetime.fromisoformat(raw_expires)
+    now_at = datetime.datetime.fromisoformat(raw_now)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+    if now_at.tzinfo is None:
+        now_at = now_at.replace(tzinfo=datetime.timezone.utc)
+    return expires_at.astimezone(datetime.timezone.utc) > now_at.astimezone(
+        datetime.timezone.utc
+    )
+
+
+def _refresh_profile_claim_eligibility_on_conn(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    *,
+    now: str,
+) -> None:
+    prior = conn.execute(
+        """
+        SELECT id, claim_eligible_at
+        FROM task_runs
+        WHERE profile_id = ?
+          AND status = 'queued'
+          AND claim_eligible_at IS NOT NULL
+        """,
+        (profile_id,),
+    ).fetchall()
+    prior_map = {str(item["id"]): item["claim_eligible_at"] for item in prior}
+    conn.execute(
+        """
+        UPDATE task_runs
+        SET claim_eligible_at = NULL
+        WHERE profile_id = ? AND status = 'queued'
+        """,
+        (profile_id,),
+    )
+    if _active_profile_automation_lease_on_conn(conn, profile_id, now=now):
+        return
+    head = conn.execute(
+        """
+        SELECT r.id
+        FROM task_runs r
+        JOIN profiles p ON p.id = r.profile_id
+        WHERE r.profile_id = ?
+          AND r.status = 'queued'
+          AND p.sandbox_id = r.sandbox_id
+        ORDER BY r.created_at ASC, r.id ASC
+        LIMIT 1
+        """,
+        (profile_id,),
+    ).fetchone()
+    if head is None:
+        return
+    head_id = str(head["id"])
+    conn.execute(
+        "UPDATE task_runs SET claim_eligible_at = ? WHERE id = ?",
+        (prior_map.get(head_id) or now, head_id),
+    )
+
+
 def _release_task_run_claim_on_conn(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -2002,9 +2085,6 @@ def _release_task_run_claim_on_conn(
             """,
             (now, reason, "placeholder:" + uuid.uuid4().hex, lease_id),
         )
-    claim_eligible_at = None
-    if status == "queued":
-        claim_eligible_at = row["claim_eligible_at"] or now
     conn.execute(
         """
         UPDATE task_runs
@@ -2020,8 +2100,15 @@ def _release_task_run_claim_on_conn(
           AND status IN ('queued', 'health_check', 'blocked_health', 'running')
           AND cancelled_at IS NULL
         """,
-        (status, claim_eligible_at, now, row["id"]),
+        (status, None, now, row["id"]),
     )
+    profile_id = str(row["profile_id"] or "")
+    if profile_id:
+        _refresh_profile_claim_eligibility_on_conn(
+            conn,
+            profile_id,
+            now=now,
+        )
     return lease_ids
 
 

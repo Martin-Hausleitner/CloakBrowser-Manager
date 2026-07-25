@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import subprocess
 import tempfile
 
@@ -13,7 +14,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "docker-compose.vcvm.yml"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy_vcvm.sh"
 DOC_FILE = ROOT / "docs" / "VCVM-DEPLOYMENT.md"
+WORKER_DOC_FILE = ROOT / "docs" / "BROWSER_USE_WORKER.md"
 DOCKERIGNORE_FILE = ROOT / ".dockerignore"
+
+# Synthetic fixture only — never print this value in pass/fail summaries.
+_DUMMY_WORKER_TOKEN = "cbm_worker_" + ("a1" * 32)
+_WORKER_TOKEN_LEAK_RE = re.compile(r"cbm_worker_[0-9a-fA-F]{16,}")
 
 
 def run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -32,16 +38,26 @@ def assert_true(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def compose_config() -> dict:
+def _write_env(lines: list[str]) -> pathlib.Path:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as env_file:
-        env_file.write("AUTH_TOKEN=unit-test-token-with-safe-length\n")
-        env_file.write("MANAGER_PORT=18115\n")
-        env_file.write("VCVM_CPUS=16.0\n")
-        env_file.write("VCVM_MEMORY_LIMIT=32g\n")
-        env_file.write("VCVM_SHM_SIZE=2gb\n")
-        env_file.write("PROXYCHECKER_URL=http://host.docker.internal:18899\n")
-        env_file.write("PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal\n")
-        env_path = pathlib.Path(env_file.name)
+        for line in lines:
+            env_file.write(line if line.endswith("\n") else line + "\n")
+        return pathlib.Path(env_file.name)
+
+
+def compose_config(extra_env_lines: list[str] | None = None) -> dict:
+    lines = [
+        "AUTH_TOKEN=unit-test-token-with-safe-length",
+        "MANAGER_PORT=18115",
+        "VCVM_CPUS=16.0",
+        "VCVM_MEMORY_LIMIT=32g",
+        "VCVM_SHM_SIZE=2gb",
+        "PROXYCHECKER_URL=http://host.docker.internal:18899",
+        "PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal",
+    ]
+    if extra_env_lines:
+        lines.extend(extra_env_lines)
+    env_path = _write_env(lines)
     try:
         result = run(
             "docker",
@@ -60,9 +76,7 @@ def compose_config() -> dict:
 
 
 def compose_quiet() -> None:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as env_file:
-        env_file.write("AUTH_TOKEN=unit-test-token-with-safe-length\n")
-        env_path = pathlib.Path(env_file.name)
+    env_path = _write_env(["AUTH_TOKEN=unit-test-token-with-safe-length"])
     try:
         run(
             "docker",
@@ -78,6 +92,155 @@ def compose_quiet() -> None:
         env_path.unlink(missing_ok=True)
 
 
+def _manager_env(config: dict) -> dict:
+    return config.get("services", {}).get("manager", {}).get("environment", {})
+
+
+def _compose_config_in_project(
+    project_dir: pathlib.Path,
+    *,
+    worker_env_lines: list[str] | None = None,
+) -> tuple[dict, str]:
+    """Render compose config from an isolated project dir; return (config, raw_stdout)."""
+    project_dir.mkdir(parents=True, exist_ok=True)
+    target_compose = project_dir / "docker-compose.vcvm.yml"
+    target_compose.write_text(COMPOSE_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+    worker_env_path = project_dir / ".env.worker.vcvm"
+    if worker_env_lines is None:
+        worker_env_path.unlink(missing_ok=True)
+    else:
+        worker_env_path.write_text(
+            "\n".join(line if line.endswith("\n") else line + "\n" for line in worker_env_lines),
+            encoding="utf-8",
+        )
+        worker_env_path.chmod(0o600)
+
+    auth_env = _write_env(
+        [
+            "AUTH_TOKEN=unit-test-token-with-safe-length",
+            "MANAGER_PORT=18115",
+            "VCVM_CPUS=16.0",
+            "VCVM_MEMORY_LIMIT=32g",
+            "VCVM_SHM_SIZE=2gb",
+            "PROXYCHECKER_URL=http://host.docker.internal:18899",
+            "PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal",
+        ]
+    )
+    try:
+        result = run(
+            "docker",
+            "compose",
+            "--env-file",
+            str(auth_env),
+            "-f",
+            str(target_compose),
+            "config",
+            "--format",
+            "json",
+        )
+    finally:
+        auth_env.unlink(missing_ok=True)
+    return json.loads(result.stdout), result.stdout
+
+
+def test_deploy_vcvm_sh_unchanged_by_worker_integration() -> None:
+    """Worker wiring must not modify deploy_vcvm.sh."""
+    completed = subprocess.run(
+        ["git", "diff", "--", "scripts/deploy_vcvm.sh"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    assert_true(completed.stdout == "", "deploy_vcvm.sh must be unchanged (no git diff)")
+    deploy_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    assert_true("CBM_WORKER" not in deploy_text, "deploy_vcvm.sh must not mention CBM_WORKER_*")
+    assert_true("remote_env_merge_script" not in deploy_text, "fragile env merge must stay removed")
+
+
+def test_compose_attaches_optional_worker_env_file_without_interpolation() -> None:
+    compose_text = COMPOSE_FILE.read_text(encoding="utf-8")
+    assert_true("env_file:" in compose_text, "compose must declare env_file for worker bootstrap")
+    assert_true(".env.worker.vcvm" in compose_text, "compose must reference .env.worker.vcvm")
+    assert_true("required: false" in compose_text, "worker env_file must be optional (required: false)")
+    assert_true(
+        "CBM_WORKER_ID:" not in compose_text and "CBM_WORKER_TOKEN:" not in compose_text,
+        "compose must not interpolate CBM_WORKER_* in environment:",
+    )
+    assert_true("${CBM_WORKER_ID" not in compose_text, "no CBM_WORKER_ID interpolation defaults")
+    assert_true("${CBM_WORKER_TOKEN" not in compose_text, "no CBM_WORKER_TOKEN interpolation defaults")
+    assert_true("cbm_worker_" not in compose_text, "compose must not embed worker token material")
+
+
+def test_worker_env_absent_keeps_manager_valid_without_defaults(tmp_path: pathlib.Path) -> None:
+    """Missing .env.worker.vcvm stays valid; backend treats absence as disabled."""
+    config, raw = _compose_config_in_project(tmp_path / "absent", worker_env_lines=None)
+    env = _manager_env(config)
+    assert_true(
+        env.get("CBM_WORKER_ID") in (None, ""),
+        "absent worker env must not invent CBM_WORKER_ID",
+    )
+    assert_true(
+        env.get("CBM_WORKER_TOKEN") in (None, ""),
+        "absent worker env must not invent CBM_WORKER_TOKEN",
+    )
+    assert_true(_DUMMY_WORKER_TOKEN not in raw, "compose stdout must not contain dummy token")
+
+
+def test_worker_env_configured_passes_into_manager_without_printing_token(
+    tmp_path: pathlib.Path,
+) -> None:
+    config, raw = _compose_config_in_project(
+        tmp_path / "configured",
+        worker_env_lines=[
+            "CBM_WORKER_ID=browser-use-worker",
+            f"CBM_WORKER_TOKEN={_DUMMY_WORKER_TOKEN}",
+        ],
+    )
+    env = _manager_env(config)
+    assert_true(
+        env.get("CBM_WORKER_ID") == "browser-use-worker",
+        "configured CBM_WORKER_ID must reach the Manager service",
+    )
+    assert_true(
+        env.get("CBM_WORKER_TOKEN") == _DUMMY_WORKER_TOKEN,
+        "configured CBM_WORKER_TOKEN must reach the Manager service",
+    )
+    # Handle compose config output without printing the token in test chatter.
+    redacted = {
+        "CBM_WORKER_ID": env.get("CBM_WORKER_ID"),
+        "CBM_WORKER_TOKEN": (
+            f"<set:{len(str(env.get('CBM_WORKER_TOKEN') or ''))}chars>"
+            if env.get("CBM_WORKER_TOKEN")
+            else env.get("CBM_WORKER_TOKEN")
+        ),
+    }
+    assert_true(redacted["CBM_WORKER_ID"] == "browser-use-worker", "redacted view keeps worker id")
+    assert_true(str(redacted["CBM_WORKER_TOKEN"]).startswith("<set:"), "token must be redacted in reports")
+    assert_true(_DUMMY_WORKER_TOKEN not in str(redacted), "redacted report must omit token")
+
+    checked_in = (
+        COMPOSE_FILE,
+        DEPLOY_SCRIPT,
+        DOC_FILE,
+        WORKER_DOC_FILE,
+        ROOT / "scripts" / "provision_browser_use_worker.py",
+        ROOT / "deploy" / "systemd" / "cloakbrowser-browser-use-worker.service.template",
+    )
+    for path in checked_in:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert_true(
+            _DUMMY_WORKER_TOKEN not in text,
+            f"checked-in file must not contain dummy worker token: {path.name}",
+        )
+        assert_true(
+            _WORKER_TOKEN_LEAK_RE.search(text) is None,
+            f"checked-in file must not embed cbm_worker_ token material: {path.name}",
+        )
+
 def main() -> None:
     assert_true(COMPOSE_FILE.exists(), "missing docker-compose.vcvm.yml")
     assert_true(DEPLOY_SCRIPT.exists(), "missing scripts/deploy_vcvm.sh")
@@ -86,6 +249,14 @@ def main() -> None:
 
     run("bash", "-n", str(DEPLOY_SCRIPT))
     compose_quiet()
+
+    # Focused Browser-Use worker env wiring (absence + configured).
+    test_deploy_vcvm_sh_unchanged_by_worker_integration()
+    test_compose_attaches_optional_worker_env_file_without_interpolation()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = pathlib.Path(tmp)
+        test_worker_env_absent_keeps_manager_valid_without_defaults(tmp_path)
+        test_worker_env_configured_passes_into_manager_without_printing_token(tmp_path)
 
     config = compose_config()
     services = config.get("services", {})
@@ -274,6 +445,26 @@ def main() -> None:
         "host preflight must validate host agent wrapper readiness",
     )
     assert_true("--agent-wrapper" in deploy_text, "deploy preflight must pass host wrapper path")
+    assert_true(
+        "BROWSER_USE_WORKER.md" in doc_text or WORKER_DOC_FILE.exists(),
+        "deployment docs must mention or link Browser-Use worker guidance",
+    )
+    if WORKER_DOC_FILE.exists():
+        worker_doc = WORKER_DOC_FILE.read_text(encoding="utf-8")
+        assert_true("CBM_WORKER_ID" in worker_doc, "worker docs must mention CBM_WORKER_ID")
+        assert_true("CBM_WORKER_TOKEN" in worker_doc, "worker docs must mention CBM_WORKER_TOKEN")
+        assert_true(
+            ".env.worker.vcvm" in worker_doc,
+            "worker docs must document the separate .env.worker.vcvm file",
+        )
+        assert_true(
+            "env_file" in worker_doc or "compose" in worker_doc.lower(),
+            "worker docs must explain compose env_file attachment",
+        )
+        assert_true(
+            _WORKER_TOKEN_LEAK_RE.search(worker_doc) is None,
+            "worker docs must not embed real worker token material",
+        )
     print("VCVM deployment surface checks passed")
 
 

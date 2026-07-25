@@ -477,10 +477,22 @@ class WorkerRuntimeService:
 
     # ── Claim ────────────────────────────────────────────────────────────────
 
-    def claim_next(self, worker_id: str) -> dict[str, Any] | None:
-        """Atomically claim the globally oldest eligible queued run."""
+    def claim_next(
+        self,
+        worker_id: str,
+        *,
+        harnesses: set[str] | frozenset[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically claim the globally oldest eligible queued run.
+
+        When ``harnesses`` is provided, only runs whose harness is in that set
+        are considered. Per-profile FIFO still applies: only the eligible head
+        of each profile queue can be claimed, so a non-matching head blocks
+        later matching runs on the same profile.
+        """
         now = self._clock()
         claim_expires = now + timedelta(seconds=CLAIM_TTL_SECONDS)
+        harness_filter = frozenset(harnesses) if harnesses else None
         with self._get_db() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -497,8 +509,7 @@ class WorkerRuntimeService:
                         conn, str(row["profile_id"]), now
                     )
 
-                candidate = conn.execute(
-                    """
+                sql = """
                     SELECT r.*
                     FROM task_runs r
                     JOIN profiles p ON p.id = r.profile_id
@@ -507,10 +518,14 @@ class WorkerRuntimeService:
                       AND r.claimed_by IS NULL
                       AND r.profile_id IS NOT NULL
                       AND p.sandbox_id = r.sandbox_id
-                    ORDER BY r.created_at ASC, r.id ASC
-                    LIMIT 1
-                    """
-                ).fetchone()
+                """
+                params: list[Any] = []
+                if harness_filter is not None:
+                    placeholders = ", ".join("?" for _ in harness_filter)
+                    sql += f" AND r.harness IN ({placeholders})"
+                    params.extend(sorted(harness_filter))
+                sql += " ORDER BY r.created_at ASC, r.id ASC LIMIT 1"
+                candidate = conn.execute(sql, params).fetchone()
                 if candidate is None:
                     conn.commit()
                     return None

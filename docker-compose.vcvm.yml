@@ -26,6 +26,11 @@ services:
       CBM_ORCA_AGENT_WRAPPER: ${CBM_ORCA_AGENT_WRAPPER:-/home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh}
       CBM_BASE_URL: ${CBM_BASE_URL:-http://127.0.0.1:18115}
       CBM_AGENT_KEY_FILE: ${CBM_AGENT_KEY_FILE:-/home/coder/.config/cloakbrowser/orca-agent-key}
+    # Optional Browser-Use worker bootstrap. Absent file is valid (required: false).
+    # Provisioner writes only CBM_WORKER_ID/TOKEN here; deploy_vcvm.sh does not manage it.
+    env_file:
+      - path: .env.worker.vcvm
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

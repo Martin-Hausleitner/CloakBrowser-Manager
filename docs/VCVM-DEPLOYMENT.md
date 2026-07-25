@@ -111,6 +111,13 @@ the VCVM, starts the stack and checks:
 2. `/api/auth/status` reports required auth.
 3. `/api/auth/status` reports access control enabled.
 
+Optional Browser-Use worker bootstrap uses a separate `.env.worker.vcvm` file
+(only `CBM_WORKER_ID` / `CBM_WORKER_TOKEN`) attached by Compose
+`env_file` with `required: false`. Absence remains valid; the backend leaves
+worker auth disabled until that file is provisioned. See
+[BROWSER_USE_WORKER.md](./BROWSER_USE_WORKER.md). `deploy_vcvm.sh` does not
+manage the worker env file.
+
 ### Optional VCVM-local proxychecker
 
 First ensure the already-authorized proxychecker listens only on the VCVM's

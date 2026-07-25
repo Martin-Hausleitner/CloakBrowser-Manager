@@ -64,6 +64,7 @@ def create_run(
     profile_id: str,
     sandbox_id: str = "alpha",
     task: str = "Work",
+    harness: str = "browser-use",
 ) -> dict:
     seed_passed_health(profile_id)
     session = db.create_task_session(profile_id, sandbox_id, "bootstrap")
@@ -71,7 +72,7 @@ def create_run(
         f"/api/task-sessions/{session['id']}/runs",
         headers=bootstrap_headers(),
         json={
-            "harness": "browser-use",
+            "harness": harness,
             "task": task,
             "profile_id": profile_id,
             "allowed_origins": ["https://example.com"],
@@ -90,6 +91,130 @@ def test_claim_204_when_no_work(client_access: TestClient):
     )
     assert resp.status_code == 204
     assert resp.content in {b"", b"null"}
+
+
+def test_unfiltered_claim_still_picks_oldest_any_harness(client_access: TestClient):
+    profile_a = db.create_profile("A", sandbox_id="alpha")
+    profile_b = db.create_profile("B", sandbox_id="alpha")
+    older_codex = create_run(
+        client_access, profile_id=profile_a["id"], task="codex-first", harness="codex"
+    )
+    create_run(
+        client_access,
+        profile_id=profile_b["id"],
+        task="browser-second",
+        harness="browser-use",
+    )
+
+    claimed = client_access.post("/internal/task-runs/claim", headers=worker_headers())
+    assert claimed.status_code == 200
+    body = claimed.json()
+    assert body["id"] == older_codex["id"]
+    assert body["harness"] == "codex"
+
+
+def test_filtered_claim_picks_matching_harness_across_profiles(
+    client_access: TestClient,
+):
+    profile_a = db.create_profile("A", sandbox_id="alpha")
+    profile_b = db.create_profile("B", sandbox_id="alpha")
+    create_run(
+        client_access, profile_id=profile_a["id"], task="codex-older", harness="codex"
+    )
+    browser_run = create_run(
+        client_access,
+        profile_id=profile_b["id"],
+        task="browser-newer",
+        harness="browser-use",
+    )
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+        params={"harness": "browser-use"},
+    )
+    assert claimed.status_code == 200
+    body = claimed.json()
+    assert body["id"] == browser_run["id"]
+    assert body["harness"] == "browser-use"
+
+
+def test_filtered_claim_blocks_when_same_profile_head_is_other_harness(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Mixed", sandbox_id="alpha")
+    codex_head = create_run(
+        client_access, profile_id=profile["id"], task="codex-head", harness="codex"
+    )
+    browser_later = create_run(
+        client_access,
+        profile_id=profile["id"],
+        task="browser-later",
+        harness="browser-use",
+    )
+
+    empty = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+        params={"harness": "browser-use"},
+    )
+    assert empty.status_code == 204
+
+    still_codex = client_access.get(
+        f"/api/task-runs/{codex_head['id']}",
+        headers=bootstrap_headers(),
+    ).json()
+    still_browser = client_access.get(
+        f"/api/task-runs/{browser_later['id']}",
+        headers=bootstrap_headers(),
+    ).json()
+    assert still_codex["status"] == "queued"
+    assert still_codex["claimed_by"] is None
+    assert still_browser["status"] == "queued"
+    assert still_browser["claimed_by"] is None
+    assert still_browser["claim_eligible_at"] is None
+
+
+def test_invalid_harness_filter_returns_422_without_queue_leak(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Secret queue", sandbox_id="alpha")
+    run = create_run(client_access, profile_id=profile["id"], task="hidden")
+
+    resp = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+        params={"harness": "not-a-real-harness"},
+    )
+    assert resp.status_code == 422
+    text = resp.text.lower()
+    assert run["id"].lower() not in text
+    assert "queued" not in text
+    assert "claim_eligible" not in text
+    assert profile["id"].lower() not in text
+
+
+def test_filtered_concurrent_claims_single_winner(client_access: TestClient):
+    profile = db.create_profile("Race filter", sandbox_id="alpha")
+    create_run(client_access, profile_id=profile["id"], harness="browser-use")
+
+    def claim_once():
+        return client_access.post(
+            "/internal/task-runs/claim",
+            headers=worker_headers(),
+            params={"harness": "browser-use"},
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: claim_once(), range(8)))
+
+    wins = [r for r in results if r.status_code == 200]
+    empties = [r for r in results if r.status_code == 204]
+    assert len(wins) == 1
+    assert len(empties) == 7
+    assert len({w.json()["id"] for w in wins}) == 1
+    assert wins[0].json()["harness"] == "browser-use"
+    assert wins[0].json()["worker_id"] == WORKER_ID
 
 
 def test_claim_fifo_per_profile_and_global_oldest(client_access: TestClient):

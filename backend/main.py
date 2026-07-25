@@ -67,6 +67,7 @@ if __package__:
         ExtensionOpenSessionRequest,
         ExtensionOpenSessionResponse,
         ExtensionProfileSummary,
+        Harness,
         LaunchResponse,
         LiveMetricsResponse,
         LiveMetricsSample,
@@ -160,6 +161,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
         ExtensionOpenSessionRequest,
         ExtensionOpenSessionResponse,
         ExtensionProfileSummary,
+        Harness,
         LaunchResponse,
         LiveMetricsResponse,
         LiveMetricsSample,
@@ -3133,9 +3135,15 @@ async def append_internal_task_run_output(run_id: str, request: Request):
 
 
 @app.post("/internal/task-runs/claim", response_model=WorkerClaimResponse)
-async def claim_internal_task_run(request: Request):
+async def claim_internal_task_run(
+    request: Request,
+    harness: Harness | None = Query(default=None),
+):
     worker = _require_worker(request)
-    claimed = worker_runtime_service.claim_next(worker.id)
+    claimed = worker_runtime_service.claim_next(
+        worker.id,
+        harnesses={harness} if harness is not None else None,
+    )
     if claimed is None:
         return Response(status_code=204)
     return WorkerClaimResponse(**claimed)

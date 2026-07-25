@@ -18,6 +18,11 @@ artifacts/
 
 # Deploy
 deploy.sh
+.env.worker.vcvm
+.env.worker.vcvm.bak*
+.env.*.bak*
+.env*.tmp
+*.tmp
 
 # Claude Code
 .claude/

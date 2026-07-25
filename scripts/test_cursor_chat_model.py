@@ -129,7 +129,14 @@ def test_cursor_wrapper_invokes_argv_only_json_and_validates_schema(tmp_path: Pa
     result = asyncio.run(model.invoke_structured([{"role": "user", "content": "hello"}], Answer, tmp_path))
 
     assert result == Answer(answer="ok")
-    assert calls == [["cursor-agent", "--print", "--mode", "ask", "--output-format", "json", "--model", "safe-model"]]
+    argv = calls[0]
+    assert argv[:6] == ["cursor-agent", "--print", "--mode", "ask", "--output-format", "json"]
+    assert "--workspace" in argv
+    assert argv[argv.index("--workspace") + 1] == str(tmp_path)
+    assert "--trust" in argv
+    assert "--sandbox" not in argv
+    assert "--model" in argv and "safe-model" in argv
+    assert tmp_path.stat().st_mode & 0o777 == 0o700
 
 
 def test_default_model_omits_model_flag(tmp_path: Path):
@@ -143,8 +150,42 @@ def test_default_model_omits_model_flag(tmp_path: Path):
         calls.clear()
         model = CursorAgentChatModel(model_alias=alias, timeout_seconds=3, runner=runner)
         asyncio.run(model.invoke_structured([{"role": "user", "content": "hi"}], Answer, tmp_path))
-        assert calls == [["cursor-agent", "--print", "--mode", "ask", "--output-format", "json"]]
+        argv = calls[0]
+        assert argv[:6] == ["cursor-agent", "--print", "--mode", "ask", "--output-format", "json"]
+        assert "--workspace" in argv
+        assert "--trust" in argv
+        assert "--sandbox" not in argv
+        assert "--model" not in argv
+        assert tmp_path.stat().st_mode & 0o777 == 0o700
 
+
+def test_workspace_is_0700_and_images_stay_inside(tmp_path: Path):
+    calls: list[list[str]] = []
+    raw = base64.b64encode(b"PNGIMG").decode("ascii")
+    payload = f"data:image/png;base64,{raw}"
+
+    def runner(argv, timeout, cancel_event=None, input_text=None):
+        calls.append(list(argv))
+        return completed(json.dumps({"result": json.dumps({"answer": "ok"})}))
+
+    model = CursorAgentChatModel(model_alias="safe-model", timeout_seconds=3, runner=runner)
+    asyncio.run(
+        model.invoke_structured(
+            [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": payload}}]}],
+            Answer,
+            tmp_path,
+        )
+    )
+    argv = calls[0]
+    workspace = Path(argv[argv.index("--workspace") + 1])
+    assert workspace == tmp_path
+    assert workspace.stat().st_mode & 0o777 == 0o700
+    assert "--trust" in argv
+    assert "--sandbox" not in argv
+    # Image temps are cleaned after invoke, but during serialize they lived under workspace.
+    assert not any(workspace.glob("cbm-shot-*")) or all(
+        p.is_relative_to(workspace) for p in workspace.glob("cbm-shot-*")
+    )
 
 def test_cursor_wrapper_retries_invalid_structured_output_twice(tmp_path: Path):
     attempts = iter(
@@ -210,6 +251,187 @@ def test_invoke_structured_does_not_second_kill_raw_pid_after_timeout(tmp_path: 
     assert kills == [(99901, signal.SIGKILL)]
     assert 4242 not in [pid for pid, _sig in kills]
 
+
+def test_ainvoke_cancellation_signals_current_invoke_only_then_second_succeeds(tmp_path: Path):
+    model = CursorAgentChatModel(timeout_seconds=30)
+    seen_events: list[asyncio.Event] = []
+    cancel_observed = []
+
+    def hanging_then_ok_runner(argv, timeout, cancel_event=None, input_text=None):
+        if cancel_event is not None:
+            seen_events.append(cancel_event)
+        # First call blocks until its own cancel_event is set.
+        if len(seen_events) == 1:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancel_observed.append("first-saw-cancel")
+                    raise CursorAgentError("cursor-agent cancelled")
+                time.sleep(0.05)
+            raise CursorAgentError("first invoke never cancelled")
+        return completed(json.dumps({"result": json.dumps({"answer": "second"})}))
+
+    model._runner = hanging_then_ok_runner
+
+    async def drive() -> None:
+        task = asyncio.create_task(
+            model.ainvoke(
+                [{"role": "user", "content": "hello"}],
+                output_format=Answer,
+                tmp_dir=tmp_path,
+            )
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Same model instance must accept a fresh invoke after cancellation.
+        second = await model.ainvoke(
+            [{"role": "user", "content": "again"}],
+            output_format=Answer,
+            tmp_dir=tmp_path,
+        )
+        assert second.completion == Answer(answer="second")
+
+    asyncio.run(drive())
+    assert cancel_observed == ["first-saw-cancel"]
+    assert len(seen_events) >= 2
+    # First invoke's event stayed set for that subprocess; second used a distinct event.
+    assert seen_events[0] is not seen_events[1]
+    assert seen_events[0].is_set()
+    assert not seen_events[1].is_set()
+
+
+def test_ainvoke_cancel_joins_runner_before_workspace_cleanup(tmp_path: Path):
+    """CancelledError must not unwind/cleanup until runner observes cancel and exits."""
+    import threading
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    os.chmod(workspace, 0o700)
+    order: list[object] = []
+    entered = threading.Event()
+
+    def slow_cancel_runner(argv, timeout, cancel_event=None, input_text=None):
+        order.append("runner-entered")
+        entered.set()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                order.append(
+                    (
+                        "runner-saw-cancel",
+                        workspace.exists(),
+                        workspace.is_dir(),
+                        not workspace.is_symlink(),
+                    )
+                )
+                # Hold briefly so premature cleanup would be visible.
+                time.sleep(0.2)
+                order.append(("runner-finished", workspace.exists()))
+                raise CursorAgentError("cursor-agent cancelled")
+            time.sleep(0.02)
+        raise CursorAgentError("never cancelled")
+
+    model = CursorAgentChatModel(timeout_seconds=30, runner=slow_cancel_runner)
+
+    async def drive() -> None:
+        task = asyncio.create_task(
+            model.ainvoke(
+                [{"role": "user", "content": "hello"}],
+                output_format=Answer,
+                tmp_dir=workspace,
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 2.0)
+        await asyncio.sleep(0.05)
+        order.append("cancel-requested")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        order.append("ainvoke-exited")
+
+    asyncio.run(drive())
+
+    saw = next(x for x in order if isinstance(x, tuple) and x[0] == "runner-saw-cancel")
+    finished = next(x for x in order if isinstance(x, tuple) and x[0] == "runner-finished")
+    assert saw == ("runner-saw-cancel", True, True, True)
+    assert finished == ("runner-finished", True)
+    assert order.index(saw) < order.index("ainvoke-exited")
+    assert order.index(finished) < order.index("ainvoke-exited")
+    assert order.index("cancel-requested") < order.index(saw)
+
+
+def test_ensure_workspace_rejects_symlink_without_changing_target_mode(tmp_path: Path):
+    target = tmp_path / "real-ws"
+    target.mkdir()
+    os.chmod(target, 0o755)
+    before_mode = target.stat().st_mode & 0o777
+    assert before_mode == 0o755
+
+    link = tmp_path / "ws-link"
+    link.symlink_to(target)
+
+    model = CursorAgentChatModel(
+        timeout_seconds=3,
+        runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("runner must not start")),
+    )
+    with pytest.raises(CursorAgentError, match="symlink"):
+        asyncio.run(
+            model.invoke_structured(
+                [{"role": "user", "content": "hello"}],
+                Answer,
+                link,
+            )
+        )
+    assert target.stat().st_mode & 0o777 == before_mode
+    assert (target.stat().st_mode & 0o777) != 0o700
+
+
+def test_ensure_workspace_rejects_non_directory(tmp_path: Path):
+    file_path = tmp_path / "not-a-dir"
+    file_path.write_text("x", encoding="utf-8")
+    model = CursorAgentChatModel(timeout_seconds=3, runner=lambda *a, **k: completed("{}"))
+    with pytest.raises(CursorAgentError, match="directory"):
+        asyncio.run(
+            model.invoke_structured(
+                [{"role": "user", "content": "hello"}],
+                Answer,
+                file_path,
+            )
+        )
+
+
+def test_model_cancel_signals_all_active_invokes(tmp_path: Path):
+    model = CursorAgentChatModel(timeout_seconds=30)
+    releases = []
+
+    def blocking_runner(argv, timeout, cancel_event=None, input_text=None):
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                releases.append(id(cancel_event))
+                raise CursorAgentError("cursor-agent cancelled")
+            time.sleep(0.05)
+        raise CursorAgentError("never cancelled")
+
+    model._runner = blocking_runner
+
+    async def drive() -> None:
+        t1 = asyncio.create_task(
+            model.ainvoke([{"role": "user", "content": "a"}], output_format=Answer, tmp_dir=tmp_path)
+        )
+        t2 = asyncio.create_task(
+            model.ainvoke([{"role": "user", "content": "b"}], output_format=Answer, tmp_dir=tmp_path)
+        )
+        await asyncio.sleep(0.15)
+        model.cancel()
+        results = await asyncio.gather(t1, t2, return_exceptions=True)
+        assert all(isinstance(r, CursorAgentError) for r in results)
+
+    asyncio.run(drive())
+    assert len(releases) == 2
+    assert releases[0] != releases[1]
 
 def test_default_runner_uses_process_group_and_honors_cancel(tmp_path: Path):
     script = tmp_path / "slow.py"

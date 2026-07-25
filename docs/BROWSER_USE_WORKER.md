@@ -15,6 +15,7 @@ include pytest.
 | --- | --- |
 | `scripts/requirements-browser-use-worker.txt` | Pinned worker deps |
 | `scripts/browser_use_worker.py` | Worker process (claim / run / heartbeat) |
+| `scripts/cursor_chat_model.py` | Argv-only Cursor chat adapter for Browser Use |
 | `scripts/provision_browser_use_worker.py` | Idempotent secret-safe provisioner |
 | `deploy/systemd/cloakbrowser-browser-use-worker.service.template` | Unit template |
 | `docs/BROWSER_USE_WORKER.md` | This guide |
@@ -71,16 +72,69 @@ Behavior:
    create no backup). `worker_id` must match
    `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (no whitespace, newlines, or `=`).
 4. Render the systemd user unit with absolute quoted paths (safe for spaces and
-   `%`), venv Python, `scripts/browser_use_worker.py`, loopback `--manager-url`
-   origin, `--worker-id`, and `--token-file` (never `--token`, never an inlined
-   secret). `UMask=0077`, `Restart=on-failure`, and `PATH` including
-   `~/.local/bin` for `cursor-agent`.
+   `%`), venv Python invoked as `-m scripts.browser_use_worker` from the repo
+   `WorkingDirectory` (so `from scripts…` imports resolve), loopback
+   `--manager-url` origin, `--worker-id`, and `--token-file` (never `--token`,
+   never an inlined secret). `UMask=0077`, `Restart=on-failure`, and `PATH`
+   including `~/.local/bin` for `cursor-agent`.
+
+**Required unit shape:** systemd must run the venv interpreter as
+`-m scripts.browser_use_worker` with `WorkingDirectory` set to the repo root.
+Do not invoke the worker as a loose script path from another cwd.
 
 Worker CLI flags used by the unit (current `browser_use_worker.py`):
 
 - `--manager-url`
 - `--worker-id`
 - `--token-file`
+
+## Runtime behavior (verified)
+
+### Cursor adapter (`scripts/cursor_chat_model.py`)
+
+- Invokes `cursor-agent --print --mode ask --output-format json --workspace
+  <per-invoke-tmp> --trust` (optional `--model <alias>`; omit for default).
+- Does **not** pass `--sandbox` (unavailable / rejected on this VCVM host).
+- Per-invoke workspace is a real directory mode `0700`. Symlink and
+  non-directory workspace paths are rejected before chmod/write.
+- Data-URL images are written under that workspace as `0600` temps and cleaned
+  after invoke.
+- Cancellation is per-invoke (not latched): `CancelledError` signals only the
+  active invoke; `llm.cancel()` signals all active invokes. The adapter joins
+  the runner/thread before unregistering or deleting the temp workspace.
+- Structured output validates against the Browser Use schema with bounded
+  retries (validation errors fed back into the prompt).
+
+### Browser Use agent settings (`scripts/browser_use_worker.py`)
+
+- `llm_timeout` is derived from the Manager run budget with a cleanup margin:
+  `margin = clamp(run_timeout // 6, 15, 60)`, then
+  `llm_timeout = clamp(run_timeout - margin, 1, run_timeout - 1)`
+  (example: run `180` → llm `150`). Cursor subprocess timeout keeps the full
+  run budget.
+- Latency-oriented construction: `flash_mode=True`, `use_judge=False`,
+  `max_clickable_elements_length=10000`, `llm_screenshot_size=(640, 480)`.
+- Vision remains enabled (do not force `use_vision=False`).
+
+### Final screenshot and public retrieval
+
+On successful runs, screenshot retrieval prefers the newest safe
+`AgentHistoryList` screenshot path, else `screenshots()` base64, then falls
+back to live `BrowserSession.take_screenshot`. Bytes are size-bounded and
+typed from PNG/JPEG magic (JPEG is never labeled PNG). Failures are soft.
+
+Upload is two-phase: typed `screenshot` output, then PUT body to Manager.
+Public retrieval is an authenticated
+`GET /api/task-outputs/{output_id}/screenshot` (private, no-store).
+
+### Reliability notes
+
+- CDP WebSocket reconnect / HTTP 403 warnings still appear during long LLM
+  waits. They are currently treated as a **non-blocking** reliability issue to
+  track (can affect live-session screenshot fallback after success).
+- First Cursor structured step latency still varies widely (~31–135s observed).
+  Prefer a Manager/E2E run budget of **≥360s** until cold-start / schema /
+  vision latency is reduced.
 
 ## Manager container restart
 
@@ -166,6 +220,27 @@ Expected: key and worker-env modes are `600`; unit shows `--token-file` and no
 3. Optionally remove or replace the worker key file only after Manager no longer
    trusts its digest; do not commit key, env, or `*.bak*` files to git.
 
+## Verified live evidence (VCVM, 2026-07-25)
+
+Successful run `a5c8f034-5e46-4048-8e58-360be635e716`:
+
+- Model: `cursor-grok-4.5-low`
+- Outcome: succeeded with typed **action**, **2 observations**, **screenshot**,
+  and **summary**
+- Created `2026-07-25T17:20:13.798674Z`; first action
+  `2026-07-25T17:21:05.357723Z` (**~51.6s** to first action)
+- Screenshot: authenticated `GET /api/task-outputs/{output_id}/screenshot`
+  returned **200** `image/png`, **20,445** bytes, **1920×1080**, content hash
+  matched upload; response marked private / no-store
+- Worker unit stayed **active** with **NRestarts=0**
+
+Honest caveat — earlier run `b9e05637-e4c9-4cd6-99e5-d44232520db6` with
+`timeout_seconds=180` was **revoked at deadline** before the first structured
+action after ~135s. Observed first-step Cursor variance on this host is about
+**31–135s**. Use an E2E budget of **≥360s** until cold-start / schema / vision
+latency is reduced. CDP reconnect/403 warnings remain a tracked reliability
+issue and did not block the successful `a5c8f034…` retrieval path above.
+
 ## E2E acceptance checklist
 
 - [ ] Dedicated venv created with `uv`; `browser-use==0.13.6` importable; pytest
@@ -180,9 +255,10 @@ Expected: key and worker-env modes are `600`; unit shows `--token-file` and no
 - [ ] Manager container restarted after worker env write; compose attaches
       `.env.worker.vcvm` via `env_file.required: false`.
 - [ ] `systemctl --user daemon-reload` and `enable --now` succeed.
-- [ ] Unit `ExecStart` uses venv Python + `browser_use_worker.py` with
-      `--manager-url` (loopback), `--worker-id`, `--token-file`; `UMask=0077`;
-      `Restart=on-failure`; `PATH` includes `~/.local/bin`.
+- [ ] Unit `ExecStart` uses venv Python `-m scripts.browser_use_worker` with
+      repo-root `WorkingDirectory`, `--manager-url` (loopback), `--worker-id`,
+      `--token-file`; `UMask=0077`; `Restart=on-failure`; `PATH` includes
+      `~/.local/bin`.
 - [ ] No worker token appears in provisioner stdout, the unit file, journal
       snippets used for triage, or documentation.
 - [ ] `scripts/deploy_vcvm.sh` remains untouched by worker provisioning.
@@ -190,6 +266,9 @@ Expected: key and worker-env modes are `600`; unit shows `--token-file` and no
       credential directories for this worker.
 - [ ] Worker claims a `browser-use` run from Manager internal APIs and completes
       a bounded smoke task against an allow-listed profile (operator-owned).
+- [ ] Smoke run budget ≥360s until first-step Cursor latency is reduced; confirm
+      action/observation/screenshot/summary outputs and authenticated screenshot
+      GET.
 
 ## Out of scope
 

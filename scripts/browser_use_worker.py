@@ -55,6 +55,32 @@ MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024
 MAX_HEARTBEAT_TRANSIENT_FAILURES = 3
 ACTION_PAYLOAD_KEYS = frozenset({"name", "url", "selector", "text", "step", "target"})
 
+# Browser Use per-call LLM wait must leave a cleanup margin under the run budget.
+# Formula: llm_timeout = run_timeout - clamp(run_timeout // 6, 15, 60),
+# then clamped to [1, run_timeout - 1]. For timeout_seconds=180 → margin 30 → 150.
+LLM_TIMEOUT_MARGIN_MIN = 15
+LLM_TIMEOUT_MARGIN_MAX = 60
+
+
+def derive_browser_use_llm_timeout(run_timeout_seconds: float) -> int:
+    """Derive Browser Use ``llm_timeout`` from the Manager run budget.
+
+    CursorAgentChatModel keeps the full run/subprocess timeout. Browser Use's
+    generic default is 75s when ``llm_timeout`` is omitted, which starved the
+    live 180s run (af3a1709). This helper always grants a value strictly less
+    than the run budget so heartbeat/screenshot/complete/cleanup can finish
+    before the Manager deadline:
+
+        margin = clamp(run_timeout // 6, 15, 60)
+        llm_timeout = clamp(run_timeout - margin, 1, run_timeout - 1)
+    """
+    run = max(1, int(run_timeout_seconds))
+    if run <= 1:
+        return 1
+    margin = max(LLM_TIMEOUT_MARGIN_MIN, min(LLM_TIMEOUT_MARGIN_MAX, run // 6))
+    llm = run - margin
+    return max(1, min(llm, run - 1))
+
 
 def validate_worker_token(token: str | None) -> str:
     """Require a non-empty printable token with no whitespace/newlines."""
@@ -183,6 +209,111 @@ def decode_screenshot_payload(payload: Any, *, max_bytes: int = MAX_SCREENSHOT_B
             raise ValueError("empty screenshot")
         return raw
     raise ValueError("unsupported screenshot payload type")
+
+
+def detect_image_media_type(data: bytes) -> str | None:
+    """Return image/png or image/jpeg from magic bytes; never guess JPEG as PNG."""
+    if not data:
+        return None
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    return None
+
+
+def _call_history_list(fn: Any, **kwargs: Any) -> Any:
+    if not callable(fn):
+        return None
+    try:
+        return fn(**kwargs)
+    except TypeError:
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _read_screenshot_file(path: Path, *, max_bytes: int = MAX_SCREENSHOT_BYTES) -> bytes | None:
+    try:
+        if not path.is_file():
+            return None
+        size = path.stat().st_size
+        if size <= 0 or size > max_bytes:
+            return None
+        raw = path.read_bytes()
+        if not raw or len(raw) > max_bytes:
+            return None
+        return raw
+    except OSError:
+        return None
+
+
+def extract_screenshot_from_history(
+    history: Any, *, max_bytes: int = MAX_SCREENSHOT_BYTES
+) -> tuple[bytes, str] | None:
+    """Prefer newest existing history screenshot_path; else newest screenshots() b64."""
+    if history is None:
+        return None
+    try:
+        paths = _call_history_list(
+            getattr(history, "screenshot_paths", None),
+            return_none_if_not_screenshot=False,
+        )
+        if isinstance(paths, list):
+            for item in reversed(paths):
+                if not item:
+                    continue
+                raw = _read_screenshot_file(Path(str(item)), max_bytes=max_bytes)
+                if raw is None:
+                    continue
+                media_type = detect_image_media_type(raw)
+                if media_type is None:
+                    continue
+                return raw, media_type
+
+        shots = _call_history_list(
+            getattr(history, "screenshots", None),
+            return_none_if_not_screenshot=False,
+        )
+        if isinstance(shots, list):
+            for item in reversed(shots):
+                if not item:
+                    continue
+                try:
+                    raw = decode_screenshot_payload(item, max_bytes=max_bytes)
+                except ValueError:
+                    continue
+                media_type = detect_image_media_type(raw)
+                if media_type is None:
+                    continue
+                return raw, media_type
+    except Exception:  # noqa: BLE001 — screenshot is best-effort
+        return None
+    return None
+
+
+async def resolve_final_screenshot(
+    history: Any, session: Any, *, max_bytes: int = MAX_SCREENSHOT_BYTES
+) -> tuple[bytes, str] | None:
+    """History screenshot first, then live session capture. Fail soft."""
+    try:
+        from_history = extract_screenshot_from_history(history, max_bytes=max_bytes)
+        if from_history is not None:
+            return from_history
+        raw = await _capture_screenshot_bytes(session)
+        if raw is None:
+            return None
+        if len(raw) > max_bytes:
+            return None
+        media_type = detect_image_media_type(raw)
+        if media_type is None:
+            return None
+        return raw, media_type
+    except Exception:  # noqa: BLE001 — screenshot is best-effort
+        return None
 
 
 @dataclass(frozen=True)
@@ -778,6 +909,7 @@ class BrowserUseWorker:
                 model_alias=model_alias,
                 timeout_seconds=timeout_seconds,
             )
+            llm_timeout = derive_browser_use_llm_timeout(timeout_seconds)
 
             async def on_step(browser_state: Any, model_output: Any, step_num: int) -> None:
                 await self._emit_actions_from_model_output(run_id, model_output, step_num)
@@ -791,6 +923,11 @@ class BrowserUseWorker:
                 browser_session=session,
                 enable_signal_handler=False,
                 register_new_step_callback=on_step,
+                llm_timeout=llm_timeout,
+                flash_mode=True,
+                use_judge=False,
+                max_clickable_elements_length=10000,
+                llm_screenshot_size=(640, 480),
             )
 
             hb_task = asyncio.create_task(
@@ -859,14 +996,15 @@ class BrowserUseWorker:
                 final = _call_maybe(getattr(history, "final_result", None))
             summary = redact_text(str(final or "succeeded"))[:500]
 
-            shot = await _capture_screenshot_bytes(
-                getattr(agent, "browser_session", None) or session
+            shot = await resolve_final_screenshot(
+                history, getattr(agent, "browser_session", None) or session
             )
             if shot:
+                body, media_type = shot
                 await self.emit_screenshot(
                     run_id,
-                    shot,
-                    media_type="image/png",
+                    body,
+                    media_type=media_type,
                     idempotency_key=f"final-shot:{run_id}",
                     summary="Final screenshot",
                 )

@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=@WORKING_DIRECTORY@
-ExecStart=@VENV_PYTHON@ @WORKER_SCRIPT@ --manager-url @MANAGER_URL@ --worker-id @WORKER_ID@ --token-file @TOKEN_FILE@
+ExecStart=@VENV_PYTHON@ -m scripts.browser_use_worker --manager-url @MANAGER_URL@ --worker-id @WORKER_ID@ --token-file @TOKEN_FILE@
 Restart=on-failure
 RestartSec=5
 UMask=0077

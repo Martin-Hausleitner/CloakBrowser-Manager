@@ -288,7 +288,6 @@ def render_systemd_unit(
 
     home_path = Path(home).expanduser().resolve() if home else Path.home().resolve()
     venv_python = venv_path / "bin" / "python"
-    worker_script = repo_path / "scripts" / "browser_use_worker.py"
     documentation = f"file://{repo_path}/docs/BROWSER_USE_WORKER.md"
     path_assignment = f"PATH={home_path}/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
@@ -297,7 +296,6 @@ def render_systemd_unit(
         "@WORKING_DIRECTORY@": systemd_quote(str(repo_path)),
         "@DOCUMENTATION@": systemd_quote(documentation),
         "@VENV_PYTHON@": systemd_quote(str(venv_python)),
-        "@WORKER_SCRIPT@": systemd_quote(str(worker_script)),
         "@MANAGER_URL@": systemd_quote(url),
         "@WORKER_ID@": systemd_quote(safe_id),
         "@TOKEN_FILE@": systemd_quote(str(key_path)),
@@ -311,6 +309,10 @@ def render_systemd_unit(
         rendered = rendered.replace(needle, value)
     if WORKER_KEY_PREFIX in rendered and TOKEN_PATTERN.search(rendered):
         raise RuntimeError("rendered unit must not contain a worker token")
+    if "browser_use_worker.py" in rendered.split("ExecStart=", 1)[-1].split("\n", 1)[0]:
+        raise RuntimeError("ExecStart must invoke -m scripts.browser_use_worker, not a .py path")
+    if "-m scripts.browser_use_worker" not in rendered:
+        raise RuntimeError("ExecStart must use python -m scripts.browser_use_worker")
     return rendered
 
 

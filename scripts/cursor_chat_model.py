@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Browser-Use BaseChatModel adapter backed by argv-only cursor-agent.
 
-Spawns ``cursor-agent --print --mode ask --output-format json``. An explicit
-non-default model alias may be passed as ``--model``; otherwise the flag is
-omitted. Prompts travel on stdin. Data-URL images are extracted to ``0600``
-temp files with size/base64 bounds and cleaned up after invoke.
+Spawns ``cursor-agent --print --mode ask --output-format json --workspace
+<tmp> --trust``. An explicit non-default model alias may be passed as
+``--model``; otherwise the flag is omitted. Prompts travel on stdin.
+Data-URL images are extracted to ``0600`` temp files under the per-invoke
+workspace (mode ``0700``) and cleaned up after invoke. Do not pass
+``--sandbox`` (unavailable on some hosts).
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -291,7 +294,9 @@ class CursorAgentChatModel:
         self.provider = provider
         self._runner = runner
         self._killpg = killpg or os.killpg
-        self._cancel_event = asyncio.Event()
+        # Per-invoke cancel events (not latched). cancel() sets all active ones.
+        self._active_cancels: set[asyncio.Event] = set()
+        self._active_lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -302,10 +307,49 @@ class CursorAgentChatModel:
         return self.model
 
     def cancel(self) -> None:
-        """Signal in-flight cursor-agent subprocesses to stop."""
-        self._cancel_event.set()
+        """Signal all currently active cursor-agent invocations."""
+        with self._active_lock:
+            active = list(self._active_cancels)
+        for ev in active:
+            ev.set()
 
-    def _argv(self) -> list[str]:
+    def _register_invoke_cancel(self) -> asyncio.Event:
+        ev = asyncio.Event()
+        with self._active_lock:
+            self._active_cancels.add(ev)
+        return ev
+
+    def _unregister_invoke_cancel(self, ev: asyncio.Event) -> None:
+        with self._active_lock:
+            self._active_cancels.discard(ev)
+
+    @staticmethod
+    def _ensure_workspace(tmp_dir: Path | str) -> Path:
+        """Create/normalize a real directory workspace (mode 0700).
+
+        Rejects symlink paths and non-directory targets before any chmod/write
+        so we never follow a link and mutate another tree's permissions.
+        """
+        root = Path(tmp_dir)
+        if root.is_symlink():
+            raise CursorAgentError("workspace must not be a symlink")
+        try:
+            st = root.lstat()
+        except FileNotFoundError:
+            root.mkdir(parents=True, exist_ok=True)
+            if root.is_symlink():
+                raise CursorAgentError("workspace must not be a symlink")
+            st = root.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            raise CursorAgentError("workspace must not be a symlink")
+        if not stat.S_ISDIR(st.st_mode):
+            raise CursorAgentError("workspace must be a directory")
+        os.chmod(root, 0o700, follow_symlinks=False)
+        if root.is_symlink():
+            raise CursorAgentError("workspace must not be a symlink")
+        return root
+
+    def _argv(self, workspace: Path) -> list[str]:
         argv = [
             "cursor-agent",
             "--print",
@@ -313,10 +357,23 @@ class CursorAgentChatModel:
             "ask",
             "--output-format",
             "json",
+            "--workspace",
+            str(workspace),
+            "--trust",
         ]
         if self._model_alias:
             argv.extend(["--model", self._model_alias])
         return argv
+
+    def _drain_runner_done(self, done: threading.Event) -> None:
+        """Block until runner thread finishes (cancel-safe, bounded).
+
+        A cancelled Task re-raises on every ``await``, and cancelling the
+        asyncio wrapper Future can mark it done while the executor thread is
+        still running — so we join via a threading.Event set in the worker
+        ``finally``. Timeout avoids deadlock if a runner ignores cancel.
+        """
+        done.wait(timeout=max(5.0, float(self.timeout_seconds) + 5.0))
 
     def run_cursor(
         self,
@@ -331,7 +388,7 @@ class CursorAgentChatModel:
         stdin is owned exclusively by ``communicate(input=...)`` so we never
         close the pipe ourselves (that caused 'I/O operation on closed file').
         """
-        events = [e for e in (cancel_event, self._cancel_event) if e is not None]
+        events = [cancel_event] if cancel_event is not None else []
         try:
             proc = subprocess.Popen(
                 argv,
@@ -432,38 +489,82 @@ class CursorAgentChatModel:
     ) -> T:
         """Invoke cursor-agent and validate structured output with retries."""
         temps: list[Path] = []
+        workspace = self._ensure_workspace(tmp_dir)
+        invoke_cancel = self._register_invoke_cancel()
+        link_task: asyncio.Task[None] | None = None
+        if cancel_event is not None:
+
+            async def _forward_external_cancel() -> None:
+                await cancel_event.wait()
+                invoke_cancel.set()
+
+            link_task = asyncio.create_task(_forward_external_cancel())
         try:
-            serialized, temps = serialize_messages(messages, tmp_dir)
-            argv = self._argv()
-            last_error: Exception | None = None
-            prior_error: str | None = None
+            try:
+                serialized, temps = serialize_messages(messages, workspace)
+                argv = self._argv(workspace)
+                last_error: Exception | None = None
+                prior_error: str | None = None
+                loop = asyncio.get_running_loop()
 
-            for _attempt in range(MAX_STRUCTURED_ATTEMPTS):
-                prompt = _build_structured_prompt(
-                    serialized, schema, prior_error=prior_error
-                )
-                try:
-                    completed = await asyncio.to_thread(
-                        self._call_runner,
-                        argv,
-                        self.timeout_seconds,
-                        cancel_event,
-                        input_text=prompt,
+                for _attempt in range(MAX_STRUCTURED_ATTEMPTS):
+                    prompt = _build_structured_prompt(
+                        serialized, schema, prior_error=prior_error
                     )
-                    payload = _extract_result_payload(completed.stdout)
-                    return schema.model_validate(payload)
-                except CursorAgentTimeout as exc:
-                    # run_cursor already killed the process group via getpgid.
-                    raise CursorAgentTimeout(str(exc), pid=exc.pid) from None
-                except (CursorAgentError, ValidationError, TypeError, ValueError) as exc:
-                    last_error = exc
-                    prior_error = str(exc)
-                    continue
+                    runner_done = threading.Event()
 
-            raise CursorAgentError(
-                f"structured output validation failed after retries: {last_error}"
-            )
+                    def _run_invoke(p: str = prompt) -> Any:
+                        try:
+                            return self._call_runner(
+                                argv,
+                                self.timeout_seconds,
+                                invoke_cancel,
+                                input_text=p,
+                            )
+                        finally:
+                            runner_done.set()
+
+                    runner_fut: asyncio.Future[Any] = loop.run_in_executor(
+                        None, _run_invoke
+                    )
+                    try:
+                        try:
+                            completed = await runner_fut
+                        except asyncio.CancelledError:
+                            # Signal current invoke, then join runner before unwind
+                            # so temp/workspace cleanup cannot race the subprocess.
+                            invoke_cancel.set()
+                            self._drain_runner_done(runner_done)
+                            raise
+                        payload = _extract_result_payload(completed.stdout)
+                        return schema.model_validate(payload)
+                    except CursorAgentTimeout as exc:
+                        # run_cursor already killed the process group via getpgid.
+                        raise CursorAgentTimeout(str(exc), pid=exc.pid) from None
+                    except CursorAgentError as exc:
+                        # Cancellation must not be retried; keep the event set so
+                        # the subprocess observer still sees its own signal.
+                        if invoke_cancel.is_set():
+                            raise
+                        last_error = exc
+                        prior_error = str(exc)
+                        continue
+                    except (ValidationError, TypeError, ValueError) as exc:
+                        last_error = exc
+                        prior_error = str(exc)
+                        continue
+
+                raise CursorAgentError(
+                    f"structured output validation failed after retries: {last_error}"
+                )
+            except asyncio.CancelledError:
+                # Signal only this invoke's event if cancel beat the runner await.
+                invoke_cancel.set()
+                raise
         finally:
+            if link_task is not None:
+                link_task.cancel()
+            self._unregister_invoke_cancel(invoke_cancel)
             cleanup_temp_paths(temps)
 
     async def ainvoke(
@@ -478,21 +579,26 @@ class CursorAgentChatModel:
         if tmp_dir is None:
             tmp_dir = tempfile.mkdtemp(prefix="cbm-cursor-")
             created_tmp = True
+            os.chmod(tmp_dir, 0o700)
         cancel_event = kwargs.get("cancel_event")
         try:
-            if output_format is not None:
-                result = await self.invoke_structured(
-                    messages, output_format, tmp_dir, cancel_event=cancel_event
+            try:
+                if output_format is not None:
+                    result = await self.invoke_structured(
+                        messages, output_format, tmp_dir, cancel_event=cancel_event
+                    )
+                    return make_chat_invoke_completion(completion=result)
+
+                class _Text(BaseModel):
+                    result: str
+
+                structured = await self.invoke_structured(
+                    messages, _Text, tmp_dir, cancel_event=cancel_event
                 )
-                return make_chat_invoke_completion(completion=result)
-
-            class _Text(BaseModel):
-                result: str
-
-            structured = await self.invoke_structured(
-                messages, _Text, tmp_dir, cancel_event=cancel_event
-            )
-            return make_chat_invoke_completion(completion=structured.result)
+                return make_chat_invoke_completion(completion=structured.result)
+            except asyncio.CancelledError:
+                # invoke_structured already signaled the active per-invoke event.
+                raise
         finally:
             if created_tmp:
                 try:

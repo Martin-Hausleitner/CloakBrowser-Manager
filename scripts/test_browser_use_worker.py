@@ -16,6 +16,9 @@ from scripts.browser_use_worker import (
     WorkerConfig,
     build_worker_config,
     decode_screenshot_payload,
+    detect_image_media_type,
+    derive_browser_use_llm_timeout,
+    extract_screenshot_from_history,
     flatten_action_payload,
     main,
     sanitize_manager_error_message,
@@ -51,6 +54,7 @@ class FakeHTTPClient:
 
 
 PNG = b"\x89PNG\r\n\x1a\nfake"
+JPEG = b"\xff\xd8\xff\xe0fakejpeg"
 
 
 def _done_history(text: str = "ok"):
@@ -62,6 +66,15 @@ def _done_history(text: str = "ok"):
         has_errors=lambda: False,
         history=[],
     )
+
+
+def _done_history_with_screenshots(*, paths=None, b64_shots=None, text: str = "ok"):
+    hist = _done_history(text)
+    path_list = list(paths or [])
+    shot_list = list(b64_shots or [])
+    hist.screenshot_paths = lambda n_last=None, return_none_if_not_screenshot=True: list(path_list)
+    hist.screenshots = lambda n_last=None, return_none_if_not_screenshot=True: list(shot_list)
+    return hist
 
 
 def _max_steps_history():
@@ -235,6 +248,161 @@ def test_capability_headers_and_allowed_origins_are_passed_to_browser_use(monkey
     assert constructed["agent"]["enable_signal_handler"] is False
     assert any(c[0] == "upload" for c in calls)
     assert constructed.get("stopped") is True
+
+
+def test_derive_browser_use_llm_timeout_leaves_cleanup_margin():
+    # Live bug: timeout_seconds=180 with no llm_timeout fell back to Browser Use's 75s.
+    assert derive_browser_use_llm_timeout(180) == 150
+    assert derive_browser_use_llm_timeout(180) < 180
+    assert derive_browser_use_llm_timeout(60) == 45
+    assert derive_browser_use_llm_timeout(60) < 60
+    # Always strictly less than the manager/run budget when budget > 1.
+    for budget in (20, 45, 90, 180, 300):
+        llm_t = derive_browser_use_llm_timeout(budget)
+        assert 1 <= llm_t < budget
+
+
+def test_agent_gets_explicit_llm_timeout_while_cursor_keeps_run_timeout(monkeypatch):
+    constructed = {}
+    llm_kwargs = {}
+
+    class FakeBrowserSession:
+        def __init__(self, **kwargs):
+            pass
+
+        async def take_screenshot(self, **kwargs):
+            return PNG
+
+        async def stop(self):
+            return None
+
+        async def close(self):
+            return None
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            constructed["agent"] = kwargs
+            self.browser_session = kwargs.get("browser_session")
+
+        async def run(self, max_steps, on_step_start=None, on_step_end=None):
+            return _done_history("ok")
+
+        def stop(self):
+            return None
+
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            llm_kwargs.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "browser_use",
+        SimpleNamespace(BrowserSession=FakeBrowserSession, Agent=FakeAgent),
+    )
+    client = SimpleNamespace(
+        issue_capability=lambda run_id: {"cdp_url": "http://cdp", "headers": {}},
+        heartbeat=lambda run_id: {"cancel_requested": False, "heartbeat_interval_seconds": 60},
+        output=lambda *args, **kwargs: {"id": "out"},
+        upload_screenshot=lambda *args, **kwargs: None,
+        complete=lambda run_id: {"status": "succeeded"},
+        fail=lambda *args, **kwargs: None,
+        revoke_capability=lambda run_id: None,
+    )
+    worker = BrowserUseWorker(
+        client=client, config=WorkerConfig(manager_url="https://manager.local", worker_id="w")
+    )
+    worker._llm_factory = FakeLLM
+    result = asyncio.run(
+        worker.execute_claim(
+            {
+                "id": "run-af3a",
+                "task": "x",
+                "harness": "browser-use",
+                "allowed_origins": ["https://example.com"],
+                "max_steps": 4,
+                "timeout_seconds": 180,
+                "model_alias": "safe",
+            }
+        )
+    )
+    assert result["status"] == "succeeded"
+    assert llm_kwargs["timeout_seconds"] == 180
+    assert constructed["agent"]["llm_timeout"] == derive_browser_use_llm_timeout(180)
+    assert constructed["agent"]["llm_timeout"] == 150
+    assert constructed["agent"]["llm_timeout"] < 180
+    assert constructed["agent"]["flash_mode"] is True
+    assert constructed["agent"]["use_judge"] is False
+    assert constructed["agent"]["max_clickable_elements_length"] == 10000
+    assert constructed["agent"]["llm_screenshot_size"] == (640, 480)
+    assert constructed["agent"]["enable_signal_handler"] is False
+    assert "use_vision" not in constructed["agent"] or constructed["agent"].get("use_vision") is not False
+
+
+def test_agent_construction_sets_flash_judge_and_dom_cap(monkeypatch):
+    constructed = {}
+
+    class FakeBrowserSession:
+        def __init__(self, **kwargs):
+            pass
+
+        async def take_screenshot(self, **kwargs):
+            return PNG
+
+        async def stop(self):
+            return None
+
+        async def close(self):
+            return None
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            constructed["agent"] = dict(kwargs)
+            self.browser_session = kwargs.get("browser_session")
+
+        async def run(self, max_steps, on_step_start=None, on_step_end=None):
+            return _done_history("ok")
+
+        def stop(self):
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "browser_use",
+        SimpleNamespace(BrowserSession=FakeBrowserSession, Agent=FakeAgent),
+    )
+    client = SimpleNamespace(
+        issue_capability=lambda run_id: {"cdp_url": "http://cdp", "headers": {}},
+        heartbeat=lambda run_id: {"cancel_requested": False, "heartbeat_interval_seconds": 60},
+        output=lambda *args, **kwargs: {"id": "out"},
+        upload_screenshot=lambda *args, **kwargs: None,
+        complete=lambda run_id: {"status": "succeeded"},
+        fail=lambda *args, **kwargs: None,
+        revoke_capability=lambda run_id: None,
+    )
+    worker = BrowserUseWorker(
+        client=client, config=WorkerConfig(manager_url="https://manager.local", worker_id="w")
+    )
+    asyncio.run(
+        worker.execute_claim(
+            {
+                "id": "run-flash",
+                "task": "x",
+                "harness": "browser-use",
+                "allowed_origins": ["https://example.com"],
+                "max_steps": 2,
+                "timeout_seconds": 90,
+            }
+        )
+    )
+    agent_kwargs = constructed["agent"]
+    assert agent_kwargs["flash_mode"] is True
+    assert agent_kwargs["use_judge"] is False
+    assert agent_kwargs["max_clickable_elements_length"] == 10000
+    assert agent_kwargs["llm_screenshot_size"] == (640, 480)
+    assert agent_kwargs["llm_timeout"] == derive_browser_use_llm_timeout(90)
+    assert agent_kwargs["enable_signal_handler"] is False
+    # Vision / thinking not disabled by this latency patch.
+    assert "use_vision" not in agent_kwargs or agent_kwargs.get("use_vision") is not False
 
 
 def test_unrestricted_origins_pass_allowed_domains_none(monkeypatch):
@@ -674,6 +842,129 @@ def test_flatten_action_and_decode_screenshot_helpers():
     assert decode_screenshot_payload(raw_b64).startswith(b"\x89PNG")
     with pytest.raises(ValueError):
         decode_screenshot_payload("A" * (5 * 1024 * 1024 + 10))
+
+    assert detect_image_media_type(PNG) == "image/png"
+    assert detect_image_media_type(JPEG) == "image/jpeg"
+    assert detect_image_media_type(b"not-an-image") is None
+
+
+def test_extract_history_screenshot_prefers_newest_existing_path(tmp_path):
+    older = tmp_path / "older.png"
+    newer = tmp_path / "newer.jpg"
+    older.write_bytes(PNG)
+    newer.write_bytes(JPEG)
+    missing = tmp_path / "gone.png"
+    history = _done_history_with_screenshots(
+        paths=[str(older), str(missing), str(newer)],
+        b64_shots=[base64.b64encode(PNG).decode("ascii")],
+    )
+    body, media_type = extract_screenshot_from_history(history)
+    assert media_type == "image/jpeg"
+    assert body == JPEG
+    assert body.startswith(b"\xff\xd8\xff")
+
+
+def test_extract_history_screenshot_falls_back_to_base64_screenshots():
+    history = _done_history_with_screenshots(
+        paths=[None, "/no/such/file.png"],
+        b64_shots=[None, base64.b64encode(PNG).decode("ascii")],
+    )
+    body, media_type = extract_screenshot_from_history(history)
+    assert media_type == "image/png"
+    assert body.startswith(b"\x89PNG")
+
+
+def test_execute_claim_uploads_history_screenshot_when_session_capture_fails(
+    tmp_path, monkeypatch
+):
+    shot_file = tmp_path / "hist.jpg"
+    shot_file.write_bytes(JPEG)
+    events: list[tuple] = []
+
+    class FakeBrowserSession:
+        def __init__(self, **kwargs):
+            pass
+
+        async def take_screenshot(self, **kwargs):
+            raise RuntimeError("CDP reconnect failed")
+
+        async def stop(self):
+            return None
+
+        async def close(self):
+            return None
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.browser_session = kwargs.get("browser_session")
+
+        async def run(self, max_steps, on_step_start=None, on_step_end=None):
+            return _done_history_with_screenshots(
+                paths=[str(shot_file)],
+                text="summary-from-history",
+            )
+
+        def stop(self):
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "browser_use",
+        SimpleNamespace(BrowserSession=FakeBrowserSession, Agent=FakeAgent),
+    )
+
+    class Client:
+        def issue_capability(self, run_id):
+            return {"cdp_url": "http://cdp", "headers": {}}
+
+        def heartbeat(self, run_id):
+            return {"cancel_requested": False, "heartbeat_interval_seconds": 60}
+
+        def output(self, run_id, *, kind, summary, payload, idempotency_key):
+            events.append(("output", kind, idempotency_key))
+            return {"id": f"out-{kind}"}
+
+        def upload_screenshot(self, run_id, output_id, body, media_type):
+            events.append(("upload", output_id, media_type, body[:3], len(body)))
+
+        def complete(self, run_id):
+            events.append(("complete", run_id))
+            return {"status": "succeeded"}
+
+        def fail(self, *args, **kwargs):
+            events.append(("fail", args, kwargs))
+            return {"status": "failed"}
+
+        def revoke_capability(self, run_id):
+            return None
+
+    worker = BrowserUseWorker(
+        client=Client(), config=WorkerConfig(manager_url="https://manager.local", worker_id="w")
+    )
+    result = asyncio.run(
+        worker.execute_claim(
+            {
+                "id": "run-hist-shot",
+                "task": "x",
+                "harness": "browser-use",
+                "allowed_origins": ["https://example.com"],
+                "max_steps": 2,
+                "timeout_seconds": 30,
+            }
+        )
+    )
+    assert result["status"] == "succeeded"
+    assert ("output", "screenshot", "final-shot:run-hist-shot") in events
+    shot_out_idx = next(
+        i for i, e in enumerate(events) if e[0] == "output" and e[1] == "screenshot"
+    )
+    upload_idx = next(i for i, e in enumerate(events) if e[0] == "upload")
+    complete_idx = next(i for i, e in enumerate(events) if e[0] == "complete")
+    assert shot_out_idx < upload_idx < complete_idx
+    upload = next(e for e in events if e[0] == "upload")
+    assert upload[2] == "image/jpeg"
+    assert upload[3] == b"\xff\xd8\xff"
+    assert "fail" not in [e[0] for e in events]
 
 
 def test_step_callbacks_emit_flattened_action_and_observation(monkeypatch):

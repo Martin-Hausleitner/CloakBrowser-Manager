@@ -192,7 +192,11 @@ def test_render_unit_uses_cli_flags_no_inline_token(tmp_path: Path):
     )
     assert str(paths["repo"]) in unit
     assert f"{paths['venv']}/bin/python" in unit
-    assert "scripts/browser_use_worker.py" in unit
+    exec_line = [ln for ln in unit.splitlines() if ln.startswith("ExecStart=")][0]
+    assert " -m scripts.browser_use_worker " in f" {exec_line} " or (
+        " -m " in exec_line and "scripts.browser_use_worker" in exec_line
+    )
+    assert "scripts/browser_use_worker.py" not in exec_line
     assert "--manager-url" in unit
     assert "http://127.0.0.1:18115" in unit
     assert "--worker-id" in unit
@@ -208,6 +212,39 @@ def test_render_unit_uses_cli_flags_no_inline_token(tmp_path: Path):
     assert "BindPaths" not in unit
     assert "/.cursor" not in unit
     assert "CBM_WORKER_TOKEN=" not in unit
+
+
+def test_render_unit_invokes_worker_as_module_from_repo_root(tmp_path: Path):
+    """WorkingDirectory is repo root; ExecStart must use -m so sys.path[0] is cwd.
+
+    Running the absolute scripts/*.py file puts scripts/ on sys.path[0] and breaks
+    ``from scripts.cursor_chat_model ...`` because repo root is missing.
+    """
+    mod = _load()
+    paths = _paths(tmp_path)
+    (paths["venv"] / "bin").mkdir(parents=True)
+    (paths["venv"] / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    key = paths["worker_key_file"]
+    key.parent.mkdir(parents=True)
+    key.write_text("cbm_worker_" + ("77" * 32) + "\n", encoding="utf-8")
+    key.chmod(0o600)
+    unit = mod.render_systemd_unit(
+        repo=paths["repo"],
+        venv=paths["venv"],
+        manager_url=str(paths["manager_url"]),
+        worker_id="browser-use-worker",
+        worker_key_file=key,
+        template_path=TEMPLATE,
+    )
+    wd = [ln for ln in unit.splitlines() if ln.startswith("WorkingDirectory=")][0]
+    exec_line = [ln for ln in unit.splitlines() if ln.startswith("ExecStart=")][0]
+    assert str(paths["repo"].resolve()) in wd or str(paths["repo"]) in wd
+    assert "-m" in exec_line
+    assert "scripts.browser_use_worker" in exec_line
+    assert "browser_use_worker.py" not in exec_line
+    # Module form keeps argv flags after -m module.
+    assert "--manager-url" in exec_line
+    assert "--token-file" in exec_line
 
 
 def test_provision_end_to_end_secret_safe_and_idempotent(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -304,7 +341,8 @@ def test_template_file_exists_and_has_placeholders():
     text = TEMPLATE.read_text(encoding="utf-8")
     assert "@WORKING_DIRECTORY@" in text
     assert "@VENV_PYTHON@" in text
-    assert "@WORKER_SCRIPT@" in text
+    assert "-m scripts.browser_use_worker" in text
+    assert "@WORKER_SCRIPT@" not in text
     assert "@TOKEN_FILE@" in text
     assert "@PATH_ENVIRONMENT@" in text
     assert "--token-file" in text
@@ -425,6 +463,8 @@ def test_systemd_quote_and_render_preserves_spaces_in_execstart(tmp_path: Path):
     # Parse argv-like quoted segments: every path with spaces appears inside quotes.
     assert str(venv / "bin" / "python") in exec_line
     assert exec_line.count('"') >= 2
+    assert "-m" in exec_line and "scripts.browser_use_worker" in exec_line
+    assert "browser_use_worker.py" not in exec_line
     assert "WorkingDirectory=" in unit
     wd = [ln for ln in unit.splitlines() if ln.startswith("WorkingDirectory=")][0]
     assert "repo with spaces" in wd
@@ -433,7 +473,7 @@ def test_systemd_quote_and_render_preserves_spaces_in_execstart(tmp_path: Path):
     assert "home with spaces" in env_line
     assert "%" not in unit or "%%" in unit  # bare % must not remain as specifier bait
     # No shell-style unquoted concatenation that would split on spaces before flags.
-    assert re.search(r"python\s+/.*scripts/browser_use_worker\.py", exec_line) is None or '"' in exec_line
+    assert "browser_use_worker.py" not in exec_line
 
 
 def test_reject_symlink_targets_for_key_env_unit(tmp_path: Path):

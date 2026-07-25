@@ -3,6 +3,10 @@
 The CDP live viewer is a Manager-owned observer: it discovers page targets via
 ``/cdp-observer`` and streams screencast frames only. Interactive control stays
 on VNC (or an explicitly leased automation surface).
+
+Live HTTP endpoints are same-origin relative paths. WebSocket URLs are derived
+from ``window.location`` so Tailscale HTTPS→HTTP / Host skew cannot bake a
+wrong absolute ``ws://`` / ``http://`` origin into the page.
 """
 
 from __future__ import annotations
@@ -25,21 +29,17 @@ def render_cdp_live_html(
     *,
     profile_id: str,
     profile_name: str,
-    cdp_ws_url: str,
-    metrics_url: str,
-    interactive: bool,
-    cdp_list_url: str | None = None,
+    interactive: bool = False,
 ) -> str:
     """Self-contained observer screencast page. No secrets or arbitrary CDP."""
+    del interactive  # Observer UI never injects input.
     safe_name = html.escape(profile_name or profile_id)
     safe_id = html.escape(profile_id)
     config = json.dumps(
         {
             "profileId": profile_id,
-            "cdpWsUrl": cdp_ws_url,
-            "cdpListUrl": cdp_list_url,
-            "metricsUrl": metrics_url,
-            # Observer UI never injects input; interactive is ignored for CDP.
+            "cdpListUrl": f"/api/profiles/{profile_id}/cdp-observer/json/list",
+            "metricsUrl": f"/api/profiles/{profile_id}/live-metrics",
             "interactive": False,
             "screencast": {
                 "format": "jpeg",
@@ -198,6 +198,23 @@ def render_cdp_live_html(
     }} catch (_) {{}}
   }}
 
+  function sameOriginWsFromDebuggerUrl(debuggerUrl) {{
+    if (!debuggerUrl || typeof debuggerUrl !== 'string') return null;
+    try {{
+      const parsed = new URL(debuggerUrl, window.location.origin);
+      const path = parsed.pathname || '';
+      const marker = '/cdp-observer/devtools/page/';
+      const idx = path.indexOf(marker);
+      if (idx === -1) return null;
+      const targetId = path.slice(idx + marker.length).split('/')[0];
+      if (!targetId || targetId === 'pending') return null;
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return proto + '//' + window.location.host + path;
+    }} catch (_) {{
+      return null;
+    }}
+  }}
+
   async function resolvePageWsUrl() {{
     if (!CONFIG.cdpListUrl) return null;
     try {{
@@ -205,7 +222,7 @@ def render_cdp_live_html(
       if (!resp.ok) return null;
       const list = await resp.json();
       const page = (Array.isArray(list) ? list : []).find((t) => t && t.type === 'page' && t.webSocketDebuggerUrl);
-      return page ? page.webSocketDebuggerUrl : null;
+      return page ? sameOriginWsFromDebuggerUrl(page.webSocketDebuggerUrl) : null;
     }} catch (_) {{
       return null;
     }}
@@ -283,10 +300,6 @@ def render_cdp_live_html(
     const pageUrl = await resolvePageWsUrl();
     if (pageUrl) {{
       bindSocket(pageUrl);
-      return;
-    }}
-    if (CONFIG.cdpWsUrl) {{
-      bindSocket(CONFIG.cdpWsUrl);
       return;
     }}
     setStatus('no observer target');

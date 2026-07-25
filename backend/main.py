@@ -2369,6 +2369,25 @@ async def auth_logout(request: Request, response: Response):
     response.delete_cookie(
         key="cbm_session", path="/", secure=is_https, samesite="strict",
     )
+    # Legacy principal-only bridge path from the first bridge slice.
+    response.delete_cookie(
+        key=access.BRIDGE_COOKIE_NAME,
+        path=access.BRIDGE_COOKIE_PATH_LEGACY,
+        secure=is_https,
+        samesite="strict",
+    )
+    # Per-profile observer paths: use existing list_profiles (no new persistence).
+    for profile in db.list_profiles():
+        try:
+            path = access.bridge_cookie_path(str(profile["id"]))
+        except ValueError:
+            continue
+        response.delete_cookie(
+            key=access.BRIDGE_COOKIE_NAME,
+            path=path,
+            secure=is_https,
+            samesite="strict",
+        )
     return {"ok": True}
 
 
@@ -4060,24 +4079,82 @@ async def cdp_live_session(profile_id: str, request: Request):
     """Browser-Use-style CDP screencast fullscreen page (snappy live URL)."""
     from fastapi.responses import HTMLResponse
 
-    profile, _identity = _require_profile_permission(request.scope, profile_id, "view")
+    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
     if profile_id not in browser_mgr.running:
         raise HTTPException(status_code=409, detail="Profile is not running")
-    local_base = _request_local_base(request)
-    ws_base = f"{session_links.ws_scheme_for(local_base)}://{local_base.split('://', 1)[-1]}"
-    # Observer discovery/WS only — no automation lease and no arbitrary CDP.
-    cdp_list = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/cdp-observer/json/list"
-    cdp_ws = f"{ws_base}/api/profiles/{profile_id}/cdp-observer/devtools/page/pending"
-    metrics = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/live-metrics"
+    # Relative same-origin paths only — client derives WS from window.location.
     html = session_views.render_cdp_live_html(
         profile_id=profile_id,
         profile_name=str(profile.get("name") or profile_id),
-        cdp_ws_url=cdp_ws,
-        cdp_list_url=cdp_list,
-        metrics_url=metrics,
         interactive=False,
     )
-    return HTMLResponse(html)
+    response = HTMLResponse(html)
+    _maybe_set_cbm_bridge_cookie(response, request, identity, profile_id=str(profile_id))
+    return response
+
+
+def _bearer_qualifies_for_bridge(
+    request: Request, identity: access.AccessIdentity
+) -> bool:
+    """True when this HTTP request authenticated via bootstrap/agent Bearer."""
+    if not AUTH_TOKEN or not ACCESS_CONTROL_ENABLED:
+        return False
+    auth = request.headers.get("authorization") or ""
+    if not auth.startswith("Bearer "):
+        return False
+    token = auth[7:].strip()
+    if not token:
+        return False
+    if identity.kind == "bootstrap" and hmac.compare_digest(token, AUTH_TOKEN):
+        return True
+    if identity.kind == "agent" and token.startswith("cbm_agent_"):
+        return True
+    return False
+
+
+def _maybe_set_cbm_bridge_cookie(
+    response: Response,
+    request: Request,
+    identity: access.AccessIdentity,
+    *,
+    profile_id: str,
+) -> None:
+    """Mint profile-bound cbm_bridge for bearer-authenticated live viewers."""
+    if not _bearer_qualifies_for_bridge(request, identity):
+        return
+    if not AUTH_TOKEN:
+        return
+    try:
+        cookie_path = access.bridge_cookie_path(profile_id)
+        if identity.kind == "bootstrap":
+            value = access.create_bridge_session(
+                "bootstrap",
+                None,
+                AUTH_TOKEN,
+                profile_id=profile_id,
+                path_class=access.BRIDGE_PATH_CLASS,
+            )
+        elif identity.kind == "agent" and identity.id:
+            value = access.create_bridge_session(
+                "agent",
+                str(identity.id),
+                AUTH_TOKEN,
+                profile_id=profile_id,
+                path_class=access.BRIDGE_PATH_CLASS,
+            )
+        else:
+            return
+    except ValueError:
+        return
+    response.set_cookie(
+        key=access.BRIDGE_COOKIE_NAME,
+        value=value,
+        max_age=access.BRIDGE_TTL_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=_is_https(request),
+        path=cookie_path,
+    )
 
 
 @app.get("/api/profiles/{profile_id}/open-links", response_model=ProfileOpenLinksResponse)

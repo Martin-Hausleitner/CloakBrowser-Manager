@@ -18,6 +18,7 @@ artifacts/
 
 # Deploy
 deploy.sh
+.env.vcvm
 .env.worker.vcvm
 .env.worker.vcvm.bak*
 .env.*.bak*

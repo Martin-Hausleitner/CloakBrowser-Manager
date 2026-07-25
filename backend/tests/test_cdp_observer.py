@@ -534,16 +534,15 @@ def test_session_live_html_uses_observer_endpoints_only():
     html = session_views.render_cdp_live_html(
         profile_id="prof-1",
         profile_name="Demo",
-        cdp_ws_url="ws://127.0.0.1:18117/api/profiles/prof-1/cdp-observer/devtools/page/x",
-        metrics_url="http://127.0.0.1:18117/api/profiles/prof-1/live-metrics",
         interactive=True,
-        cdp_list_url="http://127.0.0.1:18117/api/profiles/prof-1/cdp-observer/json/list",
     )
     assert "cdp-observer" in html
     assert "Page.startScreencast" in html
     assert "Page.screencastFrameAck" in html
     assert "Page.stopScreencast" in html
     assert "disconnected" in html or "socket error" in html
+    assert "page/pending" not in html
+    assert '"cdpWsUrl"' not in html
     for forbidden in (
         "Target.createTarget",
         "Target.attachToTarget",
@@ -556,8 +555,54 @@ def test_session_live_html_uses_observer_endpoints_only():
         "Page.captureScreenshot",
         "/cdp/json/list",
         "/api/profiles/prof-1/cdp\"",
+        "ws://127.0.0.1",
+        "http://127.0.0.1",
     ):
         assert forbidden not in html
+
+
+def test_session_live_route_uses_relative_urls_independent_of_asgi_host_proto(
+    client_access: TestClient,
+):
+    """Skewed Host/proto must not bake absolute observer/metrics/WS into live HTML."""
+    from backend import main
+
+    profile = db.create_profile("Live relative", sandbox_id="alpha")
+    _create_user(
+        client_access,
+        username="live-relative-viewer",
+        password="live-relative-viewer-password-123",
+        permission="view",
+    )
+    main.browser_mgr.running[profile["id"]] = SimpleNamespace(
+        ws_port=6210, cdp_port=5210, display=210
+    )
+    try:
+        resp = client_access.get(
+            f"/session/{profile['id']}/live",
+            headers={
+                "Host": "127.0.0.1:18115",
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "vcvm.example.ts.net",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        html = resp.text
+        assert (
+            f'"cdpListUrl": "/api/profiles/{profile["id"]}/cdp-observer/json/list"'
+            in html
+        )
+        assert f'"metricsUrl": "/api/profiles/{profile["id"]}/live-metrics"' in html
+        assert "window.location" in html
+        assert "page/pending" not in html
+        assert '"cdpWsUrl"' not in html
+        assert "ws://127.0.0.1:18115" not in html
+        assert "wss://127.0.0.1:18115" not in html
+        assert "wss://vcvm.example.ts.net" not in html
+        assert "https://vcvm.example.ts.net" not in html
+        assert "http://127.0.0.1:18115" not in html
+    finally:
+        main.browser_mgr.running.pop(profile["id"], None)
 
 
 def test_observer_upstream_filter_consumes_pending_ids():

@@ -380,15 +380,17 @@ def _extract_output_text(payload: Mapping[str, Any]) -> tuple[str, int | None]:
     result = payload.get("result")
     if not isinstance(result, dict):
         result = payload
+    terminal = result.get("terminal")
+    output_source = terminal if isinstance(terminal, dict) else result
     chunks: list[str] = []
     next_cursor: int | None = None
-    if isinstance(result.get("output"), str):
-        chunks.append(result["output"])
-    elif isinstance(result.get("text"), str):
-        chunks.append(result["text"])
-    elif isinstance(result.get("preview"), str):
-        chunks.append(result["preview"])
-    lines = result.get("lines") or result.get("rows")
+    if isinstance(output_source.get("output"), str):
+        chunks.append(output_source["output"])
+    elif isinstance(output_source.get("text"), str):
+        chunks.append(output_source["text"])
+    elif isinstance(output_source.get("preview"), str):
+        chunks.append(output_source["preview"])
+    lines = output_source.get("tail") or output_source.get("lines") or output_source.get("rows")
     if isinstance(lines, list):
         for line in lines:
             if isinstance(line, str):
@@ -397,14 +399,14 @@ def _extract_output_text(payload: Mapping[str, Any]) -> tuple[str, int | None]:
                 text = line.get("text") or line.get("content") or line.get("line")
                 if isinstance(text, str):
                     chunks.append(text)
-    if "nextCursor" in result and result["nextCursor"] is not None:
+    if "nextCursor" in output_source and output_source["nextCursor"] is not None:
         try:
-            next_cursor = int(result["nextCursor"])
+            next_cursor = int(output_source["nextCursor"])
         except (TypeError, ValueError):
             next_cursor = None
-    elif "next_cursor" in result and result["next_cursor"] is not None:
+    elif "next_cursor" in output_source and output_source["next_cursor"] is not None:
         try:
-            next_cursor = int(result["next_cursor"])
+            next_cursor = int(output_source["next_cursor"])
         except (TypeError, ValueError):
             next_cursor = None
     return "\n".join(chunks), next_cursor

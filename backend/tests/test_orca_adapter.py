@@ -109,6 +109,58 @@ def test_assert_owned_handle_rejects_foreign_terminals():
         adapter.assert_owned_handle("term_foreign-handle-0001")
 
 
+def test_read_output_extracts_nested_terminal_tail_and_string_cursor():
+    runner = FakeRunner()
+    runner.queue(
+        _ok(
+            {
+                "terminal": {
+                    "handle": "term_owned-nested-tail",
+                    "title": "cbm-codex-profile",
+                }
+            }
+        )
+    )
+    runner.queue(_ok({"ok": True}))  # initial context send
+    runner.queue(
+        _ok(
+            {
+                "terminal": {
+                    "tail": [
+                        "first line",
+                        "Authorization: Bearer cbm_agent_NESTEDLEAK999",
+                        "third line",
+                    ],
+                    "oldestCursor": "17",
+                    "nextCursor": "42",
+                    "latestCursor": "41",
+                    "hasMoreBefore": False,
+                    "hasMoreAfter": False,
+                }
+            }
+        )
+    )
+
+    adapter = oa.OrcaAdapter(
+        orca_bin="/bin/fake-orca",
+        runner=runner,
+        worktree_selector="path:/repo",
+        base_url_hint="http://127.0.0.1:18115",
+    )
+    session = adapter.start_session(
+        profile_id="profile-1",
+        sandbox_id="alpha",
+        agent="codex",
+        owner_key="agent:ops",
+    )
+
+    output = adapter.read_output(session.id, owner_key="agent:ops")
+
+    assert output["output"] == "first line\nAuthorization: Bearer [redacted]\nthird line"
+    assert "NESTEDLEAK999" not in output["output"]
+    assert output["next_cursor"] == 42
+
+
 def test_start_read_send_close_happy_path_and_ownership():
     runner = FakeRunner()
     runner.queue(

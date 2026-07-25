@@ -408,6 +408,139 @@ describe("api.getBenchmarkReport", () => {
   });
 });
 
+describe("api orca sessions", () => {
+  it("loads capabilities and starts a session with allowlisted agent", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          available: true,
+          orca_bin: "/home/coder/.local/bin/orca-ide",
+          agents: ["cursor-agent", "grok", "codex"],
+          operations: ["terminal.create"],
+          actions: {
+            start: true,
+            read: true,
+            send: true,
+            close: true,
+            pause: false,
+            resume: false,
+          },
+          notes: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            id: "orca_1",
+            profile_id: "p1",
+            sandbox_id: "default",
+            agent: "codex",
+            terminal_handle: "term_1",
+            status: "running",
+            created_at: 1,
+            capabilities: {
+              start: true,
+              read: true,
+              send: true,
+              close: true,
+              pause: false,
+              resume: false,
+            },
+            connection: {},
+          },
+          201,
+        ),
+      );
+
+    await expect(api.getOrcaCapabilities()).resolves.toMatchObject({
+      available: true,
+      actions: { pause: false, resume: false },
+    });
+    await expect(
+      api.startOrcaSession({ profile_id: "p1", agent: "codex", prompt: "go" }),
+    ).resolves.toMatchObject({ id: "orca_1", agent: "codex" });
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/orca/sessions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ profile_id: "p1", agent: "codex", prompt: "go" }),
+      }),
+    );
+  });
+
+  it("reads sends and closes with session paths", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: "orca_1",
+          terminal_handle: "term_1",
+          cursor: 0,
+          next_cursor: 2,
+          output: "hi",
+          status: "running",
+          capabilities: {
+            start: true,
+            read: true,
+            send: true,
+            close: true,
+            pause: false,
+            resume: false,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: "orca_1",
+          ok: true,
+          status: "running",
+          capabilities: {
+            start: true,
+            read: true,
+            send: true,
+            close: true,
+            pause: false,
+            resume: false,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "orca_1",
+          profile_id: "p1",
+          sandbox_id: "default",
+          agent: "codex",
+          terminal_handle: "term_1",
+          status: "closed",
+          created_at: 1,
+          capabilities: {
+            start: true,
+            read: true,
+            send: true,
+            close: true,
+            pause: false,
+            resume: false,
+          },
+          connection: {},
+        }),
+      );
+
+    await expect(api.readOrcaSessionOutput("orca_1", { cursor: 0 })).resolves.toMatchObject({
+      output: "hi",
+      next_cursor: 2,
+    });
+    await expect(api.sendOrcaSessionInput("orca_1", { text: "next" })).resolves.toMatchObject({
+      ok: true,
+    });
+    await expect(api.closeOrcaSession("orca_1")).resolves.toMatchObject({ status: "closed" });
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/orca/sessions/orca_1/output?cursor=0",
+      "/api/orca/sessions/orca_1/send",
+      "/api/orca/sessions/orca_1/close",
+    ]);
+  });
+});
+
 // ── Error handling ──────────────────────────────────────────────────────────
 
 describe("error handling", () => {

@@ -27,6 +27,7 @@ import { ProfilesWorkspace } from "./components/ProfilesWorkspace";
 import { AccountsOverview } from "./components/AccountsOverview";
 import { LiveDevPanel } from "./components/LiveDevPanel";
 import { SessionStreamButtons } from "./components/SessionStreamButtons";
+import { AgentBrowserWorkspace } from "./components/workspace/AgentBrowserWorkspace";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies" | "profiles" | "accounts";
@@ -185,6 +186,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const canManageProfiles = isAdministrator(identity);
   const canOperateSelected = Boolean(selected && canAccess(identity, selected, "operate"));
   const canInteractSelected = Boolean(selected && canAccess(identity, selected, "interact"));
+  const canAutomateSelected = Boolean(selected && canAccess(identity, selected, "automate"));
   const projects = Array.from(
     new Set<string>([
       ...FIXED_PROJECTS,
@@ -235,8 +237,9 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     const profile = profiles.find((p) => p.id === id);
     if (profile?.project_id) setProjectId(profile.project_id);
     if (profile?.harness) setHarness(profile.harness);
-    setView(isMobile ? "view" : profile?.status === "running" ? "view" : canManageProfiles ? "edit" : "home");
-  }, [canManageProfiles, isMobile, profiles]);
+    // Desktop and mobile both open the live workspace for the selected profile.
+    setView("view");
+  }, [profiles]);
 
   const handleNew = useCallback(() => {
     if (!canManageProfiles) return;
@@ -575,7 +578,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
         ) : null}
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto overscroll-contain">
+        <div className="flex-1 overflow-hidden overscroll-contain">
           {view === "home" && (
             <BrowserUseHome
               projects={projects}
@@ -691,14 +694,20 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             />
           )}
 
-          {view === "view" && selected && selected.status === "running" && (
-            <ProfileViewer
-              key={selected.id}
-              profileId={selected.id}
-              cdpUrl={selected.cdp_url}
-              clipboardSync={selected.clipboard_sync}
+          {view === "view" && selected && (
+            <AgentBrowserWorkspace
+              profiles={profiles}
+              selectedProfile={selected}
+              canAutomate={canAutomateSelected}
               canInteract={canInteractSelected}
-              onDisconnect={handleVncDisconnect}
+              onSelectProfile={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+              }}
+              onConnectionStatusChange={setMobileConnectionStatus}
+              onViewerDisconnect={handleVncDisconnect}
             />
           )}
         </div>

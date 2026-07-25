@@ -22,6 +22,67 @@ Manager, browser profile, database or VNC server on the Mac for this deployment.
 The compose file does not publish any raw VNC port. Browser viewing remains
 behind the authenticated Manager proxy.
 
+## Orca host bridge
+
+The Manager container can invoke host Orca `1.4.x` only when these read-only
+host paths are mounted and `HOME=/home/coder`:
+
+- `/home/coder/orca`
+- `/home/coder/.local`
+- `/home/coder/.config/orca`
+
+Environment written into `.env.vcvm` (never inline agent secrets):
+
+| Variable | Value |
+| --- | --- |
+| `CBM_ORCA_BIN` | `/home/coder/.local/bin/orca-ide` |
+| `CBM_ORCA_WORKTREE` | `path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use` |
+| `CBM_ORCA_AGENT_WRAPPER` | `/home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh` |
+| `CBM_BASE_URL` | `http://127.0.0.1:${MANAGER_PORT}` (host-loopback publish) |
+| `CBM_AGENT_KEY_FILE` | `/home/coder/.config/cloakbrowser/orca-agent-key` |
+
+The deploy copy under `/home/coder/cloakbrowser-manager` is **not** an
+Orca-registered git worktree. Agent terminals must use the vk-repos checkout
+above. Place a mode-`600` scoped `cbm_agent_…` key in
+`/home/coder/.config/cloakbrowser/orca-agent-key`; never put the key in argv,
+compose env values, UI, logs, or Git.
+
+**Do not mount** the scoped key directory
+(`/home/coder/.config/cloakbrowser`) or the vk-repos checkout / host wrapper
+(`…/scripts/orca_agent_cli.sh`) into the Manager container. `start_session`
+still sends the fixed **host** wrapper path through host Orca
+`terminal.create`; agent processes read the host key file outside the
+container.
+
+Readiness is split for security:
+
+1. **Host preflight** (`scripts/vcvm_orca_preflight.py`, before compose): fail
+   closed on missing/bad host Orca paths, host agent wrapper
+   (`scripts/orca_agent_cli.sh` readable+executable), agent key file (`0600` /
+   `cbm_agent_…` syntax; contents never printed), unreachable runtime, or
+   failed `worktree show` for the registered vk-repos checkout. Wrapper/key
+   readiness stays host-side.
+2. **Container `capabilities.available`**: only what the Manager can prove
+   without side effects or host-only Path probes — Orca binary reachable,
+   bounded `orca status` ready, and configured registered `worktree show`
+   succeeds. Missing container-local wrapper/key paths must **not** disable
+   Launch.
+
+Deploy preflight fails closed **before** `docker compose up` when:
+
+1. Host Orca paths or the `orca-ide` binary are missing/non-executable.
+2. The host agent wrapper (`…/scripts/orca_agent_cli.sh`) is missing or not
+   readable/executable (never mounted into the container).
+3. The agent key file is missing, not a regular file, not mode `0600`, not
+   owned/readable by the current host user, empty, or fails `cbm_agent_` +
+   safe-token syntax (contents are never printed).
+4. Orca runtime is unreachable / not ready.
+5. `orca-ide worktree show --worktree path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use --json`
+   does not succeed for the registered vk-repos checkout.
+
+Orca session **close** is owner-only: bootstrap admins cannot close another
+agent's terminal session.
+
 Profile health can optionally enrich its browser-path observation with the
 existing VCVM proxychecker. This dependency is not part of `/health`, and a
 stopped or unavailable proxychecker does not make the Manager unhealthy.

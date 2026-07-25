@@ -5,8 +5,9 @@ External agents (Codex, Antigravity, harnesses, extensions) should drive the
 stack through this CLI or the same HTTP paths — not through UI clicks.
 
 Auth:
-  export CBM_BASE_URL=http://127.0.0.1:18117
+  export CBM_BASE_URL=http://127.0.0.1:18115
   export CBM_AGENT_KEY=cbm_agent_...   # preferred for agents
+  # or: export CBM_AGENT_KEY_FILE=/home/coder/.config/cloakbrowser/orca-agent-key
   # or: export CBM_ADMIN_TOKEN=...     # bootstrap admin only
 
 Examples:
@@ -18,6 +19,10 @@ Examples:
   scripts/cbm_agent_ctl.py profiles open-links <id> --mode vnc
   scripts/cbm_agent_ctl.py profiles status <id>
   scripts/cbm_agent_ctl.py profiles stop <id>
+  scripts/cbm_agent_ctl.py tasks create --profile-id <id> --title "demo"
+  scripts/cbm_agent_ctl.py tasks run <session_id> --profile-id <id> --task "Read title" --allowed-origin https://example.com
+  scripts/cbm_agent_ctl.py runs get <run_id>
+  scripts/cbm_agent_ctl.py runs cancel <run_id>
   scripts/cbm_agent_ctl.py health
 """
 
@@ -41,18 +46,36 @@ def _env(name: str, default: str | None = None) -> str | None:
 
 
 def _base_url() -> str:
-    return (_env("CBM_BASE_URL", "http://127.0.0.1:18117") or "").rstrip("/")
+    return (_env("CBM_BASE_URL", "http://127.0.0.1:18115") or "").rstrip("/")
+
+
+def _read_agent_key_file(path: str) -> str:
+    key_path = path.strip()
+    if not key_path:
+        raise SystemExit("CBM_AGENT_KEY_FILE is empty")
+    try:
+        raw = open(key_path, "r", encoding="utf-8").read()
+    except OSError as exc:
+        raise SystemExit("Unable to read CBM_AGENT_KEY_FILE") from exc
+    key = raw.strip()
+    if not key:
+        raise SystemExit("CBM_AGENT_KEY_FILE is empty")
+    return key
 
 
 def _auth_header() -> dict[str, str]:
     agent_key = _env("CBM_AGENT_KEY")
+    if not agent_key:
+        key_file = _env("CBM_AGENT_KEY_FILE")
+        if key_file:
+            agent_key = _read_agent_key_file(key_file)
     if agent_key:
         return {"Authorization": f"Bearer {agent_key}"}
     admin = _env("CBM_ADMIN_TOKEN") or _env("AUTH_TOKEN")
     if admin:
         return {"Authorization": f"Bearer {admin}"}
     raise SystemExit(
-        "Set CBM_AGENT_KEY (preferred) or CBM_ADMIN_TOKEN/AUTH_TOKEN for authentication."
+        "Set CBM_AGENT_KEY or CBM_AGENT_KEY_FILE (preferred) or CBM_ADMIN_TOKEN/AUTH_TOKEN."
     )
 
 
@@ -225,6 +248,49 @@ def cmd_open_session(args: argparse.Namespace) -> None:
     _print(_request("POST", "/api/extension/sessions/open", body=body), args.json)
 
 
+def cmd_tasks_create(args: argparse.Namespace) -> None:
+    body: dict[str, Any] = {"profile_id": args.profile_id}
+    if args.title:
+        body["title"] = args.title
+    _print(_request("POST", "/api/task-sessions", body=body), args.json)
+
+
+def cmd_tasks_run(args: argparse.Namespace) -> None:
+    body: dict[str, Any] = {
+        "harness": "browser-use",
+        "task": args.task,
+        "profile_id": args.profile_id,
+        "launch_if_stopped": bool(args.launch_if_stopped),
+        "allowed_origins": list(args.allowed_origin or []),
+        "max_steps": args.max_steps,
+        "timeout_seconds": args.timeout_seconds,
+    }
+    if args.model_alias:
+        body["model_alias"] = args.model_alias
+    _print(
+        _request("POST", f"/api/task-sessions/{args.session_id}/runs", body=body),
+        args.json,
+    )
+
+
+def cmd_runs_get(args: argparse.Namespace) -> None:
+    _print(_request("GET", f"/api/task-runs/{args.run_id}"), args.json)
+
+
+def cmd_runs_cancel(args: argparse.Namespace) -> None:
+    _print(_request("POST", f"/api/task-runs/{args.run_id}/cancel"), args.json)
+
+
+def cmd_runs_outputs(args: argparse.Namespace) -> None:
+    query: dict[str, str] = {}
+    if args.after_sequence is not None:
+        query["after_sequence"] = str(args.after_sequence)
+    _print(
+        _request("GET", f"/api/task-runs/{args.run_id}/outputs", query=query or None),
+        args.json,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="Always print JSON")
@@ -325,6 +391,46 @@ def build_parser() -> argparse.ArgumentParser:
     p_open.add_argument("--mode", choices=["cdp", "vnc", "shell"], default="cdp")
     p_open.add_argument("--no-launch", action="store_true")
     p_open.set_defaults(func=cmd_open_session)
+
+    tasks = sub.add_parser("tasks", help="Task sessions and Browser-Use runs")
+    tsub = tasks.add_subparsers(dest="tasks_command", required=True)
+
+    tc = tsub.add_parser("create", help="Create a task session for a fixed profile")
+    tc.add_argument("--profile-id", required=True)
+    tc.add_argument("--title")
+    tc.set_defaults(func=cmd_tasks_create)
+
+    tr = tsub.add_parser("run", help="Queue a Browser-Use run on a task session")
+    tr.add_argument("session_id")
+    tr.add_argument("--profile-id", required=True)
+    tr.add_argument("--task", required=True)
+    tr.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[],
+        help="Repeatable https://host origin; automate callers should supply at least one",
+    )
+    tr.add_argument("--launch-if-stopped", action="store_true")
+    tr.add_argument("--max-steps", type=int, default=20)
+    tr.add_argument("--timeout-seconds", type=int, default=300)
+    tr.add_argument("--model-alias")
+    tr.set_defaults(func=cmd_tasks_run)
+
+    runs = sub.add_parser("runs", help="Inspect or cancel Browser-Use runs")
+    rsub = runs.add_subparsers(dest="runs_command", required=True)
+
+    rg = rsub.add_parser("get", help="Inspect one run")
+    rg.add_argument("run_id")
+    rg.set_defaults(func=cmd_runs_get)
+
+    rc = rsub.add_parser("cancel", help="Cancel one run")
+    rc.add_argument("run_id")
+    rc.set_defaults(func=cmd_runs_cancel)
+
+    ro = rsub.add_parser("outputs", help="List typed outputs for a run")
+    ro.add_argument("run_id")
+    ro.add_argument("--after-sequence", type=int)
+    ro.set_defaults(func=cmd_runs_outputs)
 
     return parser
 

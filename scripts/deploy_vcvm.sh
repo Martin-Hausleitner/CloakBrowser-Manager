@@ -24,6 +24,10 @@ Safety:
   - ACCESS_CONTROL_ENABLED is always forced to 1.
   - Persistent browser data stays in Docker volume cloakbrowser-manager-vcvm-data.
   - Optional Tailscale Serve is added only after auth/access checks pass.
+  - Host Orca bridge requires /home/coder/orca, /home/coder/.local, and
+    /home/coder/.config/orca (read-only mounts). Preflight fails closed if absent.
+  - Agent keys stay in /home/coder/.config/cloakbrowser/orca-agent-key (mode 600);
+    never written into .env.vcvm argv, UI, logs, or Git.
 EOF
 }
 
@@ -190,7 +194,25 @@ rsync -az --delete \
   printf 'PROXYCHECKER_URL=%s\n' "$proxychecker_url"
   printf 'PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal\n'
   printf 'EXTENSION_CATALOG_DIR=/data/extension-catalog\n'
+  printf 'HOME=/home/coder\n'
+  printf 'CBM_ORCA_BIN=/home/coder/.local/bin/orca-ide\n'
+  # Orca-registered git worktree (deploy copy under cloakbrowser-manager is not registered).
+  printf 'CBM_ORCA_WORKTREE=path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use\n'
+  printf 'CBM_ORCA_AGENT_WRAPPER=/home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh\n'
+  printf 'CBM_BASE_URL=http://127.0.0.1:%s\n' "$manager_port"
+  printf 'CBM_AGENT_KEY_FILE=/home/coder/.config/cloakbrowser/orca-agent-key\n'
 } | ssh "$target_host" "umask 077; cat > '$remote_path/.env.vcvm'"
+
+ssh "$target_host" "bash -s" <<REMOTE_ORCA_PREFLIGHT
+set -euo pipefail
+# Fail closed when host Orca paths/runtime/worktree/agent-key are absent or invalid.
+# Agent key contents are never printed.
+python3 /home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/vcvm_orca_preflight.py \
+  --orca-bin /home/coder/.local/bin/orca-ide \
+  --worktree path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use \
+  --agent-wrapper /home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh \
+  --agent-key-file /home/coder/.config/cloakbrowser/orca-agent-key
+REMOTE_ORCA_PREFLIGHT
 
 ssh "$target_host" "cd '$remote_path' && docker compose --env-file .env.vcvm -p '$PROJECT_NAME' -f '$COMPOSE_FILE' up -d --build --remove-orphans"
 

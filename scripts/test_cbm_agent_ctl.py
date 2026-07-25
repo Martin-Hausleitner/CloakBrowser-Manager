@@ -30,6 +30,88 @@ def test_cli_help_lists_control_plane_commands():
     assert "profiles" in text
     assert "open-links" in text
     assert "open-session" in text
+    assert "tasks" in text
+    assert "runs" in text
+
+
+def test_auth_header_reads_key_file_when_env_key_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    key_file = tmp_path / "orca-agent-key"
+    key_file.write_text("cbm_agent_from_file_not_real\n", encoding="utf-8")
+    monkeypatch.delenv("CBM_AGENT_KEY", raising=False)
+    monkeypatch.delenv("CBM_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CBM_AGENT_KEY_FILE", str(key_file))
+
+    headers = mod._auth_header()
+    assert headers["Authorization"] == "Bearer cbm_agent_from_file_not_real"
+
+
+def test_tasks_run_builds_browser_use_request(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, query=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"id": "run-1", "status": "queued"}
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(
+        [
+            "tasks",
+            "run",
+            "session-1",
+            "--profile-id",
+            "profile-1",
+            "--task",
+            "Read the page title",
+            "--allowed-origin",
+            "https://example.com",
+        ]
+    )
+    args.func(args)
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/api/task-sessions/session-1/runs"
+    assert captured["body"]["harness"] == "browser-use"
+    assert captured["body"]["profile_id"] == "profile-1"
+    assert captured["body"]["allowed_origins"] == ["https://example.com"]
+
+
+def test_runs_cancel_posts_cancel(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, query=None):
+        captured["method"] = method
+        captured["path"] = path
+        return {"id": "run-1", "status": "cancelled"}
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(["runs", "cancel", "run-1"])
+    args.func(args)
+    assert captured == {"method": "POST", "path": "/api/task-runs/run-1/cancel"}
 
 
 def test_cli_profiles_create_builds_expected_request(monkeypatch: pytest.MonkeyPatch):

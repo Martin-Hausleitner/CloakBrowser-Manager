@@ -1311,3 +1311,69 @@ class TaskOutputResponse(BaseModel):
     created_at: str
     artifact_expired: bool = False
 
+
+# ── Orca agent browser workspace ─────────────────────────────────────────────
+
+OrcaAgentCli = Literal["cursor-agent", "grok", "codex"]
+OrcaSessionStatus = Literal["starting", "running", "closed", "error"]
+
+
+class OrcaSessionStartRequest(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=120)
+    agent: OrcaAgentCli
+    prompt: str | None = Field(default=None, max_length=16000)
+
+
+class OrcaSessionSendRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=16000)
+    enter: bool = True
+
+
+class OrcaSessionCapabilities(BaseModel):
+    start: bool = True
+    read: bool = True
+    send: bool = True
+    close: bool = True
+    pause: bool = False
+    resume: bool = False
+
+
+class OrcaCapabilitiesResponse(BaseModel):
+    available: bool
+    orca_bin: str
+    agents: list[str]
+    operations: list[str]
+    actions: OrcaSessionCapabilities
+    notes: list[str] = Field(default_factory=list)
+
+
+class OrcaSessionResponse(BaseModel):
+    id: str
+    profile_id: str
+    sandbox_id: str
+    agent: OrcaAgentCli
+    terminal_handle: str
+    status: OrcaSessionStatus
+    created_at: float
+    closed_at: float | None = None
+    last_error: str | None = None
+    capabilities: OrcaSessionCapabilities
+    connection: dict[str, object] = Field(default_factory=dict)
+
+
+class OrcaSessionOutputResponse(BaseModel):
+    session_id: str
+    terminal_handle: str
+    cursor: int
+    next_cursor: int
+    output: str
+    status: OrcaSessionStatus
+    capabilities: OrcaSessionCapabilities
+
+
+class OrcaSessionSendResponse(BaseModel):
+    session_id: str
+    ok: bool
+    status: OrcaSessionStatus
+    capabilities: OrcaSessionCapabilities
+

@@ -12,6 +12,57 @@ export type ProfileHarness =
   | "unbrowse"
   | "stagehand";
 
+export type OrcaAgentCli = "cursor-agent" | "grok" | "codex";
+
+export interface OrcaSessionCapabilities {
+  start: boolean;
+  read: boolean;
+  send: boolean;
+  close: boolean;
+  pause: boolean;
+  resume: boolean;
+}
+
+export interface OrcaCapabilities {
+  available: boolean;
+  orca_bin: string;
+  agents: string[];
+  operations: string[];
+  actions: OrcaSessionCapabilities;
+  notes: string[];
+}
+
+export interface OrcaSession {
+  id: string;
+  profile_id: string;
+  sandbox_id: string;
+  agent: OrcaAgentCli;
+  terminal_handle: string;
+  status: "starting" | "running" | "closed" | "error";
+  created_at: number;
+  closed_at?: number | null;
+  last_error?: string | null;
+  capabilities: OrcaSessionCapabilities;
+  connection: Record<string, unknown>;
+}
+
+export interface OrcaSessionOutput {
+  session_id: string;
+  terminal_handle: string;
+  cursor: number;
+  next_cursor: number;
+  output: string;
+  status: OrcaSession["status"];
+  capabilities: OrcaSessionCapabilities;
+}
+
+export interface OrcaSessionSendResult {
+  session_id: string;
+  ok: boolean;
+  status: OrcaSession["status"];
+  capabilities: OrcaSessionCapabilities;
+}
+
 export type ProxyCheckState = "missing" | "passed" | "warning" | "failed" | "unavailable";
 
 export interface ExtensionDefaultItem {
@@ -743,4 +794,56 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
   ),
 
   listAccessSandboxes: () => request<AccessSandbox[]>("/api/access/sandboxes"),
+
+  getOrcaCapabilities: (options?: { signal?: AbortSignal }) =>
+    request<OrcaCapabilities>("/api/orca/capabilities", { signal: options?.signal }),
+
+  startOrcaSession: (
+    data: { profile_id: string; agent: OrcaAgentCli; prompt?: string | null },
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<OrcaSession>("/api/orca/sessions", {
+      method: "POST",
+      signal: options?.signal,
+      body: JSON.stringify(data),
+    }),
+
+  getOrcaSession: (sessionId: string, options?: { signal?: AbortSignal }) =>
+    request<OrcaSession>(`/api/orca/sessions/${encodeURIComponent(sessionId)}`, {
+      signal: options?.signal,
+    }),
+
+  readOrcaSessionOutput: (
+    sessionId: string,
+    options?: { cursor?: number; limit?: number; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.cursor != null) params.set("cursor", String(options.cursor));
+    if (options?.limit != null) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return request<OrcaSessionOutput>(
+      `/api/orca/sessions/${encodeURIComponent(sessionId)}/output${query ? `?${query}` : ""}`,
+      { signal: options?.signal },
+    );
+  },
+
+  sendOrcaSessionInput: (
+    sessionId: string,
+    data: { text: string; enter?: boolean },
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<OrcaSessionSendResult>(
+      `/api/orca/sessions/${encodeURIComponent(sessionId)}/send`,
+      {
+        method: "POST",
+        signal: options?.signal,
+        body: JSON.stringify(data),
+      },
+    ),
+
+  closeOrcaSession: (sessionId: string, options?: { signal?: AbortSignal }) =>
+    request<OrcaSession>(`/api/orca/sessions/${encodeURIComponent(sessionId)}/close`, {
+      method: "POST",
+      signal: options?.signal,
+    }),
 };

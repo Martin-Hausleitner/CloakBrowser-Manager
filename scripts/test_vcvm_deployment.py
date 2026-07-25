@@ -102,6 +102,29 @@ def main() -> None:
     assert_true(manager.get("healthcheck") is not None, "missing healthcheck")
     assert_true(env.get("ACCESS_CONTROL_ENABLED") == "1", "access control must be forced on")
     assert_true(env.get("AUTH_TOKEN") == "unit-test-token-with-safe-length", "AUTH_TOKEN must come from env")
+    assert_true(env.get("HOME") == "/home/coder", "manager must use host coder HOME for Orca")
+    assert_true(
+        env.get("CBM_ORCA_BIN") == "/home/coder/.local/bin/orca-ide",
+        "manager must point at host orca-ide",
+    )
+    assert_true(
+        env.get("CBM_ORCA_WORKTREE")
+        == "path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use",
+        "manager must use the Orca-registered vk-repos worktree",
+    )
+    assert_true(
+        env.get("CBM_ORCA_AGENT_WRAPPER")
+        == "/home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh",
+        "manager must launch agents through the vk-repos wrapper script",
+    )
+    assert_true(
+        str(env.get("CBM_BASE_URL", "")).startswith("http://127.0.0.1:"),
+        "agent base URL must be host-loopback",
+    )
+    assert_true(
+        env.get("CBM_AGENT_KEY_FILE") == "/home/coder/.config/cloakbrowser/orca-agent-key",
+        "agent key must be a host file path, never an inline secret",
+    )
     assert_true(
         env.get("PROXYCHECKER_URL") == "http://host.docker.internal:18899",
         "proxychecker URL must remain explicit and environment-controlled",
@@ -118,6 +141,38 @@ def main() -> None:
     assert_true(str(manager.get("mem_limit")) == str(32 * 1024 * 1024 * 1024), "unexpected memory limit default")
     assert_true(str(manager.get("cpus")) in {"16.0", "16"}, "unexpected CPU limit default")
 
+    volume_json = json.dumps(manager.get("volumes", []))
+    bind_mounts = {
+        (item.get("source"), item.get("target"), bool(item.get("read_only")))
+        for item in manager.get("volumes", [])
+        if isinstance(item, dict) and item.get("type") == "bind"
+    }
+    for source, target in (
+        ("/home/coder/orca", "/home/coder/orca"),
+        ("/home/coder/.local", "/home/coder/.local"),
+        ("/home/coder/.config/orca", "/home/coder/.config/orca"),
+    ):
+        assert_true(
+            (source, target, True) in bind_mounts,
+            f"missing read-only Orca mount {source}:{target}",
+        )
+    assert_true(
+        "/home/coder/.config/cloakbrowser" not in volume_json,
+        "agent key directory must not be mounted into the container image path list as rw secret store",
+    )
+    assert_true(
+        "/home/coder/vk-repos/CloakBrowser-Manager-browser-use" not in volume_json,
+        "vk-repos checkout/wrapper must not be mounted into the Manager container",
+    )
+    assert_true(
+        "orca_agent_cli.sh" not in volume_json,
+        "host agent wrapper must not be bind-mounted into the Manager container",
+    )
+    assert_true(
+        "orca-agent-key" not in volume_json,
+        "scoped agent key file must not be bind-mounted into the Manager container",
+    )
+
     port_json = json.dumps(ports)
     assert_true("127.0.0.1" in port_json, "manager must bind to loopback")
     assert_true("0.0.0.0" not in port_json, "manager must not bind to all interfaces")
@@ -133,6 +188,27 @@ def main() -> None:
         "host.docker.internal" in deploy_text,
         "deploy script must restrict the proxychecker boundary to the Docker host gateway",
     )
+    assert_true("vcvm_orca_preflight.py" in deploy_text, "deploy script must run Orca host preflight")
+    assert_true(
+        "path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use" in deploy_text,
+        "deploy script must pin the Orca-registered vk-repos worktree",
+    )
+    assert_true(
+        "/home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh"
+        in deploy_text,
+        "deploy script must pin the vk-repos wrapper path",
+    )
+    preflight_text = (ROOT / "scripts" / "vcvm_orca_preflight.py").read_text(encoding="utf-8")
+    assert_true("worktree show" in preflight_text, "preflight must verify worktree show")
+    assert_true("check_agent_key_file" in preflight_text, "preflight must validate agent key file")
+    assert_true("--agent-key-file" in preflight_text, "preflight must accept agent key file flag")
+    assert_true("0600" in preflight_text or "0o600" in (ROOT / "backend" / "orca_agent_key.py").read_text(encoding="utf-8"), "agent key mode must be exactly 0600")
+    assert_true("--agent-key-file" in deploy_text, "deploy preflight must pass agent key file path")
+    assert_true("CBM_ORCA_BIN=" in deploy_text, "deploy script must write CBM_ORCA_BIN")
+    assert_true("CBM_ORCA_WORKTREE=" in deploy_text, "deploy script must write CBM_ORCA_WORKTREE")
+    assert_true("CBM_ORCA_AGENT_WRAPPER=" in deploy_text, "deploy script must write wrapper path")
+    assert_true("CBM_AGENT_KEY_FILE=" in deploy_text, "deploy script must write key file path only")
+    assert_true("CBM_AGENT_KEY=" not in deploy_text, "deploy script must never write inline agent keys")
     assert_true("tailscale serve --bg --https" in deploy_text, "deploy script must use private HTTPS Serve")
     assert_true("timeout 30s tailscale serve" in deploy_text, "Tailscale Serve must not hang indefinitely")
     assert_true("<tailscale-admin-enable-url>" in deploy_text, "Tailscale admin URLs must be scrubbed")
@@ -166,6 +242,38 @@ def main() -> None:
         assert_true(pattern in dockerignore_text, f".dockerignore missing {pattern}")
         assert_true(pattern in deploy_text, f"rsync excludes missing {pattern}")
 
+    wrapper = ROOT / "scripts" / "orca_agent_cli.sh"
+    preflight = ROOT / "scripts" / "vcvm_orca_preflight.py"
+    assert_true(wrapper.exists(), "missing scripts/orca_agent_cli.sh")
+    assert_true(preflight.exists(), "missing scripts/vcvm_orca_preflight.py")
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert_true("cursor-agent|grok|codex" in wrapper_text, "wrapper must allowlist agent CLIs")
+    assert_true("CBM_AGENT_KEY_FILE" in wrapper_text, "wrapper must export key file path")
+    assert_true("CBM_AGENT_KEY=" not in wrapper_text, "wrapper must not export inline agent keys")
+    assert_true("exec \"$AGENT\"" in wrapper_text, "wrapper must exec the validated agent")
+    doc_text = DOC_FILE.read_text(encoding="utf-8")
+    assert_true("Orca host bridge" in doc_text, "deployment docs must describe Orca host bridge")
+    assert_true("orca-agent-key" in doc_text, "deployment docs must document key file path")
+    assert_true("0600" in doc_text or "mode-`600`" in doc_text or "mode `0600`" in doc_text, "docs must document key file mode")
+    assert_true("owner-only" in doc_text, "docs must document owner-only Orca close")
+    assert_true("vcvm_orca_preflight.py" in doc_text, "deployment docs must mention preflight")
+    assert_true(
+        "Do not mount" in doc_text or "do not mount" in doc_text,
+        "docs must forbid mounting key/wrapper into the Manager container",
+    )
+    assert_true(
+        "capabilities.available" in doc_text,
+        "docs must describe container capabilities.available contract",
+    )
+    assert_true(
+        "check_agent_key_file" in preflight.read_text(encoding="utf-8"),
+        "host preflight must validate agent key readiness",
+    )
+    assert_true(
+        "check_agent_wrapper" in preflight.read_text(encoding="utf-8"),
+        "host preflight must validate host agent wrapper readiness",
+    )
+    assert_true("--agent-wrapper" in deploy_text, "deploy preflight must pass host wrapper path")
     print("VCVM deployment surface checks passed")
 
 

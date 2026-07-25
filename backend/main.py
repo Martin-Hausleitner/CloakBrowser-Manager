@@ -102,6 +102,12 @@ if __package__:
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
+        OrcaCapabilitiesResponse,
+        OrcaSessionOutputResponse,
+        OrcaSessionResponse,
+        OrcaSessionSendRequest,
+        OrcaSessionSendResponse,
+        OrcaSessionStartRequest,
         WorkerCapabilityResponse,
         WorkerClaimResponse,
         WorkerFailRequest,
@@ -113,6 +119,8 @@ if __package__:
     from . import extension_catalog
     from . import profile_templates
     from . import stream_metrics
+    from . import orca_adapter as orca_adapter_mod
+    from .orca_adapter import orca_adapter
 else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
     import artifact_store as artifact_store_mod
@@ -123,6 +131,8 @@ else:  # Support `uvicorn main:app` from the backend directory.
     import live_diagnostics
     import worker_runtime as worker_runtime_mod
     import workspace_maintenance as workspace_maintenance_mod
+    import orca_adapter as orca_adapter_mod
+    from orca_adapter import orca_adapter
     from browser_manager import BrowserManager
     from profile_health import ProfileHealthProbe
     from models import (
@@ -185,6 +195,12 @@ else:  # Support `uvicorn main:app` from the backend directory.
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
+        OrcaCapabilitiesResponse,
+        OrcaSessionOutputResponse,
+        OrcaSessionResponse,
+        OrcaSessionSendRequest,
+        OrcaSessionSendResponse,
+        OrcaSessionStartRequest,
         WorkerCapabilityResponse,
         WorkerClaimResponse,
         WorkerFailRequest,
@@ -3290,6 +3306,119 @@ async def get_task_output_screenshot(output_id: str, request: Request):
             "Cache-Control": "private, no-store",
         },
     )
+
+
+def _orca_owner_key(identity: access.AccessIdentity) -> str:
+    return f"{identity.kind}:{identity.id or identity.display_name or 'anonymous'}"
+
+
+def _raise_orca_error(exc: orca_adapter_mod.OrcaAdapterError) -> None:
+    raise HTTPException(
+        status_code=exc.status_code,
+        detail={"code": exc.code, "message": exc.message},
+    ) from exc
+
+
+@app.get("/api/orca/capabilities", response_model=OrcaCapabilitiesResponse)
+async def get_orca_capabilities(request: Request):
+    """Honest Orca capability surface (pause/resume intentionally false)."""
+    _require_identity(request.scope)
+    caps = orca_adapter.capabilities()
+    return OrcaCapabilitiesResponse(**caps)
+
+
+@app.post("/api/orca/sessions", response_model=OrcaSessionResponse, status_code=201)
+async def start_orca_session(body: OrcaSessionStartRequest, request: Request):
+    """Start an allowlisted Orca-managed agent CLI bound to a profile."""
+    profile, identity = _require_profile_permission(request.scope, body.profile_id, "automate")
+    # Interactive composer also requires interact on the same profile sandbox.
+    if not access.can_access_profile(identity, profile, "interact"):
+        raise HTTPException(status_code=404, detail="Profile not found")
+    try:
+        session = orca_adapter.start_session(
+            profile_id=str(profile["id"]),
+            sandbox_id=str(profile.get("sandbox_id") or "default"),
+            agent=body.agent,
+            owner_key=_orca_owner_key(identity),
+            prompt=body.prompt,
+        )
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    return OrcaSessionResponse(**orca_adapter.public_session(session))
+
+
+@app.get("/api/orca/sessions/{session_id}", response_model=OrcaSessionResponse)
+async def get_orca_session(session_id: str, request: Request):
+    identity = _require_identity(request.scope)
+    try:
+        session = orca_adapter.get_session(session_id, owner_key=_orca_owner_key(identity))
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    _require_profile_permission(request.scope, session.profile_id, "view")
+    return OrcaSessionResponse(**orca_adapter.public_session(session))
+
+
+@app.get("/api/orca/sessions/{session_id}/output", response_model=OrcaSessionOutputResponse)
+async def read_orca_session_output(
+    session_id: str,
+    request: Request,
+    cursor: int | None = None,
+    limit: int | None = None,
+):
+    identity = _require_identity(request.scope)
+    try:
+        session = orca_adapter.get_session(session_id, owner_key=_orca_owner_key(identity))
+        _require_profile_permission(request.scope, session.profile_id, "view")
+        payload = orca_adapter.read_output(
+            session_id,
+            owner_key=_orca_owner_key(identity),
+            cursor=cursor,
+            limit=limit,
+        )
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    return OrcaSessionOutputResponse(**payload)
+
+
+@app.post("/api/orca/sessions/{session_id}/send", response_model=OrcaSessionSendResponse)
+async def send_orca_session_input(
+    session_id: str,
+    body: OrcaSessionSendRequest,
+    request: Request,
+):
+    identity = _require_identity(request.scope)
+    try:
+        session = orca_adapter.get_session(session_id, owner_key=_orca_owner_key(identity))
+        _require_profile_permission(request.scope, session.profile_id, "interact")
+        payload = orca_adapter.send_input(
+            session_id,
+            owner_key=_orca_owner_key(identity),
+            text=body.text,
+            enter=body.enter,
+        )
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    return OrcaSessionSendResponse(**payload)
+
+
+@app.post("/api/orca/sessions/{session_id}/close", response_model=OrcaSessionResponse)
+async def close_orca_session(session_id: str, request: Request):
+    """Close an Orca session. Owner-only: admins get no cross-owner bypass."""
+    identity = _require_identity(request.scope)
+    try:
+        session = orca_adapter.get_session(session_id, owner_key=_orca_owner_key(identity))
+        # Close needs interact (composer stop) or automate (session owner).
+        # Ownership is already enforced by get_session; do not add an admin bypass.
+        profile, _ = _require_profile_permission(request.scope, session.profile_id, "view")
+        can_close = access.can_access_profile(identity, profile, "interact") or access.can_access_profile(
+            identity, profile, "automate"
+        )
+        if not can_close:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        closed = orca_adapter.close_session(session_id, owner_key=_orca_owner_key(identity))
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    return OrcaSessionResponse(**orca_adapter.public_session(closed))
 
 
 # ── Profile CRUD ──────────────────────────────────────────────────────────────

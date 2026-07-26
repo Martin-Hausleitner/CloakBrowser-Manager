@@ -15,9 +15,13 @@ ACCENT_COLOR_PATTERN = r"^#[0-9A-Fa-f]{6}$"
 MANAGER_OWNED_LAUNCH_ARG_PREFIXES = (
     "--remote-debugging-port",
     "--remote-debugging-address",
+    "--remote-debugging-pipe",
     "--user-data-dir",
     "--proxy-server",
     "--proxy-pac-url",
+    "--no-proxy-server",
+    "--proxy-bypass-list",
+    "--proxy-auto-detect",
     "--disable-web-security",
     "--no-sandbox",
 )

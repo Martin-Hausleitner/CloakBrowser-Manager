@@ -28,8 +28,22 @@ vi.mock("../../lib/api", async () => {
 });
 
 vi.mock("../ProfileViewer", () => ({
-  ProfileViewer: ({ profileId }: { profileId: string }) => (
-    <div data-testid="mock-profile-viewer">viewer:{profileId}</div>
+  ProfileViewer: ({
+    profileId,
+    viewportScale,
+    nativeFullscreenEnabled,
+  }: {
+    profileId: string;
+    viewportScale?: number;
+    nativeFullscreenEnabled?: boolean;
+  }) => (
+    <div
+      data-testid="mock-profile-viewer"
+      data-scale={viewportScale ?? 1}
+      data-native-fullscreen={nativeFullscreenEnabled === false ? "off" : "on"}
+    >
+      viewer:{profileId}
+    </div>
   ),
 }));
 
@@ -157,6 +171,95 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("mock-profile-viewer").textContent).toContain("viewer:profile-live");
     expect(screen.getByTestId("orca-cap-pause").textContent).toMatch(/unavailable/i);
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
+  });
+
+  it("keeps zoom and viewport controls available in app full view", async () => {
+    const onViewportApply = vi.fn().mockResolvedValue(true);
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        canManageViewport
+        onViewportApply={onViewportApply}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("agent-browser-workspace");
+    fireEvent.click(screen.getByRole("button", { name: "Enter full view" }));
+    expect(screen.getByTestId("agent-browser-viewer-pane").className).toContain("fixed");
+    expect(screen.getByTestId("agent-browser-viewer-pane").classList.contains("flex")).toBe(true);
+    expect(screen.getByRole("button", { name: "Exit full view" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Increase browser zoom" }));
+    expect(screen.getByTestId("mock-profile-viewer").getAttribute("data-scale")).toBe("1.1");
+    expect(screen.getByTestId("mock-profile-viewer").getAttribute("data-native-fullscreen")).toBe(
+      "off",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open viewport controls" }));
+    fireEvent.click(screen.getByRole("button", { name: "Use phone viewport 390 by 844" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply viewport" }));
+    await waitFor(() => expect(onViewportApply).toHaveBeenCalledWith(390, 844));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "Enter full view" })).toBeTruthy();
+  });
+
+  it("blocks viewport changes while a Browser Use run is active", async () => {
+    const browserUseProfile: Profile = { ...runningProfile, harness: "browser-use" };
+    const activeRun: TaskRun = {
+      id: "run-active-viewport",
+      task_session_id: "task-active-viewport",
+      task_message_id: "message-active-viewport",
+      profile_id: browserUseProfile.id,
+      profile_id_snapshot: browserUseProfile.id,
+      sandbox_id: "default",
+      harness: "browser-use",
+      status: "running",
+      launch_if_stopped: false,
+      allowed_origins: [],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: "cursor-grok-4.5-low",
+      deadline_at: "2026-07-26T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {},
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-26T00:00:00Z",
+      updated_at: "2026-07-26T00:00:00Z",
+    };
+    const onViewportApply = vi.fn().mockResolvedValue(true);
+    window.sessionStorage.setItem(
+      `cloakbrowser.browser-use.last-run:${browserUseProfile.id}`,
+      activeRun.id,
+    );
+    apiMock.getTaskRun.mockResolvedValue(activeRun);
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[browserUseProfile]}
+        selectedProfile={browserUseProfile}
+        canAutomate
+        canInteract
+        canManageViewport
+        onViewportApply={onViewportApply}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByText(/Managed worker/);
+    fireEvent.click(screen.getByRole("button", { name: "Open viewport controls" }));
+    const applyButton = screen.getByRole("button", { name: "Apply viewport" });
+
+    expect((applyButton as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(applyButton);
+    expect(onViewportApply).not.toHaveBeenCalled();
   });
 
   it("disables launch when Orca is unavailable", async () => {

@@ -76,6 +76,8 @@ export interface AgentBrowserWorkspaceProps {
   selectedProfile: Profile | null;
   canAutomate: boolean;
   canInteract: boolean;
+  canManageViewport?: boolean;
+  onViewportApply?: (width: number, height: number) => Promise<boolean>;
   onSelectProfile: (profileId: string) => void;
   onConnectionStatusChange?: (
     status: "connecting" | "connected" | "reconnecting" | "failed",
@@ -97,6 +99,8 @@ export function AgentBrowserWorkspace({
   selectedProfile,
   canAutomate,
   canInteract,
+  canManageViewport = false,
+  onViewportApply,
   onSelectProfile,
   onConnectionStatusChange,
   onViewerDisconnect,
@@ -111,6 +115,12 @@ export function AgentBrowserWorkspace({
   const [transcript, setTranscript] = useState("");
   const [cursor, setCursor] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [viewerZoom, setViewerZoom] = useState(100);
+  const [viewerFullscreen, setViewerFullscreen] = useState(false);
+  const [viewportControlsOpen, setViewportControlsOpen] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(selectedProfile?.screen_width ?? 1280);
+  const [viewportHeight, setViewportHeight] = useState(selectedProfile?.screen_height ?? 720);
+  const [viewportApplying, setViewportApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const runPollRef = useRef<number | null>(null);
@@ -313,6 +323,25 @@ export function AgentBrowserWorkspace({
     };
   }, [selectedProfile?.id, stopPolling, stopRunPolling]);
 
+  useEffect(() => {
+    setViewportWidth(selectedProfile?.screen_width ?? 1280);
+    setViewportHeight(selectedProfile?.screen_height ?? 720);
+  }, [selectedProfile?.id, selectedProfile?.screen_height, selectedProfile?.screen_width]);
+
+  useEffect(() => {
+    if (!viewerFullscreen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const exitOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setViewerFullscreen(false);
+    };
+    window.addEventListener("keydown", exitOnEscape);
+    return () => {
+      window.removeEventListener("keydown", exitOnEscape);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [viewerFullscreen]);
+
   const handleStart = useCallback(async () => {
     if (!selectedProfile || !canStart) return;
     setBusy(true);
@@ -444,6 +473,28 @@ export function AgentBrowserWorkspace({
       setBusy(false);
     }
   }, [busy, canAutomate, nonOverridableHealthReasons.length, taskRun]);
+
+  const applyViewport = useCallback(async () => {
+    if (!canManageViewport || !onViewportApply || viewportApplying || sessionActive || busy) return;
+    const width = Math.max(320, Math.min(7680, Math.round(viewportWidth)));
+    const height = Math.max(320, Math.min(4320, Math.round(viewportHeight)));
+    setViewportWidth(width);
+    setViewportHeight(height);
+    setViewportApplying(true);
+    setError(null);
+    try {
+      const applied = await onViewportApply(width, height);
+      if (!applied) {
+        setError("The profile viewport could not be applied.");
+        return;
+      }
+      setViewportControlsOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The profile viewport could not be applied");
+    } finally {
+      setViewportApplying(false);
+    }
+  }, [busy, canManageViewport, onViewportApply, sessionActive, viewportApplying, viewportHeight, viewportWidth]);
 
   return (
     <div
@@ -690,8 +741,14 @@ export function AgentBrowserWorkspace({
         </form>
       </section>
 
-      <section className="flex min-w-0 flex-1 flex-col bg-[#090909]" aria-label="Live CloakBrowser profile">
-        <header className="flex items-center gap-2 border-b border-[#2a2a2a] bg-[#141414] px-3 py-2">
+      <section
+        className={`flex ${
+          viewerFullscreen ? "fixed inset-0 z-[80]" : "min-w-0 flex-1"
+        } flex-col bg-[#090909]`}
+        aria-label="Live CloakBrowser profile"
+        data-testid="agent-browser-viewer-pane"
+      >
+        <header className="relative flex min-h-10 flex-wrap items-center gap-2 border-b border-[#2a2a2a] bg-[#141414] px-3 py-1.5">
           <MonitorSmartphone className="h-3.5 w-3.5 text-[#8b8b8b]" />
           <div className="min-w-0 flex-1 truncate text-[12px] font-semibold">
             {selectedProfile ? selectedProfile.name : "No profile selected"}
@@ -699,6 +756,106 @@ export function AgentBrowserWorkspace({
           <span className="text-[10px] uppercase tracking-wide text-[#8b8b8b]">
             {selectedProfile?.status ?? "none"}
           </span>
+          <div className="flex items-center gap-1 text-[10px]">
+            <button
+              type="button"
+              className="min-h-8 rounded border border-[#333] px-2 text-[#bbb] hover:bg-[#222]"
+              onClick={() => setViewerZoom(100)}
+              aria-label="Fit browser view"
+            >
+              Fit
+            </button>
+            <button
+              type="button"
+              className="min-h-8 min-w-8 rounded border border-[#333] text-[#bbb] hover:bg-[#222]"
+              onClick={() => setViewerZoom((current) => Math.max(75, current - 10))}
+              aria-label="Decrease browser zoom"
+            >
+              −
+            </button>
+            <span className="min-w-9 text-center text-[#999]">{viewerZoom}%</span>
+            <button
+              type="button"
+              className="min-h-8 min-w-8 rounded border border-[#333] text-[#bbb] hover:bg-[#222]"
+              onClick={() => setViewerZoom((current) => Math.min(150, current + 10))}
+              aria-label="Increase browser zoom"
+            >
+              +
+            </button>
+            {canManageViewport && onViewportApply ? (
+              <button
+                type="button"
+                className="min-h-8 rounded border border-[#333] px-2 text-[#bbb] hover:bg-[#222]"
+                onClick={() => setViewportControlsOpen((open) => !open)}
+                aria-label={viewportControlsOpen ? "Close viewport controls" : "Open viewport controls"}
+                aria-expanded={viewportControlsOpen}
+              >
+                Viewport
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="min-h-8 rounded border border-[#333] px-2 text-[#bbb] hover:bg-[#222]"
+              onClick={() => setViewerFullscreen((open) => !open)}
+              aria-label={viewerFullscreen ? "Exit full view" : "Enter full view"}
+              aria-pressed={viewerFullscreen}
+            >
+              {viewerFullscreen ? "Exit" : "Full view"}
+            </button>
+          </div>
+          {viewportControlsOpen && canManageViewport && onViewportApply ? (
+            <div className="absolute right-3 top-[2.85rem] z-20 w-64 rounded-md border border-[#333] bg-[#171717] p-2 text-[10px] text-[#bbb]">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="space-y-1">
+                  <span className="block text-[#888]">Width</span>
+                  <input
+                    type="number"
+                    min={320}
+                    max={7680}
+                    value={viewportWidth}
+                    onChange={(event) => setViewportWidth(Number(event.target.value))}
+                    className="input h-8 w-full bg-[#0f0f0f] px-2 text-[11px]"
+                    aria-label="Viewport width"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="block text-[#888]">Height</span>
+                  <input
+                    type="number"
+                    min={320}
+                    max={4320}
+                    value={viewportHeight}
+                    onChange={(event) => setViewportHeight(Number(event.target.value))}
+                    className="input h-8 w-full bg-[#0f0f0f] px-2 text-[11px]"
+                    aria-label="Viewport height"
+                  />
+                </label>
+              </div>
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  className="min-h-8 rounded border border-[#333] px-2 hover:bg-[#222]"
+                  onClick={() => {
+                    setViewportWidth(390);
+                    setViewportHeight(844);
+                  }}
+                  aria-label="Use phone viewport 390 by 844"
+                >
+                  Phone 390×844
+                </button>
+                <button
+                  type="button"
+                  className="min-h-8 rounded bg-[#4f46e5] px-2 font-medium text-white disabled:opacity-50"
+                  onClick={() => void applyViewport()}
+                  disabled={viewportApplying || sessionActive || busy}
+                  aria-label="Apply viewport"
+                  title={sessionActive ? "Stop the active agent run before changing the viewport" : undefined}
+                >
+                  {viewportApplying ? "Applying…" : "Apply"}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </header>
         <div className="min-h-0 flex-1">
           {selectedProfile && selectedProfile.status === "running" ? (
@@ -708,6 +865,8 @@ export function AgentBrowserWorkspace({
               cdpUrl={selectedProfile.cdp_url}
               clipboardSync={selectedProfile.clipboard_sync}
               canInteract={canInteract}
+              viewportScale={viewerZoom / 100}
+              nativeFullscreenEnabled={false}
               onConnectionStatusChange={onConnectionStatusChange}
               onDisconnect={onViewerDisconnect ?? (() => undefined)}
             />

@@ -11,6 +11,7 @@ interface ProfileViewerProps {
   compactControls?: boolean;
   layoutMode?: "inline" | "fullscreen";
   viewportScale?: number;
+  nativeFullscreenEnabled?: boolean;
   remoteToolsOpen?: boolean;
   remoteToolsPortalId?: string;
   onRemoteToolsOpenChange?: (open: boolean) => void;
@@ -93,6 +94,7 @@ export function ProfileViewer({
   compactControls = false,
   layoutMode = "inline",
   viewportScale = 1,
+  nativeFullscreenEnabled = true,
   remoteToolsOpen,
   remoteToolsPortalId,
   onRemoteToolsOpenChange,
@@ -723,7 +725,7 @@ export function ProfileViewer({
               </button>
             ) : null
           ) : remoteToolButtons}
-          {!compactControls ? (
+          {!compactControls && nativeFullscreenEnabled ? (
             <button
               type="button"
               onClick={toggleFullscreen}

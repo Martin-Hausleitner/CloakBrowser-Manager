@@ -700,6 +700,8 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
               selectedProfile={selected}
               canAutomate={canAutomateSelected}
               canInteract={canInteractSelected}
+              canManageViewport={canManageProfiles && canOperateSelected}
+              onViewportApply={handleViewportApply}
               onSelectProfile={(profileId) => {
                 setSelectedId(profileId);
                 const profile = profiles.find((item) => item.id === profileId);
@@ -707,7 +709,6 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                 if (profile?.harness) setHarness(profile.harness);
               }}
               onConnectionStatusChange={setMobileConnectionStatus}
-              onViewerDisconnect={handleVncDisconnect}
             />
           )}
         </div>

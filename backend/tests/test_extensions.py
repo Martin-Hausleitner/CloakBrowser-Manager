@@ -71,7 +71,7 @@ def test_parse_extension_manifest_valid(tmp_path: Path):
     assert info.error is None
 
 
-def test_inspect_profile_extensions(tmp_path: Path):
+def test_inspect_profile_extensions(tmp_path: Path, monkeypatch):
     ext_dir = tmp_path / "my_extension"
     ext_dir.mkdir()
     manifest_data = {
@@ -84,8 +84,12 @@ def test_inspect_profile_extensions(tmp_path: Path):
 
     profile = {
         "id": "p-123",
-        "launch_args": [f"--load-extension={ext_dir}"],
+        "extension_ids": ["catalog-extension"],
     }
+    monkeypatch.setattr(
+        "backend.extension_catalog.catalog_paths_for_ids",
+        lambda _ids: [str(ext_dir)],
+    )
 
     results = inspect_profile_extensions(profile)
     assert len(results) == 1

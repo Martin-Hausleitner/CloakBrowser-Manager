@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
+from backend import extension_catalog
+
 
 TrustState = Literal["valid", "untrusted_manifest", "missing_manifest", "invalid_path"]
 
@@ -124,15 +126,15 @@ def extract_load_extension_paths(launch_args: list[str]) -> list[str]:
 
 
 def inspect_profile_extensions(profile: dict[str, Any]) -> list[dict[str, Any]]:
-    """Inspect all extensions configured via --load-extension for a profile."""
-    launch_args = profile.get("launch_args") or []
-    if isinstance(launch_args, str):
+    """Inspect only catalog-owned extension directories assigned to a profile."""
+    extension_ids = profile.get("extension_ids") or []
+    if isinstance(extension_ids, str):
         try:
-            launch_args = json.loads(launch_args)
+            extension_ids = json.loads(extension_ids)
         except Exception:
-            launch_args = []
+            extension_ids = []
 
-    ext_paths = extract_load_extension_paths(launch_args)
+    ext_paths = extension_catalog.catalog_paths_for_ids(extension_ids)
     results = []
     for p in ext_paths:
         info = parse_extension_manifest(p)

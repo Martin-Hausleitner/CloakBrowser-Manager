@@ -16,9 +16,13 @@ from cloakbrowser import launch_persistent_context_async
 
 if __package__:
     from . import live_diagnostics
+    from . import extension_catalog
+    from . import models as profile_models
     from .vnc_manager import VNCManager
 else:  # Support importing browser_manager as a top-level module.
     import live_diagnostics
+    import extension_catalog
+    import models as profile_models
     from vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
@@ -243,8 +247,7 @@ class BrowserManager:
             )
 
             # Build fingerprint args from profile settings
-            extra_args = self._build_fingerprint_args(profile)
-            extra_args += profile.get("launch_args") or []
+            extra_args = self._build_profile_launch_args(profile)
             extra_args.append(f"--remote-debugging-port={cdp_port}")
 
             # Normalize proxy format (host:port:user:pass → http://user:pass@host:port)
@@ -522,4 +525,25 @@ class BrowserManager:
         if sh:
             args.append(f"--fingerprint-screen-height={sh}")
 
+        return args
+
+    def _build_profile_launch_args(self, profile: dict[str, Any]) -> list[str]:
+        """Combine safe profile flags with server-resolved catalog extensions."""
+        args = self._build_fingerprint_args(profile)
+        for raw_arg in profile.get("launch_args") or []:
+            if not isinstance(raw_arg, str):
+                continue
+            if profile_models._manager_owned_launch_arg(raw_arg):
+                logger.warning(
+                    "Ignoring manager-owned launch argument from profile %s",
+                    str(profile.get("id") or "unknown"),
+                )
+                continue
+            args.append(raw_arg)
+
+        catalog_arg = extension_catalog.load_extension_arg_for_ids(
+            profile.get("extension_ids") or []
+        )
+        if catalog_arg:
+            args.append(catalog_arg)
         return args

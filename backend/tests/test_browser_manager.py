@@ -11,6 +11,7 @@ import pytest
 import socket
 from unittest.mock import AsyncMock, MagicMock
 
+from backend import extension_catalog
 from backend.browser_manager import (
     BASE_CDP_PORT,
     CDP_PORT_RANGE,
@@ -184,21 +185,29 @@ def test_build_args_empty_profile():
     assert len(args) == 3
 
 
-# ── launch_args appended to extra_args ────────────────────────────────────────
+# ── trusted profile launch arguments ─────────────────────────────────────────
 
 
-def test_launch_args_appended_to_fingerprint_args():
-    """launch_args from profile should appear in the args list after fingerprint args."""
+def test_profile_launch_args_use_catalog_extensions_not_profile_paths(monkeypatch: pytest.MonkeyPatch):
+    """Legacy profile paths cannot load code; catalog ids resolve server-side at launch."""
     profile = {
         "fingerprint_seed": 42,
         "platform": "windows",
-        "launch_args": ["--load-extension=/tmp/ext", "--disable-features=Foo"],
+        "extension_ids": ["catalog-extension"],
+        "launch_args": ["--load-extension=/tmp/untrusted", "--disable-features=Foo"],
     }
-    args = _mgr._build_fingerprint_args(profile)
-    args += profile.get("launch_args") or []
-    assert "--load-extension=/tmp/ext" in args
+    monkeypatch.setattr(
+        extension_catalog,
+        "load_extension_arg_for_ids",
+        lambda ids: "--load-extension=/srv/catalog/catalog-extension",
+    )
+
+    assert hasattr(_mgr, "_build_profile_launch_args")
+    args = _mgr._build_profile_launch_args(profile)
+
+    assert "--load-extension=/tmp/untrusted" not in args
+    assert "--load-extension=/srv/catalog/catalog-extension" in args
     assert "--disable-features=Foo" in args
-    # Fingerprint args still present
     assert "--fingerprint=42" in args
 
 

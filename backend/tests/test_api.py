@@ -264,13 +264,30 @@ def test_profile_launch_args_default_empty(app_client: TestClient):
     assert resp.json()["launch_args"] == []
 
 
-def test_profile_launch_args_create(app_client: TestClient):
+def test_profile_create_rejects_extension_paths_and_persists_catalog_ids(app_client: TestClient):
     resp = app_client.post("/api/profiles", json={
-        "name": "WithArgs",
-        "launch_args": ["--load-extension=/data/ext", "--disable-features=Foo"],
+        "name": "UnsafePath",
+        "launch_args": ["--load-extension=/data/ext"],
     })
-    assert resp.status_code == 201
-    assert resp.json()["launch_args"] == ["--load-extension=/data/ext", "--disable-features=Foo"]
+    assert resp.status_code == 422
+
+    created = app_client.post("/api/profiles", json={
+        "name": "WithCatalogExtension",
+        "extension_ids": ["ddkjiahejlhfcafbddmgiahcphecmpfh"],
+        "launch_args": ["--disable-features=Foo"],
+    })
+    assert created.status_code == 201
+    assert created.json()["extension_ids"] == ["ddkjiahejlhfcafbddmgiahcphecmpfh"]
+    assert created.json()["launch_args"] == ["--disable-features=Foo"]
+
+
+def test_profile_create_rejects_unknown_catalog_extension_ids(app_client: TestClient):
+    response = app_client.post(
+        "/api/profiles",
+        json={"name": "UnknownExtension", "extension_ids": ["not-in-the-server-catalog"]},
+    )
+    assert response.status_code == 422
+    assert "Unknown catalog extension" in response.json()["detail"]
 
 
 def test_profile_launch_args_update(app_client: TestClient):

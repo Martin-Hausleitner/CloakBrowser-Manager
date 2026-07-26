@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -152,6 +153,44 @@ def test_cli_profiles_create_builds_expected_request(monkeypatch: pytest.MonkeyP
     assert captured["path"] == "/api/profiles"
     assert captured["body"]["sandbox_id"] == "agents"
     assert captured["body"]["geoip"] is True
+
+
+def test_cli_profiles_create_assigns_catalog_extension_ids(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, query=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"id": "p1", "name": body["name"]}
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = SimpleNamespace(
+        name="demo",
+        sandbox="default",
+        harness="codex",
+        project="default",
+        folder="",
+        pinned=False,
+        geoip=False,
+        timezone=None,
+        locale=None,
+        proxy=None,
+        platform=None,
+        extension_ids=["catalog-a", "catalog-b"],
+        json=False,
+    )
+    mod.cmd_profiles_create(args)
+
+    assert captured["body"]["extension_ids"] == ["catalog-a", "catalog-b"]
 
 
 def test_cli_open_links_field_extraction(monkeypatch: pytest.MonkeyPatch, capsys):

@@ -22,6 +22,8 @@ MANAGER_OWNED_LAUNCH_ARG_PREFIXES = (
     "--no-proxy-server",
     "--proxy-bypass-list",
     "--proxy-auto-detect",
+    "--load-extension",
+    "--disable-extensions-except",
     "--disable-web-security",
     "--no-sandbox",
 )
@@ -59,15 +61,23 @@ def _validate_folder_path(value: str) -> str:
 def _validate_profile_launch_args(value: list[str] | None) -> list[str] | None:
     """Keep browser-manager-owned Chromium settings outside profile input."""
     for launch_arg in value or []:
-        normalized = launch_arg.strip().lower()
-        for blocked in MANAGER_OWNED_LAUNCH_ARG_PREFIXES:
-            if (
-                normalized == blocked
-                or normalized.startswith(f"{blocked}=")
-                or normalized.startswith(f"{blocked} ")
-            ):
-                raise ValueError(f"launch_args cannot set manager-owned Chromium flag: {blocked}")
+        blocked = _manager_owned_launch_arg(launch_arg)
+        if blocked:
+            raise ValueError(f"launch_args cannot set manager-owned Chromium flag: {blocked}")
     return value
+
+
+def _manager_owned_launch_arg(launch_arg: str) -> str | None:
+    """Return the protected flag matched by a Chromium argument, if any."""
+    normalized = launch_arg.strip().lower()
+    for blocked in MANAGER_OWNED_LAUNCH_ARG_PREFIXES:
+        if (
+            normalized == blocked
+            or normalized.startswith(f"{blocked}=")
+            or normalized.startswith(f"{blocked} ")
+        ):
+            return blocked
+    return None
 
 
 class ProfileCreate(BaseModel):
@@ -102,6 +112,7 @@ class ProfileCreate(BaseModel):
     auto_launch: bool = False
     color_scheme: Literal["light", "dark", "no-preference"] | None = None
     search_engine: Literal["google", "bing", "duckduckgo"] | None = None
+    extension_ids: list[str] = Field(default_factory=list)
     launch_args: list[str] = Field(default_factory=list)
     notes: str | None = None
     tags: list[TagCreate] | None = None
@@ -149,6 +160,7 @@ class ProfileUpdate(BaseModel):
     auto_launch: bool | None = None
     color_scheme: Literal["light", "dark", "no-preference"] | None = Field(default=None)
     search_engine: Literal["google", "bing", "duckduckgo"] | None = Field(default=None)
+    extension_ids: list[str] | None = None
     launch_args: list[str] | None = None
     notes: str | None = Field(default=None)
     tags: list[TagCreate] | None = None
@@ -249,6 +261,7 @@ class ProfileResponse(BaseModel):
 
     color_scheme: str | None = None
     search_engine: str | None = None
+    extension_ids: list[str] = []
     launch_args: list[str] = []
     notes: str | None = None
     user_data_dir: str

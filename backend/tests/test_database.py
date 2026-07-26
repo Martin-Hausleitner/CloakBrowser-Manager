@@ -223,6 +223,11 @@ def test_create_profile_with_launch_args(tmp_db: Path):
     assert p["launch_args"] == ["--load-extension=/tmp/ext", "--disable-features=Foo"]
 
 
+def test_create_profile_persists_catalog_extension_ids(tmp_db: Path):
+    p = db.create_profile("WithCatalogExtensions", extension_ids=["catalog-extension"])
+    assert p.get("extension_ids") == ["catalog-extension"]
+
+
 def test_create_profile_with_organization_fields(tmp_db: Path):
     p = db.create_profile(
         "Organized",

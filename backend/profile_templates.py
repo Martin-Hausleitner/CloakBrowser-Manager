@@ -236,6 +236,7 @@ def build_profile_fields(
                 {"tag": template_id, "color": "#22c55e"},
             ],
         ),
+        "extension_ids": [],
         "launch_args": list(overrides.get("launch_args") or []),
     }
     should_apply = (
@@ -244,9 +245,7 @@ def build_profile_fields(
         else bool(apply_extensions)
     )
     if should_apply:
-        fields["launch_args"] = extension_catalog.merge_launch_args_with_defaults(
-            fields["launch_args"]
-        )
+        fields["extension_ids"] = extension_catalog.load_selected_ids()
     seed_material = f"{template_id}:{fields['project_id']}:{fields['platform']}:{fields['timezone']}"
     fields["fingerprint_seed"] = (
         int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16) % 2_147_483_647

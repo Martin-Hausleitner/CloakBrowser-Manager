@@ -3667,10 +3667,27 @@ async def list_profiles(request: Request):
     ]
 
 
+def _validated_catalog_extension_ids(extension_ids: list[str] | None) -> list[str]:
+    """Accept only deduplicated extension ids published by the server catalog."""
+    requested = list(dict.fromkeys(str(extension_id) for extension_id in (extension_ids or [])))
+    known = {
+        str(item["id"])
+        for item in extension_catalog.list_catalog_extensions(include_paths=False)
+    }
+    unknown = [extension_id for extension_id in requested if extension_id not in known]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown catalog extension ids: {', '.join(unknown)}",
+        )
+    return requested
+
+
 @app.post("/api/profiles", response_model=ProfileResponse, status_code=201)
 async def create_profile(req: ProfileCreate, request: Request):
     """Create a profile in a sandbox the caller can operate (agent/CLI control plane)."""
     data = req.model_dump()
+    data["extension_ids"] = _validated_catalog_extension_ids(data.get("extension_ids"))
     sandbox_id = str(data.get("sandbox_id") or "default")
     identity = _require_sandbox_permission(request.scope, sandbox_id, "operate")
     tags = data.pop("tags", None)
@@ -3746,6 +3763,8 @@ async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
     profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
     # Only pass fields that were explicitly set
     data = req.model_dump(exclude_unset=True)
+    if "extension_ids" in data:
+        data["extension_ids"] = _validated_catalog_extension_ids(data["extension_ids"])
     tags = data.pop("tags", None)
     if tags is not None:
         data["tags"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in tags]

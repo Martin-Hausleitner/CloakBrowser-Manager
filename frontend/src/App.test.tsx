@@ -311,6 +311,19 @@ describe("toggleProfilePin", () => {
 });
 
 describe("ProfileForm profile organization", () => {
+  it("keeps raw Chromium arguments out of the operator form", () => {
+    render(
+      <ProfileForm
+        profile={null}
+        onSave={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Launch Args")).toBeNull();
+    expect(screen.getByText(/extensions and browser flags are managed by the control cli/i)).toBeTruthy();
+  });
+
   it("roundtrips organization fields while keeping sandbox as a separate access boundary", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(

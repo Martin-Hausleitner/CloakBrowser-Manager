@@ -1651,13 +1651,14 @@ Die folgenden Punkte sind **Release-Blocker**, nicht spätere Optimierungen:
 
 #### Umsetzungsstatus (27.07.2026)
 
-- **Teilweise umgesetzt:** Profile können keine manager-eigenen CDP-, Proxy-, User-Data-,
-  Web-Security- oder Sandbox-Flags mehr speichern. Das ist testgetrieben abgesichert
-  ([Commit `7c41700`](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/commit/7c41700)).
-- **Weiterhin rot:** Das ist absichtlich noch keine vollständige Allowlist. Der bestehende
-  `--load-extension`-Pfad muss zuerst von frei speicherbaren Profilargumenten in einen
-  ausschließlich serverseitig verwalteten, versionsgepinnten Extension-Katalog überführt
-  werden. Bis dahin zählt das Launch-Argument-Gate nicht als vollständig abgenommen.
+- **Umgesetzt:** Profile speichern Extension‑IDs statt lokaler Ladepfade. Create/Update,
+  die CLI und Templates akzeptieren nur IDs aus dem Server‑Katalog; der Browser löst sie erst
+  beim Launch auf. Direkt eingegebene `--load-extension`‑Flags werden abgelehnt, und alte
+  Datenbankzeilen mit solchen Flags werden beim Launch ignoriert. Die menschliche UI kann diese
+  Policy nicht mehr verändern. Der Katalog lehnt außerdem Symlink‑Pfade außerhalb seines Roots ab.
+- **Weiterhin rot:** IDs sind noch nicht an eine konkrete Artefakt‑Version und einen Content‑Digest
+  gebunden. Vor dem vollständigen Release‑Pass braucht jede katalogisierte Extension eine
+  versionsgepinnte Manifest-/Archiv‑Referenz mit Prüfsumme sowie einen expliziten Update‑Vorgang.
 
 ### 26.4 Minimaler E2E-Gate-Satz
 

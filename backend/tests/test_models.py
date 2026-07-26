@@ -119,9 +119,9 @@ def test_profile_create_launch_args_default():
     assert p.launch_args == []
 
 
-def test_profile_create_with_launch_args():
-    p = ProfileCreate(name="Test", launch_args=["--load-extension=/tmp/ext"])
-    assert p.launch_args == ["--load-extension=/tmp/ext"]
+def test_profile_create_rejects_untrusted_extension_launch_arg():
+    with pytest.raises(ValidationError, match="manager-owned"):
+        ProfileCreate(name="Test", launch_args=["--load-extension=/tmp/ext"])
 
 
 @pytest.mark.parametrize(

@@ -171,6 +171,8 @@ def cmd_profiles_create(args: argparse.Namespace) -> None:
         body["proxy"] = args.proxy
     if args.platform:
         body["platform"] = args.platform
+    if args.extension_ids is not None:
+        body["extension_ids"] = list(args.extension_ids)
     _print(_request("POST", "/api/profiles", body=body), args.json)
 
 
@@ -194,6 +196,8 @@ def cmd_profiles_update(args: argparse.Namespace) -> None:
         body["pinned"] = args.pinned
     if args.geoip is not None:
         body["geoip"] = args.geoip
+    if args.extension_ids is not None:
+        body["extension_ids"] = list(args.extension_ids)
     if not body:
         raise SystemExit("No update fields provided")
     _print(_request("PUT", f"/api/profiles/{args.profile_id}", body=body), args.json)
@@ -331,6 +335,13 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--locale")
     pc.add_argument("--proxy")
     pc.add_argument("--platform", choices=["windows", "macos", "linux"])
+    pc.add_argument(
+        "--extension-id",
+        dest="extension_ids",
+        action="append",
+        default=None,
+        help="Trusted catalog extension id; repeat to assign more than one",
+    )
     pc.add_argument("--pinned", action="store_true")
     pc.add_argument("--geoip", action="store_true")
     pc.set_defaults(func=cmd_profiles_create)
@@ -346,6 +357,13 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--locale")
     pu.add_argument("--proxy")
     pu.add_argument("--platform", choices=["windows", "macos", "linux"])
+    pu.add_argument(
+        "--extension-id",
+        dest="extension_ids",
+        action="append",
+        default=None,
+        help="Replace assigned trusted catalog extension ids; repeat for more than one",
+    )
     pu.add_argument("--pinned", type=lambda v: str(v).lower() in {"1", "true", "yes"}, default=None)
     pu.add_argument("--geoip", type=lambda v: str(v).lower() in {"1", "true", "yes"}, default=None)
     pu.set_defaults(func=cmd_profiles_update)

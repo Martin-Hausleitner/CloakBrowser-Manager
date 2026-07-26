@@ -545,6 +545,7 @@ def init_db():
                 auto_launch BOOLEAN DEFAULT 0,
                 color_scheme TEXT,
                 search_engine TEXT,
+                extension_ids TEXT NOT NULL DEFAULT '[]',
                 notes TEXT,
                 user_data_dir TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -766,6 +767,9 @@ def init_db():
         if "search_engine" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN search_engine TEXT")
             conn.commit()
+        if "extension_ids" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN extension_ids TEXT NOT NULL DEFAULT '[]'")
+            conn.commit()
         if "sandbox_id" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN sandbox_id TEXT NOT NULL DEFAULT 'default'")
             conn.commit()
@@ -978,9 +982,9 @@ def create_profile(
                 fingerprint_seed, proxy, timezone, locale, platform,
                 user_agent, screen_width, screen_height, gpu_vendor, gpu_renderer,
                 hardware_concurrency, humanize, human_preset, headless, geoip,
-                clipboard_sync, auto_launch, color_scheme, search_engine, launch_args, notes,
+                clipboard_sync, auto_launch, color_scheme, search_engine, extension_ids, launch_args, notes,
                 user_data_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 profile_id, name, sandbox_id,
                 project_id,
@@ -1007,6 +1011,7 @@ def create_profile(
                 fields.get("auto_launch", False),
                 fields.get("color_scheme"),
                 fields.get("search_engine"),
+                json.dumps(fields.get("extension_ids") or []),
                 json.dumps(fields.get("launch_args") or []),
                 fields.get("notes"),
                 user_data_dir, now, now,
@@ -1033,6 +1038,7 @@ def get_profile(profile_id: str) -> dict[str, Any] | None:
         if not row:
             return None
         profile = dict(row)
+        profile["extension_ids"] = json.loads(profile.get("extension_ids") or "[]")
         profile["launch_args"] = json.loads(profile.get("launch_args") or "[]")
         tags = conn.execute(
             "SELECT tag, color FROM profile_tags WHERE profile_id = ?",
@@ -1051,6 +1057,7 @@ def list_profiles() -> list[dict[str, Any]]:
         profiles = []
         for row in rows:
             profile = dict(row)
+            profile["extension_ids"] = json.loads(profile.get("extension_ids") or "[]")
             profile["launch_args"] = json.loads(profile.get("launch_args") or "[]")
             tags = conn.execute(
                 "SELECT tag, color FROM profile_tags WHERE profile_id = ?",
@@ -1071,7 +1078,9 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
     # Only update fields that were explicitly provided
     update_cols = []
     update_vals = []
-    # Pre-serialize launch_args to JSON before the generic update loop
+    # Pre-serialize list fields before the generic update loop
+    if "extension_ids" in fields:
+        fields["extension_ids"] = json.dumps(fields["extension_ids"] or [])
     if "launch_args" in fields:
         fields["launch_args"] = json.dumps(fields["launch_args"] or [])
 
@@ -1080,7 +1089,7 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
         "fingerprint_seed", "proxy", "timezone", "locale", "platform",
         "user_agent", "screen_width", "screen_height", "gpu_vendor", "gpu_renderer",
         "hardware_concurrency", "humanize", "human_preset", "headless", "geoip",
-        "clipboard_sync", "auto_launch", "color_scheme", "search_engine", "launch_args", "notes",
+        "clipboard_sync", "auto_launch", "color_scheme", "search_engine", "extension_ids", "launch_args", "notes",
     ):
         if col in fields:
             update_cols.append(f"{col} = ?")

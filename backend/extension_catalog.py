@@ -48,8 +48,17 @@ def _resolve_extension_path(ext_id: str) -> str | None:
     root = catalog_dir()
     if not root.exists():
         return None
+    resolved_root = root.resolve()
+
+    def is_contained(candidate: Path) -> bool:
+        try:
+            candidate.resolve().relative_to(resolved_root)
+        except ValueError:
+            return False
+        return True
+
     direct = root / ext_id
-    if (direct / "manifest.json").exists():
+    if is_contained(direct) and (direct / "manifest.json").exists():
         return str(direct.resolve())
     if direct.is_dir():
         versions = sorted(
@@ -57,7 +66,7 @@ def _resolve_extension_path(ext_id: str) -> str | None:
             key=lambda child: child.name,
         )
         for version in reversed(versions):
-            if (version / "manifest.json").exists():
+            if is_contained(version) and (version / "manifest.json").exists():
                 return str(version.resolve())
     return None
 
@@ -162,11 +171,25 @@ def defaults_payload() -> dict[str, Any]:
 
 def selected_load_extension_arg() -> str | None:
     """Build a single ``--load-extension=a,b`` arg from selected available paths."""
-    selected = set(load_selected_ids())
+    return load_extension_arg_for_ids(load_selected_ids())
+
+
+def catalog_paths_for_ids(extension_ids: list[str] | None) -> list[str]:
+    """Return existing extension directories for known catalog ids only."""
+    requested = {str(extension_id) for extension_id in (extension_ids or [])}
+    if not requested:
+        return []
     paths: list[str] = []
     for item in list_catalog_extensions(include_paths=True):
-        if item["id"] in selected and item.get("path"):
-            paths.append(str(item["path"]))
+        path = item.get("path")
+        if item["id"] in requested and isinstance(path, str) and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def load_extension_arg_for_ids(extension_ids: list[str] | None) -> str | None:
+    """Resolve only catalog-owned extension ids into a Chromium launch argument."""
+    paths = catalog_paths_for_ids(extension_ids)
     if not paths:
         return None
     return "--load-extension=" + ",".join(paths)

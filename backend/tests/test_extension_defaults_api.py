@@ -54,6 +54,29 @@ def test_extension_defaults_put_persists_selection(admin_client, tmp_path, monke
     assert json.loads((tmp_path / "extension-defaults.json").read_text())["selected_ids"] == chosen
 
 
+def test_catalog_does_not_resolve_symlinked_extension_outside_catalog(tmp_path, monkeypatch):
+    from backend import extension_catalog
+
+    catalog_root = tmp_path / "extension-catalog"
+    outside_extension = tmp_path / "outside-extension"
+    outside_extension.mkdir()
+    (outside_extension / "manifest.json").write_text("{}", encoding="utf-8")
+    catalog_root.mkdir()
+    (catalog_root / "catalog-extension").symlink_to(outside_extension, target_is_directory=True)
+    config_path = tmp_path / "extension-catalog.json"
+    config_path.write_text(
+        json.dumps({"extensions": [{"id": "catalog-extension", "name": "Catalog extension"}]}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(extension_catalog, "catalog_dir", lambda: catalog_root)
+    monkeypatch.setenv("EXTENSION_CATALOG_CONFIG", str(config_path))
+
+    item = extension_catalog.list_catalog_extensions()[0]
+    assert item["available"] is False
+    assert item["path"] is None
+
+
 def test_profile_templates_create_applies_defaults(admin_client, tmp_path, monkeypatch):
     from backend import extension_catalog
     from backend import profile_templates
@@ -80,7 +103,8 @@ def test_profile_templates_create_applies_defaults(admin_client, tmp_path, monke
     assert created.status_code == 201, created.text
     profile = created.json()
     assert profile["name"] == "Demo Generated"
-    assert any(arg.startswith("--load-extension=") for arg in profile.get("launch_args") or [])
+    assert profile.get("extension_ids") == ["ddkjiahejlhfcafbddmgiahcphecmpfh"]
+    assert profile.get("launch_args") == []
     fields = profile_templates.build_profile_fields("codex-operator")
     assert fields["harness"] == "codex"
     assert "System prompt" in (fields.get("notes") or "")

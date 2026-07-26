@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Play, Square, SendHorizontal, TerminalSquare, MonitorSmartphone } from "lucide-react";
 import {
   api,
+  type AcpxAgent,
   type OrcaAgentCli,
   type OrcaCapabilities,
   type OrcaSession,
@@ -12,9 +13,16 @@ import {
 import { ProfileViewer } from "../ProfileViewer";
 import { AgentOutputTimeline } from "./AgentOutputTimeline";
 
-type AgentMode = "browser-use" | OrcaAgentCli;
+type AgentMode = "browser-use" | "acpx" | OrcaAgentCli;
 
-const AGENT_OPTIONS: AgentMode[] = ["browser-use", "cursor-agent", "grok", "codex"];
+const AGENT_OPTIONS: AgentMode[] = ["browser-use", "acpx", "cursor-agent", "grok", "codex"];
+const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
+  { value: "codex", label: "Codex" },
+  { value: "claude", label: "Claude" },
+  { value: "cursor", label: "Cursor" },
+  { value: "grok-build", label: "Grok Build" },
+  { value: "opencode", label: "OpenCode" },
+];
 const ACTIVE_RUN_STATES = new Set(["queued", "health_check", "blocked_health", "running"]);
 const BROWSER_USE_RUN_STORAGE_PREFIX = "cloakbrowser.browser-use.last-run:";
 
@@ -47,7 +55,9 @@ function forgetBrowserUseRun(profileId: string): void {
 }
 
 function preferredAgent(profile: Profile | null): AgentMode {
-  return profile?.harness === "browser-use" ? "browser-use" : "cursor-agent";
+  if (profile?.harness === "browser-use") return "browser-use";
+  if (profile?.harness === "acpx") return "acpx";
+  return "cursor-agent";
 }
 
 function allowedOrigins(task: string): string[] {
@@ -114,6 +124,7 @@ export function AgentBrowserWorkspace({
   onViewerDisconnect,
 }: AgentBrowserWorkspaceProps) {
   const [agent, setAgent] = useState<AgentMode>(() => preferredAgent(selectedProfile));
+  const [acpxAgent, setAcpxAgent] = useState<AcpxAgent>("cursor");
   const [prompt, setPrompt] = useState("");
   const [caps, setCaps] = useState<OrcaCapabilities | null>(null);
   const [session, setSession] = useState<OrcaSession | null>(null);
@@ -142,9 +153,11 @@ export function AgentBrowserWorkspace({
 
   const unavailable = caps != null && !caps.available;
   const browserUseMode = agent === "browser-use";
-  const browserUseActive = Boolean(taskRun && ACTIVE_RUN_STATES.has(taskRun.status));
+  const acpxMode = agent === "acpx";
+  const managedRunMode = browserUseMode || acpxMode;
+  const managedRunActive = Boolean(taskRun && ACTIVE_RUN_STATES.has(taskRun.status));
   const orcaSessionActive = session?.status === "running" || session?.status === "starting";
-  const sessionActive = browserUseMode ? browserUseActive : orcaSessionActive;
+  const sessionActive = managedRunMode ? managedRunActive : orcaSessionActive;
   const originList = useMemo(() => allowedOrigins(prompt), [prompt]);
   const healthFailedReasons = useMemo(
     () => healthReasonList(taskRun?.health_decision?.failed_reasons),
@@ -154,21 +167,21 @@ export function AgentBrowserWorkspace({
     () => healthReasonList(taskRun?.health_decision?.non_overridable_reasons),
     [taskRun?.health_decision],
   );
-  const hasModePermissions = browserUseMode
+  const hasModePermissions = managedRunMode
     ? canAutomate
     : canAutomate && canInteract;
   const canStart =
     Boolean(selectedProfile) &&
     selectedProfile?.status === "running" &&
     hasModePermissions &&
-    (browserUseMode ? Boolean(prompt.trim()) && originList.length > 0 : !unavailable) &&
+    (managedRunMode ? Boolean(prompt.trim()) && originList.length > 0 : !unavailable) &&
     !sessionActive &&
     !busy;
-  const canSend = Boolean(!browserUseMode && sessionActive && canInteract && prompt.trim() && !busy);
+  const canSend = Boolean(!managedRunMode && sessionActive && canInteract && prompt.trim() && !busy);
   const canStop = Boolean(
-    (browserUseMode ? canAutomate : canInteract) &&
+    (managedRunMode ? canAutomate : canInteract) &&
     !busy &&
-    (browserUseMode
+    (managedRunMode
       ? taskRun && ACTIVE_RUN_STATES.has(taskRun.status)
       : session && session.status !== "closed"),
   );
@@ -265,7 +278,7 @@ export function AgentBrowserWorkspace({
         setTaskOutputs(nextOutputs);
         if (!ACTIVE_RUN_STATES.has(nextRun.status)) stopRunPolling();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to read Browser Use run");
+        setError(err instanceof Error ? err.message : "Failed to read managed browser run");
       }
     },
     [stopRunPolling],
@@ -273,12 +286,12 @@ export function AgentBrowserWorkspace({
 
   useEffect(() => {
     stopRunPolling();
-    if (!browserUseMode || !taskRun || !ACTIVE_RUN_STATES.has(taskRun.status)) return;
+    if (!managedRunMode || !taskRun || !ACTIVE_RUN_STATES.has(taskRun.status)) return;
     runPollRef.current = window.setInterval(() => {
       void refreshBrowserUseRun(taskRun.id);
     }, 1500);
     return stopRunPolling;
-  }, [browserUseMode, refreshBrowserUseRun, stopRunPolling, taskRun?.id, taskRun?.status]);
+  }, [managedRunMode, refreshBrowserUseRun, stopRunPolling, taskRun?.id, taskRun?.status]);
 
   useEffect(() => {
     const node = transcriptEndRef.current;
@@ -314,7 +327,6 @@ export function AgentBrowserWorkspace({
     const profileId = selectedProfile?.id;
     const rememberedRunId = profileId ? readRememberedBrowserUseRun(profileId) : null;
     if (profileId && rememberedRunId) {
-      setAgent("browser-use");
       void Promise.all([
         api.getTaskRun(rememberedRunId),
         api.listTaskRunOutputs(rememberedRunId),
@@ -325,6 +337,10 @@ export function AgentBrowserWorkspace({
             forgetBrowserUseRun(profileId);
             setAgent(preferredAgent(selectedProfile));
             return;
+          }
+          setAgent(rememberedRun.harness === "acpx" ? "acpx" : "browser-use");
+          if (rememberedRun.harness === "acpx" && rememberedRun.agent) {
+            setAcpxAgent(rememberedRun.agent);
           }
           setTaskSessionId(rememberedRun.task_session_id);
           setTaskRun(rememberedRun);
@@ -366,29 +382,35 @@ export function AgentBrowserWorkspace({
     setBusy(true);
     setError(null);
     try {
-      if (browserUseMode) {
+      if (managedRunMode) {
         const task = prompt.trim();
         const origins = allowedOrigins(task);
         if (!origins.length) {
-          throw new Error("Browser Use tasks must include an explicit http(s) URL.");
+          throw new Error("Managed browser tasks must include an explicit http(s) URL.");
         }
+        const managedHarness = acpxMode ? "acpx" : "browser-use";
         let sessionId = taskSessionId;
         if (!sessionId) {
           const created = await api.createTaskSession({
             profile_id: selectedProfile.id,
             title: task.slice(0, 120),
-            metadata: { source: "agent-browser-workspace", harness: "browser-use" },
+            metadata: {
+              source: "agent-browser-workspace",
+              harness: managedHarness,
+              ...(acpxMode ? { agent: acpxAgent } : {}),
+            },
           });
           sessionId = created.id;
           setTaskSessionId(created.id);
         }
         const started = await api.createTaskRun(sessionId, {
-          harness: "browser-use",
+          harness: managedHarness,
+          agent: acpxMode ? acpxAgent : null,
           task,
           profile_id: selectedProfile.id,
           allowed_origins: origins,
           timeout_seconds: 360,
-          model_alias: "cursor-grok-4.5-low",
+          model_alias: browserUseMode ? "cursor-grok-4.5-low" : null,
         });
         rememberBrowserUseRun(selectedProfile.id, started.id);
         setTaskRun(started);
@@ -413,7 +435,7 @@ export function AgentBrowserWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [agent, browserUseMode, canStart, prompt, selectedProfile, taskSessionId]);
+  }, [acpxAgent, acpxMode, agent, browserUseMode, canStart, managedRunMode, prompt, selectedProfile, taskSessionId]);
 
   const handleSend = useCallback(async () => {
     if (!session || !canSend) return;
@@ -437,7 +459,7 @@ export function AgentBrowserWorkspace({
     setBusy(true);
     setError(null);
     try {
-      if (browserUseMode && taskRun) {
+      if (managedRunMode && taskRun) {
         const cancelled = await api.cancelTaskRun(taskRun.id);
         setTaskRun(cancelled);
         stopRunPolling();
@@ -452,7 +474,7 @@ export function AgentBrowserWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [browserUseMode, canStop, session, stopPolling, stopRunPolling, taskRun]);
+  }, [canStop, managedRunMode, session, stopPolling, stopRunPolling, taskRun]);
 
   const handleRetryRunHealth = useCallback(async () => {
     if (!taskRun || taskRun.status !== "blocked_health" || !canAutomate || busy) return;
@@ -483,7 +505,7 @@ export function AgentBrowserWorkspace({
     try {
       const updated = await api.overrideTaskRunHealth(
         taskRun.id,
-        "Operator approved this Browser Use run after reviewing the displayed profile health gate.",
+        "Operator approved this managed browser run after reviewing the displayed profile health gate.",
       );
       setTaskRun(updated);
     } catch (err) {
@@ -528,15 +550,17 @@ export function AgentBrowserWorkspace({
           <TerminalSquare className="h-3.5 w-3.5 text-[#8b8b8b]" />
           <div className="min-w-0 flex-1">
             <div className="truncate text-[12px] font-semibold tracking-tight">
-              {browserUseMode ? "Browser Use" : "Orca CLI"}
+              {browserUseMode ? "Browser Use" : acpxMode ? "ACPX / ACP" : "Orca CLI"}
             </div>
             <div className="truncate text-[10px] text-[#8b8b8b]" data-testid="orca-connection-status">
-              {browserUseMode
+              {managedRunMode
                 ? taskRun
                   ? `Managed worker · ${taskRun.id}`
-                  : "Managed VCVM worker"
+                  : acpxMode
+                    ? `Managed run · ${acpxAgent} · availability checked after queue`
+                    : "Managed VCVM worker"
                 : statusLabel(session, caps)}
-              {!browserUseMode && session ? ` · ${session.terminal_handle}` : ""}
+              {!managedRunMode && session ? ` · ${session.terminal_handle}` : ""}
             </div>
           </div>
           <span
@@ -545,7 +569,7 @@ export function AgentBrowserWorkspace({
             }`}
             data-testid="orca-run-status"
           >
-            {browserUseMode ? taskRun?.status ?? "idle" : session?.status ?? "idle"}
+            {managedRunMode ? taskRun?.status ?? "idle" : session?.status ?? "idle"}
           </span>
         </header>
 
@@ -579,15 +603,38 @@ export function AgentBrowserWorkspace({
             className="input h-8 max-w-[10rem] bg-[#1a1a1a] py-1 text-[11px]"
             value={agent}
             onChange={(event) => setAgent(event.target.value as AgentMode)}
-            disabled={sessionActive || (!browserUseMode && unavailable)}
+            disabled={sessionActive || (!managedRunMode && unavailable)}
             data-testid="orca-agent-select"
           >
             {AGENT_OPTIONS.map((option) => (
               <option key={option} value={option}>
-                {option === "browser-use" ? "Browser Use" : option}
+                {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option}
               </option>
             ))}
           </select>
+
+          {acpxMode ? (
+            <>
+              <label className="sr-only" htmlFor="acpx-agent">
+                ACP agent
+              </label>
+              <select
+                id="acpx-agent"
+                className="input h-8 max-w-[9rem] bg-[#1a1a1a] py-1 text-[11px]"
+                value={acpxAgent}
+                onChange={(event) => setAcpxAgent(event.target.value as AcpxAgent)}
+                disabled={sessionActive}
+                data-testid="acpx-agent-select"
+                aria-label="ACP agent"
+              >
+                {ACPX_AGENT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </>
+          ) : null}
 
           <div className="ml-auto flex items-center gap-1.5">
             <button
@@ -597,14 +644,14 @@ export function AgentBrowserWorkspace({
               disabled={!canStart}
               data-testid="orca-launch"
               title={
-                !browserUseMode && unavailable
+                !managedRunMode && unavailable
                   ? "Orca runtime unavailable"
                   : !hasModePermissions
-                    ? browserUseMode
+                    ? managedRunMode
                       ? "Requires automate"
                       : "Requires automate and interact"
-                    : browserUseMode
-                      ? "Run Browser Use on this live profile"
+                    : managedRunMode
+                      ? `Run ${acpxMode ? `ACPX with ${acpxAgent}` : "Browser Use"} on this live profile`
                       : "Launch Orca agent session"
               }
             >
@@ -626,11 +673,11 @@ export function AgentBrowserWorkspace({
 
         <div className="flex flex-wrap gap-1.5 border-b border-[#2a2a2a] px-3 py-1.5 text-[10px] text-[#8b8b8b]">
           <span data-testid="orca-cap-pause">
-            {browserUseMode ? "outputs: typed" : "pause: unavailable"}
+            {managedRunMode ? "outputs: typed" : "pause: unavailable"}
           </span>
           <span>·</span>
           <span data-testid="orca-cap-resume">
-            {browserUseMode ? "worker: managed" : "resume: unavailable"}
+            {managedRunMode ? (acpxMode ? "session: ACP" : "worker: managed") : "resume: unavailable"}
           </span>
           <span>·</span>
           <span>
@@ -644,7 +691,7 @@ export function AgentBrowserWorkspace({
           </div>
         ) : null}
 
-        {browserUseMode && taskRun?.status === "blocked_health" ? (
+        {managedRunMode && taskRun?.status === "blocked_health" ? (
           <div
             className="border-b border-amber-800/50 bg-amber-950/35 px-3 py-2 text-[11px] text-amber-100"
             data-testid="browser-use-health-gate"
@@ -686,7 +733,7 @@ export function AgentBrowserWorkspace({
           </div>
         ) : null}
 
-        {!browserUseMode && unavailable ? (
+        {!managedRunMode && unavailable ? (
           <div
             className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1.5 text-[11px] text-amber-200"
             data-testid="orca-unavailable"
@@ -697,16 +744,16 @@ export function AgentBrowserWorkspace({
           </div>
         ) : null}
 
-        {browserUseMode ? (
+        {managedRunMode ? (
           <div
             className="min-h-0 flex-1 overflow-auto bg-[#0a0a0a] px-3 py-2"
-            data-testid="browser-use-output"
+            data-testid={browserUseMode ? "browser-use-output" : "managed-agent-output"}
           >
             {taskOutputs.length ? (
               <AgentOutputTimeline outputs={taskOutputs} />
             ) : (
               <p className="text-[11px] text-[#777]">
-                Add an explicit URL, then run Browser Use. Actions, screenshots, data and the
+                Add an explicit URL, then run {acpxMode ? `ACPX with ${acpxAgent}` : "Browser Use"}. Actions, screenshots, data and the
                 final summary appear here as typed cards.
               </p>
             )}
@@ -726,7 +773,7 @@ export function AgentBrowserWorkspace({
           className="flex items-end gap-2 border-t border-[#2a2a2a] bg-[#141414] px-3 py-2"
           onSubmit={(event) => {
             event.preventDefault();
-            void (browserUseMode && !sessionActive ? handleStart() : handleSend());
+            void (managedRunMode && !sessionActive ? handleStart() : handleSend());
           }}
         >
           <label className="sr-only" htmlFor="orca-prompt">
@@ -739,23 +786,23 @@ export function AgentBrowserWorkspace({
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             placeholder={
-              browserUseMode
+              managedRunMode
                 ? "Describe the task and include an explicit https:// URL…"
                 : sessionActive
                 ? "Send follow-up to the live Orca CLI…"
                 : "Initial prompt (optional) · uses CloakBrowser control skill"
             }
-            disabled={(!browserUseMode && unavailable) || (sessionActive && browserUseMode)}
+            disabled={(!managedRunMode && unavailable) || (sessionActive && managedRunMode)}
             data-testid="orca-prompt"
           />
           <button
             type="submit"
             className="btn btn-primary inline-flex h-9 items-center gap-1 px-2.5 text-[11px]"
-            disabled={browserUseMode ? !canStart : !canSend}
+            disabled={managedRunMode ? !canStart : !canSend}
             data-testid="orca-send"
           >
             <SendHorizontal className="h-3.5 w-3.5" />
-            {browserUseMode ? "Run" : "Send"}
+            {managedRunMode ? "Run" : "Send"}
           </button>
         </form>
       </section>

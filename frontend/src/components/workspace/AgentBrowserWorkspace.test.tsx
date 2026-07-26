@@ -545,6 +545,84 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("browser-use-output")).toBeTruthy();
   });
 
+  it("starts ACPX with the selected ACP agent and renders typed outputs", async () => {
+    const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
+    apiMock.createTaskSession.mockResolvedValue({
+      id: "task-acpx",
+      profile_id: acpxProfile.id,
+      sandbox_id: "default",
+      title: "Inspect example.com",
+      status: "active",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-27T00:00:00Z",
+      updated_at: "2026-07-27T00:00:00Z",
+      metadata: {},
+    });
+    apiMock.createTaskRun.mockResolvedValue({
+      id: "run-acpx",
+      task_session_id: "task-acpx",
+      task_message_id: "message-acpx",
+      profile_id: acpxProfile.id,
+      profile_id_snapshot: acpxProfile.id,
+      sandbox_id: "default",
+      harness: "acpx",
+      agent: "cursor",
+      status: "running",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: null,
+      deadline_at: "2026-07-27T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {},
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-27T00:00:00Z",
+      updated_at: "2026-07-27T00:00:00Z",
+    });
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[acpxProfile]}
+        selectedProfile={acpxProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("orca-launch");
+    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("acpx");
+    expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).toBe("cursor");
+    fireEvent.change(screen.getByTestId("acpx-agent-select"), {
+      target: { value: "opencode" },
+    });
+    fireEvent.change(screen.getByTestId("orca-prompt"), {
+      target: { value: "Inspect https://example.com" },
+    });
+    fireEvent.click(screen.getByTestId("orca-launch"));
+
+    await waitFor(() => {
+      expect(apiMock.createTaskSession).toHaveBeenCalledWith(expect.objectContaining({
+        metadata: { source: "agent-browser-workspace", harness: "acpx", agent: "opencode" },
+      }));
+      expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+        "task-acpx",
+        expect.objectContaining({
+          harness: "acpx",
+          agent: "opencode",
+          profile_id: acpxProfile.id,
+          allowed_origins: ["https://example.com"],
+        }),
+      );
+    });
+    expect(screen.getByTestId("managed-agent-output")).toBeTruthy();
+  });
+
   it("restores the last Browser Use run after the live workspace remounts", async () => {
     const completedRun: TaskRun = {
       id: "run-restored",

@@ -236,6 +236,17 @@ describe("MobileSplitScreen", () => {
     expect(screen.getByText("OpenCode · saved only")).toBeTruthy();
   });
 
+  it("keeps the ACPX preference visible on the compact mobile task surface", async () => {
+    delete window.cloakBrowserHarness;
+    renderMobileSplit({
+      selected: { ...stoppedProfile, harness: "acpx" },
+      profiles: [{ ...stoppedProfile, harness: "acpx" }],
+    });
+
+    expect(await screen.findByText("ACPX · saved only")).toBeTruthy();
+    expect(screen.getByPlaceholderText("Save task to server history...")).toBeTruthy();
+  });
+
   it("includes preferred harness and bridge metadata when sending tasks", async () => {
     const { send } = installTaskHarness();
     renderMobileSplit({ selected: secondRunningProfile, selectedId: secondRunningProfile.id });

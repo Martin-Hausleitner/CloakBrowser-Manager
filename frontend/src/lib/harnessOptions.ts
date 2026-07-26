@@ -18,6 +18,13 @@ export const HARNESS_OPTIONS: HarnessOption[] = [
     description: "Excerpt-style agent shell · CDP browser control",
   },
   {
+    value: "acpx",
+    label: "ACPX / ACP",
+    short: "ACP",
+    approach: "agent-bridge",
+    description: "Persistent ACP sessions · Codex, Claude, Cursor, Grok Build or OpenCode",
+  },
+  {
     value: "browser-harness",
     label: "Browser Harness",
     short: "BH",

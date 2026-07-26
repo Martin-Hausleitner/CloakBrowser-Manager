@@ -9,6 +9,7 @@
 **Planstand:** `5d5d90e3e13c30e5a79df8b77107d55cd80718ae`  
 **Zielbetrieb:** VCVM und lokaler Mac, privat über Tailscale/Loopback  
 **Status dieses Berichts:** finale Architektur- und Auswahlentscheidung; keine Behauptung, dass alle Zielmodule bereits implementiert sind
+**Deep-Research-Revalidierung:** 27. Juli 2026; drei primäre und mehr als zwanzig zusätzliche Grok-Build-Research-Lanes, danach Primärquellen- und Summenprüfung
 
 ---
 
@@ -1317,7 +1318,7 @@ Empfohlene Entscheidungen:
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 - [openai/codex](https://github.com/openai/codex)
 - [xai-org/grok-build](https://github.com/xai-org/grok-build)
-- [opencode-ai/opencode](https://github.com/opencode-ai/opencode)
+- [anomalyco/opencode](https://github.com/anomalyco/opencode) — aktives kanonisches Repository; `opencode-ai/opencode` ist archiviert
 - [anthropics/claude-code](https://github.com/anthropics/claude-code)
 - [stablyai/orca](https://github.com/stablyai/orca)
 
@@ -1333,7 +1334,277 @@ Empfohlene Entscheidungen:
 
 ---
 
-## 25. Abschluss
+## 25. Grok-Build Deep-Research-Revalidierung — 27. Juli 2026
+
+### 25.1 Methodik und Beweisstandard
+
+Die Revalidierung wurde nicht als einzelner Modell-Output behandelt. Drei primäre Grok-Build-Deep-Researches untersuchten unabhängig:
+
+1. Secret-, Identity- und UI-Plattformen
+2. ACPX, ACP, MCP, Browser-Harnesses und Terminal-CLIs
+3. Systemidentität, Passkeys, Machine Identities, Sicherheits- und Betriebsgrenzen
+
+Danach wurden mehr als zwanzig zusätzliche, thematisch getrennte Grok-Build-Lanes gestartet. Abgebrochene Lanes wurden mit kleinerem Kontext erneut ausgeführt. In die Entscheidung flossen nur Aussagen ein, die durch offizielle GitHub-Repositories, Releases, Lizenzen, Standards oder offizielle Produktdokumentation gestützt werden konnten.
+
+Jede Scorecard verwendet exakt **20 Kriterien mit 0 bis 10 Punkten**. Das Maximum beträgt **200 Punkte**. Die Scores sind innerhalb einer Produktfamilie vergleichbar; ein Vault wird nicht direkt gegen einen VNC-Transport oder eine Coding-CLI gerankt.
+
+| Punkte | Bedeutung |
+| ---: | --- |
+| 0–2 | nicht vorhanden, nicht öffentlich belegt oder für diesen Zweck ungeeignet |
+| 3–4 | teilweise vorhanden, aber mit deutlichen Lücken oder nur schwach dokumentiert |
+| 5–7 | belastbar dokumentiert und für einen begrenzten Produktivpfad geeignet |
+| 8–9 | stark, aktuell gepflegt und mit klarer Integrationsoberfläche |
+| 10 | vollständig, versioniert, wiederholbar und für den Zielpfad besonders passend |
+
+Zusätzlich gilt:
+
+- keine Bonusgewichte oder versteckten Multiplikatoren
+- fehlender öffentlicher Quellcode senkt nur Transparenz und Confidence, nicht automatisch jede Funktion
+- Scores ohne reproduzierbare technische Belege erhalten höchstens mittlere Confidence
+- Release-Aktivität ist ein Wartungssignal, kein Sicherheitsbeweis
+- jede produktive Entscheidung benötigt weiterhin einen eigenen E2E-, Security- und Capacity-Gate
+
+### 25.2 Scorecard A — Identity, Secrets und Vault-UIs
+
+Die 20 Kriterien dieser Familie sind:
+
+`F01 OSS` · `F02 Lizenzklarheit` · `F03 Multi-User` · `F04 RBAC` · `F05 Machine Identity` · `F06 Secret Assignment` · `F07 Passkeys` · `F08 TOTP` · `F09 SSH` · `F10 PKI/CA` · `F11 Rotation/Dynamic Secrets` · `F12 API` · `F13 SDK` · `F14 CLI` · `F15 Audit/Approval` · `F16 UI-Wiederverwendung` · `F17 Betriebsgewicht` · `F18 Release-Aktivität` · `F19 Agent/MCP-Fit` · `F20 NotebookLM/LM-Fit`.
+
+Die Summen wurden nach der Agentenkonsolidierung erneut mathematisch geprüft; mehrere Rohantworten enthielten falsche Additionen und wurden nicht unverändert übernommen.
+
+| Rang | Plattform und GitHub | F01–F20 | Gesamt | Rolle im Zielbild |
+| ---: | --- | --- | ---: | --- |
+| 1 | [Infisical](https://github.com/Infisical/infisical) | `10,7,10,10,9,8,4,5,7,10,10,10,10,10,9,6,6,10,10,10` | **171/200** | Machine-/Agent-Secrets, Rotation, PKI, Approval |
+| 2 | [Keeper Secrets Manager](https://github.com/Keeper-Security/secrets-manager) + [Commander](https://github.com/Keeper-Security/Commander) + [Keeper MCP](https://github.com/Keeper-Security/keeper-mcp-golang-docker) | `10,9,10,10,8,8,6,6,8,7,9,10,10,10,9,2,4,10,10,10` | **166/200** | stärkste kommerzielle Agent-/MCP-Alternative |
+| 3 | [OpenBao](https://github.com/openbao/openbao) | `10,9,9,10,10,8,2,1,9,10,10,9,4,10,10,3,5,10,7,4` | **150/200** | optionales infra-zentriertes Secret-/PKI-Backend |
+| 4 | [1Password Connect](https://github.com/1Password/connect) + [Operator](https://github.com/1Password/onepassword-operator) | `9,8,8,9,4,6,8,8,1,2,5,10,2,3,7,2,7,9,5,7` | **120/200** | kommerzielle Human-/Automation-Alternative |
+| 5 | [Vaultwarden](https://github.com/dani-garcia/vaultwarden) + [Bitwarden Clients](https://github.com/bitwarden/clients) | `10,9,9,7,1,4,7,8,5,2,3,10,1,3,7,10,9,9,2,3` | **119/200** | beste leichte Human-Vault- und Autofill-Oberfläche |
+| 6 | [Passbolt API](https://github.com/passbolt/passbolt_api) + [Styleguide](https://github.com/passbolt/passbolt_styleguide) + [Extension](https://github.com/passbolt/passbolt_browser_extension) + [Go Client](https://github.com/passbolt/go-passbolt) | `10,9,9,8,3,5,3,8,4,1,2,8,1,4,6,8,6,8,2,3` | **108/200** | UI-Komponenten-/Extension-Alternative; AGPL und API-RBAC beachten |
+| 7 | [Padloc](https://github.com/padloc/padloc) | `10,9,6,6,2,3,5,5,3,3,4,3,1,3,5,5,4,3,2,2` | **84/200** | modulare PWA-Ideen, aber alter Release-Stand |
+| 8 | [KeePassXC](https://github.com/keepassxreboot/keepassxc) + [KeePassXC Browser](https://github.com/keepassxreboot/keepassxc-browser) | `10,10,2,1,0,1,6,6,7,1,1,1,1,1,6,8,10,8,1,1` | **82/200** | Offline-/Import-/Export- und lokaler SSH-/Passkey-Pfad |
+| 9 | [TeamPass](https://github.com/nilsteampassnet/TeamPass) | `9,10,8,5,1,3,2,2,2,1,1,4,1,2,3,6,4,7,1,1` | **73/200** | aktiver Legacy-Manager; nicht als neue Kernarchitektur |
+| 10 | [Psono Server](https://github.com/psono/psono-server) + [Client](https://github.com/psono/psono-client) | `9,4,7,5,2,3,1,6,2,1,1,6,1,1,3,3,5,8,1,1` | **70/200** | Whole-App-Alternative, schwacher Agent-/CLI-Fit |
+| 11 | [sysPass](https://github.com/nuxsmin/sysPass) | `9,10,7,4,1,2,2,2,2,1,1,5,1,2,3,6,3,5,1,1` | **68/200** | veraltete PHP-Basis; keine Empfehlung für Neubau |
+| 12 | [Strongbox](https://github.com/strongbox-password-safe/Strongbox) | `7,7,2,1,0,1,5,5,5,1,1,1,1,1,4,4,8,5,1,1` | **61/200** | Apple-/KDBX-Client, keine zentrale Control Plane |
+
+#### Ergebnis der Secret-Scorecard
+
+Die Architekturentscheidung bleibt richtig, wird aber präziser:
+
+- **Vaultwarden/Bitwarden** bleibt die Human-Vault-Oberfläche.
+- **Infisical** bleibt die erste Wahl für Agenten, Machine Identities, Rotation und PKI.
+- **Keeper** steigt als stärkste kommerzielle MCP-/Agentenalternative deutlich auf.
+- **OpenBao** bleibt ein optionaler fortgeschrittener Provider, nicht der Endnutzer-Vault.
+- **KeePassXC/KDBX** erhält einen klaren Offline-/Migration-Adapterpfad.
+- **Passbolt** ist nur dann interessant, wenn echte React-/Extension-Wiederverwendung wichtiger als AGPL- und Kopplungsaufwand ist.
+
+### 25.3 Scorecard B — IAM, SSO und Service Accounts
+
+Die 20 IAM-Kriterien sind Release-Aktivität, Lizenz, User, Groups, Service Accounts, OIDC, SAML, SCIM, Passkeys, RBAC, Audit, Admin-UI, API, CLI, SDKs, Deployment, Gewicht, Cloud/Self-host-Parität, Hooks/Events und NotebookLM/LM-Fit.
+
+| Plattform und GitHub | F01–F20 | Gesamt | Entscheidung |
+| --- | --- | ---: | --- |
+| [ZITADEL](https://github.com/zitadel/zitadel) | `10,6,10,10,10,10,10,10,10,10,10,10,10,6,10,10,6,10,10,8` | **186/200** | stärkster Out-of-the-Box-IAM-Kandidat; AGPL-/Policy-Prüfung erforderlich |
+| [Keycloak](https://github.com/keycloak/keycloak) | `9,9,10,10,9,10,10,10,6,8,4,9,9,6,6,10,4,0,6,7` | **152/200** | reifste klassische Enterprise-IAM-Alternative |
+| [Authentik](https://github.com/goauthentik/authentik) | `9,7,7,7,2,10,10,8,1,6,1,7,5,2,1,10,6,4,8,5` | **116/200** | gutes leichtes SSO, aber öffentliche Root-Dokumentation belegt weniger Service-/Audit-Tiefe |
+
+Die frühere Aussage „Authentik oder Keycloak später“ wird verschärft:
+
+> Sobald mehr als ein externer Dienst dauerhaft produktiv betrieben wird oder SCIM/Service-Account-Governance benötigt wird, muss die IAM-Entscheidung **vor** dem Produktions-Rollout fallen. ZITADEL gehört als zusätzliche Option in dieses Gate.
+
+### 25.4 Scorecard C — ACPX, Harnesses, Browsersteuerung und Terminal-CLIs
+
+Diese Scorecard verwendet je Unterfamilie 20 gleich gewichtete technische Kriterien. Die Vektoren werden nur innerhalb derselben Unterfamilie verglichen.
+
+#### ACP/ACPX
+
+[Agent Client Protocol](https://github.com/agentclientprotocol/agent-client-protocol) hat am 21. Juli 2026 das stabile Schema `v1.20.0` veröffentlicht. [ACPX](https://github.com/openclaw/acpx) ist weiterhin aktuell auf `v0.12.1` und unterstützt `grok-build` als eingebauten Adapter.
+
+| Lösung | Gesamt | Wichtigste Aussage |
+| --- | ---: | --- |
+| [openclaw/acpx](https://github.com/openclaw/acpx) auf [ACP](https://github.com/agentclientprotocol/agent-client-protocol) | **176/200** | beste wiederverwendbare Session-/Adapter-Schicht; pinnen, per-Agent-Preflight und fail-closed Permissions bleiben Pflicht |
+| [MCP Spec](https://github.com/modelcontextprotocol/modelcontextprotocol) + [Python SDK](https://github.com/modelcontextprotocol/python-sdk) | **154/200** | beste Tool-/Resource-Schicht; stabile Spec/SDK-Linie pinnen, v2/RC nicht ungeprüft produktiv übernehmen |
+
+#### Browsersteuerung
+
+Die 20 Kriterien umfassen AI-/Browser-Fit, Dokumentation, Releases, Lizenz, CDP, CLI, SDK/API, MCP, Engines, Profile, deterministische Selektoren, typisierte Outputs, Cancel, Timeouts, Mobile, Streaming, Observability, Auth-State, LM-Fit und CloakBrowser-Wiederverwendung.
+
+| Plattform und GitHub | F01–F20 | Gesamt | Entscheidung |
+| --- | --- | ---: | --- |
+| [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser) | `10,10,10,10,10,10,9,10,8,10,10,10,2,9,9,10,9,10,9,9` | **184/200** | stärkster neuer Out-of-the-Box-Kandidat für CDP, JSON, MCP, Streaming und Mobile |
+| [microsoft/playwright](https://github.com/microsoft/playwright) | `10,10,10,10,7,10,10,9,10,7,8,5,10,6,10,0,7,7,7,7` | **160/200** | stabilste allgemeine Browserautomationsbasis und Test-Harness |
+| [browser-use/browser-use](https://github.com/browser-use/browser-use) + [web-ui](https://github.com/browser-use/web-ui) | `8,9,8,9,10,7,8,8,6,9,10,8,2,2,8,7,9,7,8,10` | **153/200** | Referenz für Agent-UX und Browserautomation; Mobile/NotebookLM nicht nativ |
+| [browserbase/stagehand](https://github.com/browserbase/stagehand) | `8,6,9,10,9,6,6,2,1,1,2,9,0,0,0,0,2,2,6,4` | **83/200** | sinnvoller High-Level-Worker, aber Root-Belege für Lifecycle/Streaming/Mobile schwächer |
+
+Die Summen wurden aus den 20 sichtbaren Werten neu berechnet; sie weichen deshalb von einzelnen Agenten-Rohsummen ab.
+
+#### Terminal-/Coding-Harnesses
+
+Die 20 Kriterien sind ACP, MCP, Auth, Sessions, Headless/CI, Permissions, Output, Cancel, Lizenz, Datenschutz, Browser-Fit, Desktop, IDE, Multi-Agent, Installation, Plattformen, Erweiterbarkeit, Release-Aktivität, Release-Details und NotebookLM/LM-Fit.
+
+| Harness und GitHub | F01–F20 | Gesamt | Einordnung |
+| --- | --- | ---: | --- |
+| [OpenAI Codex](https://github.com/openai/codex) | `0,8,9,8,3,7,8,6,10,4,8,8,9,9,10,9,8,10,10,0` | **144/200** | sehr starker direkter CLI-Harness; ACP über ACPX-Adapter |
+| [xAI Grok Build](https://github.com/xai-org/grok-build) | `10,9,10,6,10,1,3,1,10,1,10,0,5,6,10,9,8,2,6,0` | **117/200** | natives ACP, sehr gut für headless Research-/Build-Lanes |
+| [OpenCode](https://github.com/anomalyco/opencode) | `0,1,1,3,1,7,6,2,10,1,7,9,1,5,10,9,4,10,8,0` | **95/200** | aktiver kanonischer Pfad; alter `opencode-ai/opencode`-Link entfernt |
+| [Anthropic Claude Code](https://github.com/anthropics/claude-code) | `0,0,5,2,0,1,1,0,1,9,1,0,9,1,9,9,7,10,3,0` | **68/200** | funktional wichtig, aber Repository-Lizenz ist „all rights reserved“, kein permissives OSS-Backend |
+| [stablyai/orca](https://github.com/stablyai/orca) | familiespezifisch bewertet | **171/200** | stärkste fertige UX-/Remote-IDE-Referenz: Worktrees, Terminal, Browser, Remote Server, Mobile und Skills |
+
+### 25.5 Direkte GitHub-Repository-Landkarte
+
+#### CloakBrowser, Browser und Harnesses
+
+- [CloakHQ/CloakBrowser-Manager](https://github.com/CloakHQ/CloakBrowser-Manager) — Upstream, in diesem Auftrag nicht verändert
+- [Martin-Hausleitner/CloakBrowser-Manager](https://github.com/Martin-Hausleitner/CloakBrowser-Manager) — Martins Entwicklungsfork
+- [browser-use/browser-use](https://github.com/browser-use/browser-use)
+- [browser-use/web-ui](https://github.com/browser-use/web-ui)
+- [browser-use/template-library](https://github.com/browser-use/template-library)
+- [browserbase/stagehand](https://github.com/browserbase/stagehand)
+- [microsoft/playwright](https://github.com/microsoft/playwright)
+- [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser)
+- [browserless/browserless](https://github.com/browserless/browserless)
+- [stablyai/orca](https://github.com/stablyai/orca)
+- [openai/codex](https://github.com/openai/codex)
+- [anthropics/claude-code](https://github.com/anthropics/claude-code)
+- [xai-org/grok-build](https://github.com/xai-org/grok-build)
+- [anomalyco/opencode](https://github.com/anomalyco/opencode)
+- Cursor CLI: kein eigenständiges, im Report belastbar identifiziertes offizielles Open-Source-Kernrepository; Produktdokumentation separat behandeln
+
+#### Protokolle und Agentenintegration
+
+- [agentclientprotocol/agent-client-protocol](https://github.com/agentclientprotocol/agent-client-protocol)
+- [openclaw/acpx](https://github.com/openclaw/acpx)
+- [modelcontextprotocol/modelcontextprotocol](https://github.com/modelcontextprotocol/modelcontextprotocol)
+- [modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk)
+
+#### Human Vault, Machine Secrets und Offline-Provider
+
+- [dani-garcia/vaultwarden](https://github.com/dani-garcia/vaultwarden)
+- [dani-garcia/bw_web_builds](https://github.com/dani-garcia/bw_web_builds)
+- [bitwarden/clients](https://github.com/bitwarden/clients)
+- [bitwarden/sdk-sm](https://github.com/bitwarden/sdk-sm)
+- [Infisical/infisical](https://github.com/Infisical/infisical)
+- [openbao/openbao](https://github.com/openbao/openbao)
+- [passbolt/passbolt_api](https://github.com/passbolt/passbolt_api)
+- [passbolt/passbolt_styleguide](https://github.com/passbolt/passbolt_styleguide)
+- [passbolt/passbolt_browser_extension](https://github.com/passbolt/passbolt_browser_extension)
+- [passbolt/go-passbolt](https://github.com/passbolt/go-passbolt)
+- [passbolt/go-passbolt-cli](https://github.com/passbolt/go-passbolt-cli)
+- [psono/psono-server](https://github.com/psono/psono-server)
+- [psono/psono-client](https://github.com/psono/psono-client)
+- [padloc/padloc](https://github.com/padloc/padloc)
+- [nilsteampassnet/TeamPass](https://github.com/nilsteampassnet/TeamPass)
+- [nuxsmin/sysPass](https://github.com/nuxsmin/sysPass)
+- [keepassxreboot/keepassxc](https://github.com/keepassxreboot/keepassxc)
+- [keepassxreboot/keepassxc-browser](https://github.com/keepassxreboot/keepassxc-browser)
+- [strongbox-password-safe/Strongbox](https://github.com/strongbox-password-safe/Strongbox)
+- [keeweb/kdbxweb](https://github.com/keeweb/kdbxweb)
+- [keeweb/keeweb](https://github.com/keeweb/keeweb)
+- [1Password/connect](https://github.com/1Password/connect)
+- [1Password/onepassword-operator](https://github.com/1Password/onepassword-operator)
+- [Keeper-Security/secrets-manager](https://github.com/Keeper-Security/secrets-manager)
+- [Keeper-Security/Commander](https://github.com/Keeper-Security/Commander)
+- [Keeper-Security/keeper-mcp-golang-docker](https://github.com/Keeper-Security/keeper-mcp-golang-docker)
+
+#### IAM und Workload Identity
+
+- [goauthentik/authentik](https://github.com/goauthentik/authentik)
+- [keycloak/keycloak](https://github.com/keycloak/keycloak)
+- [zitadel/zitadel](https://github.com/zitadel/zitadel)
+- [spiffe/spire](https://github.com/spiffe/spire)
+- [ory/hydra](https://github.com/ory/hydra)
+- [ory/keto](https://github.com/ory/keto)
+
+#### Streaming und Remote Browser
+
+- [kasmtech/KasmVNC](https://github.com/kasmtech/KasmVNC)
+- [novnc/noVNC](https://github.com/novnc/noVNC)
+- [selkies-project/selkies](https://github.com/selkies-project/selkies)
+- [Xpra-org/xpra](https://github.com/Xpra-org/xpra)
+- [TigerVNC/tigervnc](https://github.com/TigerVNC/tigervnc)
+- [coturn/coturn](https://github.com/coturn/coturn)
+
+Kommerzielle Profilprodukte wie Multilogin, GoLogin, Octo Browser, AdsPower und Kameleo besitzen für ihre vollständige Plattform kein im Bericht verifiziertes offizielles Open-Source-Kernrepository. Ihre Fähigkeiten dürfen deshalb nur aus offizieller Produkt-/API-Dokumentation abgeleitet werden; dies wird als Evidence Gap markiert.
+
+### 25.6 Out-of-the-Box-Funde, die den Eigenbau reduzieren
+
+| Kandidat | GitHub | Nutzen für CloakBrowser | Empfehlung |
+| --- | --- | --- | --- |
+| SPIRE | [spiffe/spire](https://github.com/spiffe/spire) | kurzlebige Workload-Identitäten/SVIDs für VCVM-Worker | Research-Spike für Machine-Identity, nicht sofortiger MVP-Blocker |
+| ZITADEL | [zitadel/zitadel](https://github.com/zitadel/zitadel) | API-first IAM, Service Accounts, Passkeys, Audit | in IAM-Entscheidung neben Authentik/Keycloak aufnehmen |
+| Agent Browser | [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser) | CDP, JSON, MCP, deterministische Refs, Streaming, Mobile | sofortiger technischer Benchmark gegen eigene Browser-CLI |
+| browserless | [browserless/browserless](https://github.com/browserless/browserless) | fertiges Remote-Chromium-Gateway | als Runtime-/Capacity-Alternative benchmarken |
+| kdbxweb | [keeweb/kdbxweb](https://github.com/keeweb/kdbxweb) | KDBX lesen/schreiben in Browser und Node | Import-/Export-Adapter ohne KeePass-Eigenimplementierung |
+| KeeWeb | [keeweb/keeweb](https://github.com/keeweb/keeweb) | fertige Offline-KDBX-Web-/Desktop-App | optionale Recovery-/Offline-UI |
+| Langfuse | [langfuse/langfuse](https://github.com/langfuse/langfuse) | LLM-Traces, Datasets, Evals und Evidence-Pipeline | Alternative für Harness-Observability, getrennt von Browser-Metriken |
+| Ory Keto | [ory/keto](https://github.com/ory/keto) | feingranulare externe Authorization | nur falls CloakBrowser-RBAC nicht mehr genügt |
+
+### 25.7 NotebookLM, „Modebook“, LM und CLI
+
+Für „Modebook“ wurde keine eindeutige offizielle Plattform, API oder ein belastbares öffentliches Repository gefunden. Der Begriff bleibt deshalb als **ungeklärte Bezeichnung** markiert und wird nicht erfunden oder bewertet. Falls damit NotebookLM gemeint ist, gilt der folgende Pfad.
+
+NotebookLM/Gemini Notebook Enterprise besitzt eine offizielle Notebook-/Sources-API, aber dies ist kein Secret Store, keine Harness und kein Browser-Runtime-Manager. Es dient als Evidence- und Review-Schicht.
+
+#### Empfohlener Evidence-Flow
+
+```mermaid
+flowchart LR
+  GH["GitHub-Repositories, Releases, Lizenzen"] --> COLLECT["Research Collector"]
+  DOCS["Offizielle Produkt- und Standard-Dokumentation"] --> COLLECT
+  TESTS["CloakBrowser Tests, Benchmarks, Screenshots"] --> COLLECT
+  COLLECT --> NORM["Normalisierte Evidence-Records"]
+  NORM --> SCORE["20 x 0-10 Score Engine"]
+  NORM --> NBLM["NotebookLM / Gemini Notebook Sources"]
+  SCORE --> REPORT["Markdown-Report + JSON/CSV"]
+  NBLM --> REVIEW["Quellengebundene Review-Fragen"]
+  REVIEW --> REPORT
+  REPORT --> GATE["Human + Agent Quality Gate"]
+```
+
+Jeder Evidence-Record erhält:
+
+```json
+{
+  "platform": "openclaw/acpx",
+  "feature": "session_lifecycle",
+  "score": 10,
+  "confidence": "high",
+  "source_url": "https://github.com/openclaw/acpx",
+  "source_type": "official_github",
+  "captured_at": "2026-07-27",
+  "notes": "named sessions, ensure, status, cancel"
+}
+```
+
+#### CLI-First-Regeln
+
+- Repository-Metadaten über GitHub API/CLI abrufen und Commit-/Release-Stand speichern.
+- Markdown, JSON und CSV aus derselben normalisierten Datenbasis erzeugen.
+- NotebookLM nur redigierte Dokumente und öffentliche Quellen zuführen.
+- keine API-Keys, Session-Cookies, Proxy-Credentials, Vault-Werte oder Browserprofile als Notebook-Quelle verwenden.
+- Scoreänderungen benötigen Quelle, Datum, Confidence und Begründung.
+- kommerzielle Plattformen ohne öffentliches Repository erhalten ein `evidence_gap`, aber keine erfundenen Nullwerte.
+- ACPX/ACP, MCP, Vault-/IAM-Provider und Browser-Harnesses werden getrennt versioniert und separat E2E-geprüft.
+
+### 25.8 Korrigierte finale Architekturentscheidung
+
+Die Revalidierung ändert die Grundarchitektur nicht, erweitert aber die Shortlist:
+
+1. **Human Vault:** Vaultwarden + unveränderte Bitwarden-Clients.
+2. **Machine-/Agent-Secrets:** Infisical als erste Wahl; Keeper als starke kommerzielle MCP-/Agentenalternative; OpenBao optional für fortgeschrittene PKI-/Secret-Engine-Anforderungen.
+3. **Identity Federation:** ZITADEL, Keycloak und Authentik vor dem Multi-Service-Produktivbetrieb vergleichen; Entscheidung ist ein Gate, nicht nur ein späteres Nice-to-have.
+4. **Workload Identity:** SPIRE als Research-Spike für kurzlebige VCVM-Worker-Identitäten.
+5. **Agent Protocol:** ACP als Vertrag, ACPX `0.12.1` als gepinnte Adapter-/Session-Schicht, MCP als begrenzte Tool-/Resource-Schicht.
+6. **Browser Automation:** Browser Use bleibt Referenzworker; `agent-browser` wird als unmittelbarer CDP/JSON/MCP/Streaming-Benchmark ergänzt; Playwright bleibt Test- und Fallback-Basis.
+7. **Operator UX:** Orca bleibt die stärkste fertige Referenz für Worktrees, Terminal, Browser, Remote Server, Mobile und Skills; CloakBrowser übernimmt nur die passenden Interaktionsmuster.
+8. **Offline/Recovery:** KeePassXC/KDBX über Adapter, `kdbxweb` und optional KeeWeb; keine neue KDBX-Engine bauen.
+9. **Research:** NotebookLM/Gemini Notebook nur als redigierte Evidence-Schicht, niemals als Secret- oder Runtime-System.
+
+Die härteste unveränderte Sicherheitsregel lautet:
+
+> Kein Agent erhält Raw Secrets. Secret-Nutzung erfolgt origin-, profil-, run-, zweck- und zeitgebunden über einen Broker. Browser-Fingerprint, Browserzustand, Passwort, Passkey, Machine Identity und Hardware-Attestation bleiben getrennte Kategorien.
+
+## 26. Abschluss
 
 Der aktuelle CloakBrowser-Stand ist eine tragfähige Browser- und Agent-Control-Plane, aber noch kein universeller Identity-/Secret-Manager. Die fehlende Schicht soll nicht durch eine neue selbst entwickelte Vault-Anwendung geschlossen werden.
 

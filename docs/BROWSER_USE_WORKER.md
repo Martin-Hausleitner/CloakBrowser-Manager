@@ -241,6 +241,35 @@ action after ~135s. Observed first-step Cursor variance on this host is about
 latency is reduced. CDP reconnect/403 warnings remain a tracked reliability
 issue and did not block the successful `a5c8f034…` retrieval path above.
 
+## Verified Web-UI E2E evidence (VCVM, 2026-07-26)
+
+Commit `3c330ef` was pushed to `feature/browser-use-agent-workspace`, deployed as
+healthy image digest `sha256:ab21946fc1803d4d0a8d5e19fbc1ca080d799795ab450e2399f6f0582c69b856`,
+and exercised through the private Tailscale Web UI with a named, scoped user.
+
+Successful run `ae877b32-95e1-45e3-b2fd-18855496c1e8`:
+
+- The UI created the run for a running CloakBrowser profile and displayed the
+  fail-closed health gate rather than silently bypassing it.
+- Fresh profile health measured **100/100 fingerprint consistency** and
+  **100/100 BrowserScan**. Because the demo profile intentionally had no
+  measured proxy-authenticity score, the UI exposed the overridable reason and
+  required an explicit operator action. The audit record stored the override;
+  no default policy threshold was weakened.
+- Created `2026-07-26T12:46:39.218249Z`; first structured action
+  `2026-07-26T12:47:54.959165Z` (**~75.7s** to first action); succeeded at
+  `2026-07-26T12:47:55.331526Z`.
+- Typed outputs: **action**, **2 observations**, **screenshot**, and **summary**.
+- Authenticated screenshot retrieval returned **200** `image/png`, **20,445**
+  bytes, with a rendered intrinsic size of **1920×1080**.
+- After a full Manager-page reload and reopening the profile, the UI restored
+  the same Browser Use mode, run status, typed cards, screenshot, and summary
+  from the public task APIs. This closes the prior remount/output-loss bug.
+- Manager container stayed healthy; `cloakbrowser-browser-use-worker.service`
+  stayed active.
+
+![Browser Use worker output restored after reopening the live workspace](assets/browser-use-worker-ui-2026-07-26.png)
+
 ## E2E acceptance checklist
 
 - [ ] Dedicated venv created with `uv`; `browser-use==0.13.6` importable; pytest
@@ -264,9 +293,9 @@ issue and did not block the successful `a5c8f034…` retrieval path above.
 - [ ] `scripts/deploy_vcvm.sh` remains untouched by worker provisioning.
 - [ ] Cursor credentials remain on the host; no container bind of Cursor
       credential directories for this worker.
-- [ ] Worker claims a `browser-use` run from Manager internal APIs and completes
+- [x] Worker claims a `browser-use` run from Manager internal APIs and completes
       a bounded smoke task against an allow-listed profile (operator-owned).
-- [ ] Smoke run budget ≥360s until first-step Cursor latency is reduced; confirm
+- [x] Smoke run budget ≥360s until first-step Cursor latency is reduced; confirm
       action/observation/screenshot/summary outputs and authenticated screenshot
       GET.
 

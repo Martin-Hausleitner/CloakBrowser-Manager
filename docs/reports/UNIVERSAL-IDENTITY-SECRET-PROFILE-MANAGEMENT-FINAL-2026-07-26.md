@@ -1649,6 +1649,16 @@ Die folgenden Punkte sind **Release-Blocker**, nicht spätere Optimierungen:
 6. ACPX/MCP wird nicht als produktiv bezeichnet, bevor eine reale, authentifizierte Adapter-Probe und ein Manager-eigener Browserlauf je freigegebenem Agenten vorliegen.
 7. Ein BrowserScan-/Fingerprint-Score darf nie als TPM-, Secure-Enclave-, Passkey- oder MDM-Vertrauensnachweis dargestellt werden.
 
+#### Umsetzungsstatus (27.07.2026)
+
+- **Teilweise umgesetzt:** Profile können keine manager-eigenen CDP-, Proxy-, User-Data-,
+  Web-Security- oder Sandbox-Flags mehr speichern. Das ist testgetrieben abgesichert
+  ([Commit `7c41700`](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/commit/7c41700)).
+- **Weiterhin rot:** Das ist absichtlich noch keine vollständige Allowlist. Der bestehende
+  `--load-extension`-Pfad muss zuerst von frei speicherbaren Profilargumenten in einen
+  ausschließlich serverseitig verwalteten, versionsgepinnten Extension-Katalog überführt
+  werden. Bis dahin zählt das Launch-Argument-Gate nicht als vollständig abgenommen.
+
 ### 26.4 Minimaler E2E-Gate-Satz
 
 Der erste **Browser-Use-MVP-Release** ist erst zulässig, wenn die drei Browser-Use-Gates mit frischen, redigierten Artefakten bestehen. ACPX bleibt bis zu seinem eigenen Promotion-Gate nicht als produktiver Harness auswählbar.

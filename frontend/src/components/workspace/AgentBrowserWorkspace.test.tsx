@@ -5,6 +5,7 @@ import { AgentBrowserWorkspace } from "./AgentBrowserWorkspace";
 
 const apiMock = vi.hoisted(() => ({
   getOrcaCapabilities: vi.fn(),
+  getTaskHarnessPresence: vi.fn(),
   startOrcaSession: vi.fn(),
   readOrcaSessionOutput: vi.fn(),
   sendOrcaSessionInput: vi.fn(),
@@ -138,6 +139,7 @@ describe("AgentBrowserWorkspace", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
     apiMock.getOrcaCapabilities.mockReset();
+    apiMock.getTaskHarnessPresence.mockReset();
     apiMock.startOrcaSession.mockReset();
     apiMock.readOrcaSessionOutput.mockReset();
     apiMock.sendOrcaSessionInput.mockReset();
@@ -150,6 +152,13 @@ describe("AgentBrowserWorkspace", () => {
     apiMock.retryTaskRunHealth.mockReset();
     apiMock.overrideTaskRunHealth.mockReset();
     apiMock.getOrcaCapabilities.mockResolvedValue(capsAvailable);
+    apiMock.getTaskHarnessPresence.mockResolvedValue({
+      harness: "acpx",
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-27T00:00:00Z",
+      reason: null,
+    });
   });
 
   afterEach(() => {
@@ -621,6 +630,33 @@ describe("AgentBrowserWorkspace", () => {
       );
     });
     expect(screen.getByTestId("managed-agent-output")).toBeTruthy();
+  });
+
+  it("keeps ACPX launch disabled when no fresh worker has checked in", async () => {
+    const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
+    apiMock.getTaskHarnessPresence.mockResolvedValue({
+      harness: "acpx",
+      worker_seen_recently: false,
+      state: "stale",
+      last_seen_at: "2026-07-26T23:59:00Z",
+      reason: "The last authenticated ACPX worker check-in is stale",
+    });
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[acpxProfile]}
+        selectedProfile={acpxProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(await screen.findByTestId("orca-prompt"), {
+      target: { value: "Inspect https://example.com" },
+    });
+    expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(true);
+    expect(await screen.findByText("The last authenticated ACPX worker check-in is stale")).toBeTruthy();
   });
 
   it("restores the last Browser Use run after the live workspace remounts", async () => {

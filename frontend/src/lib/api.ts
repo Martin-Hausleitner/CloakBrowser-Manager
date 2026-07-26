@@ -540,6 +540,14 @@ export interface TaskRunCreateData {
   model_alias?: string | null;
 }
 
+export interface TaskHarnessPresence {
+  harness: ProfileHarness;
+  worker_seen_recently: boolean;
+  state: "polling" | "stale" | "unavailable";
+  last_seen_at: string | null;
+  reason: string | null;
+}
+
 export interface TaskOutput {
   id: string;
   run_id: string;
@@ -916,6 +924,14 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
         body: JSON.stringify(data),
       },
     ),
+
+  getTaskHarnessPresence: (
+    harness: ProfileHarness,
+    options?: { signal?: AbortSignal },
+  ) => request<TaskHarnessPresence>(
+    `/api/task-harnesses/${encodeURIComponent(harness)}/presence`,
+    { signal: options?.signal },
+  ),
 
   getTaskRun: (runId: string, options?: { signal?: AbortSignal }) =>
     request<TaskRun>(

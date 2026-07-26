@@ -681,6 +681,43 @@ describe("api.taskRuns", () => {
       "/api/task-runs/run-1/cancel",
     ]);
   });
+
+  it("serializes ACPX agent selection and reads redacted worker readiness", async () => {
+    const run = {
+      id: "run-acpx",
+      harness: "acpx",
+      agent: "cursor",
+      status: "queued",
+    };
+    const presence = {
+      harness: "acpx",
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-27T00:00:00Z",
+      reason: null,
+    };
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(run, 201))
+      .mockResolvedValueOnce(jsonResponse(presence));
+
+    await api.createTaskRun("session-acpx", {
+      harness: "acpx",
+      agent: "cursor",
+      task: "Inspect https://example.com",
+      profile_id: "profile-acpx",
+      allowed_origins: ["https://example.com"],
+    });
+    await expect(api.getTaskHarnessPresence("acpx")).resolves.toEqual(presence);
+
+    expect(JSON.parse(String(mockFetch.mock.calls[0][1]?.body))).toMatchObject({
+      harness: "acpx",
+      agent: "cursor",
+    });
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/task-sessions/session-acpx/runs",
+      "/api/task-harnesses/acpx/presence",
+    ]);
+  });
 });
 
 // ── Error handling ──────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import {
   type OrcaSession,
   type Profile,
   type TaskOutput,
+  type TaskHarnessPresence,
   type TaskRun,
 } from "../../lib/api";
 import { ProfileViewer } from "../ProfileViewer";
@@ -130,6 +131,7 @@ export function AgentBrowserWorkspace({
   const [session, setSession] = useState<OrcaSession | null>(null);
   const [taskSessionId, setTaskSessionId] = useState<string | null>(null);
   const [taskRun, setTaskRun] = useState<TaskRun | null>(null);
+  const [acpxPresence, setAcpxPresence] = useState<TaskHarnessPresence | null>(null);
   const [taskOutputs, setTaskOutputs] = useState<TaskOutput[]>([]);
   const [transcript, setTranscript] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -175,6 +177,7 @@ export function AgentBrowserWorkspace({
     selectedProfile?.status === "running" &&
     hasModePermissions &&
     (managedRunMode ? Boolean(prompt.trim()) && originList.length > 0 : !unavailable) &&
+    (!acpxMode || acpxPresence?.worker_seen_recently === true) &&
     !sessionActive &&
     !busy;
   const canSend = Boolean(!managedRunMode && sessionActive && canInteract && prompt.trim() && !busy);
@@ -216,6 +219,39 @@ export function AgentBrowserWorkspace({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!acpxMode) {
+      setAcpxPresence(null);
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const presence = await api.getTaskHarnessPresence("acpx", {
+          signal: controller.signal,
+        });
+        if (!cancelled) setAcpxPresence(presence);
+      } catch (err) {
+        if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
+        setAcpxPresence({
+          harness: "acpx",
+          worker_seen_recently: false,
+          state: "unavailable",
+          last_seen_at: null,
+          reason: "ACPX worker readiness could not be verified",
+        });
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [acpxMode]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current != null) {
@@ -557,7 +593,11 @@ export function AgentBrowserWorkspace({
                 ? taskRun
                   ? `Managed worker · ${taskRun.id}`
                   : acpxMode
-                    ? `Managed run · ${acpxAgent} · availability checked after queue`
+                    ? acpxPresence?.worker_seen_recently
+                      ? `Managed run · ${acpxAgent} · worker polling · adapter checked at run`
+                      : acpxPresence
+                        ? `Managed run · ${acpxAgent} · ${acpxPresence.state}`
+                        : `Managed run · ${acpxAgent} · checking worker`
                     : "Managed VCVM worker"
                 : statusLabel(session, caps)}
               {!managedRunMode && session ? ` · ${session.terminal_handle}` : ""}
@@ -688,6 +728,15 @@ export function AgentBrowserWorkspace({
         {error ? (
           <div className="border-b border-red-900/50 bg-red-950/40 px-3 py-1.5 text-[11px] text-red-300">
             {error}
+          </div>
+        ) : null}
+
+        {acpxMode && acpxPresence && !acpxPresence.worker_seen_recently ? (
+          <div
+            className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1.5 text-[11px] text-amber-200"
+            data-testid="acpx-unavailable"
+          >
+            {acpxPresence.reason || "ACPX worker unavailable"}
           </div>
         ) : null}
 

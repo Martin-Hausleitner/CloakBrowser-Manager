@@ -1095,6 +1095,16 @@ class WorkerHeartbeatResponse(BaseModel):
     heartbeat_interval_seconds: int = 15
 
 
+class TaskHarnessPresenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    harness: Harness
+    worker_seen_recently: bool
+    state: Literal["polling", "stale", "unavailable"]
+    last_seen_at: str | None = None
+    reason: str | None = None
+
+
 class WorkerCapabilityResponse(BaseModel):
     token: str
     cdp_url: str

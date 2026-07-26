@@ -28,6 +28,11 @@ def client_access(tmp_db, monkeypatch):
     monkeypatch.setattr(main.browser_mgr, "cleanup_stale", AsyncMock())
     monkeypatch.setattr(main.browser_mgr, "cleanup_all", AsyncMock())
     monkeypatch.setattr(main.browser_mgr.vnc, "cleanup_stale", AsyncMock())
+    monkeypatch.setattr(
+        main.worker_runtime_service,
+        "_clock",
+        lambda: datetime.now(timezone.utc),
+    )
     with TestClient(main.app) as client:
         main.worker_runtime_service.sync_configured_worker()
         yield client
@@ -114,6 +119,55 @@ def test_claim_204_when_no_work(client_access: TestClient):
     )
     assert resp.status_code == 204
     assert resp.content in {b"", b"null"}
+
+
+def test_filtered_claim_reports_redacted_harness_presence(client_access: TestClient):
+    from backend import main
+
+    assert client_access.get("/api/task-harnesses/acpx/presence").status_code == 401
+    missing = client_access.get(
+        "/api/task-harnesses/acpx/presence",
+        headers=bootstrap_headers(),
+    )
+    assert missing.status_code == 200
+    assert missing.json() == {
+        "harness": "acpx",
+        "worker_seen_recently": False,
+        "state": "unavailable",
+        "last_seen_at": None,
+        "reason": "No authenticated ACPX worker has checked in",
+    }
+
+    poll = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+        params={"harness": "acpx"},
+    )
+    assert poll.status_code == 204
+
+    ready = client_access.get(
+        "/api/task-harnesses/acpx/presence",
+        headers=bootstrap_headers(),
+    )
+    assert ready.status_code == 200
+    body = ready.json()
+    assert body["harness"] == "acpx"
+    assert body["worker_seen_recently"] is True
+    assert body["state"] == "polling"
+    assert body["last_seen_at"]
+    assert body["reason"] is None
+    assert "worker_id" not in body
+
+    last_seen = datetime.fromisoformat(body["last_seen_at"])
+    main.worker_runtime_service._clock = lambda: last_seen + timedelta(seconds=46)
+    stale = client_access.get(
+        "/api/task-harnesses/acpx/presence",
+        headers=bootstrap_headers(),
+    )
+    assert stale.status_code == 200
+    assert stale.json()["worker_seen_recently"] is False
+    assert stale.json()["state"] == "stale"
+    assert stale.json()["reason"] == "The last authenticated ACPX worker check-in is stale"
 
 
 def test_unfiltered_claim_still_picks_oldest_any_harness(client_access: TestClient):

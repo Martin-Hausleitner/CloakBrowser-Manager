@@ -26,6 +26,7 @@ DEFAULT_ELIGIBILITY_TIMEOUT_SECONDS = 60
 MIN_ELIGIBILITY_TIMEOUT_SECONDS = 30
 MAX_ELIGIBILITY_TIMEOUT_SECONDS = 300
 WORKER_MAINTENANCE_INTERVAL_SECONDS = 5
+HARNESS_PRESENCE_TTL_SECONDS = 45
 
 ALLOWLISTED_FAIL_CODES = frozenset(
     {
@@ -362,6 +363,70 @@ class WorkerRuntimeService:
                 conn.rollback()
                 raise
         return lease_ids
+
+    # ── Harness presence ────────────────────────────────────────────────────
+
+    def record_harness_poll(self, worker_id: str, harness: str) -> None:
+        """Record one authenticated filtered claim poll as a harness heartbeat."""
+        now = self._clock()
+        with self._get_db() as conn:
+            active = conn.execute(
+                "SELECT 1 FROM worker_identities WHERE id = ? AND active = 1",
+                (worker_id,),
+            ).fetchone()
+            if active is None:
+                raise WorkerNotFound(worker_id)
+            conn.execute(
+                """
+                INSERT INTO worker_harness_presence (worker_id, harness, last_seen_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(worker_id, harness) DO UPDATE SET
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (worker_id, harness, _iso(now)),
+            )
+            conn.commit()
+
+    def harness_presence(self, harness: str) -> dict[str, Any]:
+        """Return process presence only; provider/adapter readiness is not implied."""
+        now = self._clock()
+        with self._get_db() as conn:
+            row = conn.execute(
+                """
+                SELECT r.last_seen_at
+                FROM worker_harness_presence r
+                JOIN worker_identities w ON w.id = r.worker_id
+                WHERE r.harness = ? AND w.active = 1
+                ORDER BY r.last_seen_at DESC
+                LIMIT 1
+                """,
+                (harness,),
+            ).fetchone()
+        label = "ACPX" if harness == "acpx" else harness
+        if row is None:
+            return {
+                "harness": harness,
+                "worker_seen_recently": False,
+                "state": "unavailable",
+                "last_seen_at": None,
+                "reason": f"No authenticated {label} worker has checked in",
+            }
+        last_seen = _parse_dt(row["last_seen_at"])
+        if last_seen is None or now - last_seen > timedelta(seconds=HARNESS_PRESENCE_TTL_SECONDS):
+            return {
+                "harness": harness,
+                "worker_seen_recently": False,
+                "state": "stale",
+                "last_seen_at": row["last_seen_at"],
+                "reason": f"The last authenticated {label} worker check-in is stale",
+            }
+        return {
+            "harness": harness,
+            "worker_seen_recently": True,
+            "state": "polling",
+            "last_seen_at": row["last_seen_at"],
+            "reason": None,
+        }
 
     # ── Eligibility ──────────────────────────────────────────────────────────
 

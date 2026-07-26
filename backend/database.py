@@ -469,6 +469,50 @@ def _migrate_task_runs_acpx_v1(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_worker_harness_presence_v1(conn: sqlite3.Connection) -> None:
+    """Persist harness-specific authenticated worker polls without worker details."""
+    migration_version = "worker_harness_presence_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        workers_exist = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_identities'"
+        ).fetchone()
+        if workers_exist is None:
+            conn.rollback()
+            return
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_harness_presence (
+                worker_id TEXT NOT NULL REFERENCES worker_identities(id) ON DELETE CASCADE,
+                harness TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (worker_id, harness)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_worker_harness_presence_lookup
+                ON worker_harness_presence(harness, last_seen_at DESC)
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
@@ -744,6 +788,7 @@ def init_db():
         _migrate_task_runs_v1(conn)
         _migrate_worker_runtime_v1(conn)
         _migrate_task_runs_acpx_v1(conn)
+        _migrate_worker_harness_presence_v1(conn)
 
 
 def _now() -> str:

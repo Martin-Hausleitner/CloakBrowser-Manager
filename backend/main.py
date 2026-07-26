@@ -100,6 +100,7 @@ if __package__:
         TaskRunCreate,
         TaskRunHealthOverrideRequest,
         TaskRunResponse,
+        TaskHarnessPresenceResponse,
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
@@ -194,6 +195,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
         TaskRunCreate,
         TaskRunHealthOverrideRequest,
         TaskRunResponse,
+        TaskHarnessPresenceResponse,
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
@@ -3160,6 +3162,8 @@ async def claim_internal_task_run(
     harness: Harness | None = Query(default=None),
 ):
     worker = _require_worker(request)
+    if harness is not None:
+        worker_runtime_service.record_harness_poll(worker.id, harness)
     claimed = worker_runtime_service.claim_next(
         worker.id,
         harnesses={harness} if harness is not None else None,
@@ -3167,6 +3171,17 @@ async def claim_internal_task_run(
     if claimed is None:
         return Response(status_code=204)
     return WorkerClaimResponse(**claimed)
+
+
+@app.get(
+    "/api/task-harnesses/{harness}/presence",
+    response_model=TaskHarnessPresenceResponse,
+)
+async def get_task_harness_presence(harness: Harness, request: Request):
+    _require_identity(request.scope)
+    return TaskHarnessPresenceResponse(
+        **worker_runtime_service.harness_presence(harness)
+    )
 
 
 @app.post(

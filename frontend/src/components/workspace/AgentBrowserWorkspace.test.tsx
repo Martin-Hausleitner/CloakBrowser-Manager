@@ -9,6 +9,12 @@ const apiMock = vi.hoisted(() => ({
   readOrcaSessionOutput: vi.fn(),
   sendOrcaSessionInput: vi.fn(),
   closeOrcaSession: vi.fn(),
+  createTaskSession: vi.fn(),
+  createTaskRun: vi.fn(),
+  getTaskRun: vi.fn(),
+  listTaskRunOutputs: vi.fn(),
+  cancelTaskRun: vi.fn(),
+  taskOutputScreenshotUrl: vi.fn((id: string) => `/api/task-outputs/${id}/screenshot`),
 }));
 
 vi.mock("../../lib/api", async () => {
@@ -55,7 +61,7 @@ const runningProfile: Profile = {
   folder_path: "",
   pinned: false,
   accent_color: null,
-  harness: "browser-use",
+  harness: "codex",
   fingerprint_seed: 1,
   proxy: null,
   timezone: null,
@@ -119,6 +125,11 @@ describe("AgentBrowserWorkspace", () => {
     apiMock.readOrcaSessionOutput.mockReset();
     apiMock.sendOrcaSessionInput.mockReset();
     apiMock.closeOrcaSession.mockReset();
+    apiMock.createTaskSession.mockReset();
+    apiMock.createTaskRun.mockReset();
+    apiMock.getTaskRun.mockReset();
+    apiMock.listTaskRunOutputs.mockReset();
+    apiMock.cancelTaskRun.mockReset();
     apiMock.getOrcaCapabilities.mockResolvedValue(capsAvailable);
   });
 
@@ -289,5 +300,105 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("orca-transcript").textContent).not.toContain("hello");
     expect(screen.getByTestId("orca-viewer-empty")).toBeTruthy();
     expect(screen.getByTestId("orca-run-status").textContent).toContain("idle");
+  });
+
+  it("starts Browser Use for a browser-use profile and renders typed outputs", async () => {
+    const browserUseProfile: Profile = { ...runningProfile, harness: "browser-use" };
+    apiMock.createTaskSession.mockResolvedValue({
+      id: "task-1",
+      profile_id: browserUseProfile.id,
+      sandbox_id: "default",
+      title: "Open example.com",
+      status: "active",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-26T00:00:00Z",
+      updated_at: "2026-07-26T00:00:00Z",
+      metadata: {},
+    });
+    apiMock.createTaskRun.mockResolvedValue({
+      id: "run-1",
+      task_session_id: "task-1",
+      task_message_id: "message-1",
+      profile_id: browserUseProfile.id,
+      profile_id_snapshot: browserUseProfile.id,
+      sandbox_id: "default",
+      harness: "browser-use",
+      status: "running",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: "cursor-grok-4.5-low",
+      deadline_at: "2026-07-26T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {},
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-26T00:00:00Z",
+      updated_at: "2026-07-26T00:00:00Z",
+    });
+    apiMock.listTaskRunOutputs.mockResolvedValue([{
+      id: "output-1",
+      run_id: "run-1",
+      sequence: 1,
+      idempotency_key: "action-1",
+      kind: "action",
+      summary: "Opened example.com",
+      payload: { name: "navigate", url: "https://example.com" },
+      created_at: "2026-07-26T00:00:01Z",
+      artifact_expired: false,
+    }]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[browserUseProfile]}
+        selectedProfile={browserUseProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("orca-launch");
+    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("browser-use");
+    fireEvent.change(screen.getByTestId("orca-prompt"), {
+      target: { value: "Open https://example.com and report the heading" },
+    });
+    fireEvent.click(screen.getByTestId("orca-launch"));
+
+    await waitFor(() => {
+      expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+        "task-1",
+        expect.objectContaining({
+          harness: "browser-use",
+          profile_id: browserUseProfile.id,
+          allowed_origins: ["https://example.com"],
+          timeout_seconds: 360,
+        }),
+      );
+    });
+    expect(await screen.findByText("navigate")).toBeTruthy();
+    expect(screen.getByTestId("browser-use-output")).toBeTruthy();
+  });
+
+  it("allows Browser Use with automate permission even when the viewer is read-only", async () => {
+    const browserUseProfile: Profile = { ...runningProfile, harness: "browser-use" };
+    render(
+      <AgentBrowserWorkspace
+        profiles={[browserUseProfile]}
+        selectedProfile={browserUseProfile}
+        canAutomate
+        canInteract={false}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("orca-launch");
+    fireEvent.change(screen.getByTestId("orca-prompt"), {
+      target: { value: "Inspect https://example.com" },
+    });
+    expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(false);
   });
 });

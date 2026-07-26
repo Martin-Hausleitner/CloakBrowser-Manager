@@ -456,6 +456,81 @@ export interface TaskHarnessEvent {
   payload: Record<string, unknown>;
 }
 
+export type TaskRunStatus =
+  | "queued"
+  | "health_check"
+  | "blocked_health"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "revoked";
+
+export type TaskOutputKind =
+  | "status"
+  | "action"
+  | "observation"
+  | "screenshot"
+  | "extracted_data"
+  | "link"
+  | "metric"
+  | "error"
+  | "approval"
+  | "summary";
+
+export interface TaskRun {
+  id: string;
+  task_session_id: string;
+  task_message_id: string;
+  profile_id: string | null;
+  profile_id_snapshot: string;
+  sandbox_id: string;
+  harness: ProfileHarness;
+  status: TaskRunStatus;
+  launch_if_stopped: boolean;
+  allowed_origins: string[];
+  max_steps: number;
+  timeout_seconds: number;
+  model_alias: string | null;
+  deadline_at: string;
+  health_snapshot: Record<string, unknown>;
+  health_decision: Record<string, unknown>;
+  health_override?: Record<string, unknown> | null;
+  retry_count: number;
+  first_action_sequence?: number | null;
+  first_action_at?: string | null;
+  cancelled_at?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskRunCreateData {
+  harness?: ProfileHarness;
+  task: string;
+  profile_id: string;
+  launch_if_stopped?: boolean;
+  allowed_origins?: string[];
+  max_steps?: number;
+  timeout_seconds?: number;
+  model_alias?: string | null;
+}
+
+export interface TaskOutput {
+  id: string;
+  run_id: string;
+  sequence: number;
+  idempotency_key: string;
+  kind: TaskOutputKind;
+  summary: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+  artifact_expired: boolean;
+}
+
 export interface AccessSandbox {
   sandbox_id: string;
   profile_count: number;
@@ -792,6 +867,51 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
     }`,
     { signal: options?.signal },
   ),
+
+  createTaskRun: (
+    sessionId: string,
+    data: TaskRunCreateData,
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<TaskRun>(
+      `/api/task-sessions/${encodeURIComponent(sessionId)}/runs`,
+      {
+        method: "POST",
+        signal: options?.signal,
+        body: JSON.stringify(data),
+      },
+    ),
+
+  getTaskRun: (runId: string, options?: { signal?: AbortSignal }) =>
+    request<TaskRun>(
+      `/api/task-runs/${encodeURIComponent(runId)}`,
+      { signal: options?.signal },
+    ),
+
+  listTaskRunOutputs: (
+    runId: string,
+    options?: { afterSequence?: number; limit?: number; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.afterSequence != null) {
+      params.set("after_sequence", String(options.afterSequence));
+    }
+    if (options?.limit != null) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return request<TaskOutput[]>(
+      `/api/task-runs/${encodeURIComponent(runId)}/outputs${query ? `?${query}` : ""}`,
+      { signal: options?.signal },
+    );
+  },
+
+  cancelTaskRun: (runId: string, options?: { signal?: AbortSignal }) =>
+    request<TaskRun>(
+      `/api/task-runs/${encodeURIComponent(runId)}/cancel`,
+      { method: "POST", signal: options?.signal },
+    ),
+
+  taskOutputScreenshotUrl: (outputId: string) =>
+    `/api/task-outputs/${encodeURIComponent(outputId)}/screenshot`,
 
   listAccessSandboxes: () => request<AccessSandbox[]>("/api/access/sandboxes"),
 

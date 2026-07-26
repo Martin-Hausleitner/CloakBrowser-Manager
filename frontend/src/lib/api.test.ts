@@ -541,6 +541,78 @@ describe("api orca sessions", () => {
   });
 });
 
+describe("api.taskRuns", () => {
+  it("creates polls cancels and lists typed outputs for a Browser Use run", async () => {
+    const run = {
+      id: "run-1",
+      task_session_id: "session-1",
+      task_message_id: "message-1",
+      profile_id: "profile-1",
+      profile_id_snapshot: "profile-1",
+      sandbox_id: "default",
+      harness: "browser-use",
+      status: "queued",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: "cursor-grok-4.5-low",
+      deadline_at: "2026-07-26T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {
+        allowed: true,
+        waiting: false,
+        failed_reasons: [],
+        non_overridable_reasons: [],
+        policy_version: "v1",
+      },
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-26T00:00:00Z",
+      updated_at: "2026-07-26T00:00:00Z",
+    };
+    const outputs = [{
+      id: "output-1",
+      run_id: "run-1",
+      sequence: 1,
+      idempotency_key: "action-1",
+      kind: "action",
+      summary: "Opened example.com",
+      payload: { name: "navigate", url: "https://example.com" },
+      created_at: "2026-07-26T00:00:01Z",
+      artifact_expired: false,
+    }];
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(run, 201))
+      .mockResolvedValueOnce(jsonResponse(run))
+      .mockResolvedValueOnce(jsonResponse(outputs))
+      .mockResolvedValueOnce(jsonResponse({ ...run, status: "cancelled" }));
+
+    await expect(api.createTaskRun("session-1", {
+      harness: "browser-use",
+      task: "Open example.com",
+      profile_id: "profile-1",
+      allowed_origins: ["https://example.com"],
+      timeout_seconds: 360,
+      model_alias: "cursor-grok-4.5-low",
+    })).resolves.toMatchObject({ id: "run-1", status: "queued" });
+    await expect(api.getTaskRun("run-1")).resolves.toMatchObject({ id: "run-1" });
+    await expect(api.listTaskRunOutputs("run-1", { afterSequence: 0 })).resolves.toEqual(outputs);
+    await expect(api.cancelTaskRun("run-1")).resolves.toMatchObject({ status: "cancelled" });
+    expect(api.taskOutputScreenshotUrl("output/1")).toBe(
+      "/api/task-outputs/output%2F1/screenshot",
+    );
+
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/task-sessions/session-1/runs",
+      "/api/task-runs/run-1",
+      "/api/task-runs/run-1/outputs?after_sequence=0",
+      "/api/task-runs/run-1/cancel",
+    ]);
+  });
+});
+
 // ── Error handling ──────────────────────────────────────────────────────────
 
 describe("error handling", () => {

@@ -9,6 +9,7 @@
 **Planstand:** `5d5d90e3e13c30e5a79df8b77107d55cd80718ae`  
 **Zielbetrieb:** VCVM und lokaler Mac, privat über Tailscale/Loopback  
 **Status dieses Berichts:** finale Architektur- und Auswahlentscheidung; keine Behauptung, dass alle Zielmodule bereits implementiert sind
+
 **Deep-Research-Revalidierung:** 27. Juli 2026; drei primäre und mehr als zwanzig zusätzliche Grok-Build-Research-Lanes, danach Primärquellen- und Summenprüfung
 
 ---
@@ -51,7 +52,7 @@ Dadurch werden vorhandene, gepflegte Benutzeroberflächen, Browser-Erweiterungen
 | Agenten, Machine Identities, dynamische Secrets, Rotation, SSH-/X.509-Zertifikate | Infisical | moderne API/CLI/SDKs, RBAC, Machine Identities, Audit und PKI |
 | Browser-/Systemprofile, Proxys, Runtimes, Aufgaben, Live-Ansicht, Harnesses | CloakBrowser Manager | bereits vorhandene Produktbasis und spezifische Browser-/Agentenlogik |
 | Benutzer-/Gruppen-Policy im MVP | vorhandene CloakBrowser-RBAC | bereits implementiert; verhindert einen zusätzlichen schweren IAM-Stack |
-| zentrales SSO/Provisioning später | Authentik oder Keycloak | erst ergänzen, wenn mehrere Dienste dauerhaft produktiv betrieben werden |
+| zentrales SSO/Provisioning | ZITADEL, Keycloak oder Authentik | vor produktivem Multi-Service-Betrieb als eigener Identity-Gate entscheiden |
 | optionales Vault-/PKI-Backend | OpenBao | vollständig offene Alternative für fortgeschrittene Secret Engines und PKI |
 
 ---

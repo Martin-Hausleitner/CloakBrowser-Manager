@@ -424,15 +424,32 @@ export interface AccessAgentCreated extends AccessAgent {
 
 export interface TaskHarnessSession {
   id: string;
-  profile_id: string;
+  profile_id: string | null;
   sandbox_id: string;
+  project_id: string;
   title: string | null;
   status: "active" | "archived";
+  workflow_state: "open" | "done";
+  done_at: string | null;
+  archived_at: string | null;
+  retention_class: "temporary" | "project" | "legacy";
+  expires_at: string | null;
+  activity_at: string;
+  row_version: number;
   created_by_kind: string;
   created_by_id: string | null;
   created_at: string;
   updated_at: string;
   metadata: Record<string, unknown>;
+}
+
+export interface TaskSessionUpdateData {
+  row_version: number;
+  title?: string | null;
+  workflow_state?: "open" | "done";
+  archived?: boolean | null;
+  retention_class?: "temporary" | "project";
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface TaskHarnessMessage {
@@ -824,6 +841,20 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
     request<TaskHarnessSession>(
       `/api/task-sessions/${encodeURIComponent(sessionId)}`,
       { signal: options?.signal },
+    ),
+
+  updateTaskSession: (
+    sessionId: string,
+    data: TaskSessionUpdateData,
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<TaskHarnessSession>(
+      `/api/task-sessions/${encodeURIComponent(sessionId)}`,
+      {
+        method: "PATCH",
+        signal: options?.signal,
+        body: JSON.stringify(data),
+      },
     ),
 
   appendTaskMessage: (sessionId: string, data: {

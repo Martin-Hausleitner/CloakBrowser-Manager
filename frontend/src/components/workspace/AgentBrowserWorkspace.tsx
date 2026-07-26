@@ -76,6 +76,12 @@ export interface AgentBrowserWorkspaceProps {
   selectedProfile: Profile | null;
   canAutomate: boolean;
   canInteract: boolean;
+  initialPromptDraft?: {
+    id: string;
+    profileId: string;
+    task: string;
+  } | null;
+  onInitialPromptDraftApplied?: (draftId: string) => void;
   canManageViewport?: boolean;
   onViewportApply?: (width: number, height: number) => Promise<boolean>;
   onSelectProfile: (profileId: string) => void;
@@ -99,6 +105,8 @@ export function AgentBrowserWorkspace({
   selectedProfile,
   canAutomate,
   canInteract,
+  initialPromptDraft = null,
+  onInitialPromptDraftApplied,
   canManageViewport = false,
   onViewportApply,
   onSelectProfile,
@@ -125,6 +133,7 @@ export function AgentBrowserWorkspace({
   const pollRef = useRef<number | null>(null);
   const runPollRef = useRef<number | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const appliedInitialPromptDraftIdRef = useRef<string | null>(null);
 
   const runningProfiles = useMemo(
     () => profiles.filter((profile) => profile.status === "running"),
@@ -277,6 +286,16 @@ export function AgentBrowserWorkspace({
       node.scrollIntoView({ block: "end" });
     }
   }, [transcript]);
+
+  useEffect(() => {
+    if (!initialPromptDraft || !selectedProfile) return;
+    if (initialPromptDraft.profileId !== selectedProfile.id) return;
+    if (appliedInitialPromptDraftIdRef.current === initialPromptDraft.id) return;
+
+    appliedInitialPromptDraftIdRef.current = initialPromptDraft.id;
+    setPrompt((current) => (current ? current : initialPromptDraft.task));
+    onInitialPromptDraftApplied?.(initialPromptDraft.id);
+  }, [initialPromptDraft, onInitialPromptDraftApplied, selectedProfile?.id]);
 
   useEffect(() => {
     // Switching profiles stops the local session view; operator must relaunch.

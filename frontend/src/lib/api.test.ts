@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { api, type ProfileCreateData, type ProfileHarness } from "./api";
+import {
+  api,
+  type ProfileCreateData,
+  type ProfileHarness,
+  type TaskHarnessSession,
+  type TaskSessionUpdateData,
+} from "./api";
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -221,14 +227,22 @@ describe("api.createTaskSession", () => {
       id: "server-session-1",
       profile_id: "1",
       sandbox_id: "default",
+      project_id: "default",
       title: null,
       status: "active" as const,
+      workflow_state: "open" as const,
+      done_at: null,
+      archived_at: null,
+      retention_class: "project" as const,
+      expires_at: null,
+      activity_at: "2026-07-21T10:00:00.000Z",
+      row_version: 1,
       created_by_kind: "user",
       created_by_id: "owner",
       created_at: "2026-07-21T10:00:00.000Z",
       updated_at: "2026-07-21T10:00:00.000Z",
       metadata: { source: "test" },
-    };
+    } satisfies TaskHarnessSession;
     mockFetch.mockResolvedValueOnce(jsonResponse(session));
 
     const result = await api.createTaskSession({
@@ -272,14 +286,22 @@ describe("api.getTaskSession", () => {
       id: "server-session-1",
       profile_id: "1",
       sandbox_id: "default",
+      project_id: "default",
       title: "Run",
       status: "active" as const,
+      workflow_state: "open" as const,
+      done_at: null,
+      archived_at: null,
+      retention_class: "project" as const,
+      expires_at: null,
+      activity_at: "2026-07-21T10:00:00.000Z",
+      row_version: 1,
       created_by_kind: "user",
       created_by_id: "owner",
       created_at: "2026-07-21T10:00:00.000Z",
       updated_at: "2026-07-21T10:00:00.000Z",
       metadata: {},
-    };
+    } satisfies TaskHarnessSession;
     mockFetch.mockResolvedValueOnce(jsonResponse(session));
 
     const result = await api.getTaskSession("server/session");
@@ -292,6 +314,53 @@ describe("api.getTaskSession", () => {
       },
     );
     expect(result).toEqual(session);
+  });
+});
+
+describe("api.updateTaskSession", () => {
+  it("patches lifecycle fields with the optimistic row version", async () => {
+    const updated = {
+      id: "server-session-1",
+      profile_id: "1",
+      sandbox_id: "default",
+      project_id: "default",
+      title: "Temp chat",
+      status: "archived" as const,
+      workflow_state: "done" as const,
+      done_at: "2026-07-21T10:05:00.000Z",
+      archived_at: "2026-07-21T10:06:00.000Z",
+      retention_class: "temporary" as const,
+      expires_at: "2026-07-28T10:06:00.000Z",
+      activity_at: "2026-07-21T10:06:00.000Z",
+      row_version: 3,
+      created_by_kind: "user",
+      created_by_id: "owner",
+      created_at: "2026-07-21T10:00:00.000Z",
+      updated_at: "2026-07-21T10:06:00.000Z",
+      metadata: { source: "test" },
+    } satisfies TaskHarnessSession;
+    const payload = {
+      row_version: 2,
+      title: "Temp chat",
+      workflow_state: "done",
+      archived: true,
+      retention_class: "temporary",
+      metadata: { source: "test" },
+    } satisfies TaskSessionUpdateData;
+    mockFetch.mockResolvedValueOnce(jsonResponse(updated));
+
+    const result = await api.updateTaskSession("server/session", payload);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/task-sessions/server%2Fsession",
+      {
+        headers: { "Content-Type": "application/json" },
+        method: "PATCH",
+        signal: undefined,
+        body: JSON.stringify(payload),
+      },
+    );
+    expect(result).toEqual(updated);
   });
 });
 

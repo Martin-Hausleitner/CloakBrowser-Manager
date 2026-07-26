@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Plus, Users, KeyRound } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import {
@@ -34,6 +34,12 @@ type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies"
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 type MobileConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
 const FIXED_PROJECTS = ["default", "proxied", "mobile", "research"] as const;
+
+interface InitialPromptDraft {
+  id: string;
+  profileId: string;
+  task: string;
+}
 
 interface ApplyProfileViewportOptions {
   profile: Profile | null;
@@ -180,6 +186,8 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const [projectId, setProjectId] = useState<string>("default");
   const [harness, setHarness] = useState<ProfileHarness>("browser-use");
   const [taskDraft, setTaskDraft] = useState("");
+  const [initialPromptDraft, setInitialPromptDraft] = useState<InitialPromptDraft | null>(null);
+  const initialPromptDraftCounter = useRef(0);
   const isMobile = useIsMobile();
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
@@ -277,6 +285,16 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     const result = await launch(selectedId);
     if (result) setView("view");
   }, [identity, profiles, selectedId, launch]);
+
+  const handOffTaskDraft = useCallback((profileId: string) => {
+    if (!taskDraft) return;
+    initialPromptDraftCounter.current += 1;
+    setInitialPromptDraft({
+      id: `${profileId}:${initialPromptDraftCounter.current}`,
+      profileId,
+      task: taskDraft,
+    });
+  }, [taskDraft]);
 
   const handleStop = useCallback(async () => {
     if (!selectedId || !canAccess(identity, profiles.find((profile) => profile.id === selectedId) ?? null, "operate")) return;
@@ -611,6 +629,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
               }}
               onLaunchSelected={async () => {
                 if (!selected) return;
+                handOffTaskDraft(selected.id);
                 if (selected.status === "running") {
                   setView("view");
                   return;
@@ -715,6 +734,14 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                 if (profile?.harness) setHarness(profile.harness);
               }}
               onConnectionStatusChange={setMobileConnectionStatus}
+              initialPromptDraft={
+                initialPromptDraft?.profileId === selected.id ? initialPromptDraft : null
+              }
+              onInitialPromptDraftApplied={(draftId) => {
+                setInitialPromptDraft((current) => (
+                  current?.id === draftId ? null : current
+                ));
+              }}
             />
           )}
         </div>

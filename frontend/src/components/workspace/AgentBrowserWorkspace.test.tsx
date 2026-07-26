@@ -410,6 +410,60 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("orca-run-status").textContent).toContain("idle");
   });
 
+  it("applies a handed-off prompt draft once without overwriting operator edits", async () => {
+    const task = "Open https://example.com and report the heading";
+    const onInitialPromptDraftApplied = vi.fn();
+    const { rerender } = render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={{ ...runningProfile, harness: "browser-use" }}
+        canAutomate
+        canInteract
+        initialPromptDraft={{
+          id: "handoff-1",
+          profileId: runningProfile.id,
+          task,
+        }}
+        onInitialPromptDraftApplied={onInitialPromptDraftApplied}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("orca-launch");
+    expect((screen.getByTestId("orca-prompt") as HTMLTextAreaElement).value).toBe(task);
+    expect(onInitialPromptDraftApplied).toHaveBeenCalledTimes(1);
+    expect(onInitialPromptDraftApplied).toHaveBeenCalledWith("handoff-1");
+
+    fireEvent.change(screen.getByTestId("orca-prompt"), {
+      target: { value: "Operator edit in progress" },
+    });
+
+    rerender(
+      <AgentBrowserWorkspace
+        profiles={[{ ...runningProfile, updated_at: "2026-07-25T00:00:01Z" }]}
+        selectedProfile={{
+          ...runningProfile,
+          harness: "browser-use",
+          updated_at: "2026-07-25T00:00:01Z",
+        }}
+        canAutomate
+        canInteract
+        initialPromptDraft={{
+          id: "handoff-1",
+          profileId: runningProfile.id,
+          task,
+        }}
+        onInitialPromptDraftApplied={onInitialPromptDraftApplied}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    expect((screen.getByTestId("orca-prompt") as HTMLTextAreaElement).value).toBe(
+      "Operator edit in progress",
+    );
+    expect(onInitialPromptDraftApplied).toHaveBeenCalledTimes(1);
+  });
+
   it("starts Browser Use for a browser-use profile and renders typed outputs", async () => {
     const browserUseProfile: Profile = { ...runningProfile, harness: "browser-use" };
     apiMock.createTaskSession.mockResolvedValue({

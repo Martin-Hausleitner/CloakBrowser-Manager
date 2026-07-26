@@ -1,8 +1,49 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-import { applyProfileViewport, toggleProfilePin } from "./App";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import App, { applyProfileViewport, toggleProfilePin } from "./App";
 import { ProfileForm } from "./components/ProfileForm";
 import type { Profile } from "./lib/api";
+
+const apiMock = vi.hoisted(() => ({
+  authStatus: vi.fn(),
+  logout: vi.fn(),
+  setOnUnauthorized: vi.fn(),
+  getOrcaCapabilities: vi.fn(),
+}));
+
+const useProfilesMock = vi.hoisted(() => vi.fn());
+
+vi.mock("./lib/api", async () => {
+  const actual = await vi.importActual<typeof import("./lib/api")>("./lib/api");
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      authStatus: apiMock.authStatus,
+      logout: apiMock.logout,
+      getOrcaCapabilities: apiMock.getOrcaCapabilities,
+    },
+    setOnUnauthorized: apiMock.setOnUnauthorized,
+  };
+});
+
+vi.mock("./hooks/useProfiles", () => ({
+  useProfiles: useProfilesMock,
+}));
+
+vi.mock("./components/ProfileViewer", () => ({
+  ProfileViewer: ({ profileId }: { profileId: string }) => (
+    <div data-testid="mock-profile-viewer">viewer:{profileId}</div>
+  ),
+}));
+
+vi.mock("./components/LiveDevPanel", () => ({
+  LiveDevPanel: () => <div data-testid="mock-live-dev-panel" />,
+}));
+
+vi.mock("./components/SessionStreamButtons", () => ({
+  SessionStreamButtons: () => <div data-testid="mock-session-stream-buttons" />,
+}));
 
 const stoppedProfile: Profile = {
   id: "profile-1",
@@ -50,6 +91,85 @@ const runningProfile: Profile = {
   status: "running",
   vnc_ws_port: 5901,
 };
+
+beforeEach(() => {
+  apiMock.authStatus.mockResolvedValue({
+    auth_required: false,
+    access_control_enabled: false,
+    authenticated: true,
+    identity: { kind: "anonymous", display_name: "Local operator" },
+  });
+  apiMock.logout.mockResolvedValue(undefined);
+  apiMock.getOrcaCapabilities.mockResolvedValue({
+    available: true,
+    orca_bin: "/usr/local/bin/orca",
+    agents: ["cursor-agent", "grok", "codex"],
+    operations: ["terminal.create"],
+    actions: {
+      start: true,
+      read: true,
+      send: true,
+      close: true,
+      pause: false,
+      resume: false,
+    },
+    notes: [],
+  });
+  useProfilesMock.mockReset();
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: vi.fn().mockImplementation(() => ({
+      matches: false,
+      media: "",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+  window.sessionStorage.clear();
+});
+
+describe("App Browser Use home handoff", () => {
+  it("carries the home task into the selected running Agent Browser workspace once when opening it", async () => {
+    const browserUseRunningProfile: Profile = {
+      ...runningProfile,
+      id: "profile-browser-use",
+      name: "Browser Use Live",
+      project_id: "default",
+      harness: "browser-use",
+      cdp_url: "ws://example",
+    };
+    useProfilesMock.mockReturnValue({
+      profiles: [browserUseRunningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    const task = "Open https://example.com and report the heading";
+    fireEvent.change(
+      await screen.findByPlaceholderText(/give the agent a task/i),
+      { target: { value: task } },
+    );
+    fireEvent.change(screen.getByRole("combobox", { name: "Run with browser profile" }), {
+      target: { value: browserUseRunningProfile.id },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Open or launch selected browser" }));
+
+    const workspacePrompt = await screen.findByTestId("orca-prompt");
+    expect((workspacePrompt as HTMLTextAreaElement).value).toBe(task);
+  });
+});
 
 describe("applyProfileViewport", () => {
   it("saves stopped profile viewport without restarting", async () => {

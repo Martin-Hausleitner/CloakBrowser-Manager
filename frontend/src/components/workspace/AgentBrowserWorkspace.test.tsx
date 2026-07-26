@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { OrcaCapabilities, OrcaSession, Profile } from "../../lib/api";
+import type { OrcaCapabilities, OrcaSession, Profile, TaskRun } from "../../lib/api";
 import { AgentBrowserWorkspace } from "./AgentBrowserWorkspace";
 
 const apiMock = vi.hoisted(() => ({
@@ -14,6 +14,8 @@ const apiMock = vi.hoisted(() => ({
   getTaskRun: vi.fn(),
   listTaskRunOutputs: vi.fn(),
   cancelTaskRun: vi.fn(),
+  retryTaskRunHealth: vi.fn(),
+  overrideTaskRunHealth: vi.fn(),
   taskOutputScreenshotUrl: vi.fn((id: string) => `/api/task-outputs/${id}/screenshot`),
 }));
 
@@ -120,6 +122,7 @@ function sessionFixture(overrides: Partial<OrcaSession> = {}): OrcaSession {
 
 describe("AgentBrowserWorkspace", () => {
   beforeEach(() => {
+    window.sessionStorage.clear();
     apiMock.getOrcaCapabilities.mockReset();
     apiMock.startOrcaSession.mockReset();
     apiMock.readOrcaSessionOutput.mockReset();
@@ -130,6 +133,8 @@ describe("AgentBrowserWorkspace", () => {
     apiMock.getTaskRun.mockReset();
     apiMock.listTaskRunOutputs.mockReset();
     apiMock.cancelTaskRun.mockReset();
+    apiMock.retryTaskRunHealth.mockReset();
+    apiMock.overrideTaskRunHealth.mockReset();
     apiMock.getOrcaCapabilities.mockResolvedValue(capsAvailable);
   });
 
@@ -381,6 +386,142 @@ describe("AgentBrowserWorkspace", () => {
     });
     expect(await screen.findByText("navigate")).toBeTruthy();
     expect(screen.getByTestId("browser-use-output")).toBeTruthy();
+  });
+
+  it("restores the last Browser Use run after the live workspace remounts", async () => {
+    const completedRun: TaskRun = {
+      id: "run-restored",
+      task_session_id: "task-restored",
+      task_message_id: "message-restored",
+      profile_id: runningProfile.id,
+      profile_id_snapshot: runningProfile.id,
+      sandbox_id: "default",
+      harness: "browser-use",
+      status: "succeeded",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: "cursor-grok-4.5-low",
+      deadline_at: "2026-07-26T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {},
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-26T00:00:00Z",
+      updated_at: "2026-07-26T00:01:00Z",
+    };
+    window.sessionStorage.setItem(
+      `cloakbrowser.browser-use.last-run:${runningProfile.id}`,
+      completedRun.id,
+    );
+    apiMock.getTaskRun.mockResolvedValue(completedRun);
+    apiMock.listTaskRunOutputs.mockResolvedValue([
+      {
+        id: "output-restored",
+        run_id: completedRun.id,
+        sequence: 1,
+        idempotency_key: "summary-restored",
+        kind: "summary",
+        summary: "Example Domain restored from the completed run",
+        payload: { success: true },
+        created_at: "2026-07-26T00:01:00Z",
+        artifact_expired: false,
+      },
+    ]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Example Domain restored from the completed run")).toBeTruthy();
+    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe(
+      "browser-use",
+    );
+    expect(screen.getByTestId("orca-run-status").textContent).toContain("succeeded");
+  });
+
+  it("shows Browser Use health blockers and allows an explicit operator override", async () => {
+    const browserUseProfile: Profile = { ...runningProfile, harness: "browser-use" };
+    const blockedRun: TaskRun = {
+      id: "run-blocked",
+      task_session_id: "task-blocked",
+      task_message_id: "message-blocked",
+      profile_id: browserUseProfile.id,
+      profile_id_snapshot: browserUseProfile.id,
+      sandbox_id: "default",
+      harness: "browser-use",
+      status: "blocked_health",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: "cursor-grok-4.5-low",
+      deadline_at: "2026-07-26T00:06:00Z",
+      health_snapshot: { browser_scan_score: 100 },
+      health_decision: {
+        allowed: false,
+        waiting: false,
+        failed_reasons: ["measured_authenticity_below_threshold"],
+        non_overridable_reasons: [],
+      },
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-26T00:00:00Z",
+      updated_at: "2026-07-26T00:00:00Z",
+    };
+    apiMock.createTaskSession.mockResolvedValue({
+      id: blockedRun.task_session_id,
+      profile_id: browserUseProfile.id,
+      sandbox_id: "default",
+      title: "Inspect example.com",
+      status: "active",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-26T00:00:00Z",
+      updated_at: "2026-07-26T00:00:00Z",
+      metadata: {},
+    });
+    apiMock.createTaskRun.mockResolvedValue(blockedRun);
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+    apiMock.overrideTaskRunHealth.mockResolvedValue({
+      ...blockedRun,
+      status: "queued",
+      health_override: { applied: true },
+      health_decision: { allowed: true, waiting: false, failed_reasons: [] },
+    });
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[browserUseProfile]}
+        selectedProfile={browserUseProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(await screen.findByTestId("orca-prompt"), {
+      target: { value: "Inspect https://example.com" },
+    });
+    fireEvent.click(screen.getByTestId("orca-launch"));
+
+    expect(await screen.findByText("Measured authenticity below threshold")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Run with override" }));
+    await waitFor(() => {
+      expect(apiMock.overrideTaskRunHealth).toHaveBeenCalledWith(
+        blockedRun.id,
+        expect.stringContaining("Operator approved"),
+      );
+    });
   });
 
   it("allows Browser Use with automate permission even when the viewer is read-only", async () => {

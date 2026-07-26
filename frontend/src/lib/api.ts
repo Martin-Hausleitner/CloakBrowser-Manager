@@ -910,6 +910,26 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
       { method: "POST", signal: options?.signal },
     ),
 
+  retryTaskRunHealth: (runId: string, options?: { signal?: AbortSignal }) =>
+    request<TaskRun>(
+      `/api/task-runs/${encodeURIComponent(runId)}/retry-health`,
+      { method: "POST", signal: options?.signal },
+    ),
+
+  overrideTaskRunHealth: (
+    runId: string,
+    reason: string,
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<TaskRun>(
+      `/api/task-runs/${encodeURIComponent(runId)}/override-health`,
+      {
+        method: "POST",
+        signal: options?.signal,
+        body: JSON.stringify({ reason }),
+      },
+    ),
+
   taskOutputScreenshotUrl: (outputId: string) =>
     `/api/task-outputs/${encodeURIComponent(outputId)}/screenshot`,
 

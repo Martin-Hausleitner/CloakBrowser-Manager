@@ -16,6 +16,35 @@ type AgentMode = "browser-use" | OrcaAgentCli;
 
 const AGENT_OPTIONS: AgentMode[] = ["browser-use", "cursor-agent", "grok", "codex"];
 const ACTIVE_RUN_STATES = new Set(["queued", "health_check", "blocked_health", "running"]);
+const BROWSER_USE_RUN_STORAGE_PREFIX = "cloakbrowser.browser-use.last-run:";
+
+function browserUseRunStorageKey(profileId: string): string {
+  return `${BROWSER_USE_RUN_STORAGE_PREFIX}${profileId}`;
+}
+
+function readRememberedBrowserUseRun(profileId: string): string | null {
+  try {
+    return window.sessionStorage.getItem(browserUseRunStorageKey(profileId));
+  } catch {
+    return null;
+  }
+}
+
+function rememberBrowserUseRun(profileId: string, runId: string): void {
+  try {
+    window.sessionStorage.setItem(browserUseRunStorageKey(profileId), runId);
+  } catch {
+    // The run remains usable in memory when storage is disabled or full.
+  }
+}
+
+function forgetBrowserUseRun(profileId: string): void {
+  try {
+    window.sessionStorage.removeItem(browserUseRunStorageKey(profileId));
+  } catch {
+    // Ignore unavailable storage; there is no local state left to recover.
+  }
+}
 
 function preferredAgent(profile: Profile | null): AgentMode {
   return profile?.harness === "browser-use" ? "browser-use" : "cursor-agent";
@@ -31,6 +60,15 @@ function allowedOrigins(task: string): string[] {
     }
   }
   return [...origins];
+}
+
+function healthReasonList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function healthReasonLabel(reason: string): string {
+  const words = reason.replaceAll("_", " ");
+  return words ? `${words.charAt(0).toUpperCase()}${words.slice(1)}` : reason;
 }
 
 export interface AgentBrowserWorkspaceProps {
@@ -89,6 +127,14 @@ export function AgentBrowserWorkspace({
   const orcaSessionActive = session?.status === "running" || session?.status === "starting";
   const sessionActive = browserUseMode ? browserUseActive : orcaSessionActive;
   const originList = useMemo(() => allowedOrigins(prompt), [prompt]);
+  const healthFailedReasons = useMemo(
+    () => healthReasonList(taskRun?.health_decision?.failed_reasons),
+    [taskRun?.health_decision],
+  );
+  const nonOverridableHealthReasons = useMemo(
+    () => healthReasonList(taskRun?.health_decision?.non_overridable_reasons),
+    [taskRun?.health_decision],
+  );
   const hasModePermissions = browserUseMode
     ? canAutomate
     : canAutomate && canInteract;
@@ -224,6 +270,7 @@ export function AgentBrowserWorkspace({
 
   useEffect(() => {
     // Switching profiles stops the local session view; operator must relaunch.
+    let cancelled = false;
     stopPolling();
     stopRunPolling();
     setAgent(preferredAgent(selectedProfile));
@@ -234,6 +281,36 @@ export function AgentBrowserWorkspace({
     setTranscript("");
     setCursor(0);
     setError(null);
+
+    const profileId = selectedProfile?.id;
+    const rememberedRunId = profileId ? readRememberedBrowserUseRun(profileId) : null;
+    if (profileId && rememberedRunId) {
+      setAgent("browser-use");
+      void Promise.all([
+        api.getTaskRun(rememberedRunId),
+        api.listTaskRunOutputs(rememberedRunId),
+      ])
+        .then(([rememberedRun, rememberedOutputs]) => {
+          if (cancelled) return;
+          if (rememberedRun.profile_id_snapshot !== profileId) {
+            forgetBrowserUseRun(profileId);
+            setAgent(preferredAgent(selectedProfile));
+            return;
+          }
+          setTaskSessionId(rememberedRun.task_session_id);
+          setTaskRun(rememberedRun);
+          setTaskOutputs(rememberedOutputs);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          forgetBrowserUseRun(profileId);
+          setAgent(preferredAgent(selectedProfile));
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedProfile?.id, stopPolling, stopRunPolling]);
 
   const handleStart = useCallback(async () => {
@@ -265,6 +342,7 @@ export function AgentBrowserWorkspace({
           timeout_seconds: 360,
           model_alias: "cursor-grok-4.5-low",
         });
+        rememberBrowserUseRun(selectedProfile.id, started.id);
         setTaskRun(started);
         setTaskOutputs(await api.listTaskRunOutputs(started.id));
         setPrompt("");
@@ -327,6 +405,45 @@ export function AgentBrowserWorkspace({
       setBusy(false);
     }
   }, [browserUseMode, canStop, session, stopPolling, stopRunPolling, taskRun]);
+
+  const handleRetryRunHealth = useCallback(async () => {
+    if (!taskRun || taskRun.status !== "blocked_health" || !canAutomate || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await api.retryTaskRunHealth(taskRun.id);
+      setTaskRun(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to refresh the profile health gate");
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, canAutomate, taskRun]);
+
+  const handleOverrideRunHealth = useCallback(async () => {
+    if (
+      !taskRun ||
+      taskRun.status !== "blocked_health" ||
+      !canAutomate ||
+      busy ||
+      nonOverridableHealthReasons.length > 0
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await api.overrideTaskRunHealth(
+        taskRun.id,
+        "Operator approved this Browser Use run after reviewing the displayed profile health gate.",
+      );
+      setTaskRun(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to override the profile health gate");
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, canAutomate, nonOverridableHealthReasons.length, taskRun]);
 
   return (
     <div
@@ -454,6 +571,48 @@ export function AgentBrowserWorkspace({
         {error ? (
           <div className="border-b border-red-900/50 bg-red-950/40 px-3 py-1.5 text-[11px] text-red-300">
             {error}
+          </div>
+        ) : null}
+
+        {browserUseMode && taskRun?.status === "blocked_health" ? (
+          <div
+            className="border-b border-amber-800/50 bg-amber-950/35 px-3 py-2 text-[11px] text-amber-100"
+            data-testid="browser-use-health-gate"
+          >
+            <div className="font-semibold">Automation blocked by profile health</div>
+            <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-amber-200/90">
+              {(healthFailedReasons.length ? healthFailedReasons : ["health_gate_blocked"]).map(
+                (reason) => (
+                  <span key={reason} className="rounded bg-amber-900/45 px-1.5 py-0.5">
+                    {healthReasonLabel(reason)}
+                  </span>
+                ),
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                className="btn btn-secondary h-7 px-2 text-[10px]"
+                onClick={() => void handleRetryRunHealth()}
+                disabled={busy || !canAutomate}
+              >
+                Refresh gate
+              </button>
+              {nonOverridableHealthReasons.length === 0 ? (
+                <button
+                  type="button"
+                  className="btn btn-primary h-7 px-2 text-[10px]"
+                  onClick={() => void handleOverrideRunHealth()}
+                  disabled={busy || !canAutomate}
+                >
+                  Run with override
+                </button>
+              ) : (
+                <span className="self-center text-[10px] text-amber-300">
+                  This blocker must be fixed before automation can run.
+                </span>
+              )}
+            </div>
           </div>
         ) : null}
 

@@ -1605,7 +1605,72 @@ Die härteste unveränderte Sicherheitsregel lautet:
 
 > Kein Agent erhält Raw Secrets. Secret-Nutzung erfolgt origin-, profil-, run-, zweck- und zeitgebunden über einen Broker. Browser-Fingerprint, Browserzustand, Passwort, Passkey, Machine Identity und Hardware-Attestation bleiben getrennte Kategorien.
 
-## 26. Abschluss
+## 26. Pareto-Challenge — verbindliche MVP-Grenze
+
+Die unabhängige Produkt-, Security-, Delivery- und Performance-Challenge hat den bisherigen Gesamtplan verworfen, **wenn** er als gleichzeitiger Bauauftrag gelesen wird. Die Architektur bleibt gültig; die Reihenfolge wird strenger. Der nutzbare MVP ist nicht „alle Harnesses, Vaults, Grids und Kubernetes“, sondern ein nachweisbar sicherer, schneller Browser-Agent-Loop.
+
+### 26.1 Die 20 %, die 80 % des Nutzens liefern
+
+| Rang | Unverzichtbarer MVP-Loop | Abnahmebeweis |
+| ---: | --- | --- |
+| 1 | Profil auswählen/erstellen → Browser starten → Live-View | realer Browser, nicht nur Layout-Screenshot; View- und Startrechte geprüft |
+| 2 | Browser Use als Referenz-Harness → verwalteter Run → typisierte Outputs | Action, Observation, Screenshot und Summary kommen über den Manager an; Cancel/Retry funktioniert |
+| 3 | Full View, Desktop und Mobile nutzen dieselbe kompakte Control-Dock-Logik | PhoneFit, Viewport, Zoom, Screenshot, Start/Stop, Stream-Wechsel und Keyboard-Safe-Area funktionieren in allen drei Modi |
+| 4 | Health-/Proxy-/Latenzdiagnose vor Automatisierung | Proxy-Erreichbarkeit, maskierte Exit-IP, Browser-/Fingerprint-Score, API-RTT, First Frame, FPS/Frame-Drops werden als Diagnose erfasst |
+| 5 | schmale, vereinheitlichte `cbm`-CLI aus den heutigen Agent-/Browser-Skripten für Profile, Runs, Screenshot, Proxy und Health | Contract-Tests belegen identische Policy und keine Secret-Ausgabe |
+| 6 | ACPX als **zweiter**, nicht als paralleler erster Worker | nur nach gleichem Live-E2E-, Cancel-, Output- und Security-Gate wie Browser Use |
+
+### 26.2 Stop, Start, Defer
+
+| Entscheidung | Gegenstand | Begründung und harte Grenze |
+| --- | --- | --- |
+| **Start** | Browser Use Live-Loop + kompakte Full-View/Mobile-Parität | löst die unmittelbarsten Produktprobleme und nutzt bereits vorhandene Runtime-, Task- und Output-Bausteine |
+| **Start** | Direkter Tailscale-/Serve-Pfad, 1024×576-Standard und Focus-Stream mit gedrosselten Grid-Thumbnails | der dokumentierte Relay-Pfad ist der größte Latenzhebel; ein Stackwechsel liefert derzeit keinen belegten **integrierten Produktpfad-Gewinn** gegenüber Manager/KasmVNC/noVNC |
+| **Start** | Auth-, Proxy- und Launch-Argument-Härtung | Voraussetzung für jede externe/Tailnet-Exposition und Agentenautomatisierung |
+| **Start** | wahrheitsgemäße Harness-Readiness | ein Harness ist nur sichtbar ausführbar bei Descriptor, frischem Worker, passender Box, Rechteprüfung und grüner Probe |
+| **Defer** | Vaultwarden/Infisical-Installation und Secret Broker | Architektur behalten, aber erst nach freiem **Root-Datenträgerplatz**/Capacity-Gate, Backup/Restore, Account-Modell und no-plaintext-Migration starten |
+| **Defer** | Stagehand, Unbrowse, Agent Browser und alle weiteren ACP-Agenten | jeweils einzeln erst dann zulassen, wenn Browser Use vollständig und messbar stabil ist |
+| **Defer** | lokale Mac-Box als kanonische Runtime | erst modellieren, wenn die VCVM-Profilkette und Metriken reproduzierbar sind |
+| **Stop** | Kubernetes/Helm auf dem einzelnen vollen VCVM-Host | Kubernetes macht einen vollen Einzelhost weder schneller noch sicherer |
+| **Stop** | automatische Mutation von Produktions-Fingerprints | nur reversible, deklarative Vorschläge mit Diff, Messung und menschlicher Freigabe |
+| **Stop** | eigener Passwortmanager, Secret-Reveal-CLI oder Vault-UI-Kopie | kein Raw-Secret-Pfad in UI, API, CLI, MCP oder ACP |
+| **Stop** | Full-Rate-Live-Stream für jedes Browser-Grid-Element | nur Fokus-Stream in voller Rate; übrige Kacheln als gedrosselte Vorschau/letztes Bild |
+| **Stop** | „lokalen Mac“ oder Hardware-Attestation per Browserprofil imitieren | emulierte Darstellung, portable Secrets und hardwaregebundene Identität bleiben sichtbar getrennt |
+
+### 26.3 Sicherheits-Gates vor Feature-Ausbau
+
+Die folgenden Punkte sind **Release-Blocker**, nicht spätere Optimierungen:
+
+1. Nicht-Entwicklungsbetrieb startet nicht ohne Authentisierung und Access Control; ein expliziter offener Dev-Modus darf nur auf Loopback laufen.
+2. Nicht-Loopback-Verkehr mit Bearer-/Cookie-Authentisierung läuft ausschließlich über privates Tailnet-HTTPS oder einen TLS-terminierenden Reverse Proxy; Safari/iPhone zählt erst nach diesem direkten Transportbeweis als abgenommen.
+3. Proxy-, Account- und Agenten-Credentials wandern aus Profilfeldern in Secret-Referenzen. Bis dahin dürfen sie weder in API, Logs, Prozessargumenten, Fehlern, Screenshots, Task-Outputs noch CLI-Ausgabe erscheinen.
+4. Persistente Chromium-`launch_args` werden allowlisted. Sie dürfen weder CDP, User-Data, Proxy, Extensions noch Browser-Sicherheitsgrenzen umgehen.
+5. `view` bedeutet ausschließlich beobachten: keine VNC-Eingabe, Clipboard-Write oder CDP-Tunnel. `automate` benötigt eine kurzlebige, profil-/run-gebundene und widerrufbare Capability.
+6. ACPX/MCP wird nicht als produktiv bezeichnet, bevor eine reale, authentifizierte Adapter-Probe und ein Manager-eigener Browserlauf je freigegebenem Agenten vorliegen.
+7. Ein BrowserScan-/Fingerprint-Score darf nie als TPM-, Secure-Enclave-, Passkey- oder MDM-Vertrauensnachweis dargestellt werden.
+
+### 26.4 Minimaler E2E-Gate-Satz
+
+Der erste **Browser-Use-MVP-Release** ist erst zulässig, wenn die drei Browser-Use-Gates mit frischen, redigierten Artefakten bestehen. ACPX bleibt bis zu seinem eigenen Promotion-Gate nicht als produktiver Harness auswählbar.
+
+| Gate | Muss beweisen |
+| --- | --- |
+| Browser Use Live | laufendes Profil → Live-View → Run → Claim → Action/Observation/Screenshot/Summary → Reload → Cancel/Retry |
+| Mobile/Full View | PhoneFit, Viewport, Zoom, Stream, Screenshot und Keyboard-Safe-Area ohne überlappende Controls; aktiver Run sperrt Viewport-Mutation |
+| Secret Boundary | keine Tokens/Prompts/Credentials in argv, DB/API/Output/Report/Artefaktmetadaten; Capability-Datei 0600 und auf jedem Terminalpfad entfernt |
+
+**ACPX-Promotion-Gate (zweiter Harness):** frischer Worker + ausgewählter grüner Preflight → `cbm-mcp` nur auf erlaubter Origin → Outputs → Cancel → Session-/Capability-Cleanup. Erst danach darf ACPX für diesen einen Agenten sichtbar als produktiv ausführbar sein.
+
+### 26.5 Performance-Gates
+
+- KasmVNC 1.3.3 + noVNC 1.4.x bleibt der aktuelle Web-Referenzstack, weil ein Wechsel bisher keinen belegten integrierten Produktpfad-Gewinn gezeigt hat.
+- Jede Änderung misst mindestens fünf warme Läufe mit Median, p95 und Ausreißern für Health, WebSocket, First-RFB/First-Frame, sichtbare Frame-Änderungen, Eingabe-Latenz, CPU, RAM und Bandbreite.
+- Priorisierte Zielkette ist ein direkter Tailnet-/HTTPS-/Safari-Pfad. Der aktuell dokumentierte DERP-/Relay-Pfad ist kein Beweis für die App-Latenz.
+- 1024×576 ist der primäre schnelle Standard; größere Viewports sind Regressionstests, kein Standard für jedes Profil.
+
+Diese Pareto-Grenze ist absichtlich restriktiv: Jede neue Plattform, UI-Fläche oder Automatisierung muss einen Browser-Use-MVP-Gate oder ein späteres, klar getrenntes Harness-Promotion-Gate verbessern oder wird verschoben.
+
+## 27. Abschluss
 
 Der aktuelle CloakBrowser-Stand ist eine tragfähige Browser- und Agent-Control-Plane, aber noch kein universeller Identity-/Secret-Manager. Die fehlende Schicht soll nicht durch eine neue selbst entwickelte Vault-Anwendung geschlossen werden.
 

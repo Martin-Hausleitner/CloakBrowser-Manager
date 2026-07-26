@@ -591,6 +591,12 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
               onProjectChange={setProjectId}
               onHarnessChange={setHarness}
               onTaskChange={setTaskDraft}
+              onSelectProfile={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+              }}
               onOpenProxies={() => setView("proxies")}
               onOpenProfiles={() => setView("profiles")}
               onOpenAccounts={() => setView("accounts")}

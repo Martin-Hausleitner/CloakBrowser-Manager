@@ -13,6 +13,7 @@ interface BrowserUseHomeProps {
   onProjectChange: (projectId: string) => void;
   onHarnessChange: (harness: ProfileHarness) => void;
   onTaskChange: (task: string) => void;
+  onSelectProfile: (profileId: string | null) => void;
   onOpenSettings: (profileId: string | null) => void;
   onOpenProxies: () => void;
   onOpenProfiles: () => void;
@@ -32,6 +33,7 @@ export function BrowserUseHome({
   onProjectChange,
   onHarnessChange,
   onTaskChange,
+  onSelectProfile,
   onOpenSettings,
   onOpenProxies,
   onOpenProfiles,
@@ -164,7 +166,7 @@ export function BrowserUseHome({
               <select
                 className="input py-1 text-xs"
                 value={selectedProfile?.id ?? ""}
-                onChange={(event) => onOpenSettings(event.target.value || null)}
+                onChange={(event) => onSelectProfile(event.target.value || null)}
                 aria-label="Run with browser profile"
               >
                 <option value="">Choose browser…</option>

@@ -23,6 +23,7 @@ Harness = Literal[
     "stagehand",
     "acpx",
 ]
+AcpxAgent = Literal["codex", "claude", "cursor", "grok-build", "opencode"]
 ProfileHealthState = Literal["pending", "running", "passed", "warning", "failed", "unavailable"]
 ProfileHealthSourceState = Literal["missing", "measured", "derived", "unavailable", "skipped"]
 
@@ -966,6 +967,7 @@ class TaskRunCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     harness: Harness = "browser-use"
+    agent: AcpxAgent | None = None
     task: str = Field(min_length=1, max_length=8_000)
     profile_id: str = Field(min_length=1, max_length=120)
     launch_if_stopped: bool = False
@@ -973,6 +975,14 @@ class TaskRunCreate(BaseModel):
     max_steps: int = Field(default=20, ge=1, le=200)
     timeout_seconds: int = Field(default=300, ge=1, le=3_600)
     model_alias: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_agent_for_harness(self):
+        if self.harness == "acpx" and self.agent is None:
+            raise ValueError("agent is required for acpx harness")
+        if self.harness != "acpx" and self.agent is not None:
+            raise ValueError("agent is only valid for acpx harness")
+        return self
 
     @field_validator("allowed_origins")
     @classmethod
@@ -1028,6 +1038,7 @@ class TaskRunResponse(BaseModel):
     profile_id_snapshot: str
     sandbox_id: str
     harness: Harness
+    agent: AcpxAgent | None = None
     status: TaskRunStatus
     launch_if_stopped: bool = False
     allowed_origins: list[str] = Field(default_factory=list)
@@ -1065,6 +1076,7 @@ class WorkerClaimResponse(BaseModel):
     profile_id: str | None = None
     sandbox_id: str
     harness: Harness
+    agent: AcpxAgent | None = None
     status: TaskRunStatus
     allowed_origins: list[str] = Field(default_factory=list)
     max_steps: int

@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from scripts.cbm_mcp import CbmMcpController, RunContext
+from scripts.cbm_browser_ctl import BrowserCtlError
+
+
+class FakeLocator:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+
+    def inner_text(self):
+        return self.page.body_text if self.selector == "body" else f"text:{self.selector}"
+
+
+class FakePage:
+    def __init__(self):
+        self.url = "https://example.com/start"
+        self.body_text = "Visible page text"
+        self.actions = []
+
+    def title(self):
+        return "Example"
+
+    def bring_to_front(self):
+        self.actions.append(("front",))
+
+    def goto(self, url, wait_until):
+        self.url = url
+        self.actions.append(("goto", url, wait_until))
+
+    def click(self, selector):
+        self.actions.append(("click", selector))
+        if selector == "a.cross-origin":
+            self.url = "https://evil.example/account"
+
+    def fill(self, selector, text):
+        self.actions.append(("fill", selector, text))
+
+    def locator(self, selector):
+        return FakeLocator(self, selector)
+
+
+class FakeContext:
+    def __init__(self, page):
+        self.pages = [page]
+
+
+class FakeBrowser:
+    def __init__(self, page):
+        self.contexts = [FakeContext(page)]
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def make_run_context(tmp_path: Path, **overrides) -> RunContext:
+    capability = tmp_path / "capability"
+    capability.write_text("cbm_run_private_capability", encoding="utf-8")
+    os.chmod(capability, 0o600)
+    env = {
+        "CBM_MANAGER_URL": "https://manager.local",
+        "CBM_RUN_CAPABILITY_FILE": str(capability),
+        "CBM_PROFILE_ID": "profile-1",
+        "CBM_TASK_RUN_ID": "run-1",
+        "CBM_ALLOWED_ORIGINS": json.dumps(["https://example.com"]),
+        **overrides,
+    }
+    return RunContext.from_environment(env)
+
+
+def controller(tmp_path: Path):
+    page = FakePage()
+    browser = FakeBrowser(page)
+    calls = []
+
+    def connect(endpoint, *, headers):
+        calls.append((endpoint, headers))
+        return browser
+
+    ctl = CbmMcpController(make_run_context(tmp_path), connect_over_cdp=connect)
+    return ctl, page, browser, calls
+
+
+def test_run_context_requires_private_capability_and_exact_profile(tmp_path: Path):
+    context = make_run_context(tmp_path)
+    assert context.profile_id == "profile-1"
+    assert context.capability_token == "cbm_run_private_capability"
+    assert "cbm_run_private_capability" not in repr(context)
+
+    capability = Path(context.capability_file)
+    os.chmod(capability, 0o644)
+    with pytest.raises(ValueError, match="mode 0600"):
+        RunContext.from_environment(
+            {
+                "CBM_MANAGER_URL": "https://manager.local",
+                "CBM_RUN_CAPABILITY_FILE": str(capability),
+                "CBM_PROFILE_ID": "profile-1",
+                "CBM_TASK_RUN_ID": "run-1",
+                "CBM_ALLOWED_ORIGINS": "[]",
+            }
+        )
+
+
+def test_inspect_uses_run_capability_without_exposing_it(tmp_path: Path):
+    ctl, _page, browser, calls = controller(tmp_path)
+
+    result = ctl.inspect()
+
+    assert result == {
+        "ok": True,
+        "command": "inspect",
+        "profile_id": "profile-1",
+        "url": "https://example.com/start",
+        "title": "Example",
+    }
+    assert calls[0][0] == "https://manager.local/api/profiles/profile-1/cdp"
+    assert calls[0][1] == {"Authorization": "Bearer cbm_run_private_capability"}
+    assert "cbm_run_private_capability" not in json.dumps(result)
+    assert browser.closed is True
+
+
+def test_navigation_is_exact_origin_scoped(tmp_path: Path):
+    ctl, page, _browser, _calls = controller(tmp_path)
+    result = ctl.navigate("https://example.com/account")
+    assert result["url"] == "https://example.com/account"
+    assert page.actions[-1] == (
+        "goto",
+        "https://example.com/account",
+        "domcontentloaded",
+    )
+
+    with pytest.raises(BrowserCtlError, match="allowed origin"):
+        ctl.navigate("https://evil.example/account")
+
+
+def test_every_tool_blocks_disallowed_current_or_redirected_origin(tmp_path: Path):
+    ctl, page, _browser, _calls = controller(tmp_path)
+    page.url = "https://evil.example/account"
+    with pytest.raises(BrowserCtlError, match="allowed origin"):
+        ctl.inspect()
+    with pytest.raises(BrowserCtlError, match="allowed origin"):
+        ctl.read_text()
+    with pytest.raises(BrowserCtlError, match="allowed origin"):
+        ctl.fill("input", "value")
+
+    page.url = "https://example.com/start"
+    with pytest.raises(BrowserCtlError, match="allowed origin"):
+        ctl.click("a.cross-origin")
+
+
+def test_click_fill_and_read_text_are_bounded_browser_tools(tmp_path: Path):
+    ctl, page, _browser, _calls = controller(tmp_path)
+
+    assert ctl.click("button[type=submit]")["selector"] == "button[type=submit]"
+    fill = ctl.fill("input[name=email]", "person@example.com")
+    assert fill["text_length"] == len("person@example.com")
+    assert "person@example.com" not in json.dumps(fill)
+    assert ctl.read_text()["text"] == "Visible page text"
+    assert ctl.read_text("h1")["text"] == "text:h1"
+    assert ("click", "button[type=submit]") in page.actions
+
+
+def test_server_factory_registers_only_bounded_tools(tmp_path: Path, monkeypatch):
+    from scripts import cbm_mcp
+
+    registered = []
+
+    class FakeFastMCP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def tool(self):
+            def decorate(fn):
+                registered.append(fn.__name__)
+                return fn
+
+            return decorate
+
+    monkeypatch.setattr(cbm_mcp, "_import_fastmcp", lambda: FakeFastMCP)
+    cbm_mcp.build_server(controller(tmp_path)[0])
+    assert registered == [
+        "browser_inspect",
+        "browser_navigate",
+        "browser_click",
+        "browser_fill",
+        "browser_read_text",
+    ]

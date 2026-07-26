@@ -12,6 +12,7 @@ from backend.models import (
     ProfileStatusResponse,
     ProfileUpdate,
     TagCreate,
+    TaskRunCreate,
 )
 
 
@@ -198,6 +199,29 @@ def test_profile_create_invalid_harness():
 def test_profile_create_accepts_callable_browser_harnesses(harness: str):
     profile = ProfileCreate(name="Harness", harness=harness)
     assert profile.harness == harness
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude", "cursor", "grok-build", "opencode"])
+def test_acpx_task_run_requires_supported_agent(agent: str):
+    run = TaskRunCreate(
+        harness="acpx",
+        agent=agent,
+        task="Inspect the managed browser",
+        profile_id="profile-1",
+    )
+    assert run.agent == agent
+
+
+def test_acpx_task_run_rejects_missing_or_unrelated_agent():
+    with pytest.raises(ValidationError, match="agent is required"):
+        TaskRunCreate(harness="acpx", task="Inspect", profile_id="profile-1")
+    with pytest.raises(ValidationError, match="only valid for acpx"):
+        TaskRunCreate(
+            harness="browser-use",
+            agent="codex",
+            task="Inspect",
+            profile_id="profile-1",
+        )
 
 
 # ── ProfileUpdate ────────────────────────────────────────────────────────────

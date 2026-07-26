@@ -100,6 +100,7 @@ const harnessNames: Record<ProfileHarness, string> = {
   "browser-harness": "Browser Harness",
   unbrowse: "Unbrowse",
   stagehand: "Stagehand",
+  acpx: "ACPX",
 };
 
 type PinnedHarnessAction = Omit<TaskHarnessAction, "kind"> & {

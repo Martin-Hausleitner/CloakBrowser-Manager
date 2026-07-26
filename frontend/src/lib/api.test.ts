@@ -620,6 +620,7 @@ describe("api.taskRuns", () => {
       profile_id_snapshot: "profile-1",
       sandbox_id: "default",
       harness: "browser-use",
+      agent: null,
       status: "queued",
       launch_if_stopped: false,
       allowed_origins: ["https://example.com"],

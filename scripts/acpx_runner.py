@@ -146,21 +146,42 @@ def validate_permission_policy(path: Path) -> Path:
 
 
 def build_ensure_command(
-    *, executable: str, cwd: Path, agent: str, session_name: str
+    *,
+    executable: str,
+    cwd: Path,
+    agent: str,
+    session_name: str,
+    permission_policy: Path,
+    mcp_config: Path,
 ) -> list[str]:
     """Build the deterministic command that creates or resumes one ACP session."""
+    safe_cwd = _validate_cwd(cwd)
+    safe_agent = _validate_agent(agent)
+    safe_session = _validate_session_name(session_name)
+    policy = validate_permission_policy(permission_policy)
+    mcp = validate_mcp_config(mcp_config)
     return [
         str(executable),
         "--cwd",
-        str(_validate_cwd(cwd)),
+        str(safe_cwd),
         "--format",
         "json",
         "--json-strict",
-        _validate_agent(agent),
+        "--suppress-reads",
+        "--auth-policy",
+        "fail",
+        "--no-terminal",
+        "--non-interactive-permissions",
+        "fail",
+        "--permission-policy",
+        str(policy),
+        "--mcp-config",
+        str(mcp),
+        safe_agent,
         "sessions",
         "ensure",
         "--name",
-        _validate_session_name(session_name),
+        safe_session,
     ]
 
 
@@ -172,17 +193,24 @@ def build_prompt_command(
     session_name: str,
     permission_policy: Path,
     mcp_config: Path,
+    timeout_seconds: int | None = None,
 ) -> list[str]:
     """Build a prompt invocation that reads the prompt from stdin and fails closed."""
+    safe_cwd = _validate_cwd(cwd)
+    safe_agent = _validate_agent(agent)
+    safe_session = _validate_session_name(session_name)
     policy = validate_permission_policy(permission_policy)
     mcp = validate_mcp_config(mcp_config)
-    return [
+    command = [
         str(executable),
         "--cwd",
-        str(_validate_cwd(cwd)),
+        str(safe_cwd),
         "--format",
         "json",
         "--json-strict",
+        "--auth-policy",
+        "fail",
+        "--no-terminal",
         "--suppress-reads",
         "--non-interactive-permissions",
         "fail",
@@ -190,12 +218,21 @@ def build_prompt_command(
         str(policy),
         "--mcp-config",
         str(mcp),
-        _validate_agent(agent),
+    ]
+    if timeout_seconds is not None:
+        if not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+            raise ValueError("ACPX timeout must be a positive integer")
+        command.extend(["--timeout", str(timeout_seconds)])
+    command.extend(
+        [
+        safe_agent,
         "-s",
-        _validate_session_name(session_name),
+        safe_session,
         "--file",
         "-",
-    ]
+        ]
+    )
+    return command
 
 
 def parse_acpx_event(line: str) -> dict[str, Any]:

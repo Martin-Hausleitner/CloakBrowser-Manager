@@ -47,6 +47,8 @@ Status date: **26 July 2026**. This section describes the active development bra
 
 > **Fresh VCVM checkpoint:** Browser Use is now live-proven through the scoped Web UI: visible health gate, explicit audited override, real Browser Use worker, typed action/observation/screenshot/summary output, authenticated 1920×1080 screenshot, and output restoration after reopening the workspace. See [the worker E2E report and screenshot](docs/BROWSER_USE_WORKER.md#verified-web-ui-e2e-evidence-vcvm-2026-07-26). Broader universal-harness, true-mobile-identity and fullscreen-parity work remains open.
 
+> **ACPX/ACP checkpoint:** the branch now contains a pinned ACPX `0.12.1` host worker, explicit per-run agent selection for Codex/Claude/Cursor/Grok Build/OpenCode, and a run-scoped `cbm-mcp` server built on the official MCP Python SDK. Local contract/runtime tests cover claims, heartbeats, typed outputs, cancellation, strict origin-scoped browser tools, private capability files, raw ACP errors, and subprocess cleanup. This is not yet called live: VCVM provisioning, provider authentication, and a real managed-browser MCP run remain required.
+
 
 ### Repository boundaries
 
@@ -72,6 +74,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 - **Fail-closed execution boundary** — a saved harness preference never grants execution. Browser-visible host actions still require a capability-verified `codex-computer-use` bridge; server task history remains persistence only.
 - **Streaming and competitor research** — reproducible redacted benchmark tooling, a VCVM/Tailscale latency audit, a Safari/WebKit gate that reports missing prerequisites honestly, and an official-source competitor feature matrix.
 - **Browser Use managed-worker E2E** — the Web UI creates a bounded Browser Use run against a selected live profile, displays health blockers, requires an explicit audited override when policy permits it, renders typed outputs and authenticated screenshots, and restores the last run after the live workspace remounts.
+- **ACPX/ACP execution foundation** — `harness=acpx` persists an explicit Codex/Claude/Cursor/Grok Build/OpenCode selector, a host worker maps Manager tasks to opaque ACPX sessions and lifecycle events, and `cbm-mcp` exposes only inspect/navigate/click/fill/read-text against the Manager-granted profile and exact allowed origins. VCVM/provider E2E remains open.
 
 ### Current verified state
 
@@ -85,6 +88,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 | Admin-only live diagnostics | Implemented; full local suite passed | `GET /api/admin/live-diagnostics` returns launch/VNC counters with measured-or-unavailable metrics, strips ports/paths/URLs/proxy/secrets, rejects non-admin callers with HTTP 403, and leaves the mobile workspace unchanged. |
 | Credentialed proxychecker enrichment | Live-proven on VCVM | Restored VCVM-local proxychecker; Manager launched a disposable credentialed-proxy profile; health sources reported `proxychecker: measured` with risk/authenticity scores, masked outbound IP, and no credentials in the API payload. Local Basic-auth forward proxy is intentionally low-authenticity (`warning`). |
 | Browser Use worker through scoped Web UI | Live-proven on VCVM at commit `3c330ef` | Run `ae877b32-95e1-45e3-b2fd-18855496c1e8` passed with action, two observations, screenshot and summary. Screenshot GET returned 200 `image/png` / 20,445 bytes / 1920×1080. Reload + reopen restored the completed run and all typed cards. |
+| ACPX/ACP + `cbm-mcp` | Implemented and locally contract-tested; not yet live-proven on VCVM | ACPX `0.12.1`; official MCP Python SDK `mcp>=1.27,<2`; Manager claim/heartbeat/output/complete/fail/cancel flow; private run-capability handoff; five origin-scoped browser tools. Real provider auth and managed-browser E2E are still required. |
 | Proxy inventory + auto geo-aligned profiles | Live-proven on VCVM | Admin ingest of **11** inventory entries (credentials never returned), Proxy-Checker check produced redacted scores, auto profile created under `proxied/auto` with `geoip` + locale/timezone defaults; Browser-Use/Proxies UI verified via headless Chromium screenshots. |
 | CDP `/session/{id}/live` screencast | Live-proven on VCVM tunnel | Root cause: Chromium emits one frame on static pages. Fix: canvas/rAF compositor pulse + immediate `screencastFrameAck` + 2s pulse keepalive. After redeploy: **about:blank avg ~12 / min ~8 fps** (cast), **example.com avg ~21 / min ~14 fps**, RTT p50 **~139–175 ms**, Live Dev **CDP 22 fps**. Before: **~5.7–7 fps** screenshot-poll. |
 | Physical iPhone Safari and private Tailnet HTTPS | Not yet proven | Chromium emulation is not relabeled as Safari evidence; Safari Remote Automation and a physical-device run remain external prerequisites. |
@@ -95,6 +99,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 | Priority | Feature | Required completion evidence |
 | --- | --- | --- |
 | P0 | Universal browser backends (Stagehand / Unbrowse / remaining harnesses) behind one Manager lease/control plane | Browser Use is live-proven. Next adapters must reuse Manager CDP capabilities and typed outputs; UI labels alone do not count as execution. |
+| P0 | Provision ACPX + `cbm-mcp` on VCVM and prove one real browser task | Install the pinned Node/Python dependencies, configure provider auth by secret reference, pass worker heartbeat/doctor, then navigate and inspect a Manager-owned profile through ACP → MCP with typed outputs and clean cancellation. |
 | P0 | Finish the release handoff | Push only the fork branch, verify its SHA and GitHub files, then retain the green release report and screenshot paths as local evidence. |
 | P1 | Direct Tailnet route and real iPhone Safari acceptance | Private HTTPS, physical keyboard behavior, touch interaction, direct-versus-DERP route evidence, and honest latency definitions. |
 | P1 | Profile organization refinements | Search/filter and safe bulk movement implemented; refresh-stable live E2E after redeploy remains. |
@@ -102,6 +107,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 ### Development timeline
 
+- **26 July 2026 (ACPX/ACP)** — added explicit per-run ACPX agent selection, SQLite migration, filtered worker claims, pinned ACPX worker lifecycle, strict NDJSON/error handling, private run-capability files, official FastMCP stdio server, five bounded browser tools, origin enforcement, systemd template, TypeScript parity, and local runtime/contract tests. A real Codex ACP initialize handshake succeeded but provider authentication remains deliberately unconfigured, so VCVM browser E2E is still open.
 - **26 July 2026** — managed Browser Use execution was exposed in the compact live workspace with typed action/observation/screenshot/summary cards. A real scoped-user VCVM run succeeded after a visible, explicit health override; the authenticated screenshot rendered at 1920×1080. Session-storage recovery now restores the last Browser Use run after a Manager reload/reopen. Full frontend suite: **149/149**; production build passed; independent code review approved.
 - **23 July 2026 (late night)** — CDP live stream hardened: canvas/rAF compositor dirty-pulse + ack-first cast + pulse keepalive so `Page.startScreencast` sustains frames on static Cloak pages; screenshot-poll remains stall fallback only. VCVM redeploy proof: blank **~12 fps cast**, example.com **~21 fps**, Live Dev synced via `/live-metrics`.
 - **23 July 2026 (night)** — Browser Use home gained first-class preference cards for Browser Harness, Unbrowse, and Stagehand (metadata only); sidebar tabs for Proxies, Profiles, and Accounts & 2FA (redacted session/auth badges + planned Bitwarden/Keypad sync). Focused harness/account tests passed; host execution boundary unchanged.

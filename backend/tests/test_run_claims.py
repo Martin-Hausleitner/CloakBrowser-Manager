@@ -65,6 +65,7 @@ def create_run(
     sandbox_id: str = "alpha",
     task: str = "Work",
     harness: str = "browser-use",
+    agent: str | None = None,
 ) -> dict:
     seed_passed_health(profile_id)
     session = db.create_task_session(profile_id, sandbox_id, "bootstrap")
@@ -73,6 +74,7 @@ def create_run(
         headers=bootstrap_headers(),
         json={
             "harness": harness,
+            **({"agent": agent} if agent is not None else {}),
             "task": task,
             "profile_id": profile_id,
             "allowed_origins": ["https://example.com"],
@@ -82,6 +84,27 @@ def create_run(
     )
     assert created.status_code == 201, created.text
     return created.json()
+
+
+def test_acpx_agent_persists_and_is_returned_to_filtered_worker(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX", sandbox_id="alpha")
+    run = create_run(
+        client_access,
+        profile_id=profile["id"],
+        harness="acpx",
+        agent="cursor",
+    )
+    assert run["agent"] == "cursor"
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+        params={"harness": "acpx"},
+    )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["agent"] == "cursor"
 
 
 def test_claim_204_when_no_work(client_access: TestClient):

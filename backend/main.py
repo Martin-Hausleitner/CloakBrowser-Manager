@@ -3001,6 +3001,7 @@ async def create_task_run(session_id: str, body: TaskRunCreate, request: Request
         profile_id=str(profile["id"]),
         sandbox_id=sandbox_id,
         harness=body.harness,
+        agent=body.agent,
         launch_if_stopped=body.launch_if_stopped,
         allowed_origins=list(body.allowed_origins),
         max_steps=body.max_steps,

@@ -132,6 +132,12 @@ Implemented:
 - NDJSON envelope parser and size/version gates
 - typed Manager output mapping and basic secret redaction
 - focused unit tests
+- explicit ACPX agent selector persisted from Task Run creation through worker claim
+- host worker claim, capability, heartbeat, output, complete/fail, cancel, and cleanup lifecycle
+- private mode-`0600` run-capability handoff with deletion after every terminal path
+- official FastMCP stdio server (`mcp>=1.27,<2`)
+- five run-scoped browser tools: inspect, exact-origin navigate, click, fill without echo, and bounded visible-text read
+- systemd service template and version-bounded worker requirements
 
 Fresh local runtime validation on 2026-07-26 established:
 
@@ -142,15 +148,13 @@ Fresh local runtime validation on 2026-07-26 established:
 
 Pending before claiming live availability:
 
-- host worker claim/heartbeat/complete/fail/cancel loop
-- bounded `cbm-mcp` server
-- agent selector in Task Run API/UI
-- systemd provisioning on VCVM
+- render/install the systemd template and dependencies on VCVM
 - live capability doctor for every adapter
 - real browser E2E through MCP and a managed CloakBrowser profile
 - host credential-reference configuration for each ACP adapter (never raw secrets in project config)
 - production lock/doctor check for the exact resolved ACP SDK dependency
-- cancellation/resume/crash/reconnect tests
+- ACPX session close on Manager task archive/retention expiry
+- live cancellation/resume/crash/reconnect tests on VCVM
 - mobile and desktop visual output/approval flows
 
 The UI must label ACPX unavailable until the host worker heartbeat and an adapter-specific E2E probe are fresh.

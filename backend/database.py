@@ -265,6 +265,7 @@ def _migrate_task_runs_v1(conn: sqlite3.Connection) -> None:
                 profile_id_snapshot TEXT NOT NULL,
                 sandbox_id TEXT NOT NULL,
                 harness TEXT NOT NULL,
+                agent TEXT,
                 status TEXT NOT NULL CHECK (
                     status IN (
                         'queued', 'health_check', 'blocked_health', 'running',
@@ -424,6 +425,40 @@ def _migrate_worker_runtime_v1(conn: sqlite3.Connection) -> None:
             raise RuntimeError(
                 f"Foreign key violation after {migration_version}: {tuple(violation)}"
             )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_task_runs_acpx_v1(conn: sqlite3.Connection) -> None:
+    """Add the selected ACPX agent without rebuilding existing task runs."""
+    migration_version = "task_runs_acpx_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        task_runs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+        ).fetchone()
+        if task_runs_exists is None:
+            conn.rollback()
+            return
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if "agent" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN agent TEXT")
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (migration_version, _now()),
@@ -708,6 +743,7 @@ def init_db():
         _migrate_agent_workspace_v1(conn)
         _migrate_task_runs_v1(conn)
         _migrate_worker_runtime_v1(conn)
+        _migrate_task_runs_acpx_v1(conn)
 
 
 def _now() -> str:
@@ -1750,6 +1786,7 @@ def _insert_task_run_on_conn(
     profile_id: str,
     sandbox_id: str,
     harness: str,
+    agent: str | None,
     status: str,
     launch_if_stopped: bool,
     allowed_origins: list[str],
@@ -1767,7 +1804,7 @@ def _insert_task_run_on_conn(
     conn.execute(
         """INSERT INTO task_runs (
             id, task_session_id, task_message_id, profile_id, profile_id_snapshot,
-            sandbox_id, harness, status, launch_if_stopped, allowed_origins_json,
+            sandbox_id, harness, agent, status, launch_if_stopped, allowed_origins_json,
             max_steps, timeout_seconds, model_alias, deadline_at,
             health_snapshot_json, health_decision_json, health_override_json,
             retry_count, first_action_sequence, first_action_at, next_output_sequence,
@@ -1775,7 +1812,7 @@ def _insert_task_run_on_conn(
             created_by_kind, created_by_id, created_at, updated_at,
             lease_id, capability_digest, error_code, error_message, queued_at
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
             0, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?,
             NULL, NULL, NULL, NULL, ?
         )""",
@@ -1787,6 +1824,7 @@ def _insert_task_run_on_conn(
             profile_id,
             sandbox_id,
             harness,
+            agent,
             status,
             bool(launch_if_stopped),
             json.dumps(list(allowed_origins), separators=(",", ":")),
@@ -1816,6 +1854,7 @@ def create_task_run(
     profile_id: str,
     sandbox_id: str,
     harness: str,
+    agent: str | None = None,
     launch_if_stopped: bool,
     allowed_origins: list[str],
     max_steps: int,
@@ -1842,6 +1881,7 @@ def create_task_run(
             profile_id=profile_id,
             sandbox_id=sandbox_id,
             harness=harness,
+            agent=agent,
             status=status,
             launch_if_stopped=launch_if_stopped,
             allowed_origins=allowed_origins,
@@ -1869,6 +1909,7 @@ def create_task_run_with_message(
     profile_id: str,
     sandbox_id: str,
     harness: str,
+    agent: str | None = None,
     launch_if_stopped: bool,
     allowed_origins: list[str],
     max_steps: int,
@@ -1924,6 +1965,7 @@ def create_task_run_with_message(
                 profile_id=profile_id,
                 sandbox_id=sandbox_id,
                 harness=harness,
+                agent=agent,
                 status=status,
                 launch_if_stopped=launch_if_stopped,
                 allowed_origins=allowed_origins,

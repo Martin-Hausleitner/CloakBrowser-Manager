@@ -41,25 +41,36 @@ def test_session_name_is_opaque_stable_and_safe():
 
 
 def test_ensure_command_is_strict_and_repo_scoped(tmp_path: Path):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"defaultAction":"deny"}', encoding="utf-8")
+    os.chmod(policy, 0o600)
+    mcp = tmp_path / "mcp.json"
+    mcp.write_text(
+        json.dumps(
+            {"mcpServers": [{"name": "cloakbrowser", "command": "cbm-mcp", "args": []}]}
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(mcp, 0o600)
     command = build_ensure_command(
         executable="acpx",
         cwd=tmp_path,
         agent="codex",
         session_name="cbm-0123456789abcdef0123456789abcdef",
+        permission_policy=policy,
+        mcp_config=mcp,
     )
 
-    assert command == [
-        "acpx",
-        "--cwd",
-        str(tmp_path.resolve()),
-        "--format",
-        "json",
-        "--json-strict",
-        "codex",
-        "sessions",
-        "ensure",
-        "--name",
-        "cbm-0123456789abcdef0123456789abcdef",
+    assert command[:7] == [
+        "acpx", "--cwd", str(tmp_path.resolve()), "--format", "json", "--json-strict",
+        "--suppress-reads",
+    ]
+    assert "--auth-policy" in command and command[command.index("--auth-policy") + 1] == "fail"
+    assert "--no-terminal" in command
+    assert command[command.index("--permission-policy") + 1] == str(policy.resolve())
+    assert command[command.index("--mcp-config") + 1] == str(mcp.resolve())
+    assert command[-5:] == [
+        "codex", "sessions", "ensure", "--name", "cbm-0123456789abcdef0123456789abcdef",
     ]
 
 
@@ -101,6 +112,8 @@ def test_commands_reject_unsupported_agent_and_relative_worktree(tmp_path: Path)
             cwd=tmp_path,
             agent="shell",
             session_name="cbm-0123456789abcdef0123456789abcdef",
+            permission_policy=tmp_path / "missing-policy",
+            mcp_config=tmp_path / "missing-mcp",
         )
     with pytest.raises(ValueError, match="absolute directory"):
         build_ensure_command(
@@ -108,6 +121,8 @@ def test_commands_reject_unsupported_agent_and_relative_worktree(tmp_path: Path)
             cwd=Path("relative"),
             agent="codex",
             session_name="cbm-0123456789abcdef0123456789abcdef",
+            permission_policy=tmp_path / "missing-policy",
+            mcp_config=tmp_path / "missing-mcp",
         )
 
 

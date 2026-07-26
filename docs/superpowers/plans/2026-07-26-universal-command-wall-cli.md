@@ -1140,13 +1140,17 @@ Use ACPX `0.12.1`. Its package currently declares `@agentclientprotocol/sdk` as 
 
 Profiles and Task Runs can select `acpx`; this is a contract registration, not yet a live availability claim.
 
-- [ ] **Step 4: Implement the host worker lifecycle**
+- [x] **Step 4: Implement the host worker run lifecycle**
 
-Claim only `harness=acpx`, map one Manager Task Session to one opaque ACPX named session, stream typed outputs, heartbeat, propagate cancel through `acpx <agent> cancel -s <name>`, and close on archive/retention expiry. The Manager remains the source of truth; ACPX session storage is only a runtime cache.
+Claim only `harness=acpx`, map one Manager Task Session to one opaque ACPX named session, stream typed outputs, heartbeat, propagate cancel through `acpx <agent> cancel -s <name>`, and clean the private run capability. The Manager remains the source of truth; ACPX session storage is only a runtime cache.
 
-- [ ] **Step 5: Connect bounded browser tools through MCP**
+- [ ] **Step 4b: Close ACPX sessions on archive/retention expiry**
 
-Pass a mode-`0600` `--mcp-config` that exposes only `cbm-mcp`. Do not place bearer tokens in the config. The worker supplies credential references through a private file or inherited host credential provider.
+Add the Manager-to-worker lifecycle signal and call `sessions close` only after the durable task is archived or expires. Do not close after every run because follow-up prompts must resume the same named ACP session.
+
+- [x] **Step 5: Connect bounded browser tools through MCP**
+
+Pass a mode-`0600` `--mcp-config` that exposes only `cbm-mcp`. Do not place bearer tokens in the config. The worker supplies a short-lived run capability through a private mode-`0600` file. `cbm-mcp` uses the official MCP Python SDK and exposes only inspect, exact-origin navigate, click, fill-without-echo, and bounded visible-text read for the Manager-granted profile.
 
 - [ ] **Step 6: Normalize events**
 
@@ -1175,7 +1179,7 @@ Test unknown additive fields, truncated stream, nonzero exit without terminal ev
 Run:
 
 ```bash
-python -m pytest scripts/test_acpx_runner.py scripts/test_acpx_worker.py backend/tests/test_models.py -q
+python -m pytest scripts/test_acpx_runner.py scripts/test_acpx_worker.py scripts/test_cbm_mcp.py scripts/test_acpx_deployment.py backend/tests/test_models.py backend/tests/test_run_claims.py -q
 ```
 
 Expected: every adapter emits one terminal canonical event and preserves authorization boundaries.

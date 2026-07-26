@@ -10,7 +10,8 @@ export type ProfileHarness =
   | "browser-use"
   | "browser-harness"
   | "unbrowse"
-  | "stagehand";
+  | "stagehand"
+  | "acpx";
 
 export type OrcaAgentCli = "cursor-agent" | "grok" | "codex";
 
@@ -503,6 +504,7 @@ export interface TaskRun {
   profile_id_snapshot: string;
   sandbox_id: string;
   harness: ProfileHarness;
+  agent: "codex" | "claude" | "cursor" | "grok-build" | "opencode" | null;
   status: TaskRunStatus;
   launch_if_stopped: boolean;
   allowed_origins: string[];
@@ -527,6 +529,7 @@ export interface TaskRun {
 
 export interface TaskRunCreateData {
   harness?: ProfileHarness;
+  agent?: "codex" | "claude" | "cursor" | "grok-build" | "opencode" | null;
   task: string;
   profile_id: string;
   launch_if_stopped?: boolean;

@@ -604,6 +604,7 @@ class WorkerRuntimeService:
             "profile_id": run.get("profile_id") or run.get("profile_id_snapshot"),
             "sandbox_id": run["sandbox_id"],
             "harness": run["harness"],
+            "agent": run.get("agent"),
             "status": run["status"],
             "allowed_origins": run["allowed_origins"],
             "max_steps": run["max_steps"],

@@ -1,0 +1,25 @@
+[Unit]
+Description=CloakBrowser ACPX host worker
+Documentation=@DOCUMENTATION@
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKING_DIRECTORY@
+ExecStart=@VENV_PYTHON@ -m scripts.acpx_worker \
+  --manager-url @MANAGER_URL@ \
+  --worker-id @WORKER_ID@ \
+  --token-file @TOKEN_FILE@ \
+  --worktree @WORKING_DIRECTORY@ \
+  --permission-policy @PERMISSION_POLICY@ \
+  --mcp-config @MCP_CONFIG@ \
+  --capability-dir @CAPABILITY_DIR@ \
+  --acpx @ACPX_EXECUTABLE@
+Restart=on-failure
+RestartSec=5
+UMask=0077
+Environment=@PATH_ENVIRONMENT@
+
+[Install]
+WantedBy=default.target

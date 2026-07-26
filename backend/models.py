@@ -12,6 +12,15 @@ from urllib.parse import urlparse
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 FOLDER_SEGMENT_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._ -]*$"
 ACCENT_COLOR_PATTERN = r"^#[0-9A-Fa-f]{6}$"
+MANAGER_OWNED_LAUNCH_ARG_PREFIXES = (
+    "--remote-debugging-port",
+    "--remote-debugging-address",
+    "--user-data-dir",
+    "--proxy-server",
+    "--proxy-pac-url",
+    "--disable-web-security",
+    "--no-sandbox",
+)
 Harness = Literal[
     "codex",
     "antigravity",
@@ -40,6 +49,20 @@ def _validate_folder_path(value: str) -> str:
         raise ValueError("folder_path must contain friendly path segments")
     if any(re.fullmatch(FOLDER_SEGMENT_PATTERN, segment) is None for segment in segments):
         raise ValueError("folder_path must contain friendly path segments")
+    return value
+
+
+def _validate_profile_launch_args(value: list[str] | None) -> list[str] | None:
+    """Keep browser-manager-owned Chromium settings outside profile input."""
+    for launch_arg in value or []:
+        normalized = launch_arg.strip().lower()
+        for blocked in MANAGER_OWNED_LAUNCH_ARG_PREFIXES:
+            if (
+                normalized == blocked
+                or normalized.startswith(f"{blocked}=")
+                or normalized.startswith(f"{blocked} ")
+            ):
+                raise ValueError(f"launch_args cannot set manager-owned Chromium flag: {blocked}")
     return value
 
 
@@ -84,6 +107,11 @@ class ProfileCreate(BaseModel):
     def validate_folder_path(cls, value: str) -> str:
         return _validate_folder_path(value)
 
+    @field_validator("launch_args")
+    @classmethod
+    def validate_launch_args(cls, value: list[str]) -> list[str]:
+        return _validate_profile_launch_args(value) or []
+
 
 class ProfileUpdate(BaseModel):
     name: str | None = None
@@ -127,6 +155,11 @@ class ProfileUpdate(BaseModel):
         if value is None:
             return value
         return _validate_folder_path(value)
+
+    @field_validator("launch_args")
+    @classmethod
+    def validate_launch_args(cls, value: list[str] | None) -> list[str] | None:
+        return _validate_profile_launch_args(value)
 
 
 class ProfileBulkOrganize(BaseModel):

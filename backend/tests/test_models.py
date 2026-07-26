@@ -124,6 +124,24 @@ def test_profile_create_with_launch_args():
     assert p.launch_args == ["--load-extension=/tmp/ext"]
 
 
+@pytest.mark.parametrize(
+    "launch_arg",
+    [
+        "--remote-debugging-port=9222",
+        "--remote-debugging-address=0.0.0.0",
+        "--user-data-dir=/tmp/unmanaged-profile",
+        "--proxy-server=http://proxy.invalid:8080",
+        "--proxy-pac-url=https://proxy.invalid/config.pac",
+        "--disable-web-security",
+        "--no-sandbox",
+    ],
+)
+def test_profile_create_rejects_manager_owned_launch_args(launch_arg: str):
+    """Profiles cannot override runtime, network, or browser-security ownership."""
+    with pytest.raises(ValidationError, match="manager-owned"):
+        ProfileCreate(name="Unsafe", launch_args=[launch_arg])
+
+
 def test_profile_create_organization_fields():
     p = ProfileCreate(
         name="Organized",

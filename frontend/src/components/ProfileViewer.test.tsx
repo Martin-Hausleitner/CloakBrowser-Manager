@@ -193,6 +193,34 @@ describe("ProfileViewer", () => {
     expect(onDisconnect).not.toHaveBeenCalled();
   });
 
+  it("keeps the VNC connection when the parent replaces its disconnect callback", async () => {
+    const firstDisconnect = vi.fn();
+    const secondDisconnect = vi.fn();
+    const view = render(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        onDisconnect={firstDisconnect}
+      />,
+    );
+    await flushAsyncWork();
+    expect(rfbMock.instances).toHaveLength(1);
+
+    view.rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        onDisconnect={secondDisconnect}
+      />,
+    );
+    await flushAsyncWork();
+
+    expect(rfbMock.instances).toHaveLength(1);
+    expect(rfbMock.instances[0]?.disconnectCalls).toBe(0);
+  });
+
   it("notifies the parent only after reconnect attempts are exhausted", async () => {
     const { onDisconnect } = await renderProfileViewer();
 

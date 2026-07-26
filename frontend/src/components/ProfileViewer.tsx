@@ -103,6 +103,8 @@ export function ProfileViewer({
 }: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<any>(null);
+  const onDisconnectRef = useRef(onDisconnect);
+  onDisconnectRef.current = onDisconnect;
   const [connected, setConnected] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -235,7 +237,7 @@ export function ProfileViewer({
       setConnected(false);
       setConnectionStatus("failed");
       setError(message);
-      if (notifyParent) onDisconnect();
+      if (notifyParent) onDisconnectRef.current();
     };
 
     const scheduleReconnect = () => {
@@ -349,7 +351,7 @@ export function ProfileViewer({
       }
       rfbRef.current = null;
     };
-  }, [profileId, canInteract, onDisconnect]);
+  }, [profileId, canInteract]);
 
   // Host→VNC: intercept Ctrl+V/Cmd+V at keydown (capture phase)
   // Must fire BEFORE noVNC's canvas listener to prevent the race condition

@@ -1117,25 +1117,38 @@ git add integrations/mcp backend/requirements.txt
 git commit -m "feat(mcp): expose bounded browser manager tools"
 ```
 
-### Task 12: Add ACP and vendor harness adapters
+### Task 12: Add ACPX-backed ACP harness adapters
 
 **Files:**
-- Create: `integrations/acp/__init__.py`
-- Create: `integrations/acp/bridge.py`
-- Create: `integrations/acp/events.py`
-- Create: `integrations/acp/adapters/grok.py`
-- Create: `integrations/acp/adapters/opencode.py`
-- Create: `integrations/acp/adapters/cursor.py`
-- Create: `integrations/acp/adapters/claude.py`
-- Create: `integrations/acp/adapters/codex.py`
-- Create: `integrations/acp/tests/test_acp_bridge.py`
-- Create: `integrations/acp/tests/test_vendor_adapters.py`
+- Create: `scripts/acpx_runner.py`
+- Create: `scripts/test_acpx_runner.py`
+- Create: `scripts/acpx_worker.py`
+- Create: `scripts/test_acpx_worker.py`
+- Create: `deploy/systemd/cloakbrowser-acpx-worker.service.template`
+- Modify: `backend/models.py`
+- Modify: `backend/tests/test_models.py`
 
-- [ ] **Step 1: Pin official ACP schema/SDK**
+- [x] **Step 1: Pin ACPX and record the reviewed ACP SDK baseline**
 
-Use the official schema and negotiated capability version. Preserve raw vendor events as bounded opaque metadata while normalizing the envelope.
+Use ACPX `0.12.1`. Its package currently declares `@agentclientprotocol/sdk` as `^1.2.1`, so `1.2.1` is the reviewed contract baseline rather than an enforced exact SDK pin. ACP is canonical; ACPX is a replaceable runtime adapter. The production provisioner must lock and verify the resolved dependency graph before enabling the worker.
 
-- [ ] **Step 2: Normalize events**
+- [x] **Step 2: Add the fail-closed command and event adapter**
+
+`scripts/acpx_runner.py` now validates the worktree, allowed agent, private permission/MCP files, opaque session name, exact runtime version, strict NDJSON event envelope, event size, typed-output mapping, and secret redaction. Prompts never enter argv.
+
+- [x] **Step 3: Register `acpx` as a Manager harness type**
+
+Profiles and Task Runs can select `acpx`; this is a contract registration, not yet a live availability claim.
+
+- [ ] **Step 4: Implement the host worker lifecycle**
+
+Claim only `harness=acpx`, map one Manager Task Session to one opaque ACPX named session, stream typed outputs, heartbeat, propagate cancel through `acpx <agent> cancel -s <name>`, and close on archive/retention expiry. The Manager remains the source of truth; ACPX session storage is only a runtime cache.
+
+- [ ] **Step 5: Connect bounded browser tools through MCP**
+
+Pass a mode-`0600` `--mcp-config` that exposes only `cbm-mcp`. Do not place bearer tokens in the config. The worker supplies credential references through a private file or inherited host credential provider.
+
+- [ ] **Step 6: Normalize events**
 
 ```text
 session.started, message.delta, tool.started, tool.completed,
@@ -1143,35 +1156,35 @@ approval.requested, artifact.created, progress.updated,
 result.completed, result.failed
 ```
 
-- [ ] **Step 3: Prove native ACP with Grok**
+- [ ] **Step 7: Prove native ACP with Grok Build**
 
-Start `grok agent stdio`, negotiate capabilities, create/resume a session, invoke the `cbm` MCP tools, stream typed results, and cancel cleanly.
+Use the ACPX `grok-build` adapter, negotiate capabilities, create/resume a session, invoke the `cbm` MCP tools, stream typed results, and cancel cleanly.
 
-- [ ] **Step 4: Add OpenCode ACP**
+- [ ] **Step 8: Prove OpenCode, Cursor, Codex, and Claude adapters**
 
-Use `opencode acp`; do not scrape its terminal UI.
+Use ACPX built-ins (`opencode`, `cursor`, `codex`, `claude`); do not scrape terminal UIs. Each adapter must pass the same authorization, cancellation, resume, and output-contract suite.
 
-- [ ] **Step 5: Add structured subprocess adapters**
+- [ ] **Step 9: Keep custom/vendor adapters behind ACPX**
 
-Cursor and Claude use documented streaming JSON. Codex uses documented stable structured/MCP surfaces; experimental app-server RPC remains behind a version-pinned adapter and is not required for baseline availability.
+Use ACPX `--agent` only for an ACP server with an explicit descriptor, version pin, executable allowlist, and contract tests. Do not introduce a second proprietary session protocol.
 
-- [ ] **Step 6: Verify incomplete and hostile streams**
+- [ ] **Step 10: Verify incomplete and hostile streams**
 
 Test unknown additive fields, truncated stream, nonzero exit without terminal event, oversized event, secret-like stderr, cancellation, resume, and adapter version mismatch.
 
 Run:
 
 ```bash
-python -m pytest integrations/acp/tests/test_acp_bridge.py integrations/acp/tests/test_vendor_adapters.py -q
+python -m pytest scripts/test_acpx_runner.py scripts/test_acpx_worker.py backend/tests/test_models.py -q
 ```
 
 Expected: every adapter emits one terminal canonical event and preserves authorization boundaries.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add integrations/acp
-git commit -m "feat(acp): bridge coding harness sessions"
+git add scripts/acpx_runner.py scripts/test_acpx_runner.py scripts/acpx_worker.py scripts/test_acpx_worker.py deploy/systemd/cloakbrowser-acpx-worker.service.template backend/models.py backend/tests/test_models.py
+git commit -m "feat(acp): add pinned acpx harness adapter"
 ```
 
 ### Task 13: Publish one cross-harness skill
@@ -1426,4 +1439,3 @@ Tasks 14–15. Stop condition: desktop/mobile/full-view parity, live URL, screen
 - Custom VNC OS is excluded because KasmVNC/noVNC and CDP-live already cover the two required viewing modes.
 - Kubernetes is deferred until one-box capacity measurements justify it.
 - Major visual redesign begins only after this architecture is accepted; the plan specifies behavior and boundaries first.
-

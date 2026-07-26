@@ -123,7 +123,7 @@ Am 26. Juli 2026 wurde der VCVM-Stand read-only erneut geprüft.
 | Agent Secret Assignment | nicht vorhanden | Machine Identity, Secret Assignment, Approval und Audit |
 | Proxy-Secrets | intern als credentialed URL speicherbar | Migration zu Secret-Referenzen |
 | Extension-Installation | lokale vorhandene Ordner können geladen werden | Store-Link/Upload/Sync/Version/Trust/CLI-Lifecycle |
-| ACP | nicht vorhanden | offizielles ACP-Schema/SDK und Vendor-Adapter |
+| ACP/ACPX | Adapter-Grundlage vorhanden: ACPX `0.12.1`, geprüfte ACP-SDK-Baseline `1.2.1`, Harness-Typ, sichere Command-/Event-Verträge und 29 Tests | aufgelöste SDK-Version im Provisioning sperren, Host-Worker, MCP-Server, Live-E2E je Agent und UI-Verfügbarkeitsstatus |
 | MCP | nicht vorhanden | offizieller MCP-Server über gemeinsamen Client |
 | Full-View-Parität | verbessert, aber nicht global vereinheitlicht | ein gemeinsames Control-Dock für Mobile/Desktop/Full View |
 | Multi-Browser-Grid | Sessions-Auswahl vorhanden | gedrosselte Live-Thumbnails und fokussierter Interaktionsstream |
@@ -819,22 +819,36 @@ Ein einziger `cloakbrowser-command-wall` Skill beschreibt:
 ### 14.1 Protokollrollen
 
 - **ACP:** Coding-Agent-/Editor-Sessions, Streaming, Approvals und Session Lifecycle
+- **ACPX:** versionierter ACP-Client und Session-Runtime für Codex, Claude, Cursor, Grok Build und OpenCode
 - **MCP:** bounded Tools, Resources und Browser-/Manager-Capabilities
 - **Manager API:** Autorität für Policy, Zustand, Persistence und Lifecycle
 - **JSON-RPC:** nur Wire-Grundlage, kein neues Produktprotokoll
 
-### 14.2 Harness-Reihenfolge
+Die verbindliche Entscheidung lautet: ACP ist der Protokollvertrag, [openclaw/acpx](https://github.com/openclaw/acpx) ist die ausführende Adapter- und Session-Schicht. ACPX wird exakt auf `0.12.1` gepinnt und wegen seines Alpha-Status ausschließlich hinter dem CloakBrowser-Kompatibilitätsadapter verwendet. Der Manager bleibt für Rechte, Task-Lifecycle, Audit, Profile und Browser-Leases zuständig; `~/.acpx/sessions` ist nur Ausführungscache.
+
+### 14.2 Sicherheitsvertrag für ACPX
+
+- Prompt ausschließlich über STDIN (`--file -`), niemals im Prozessargument
+- JSON-NDJSON ausschließlich mit `--format json --json-strict`
+- Nichtinteraktive Permission-Anfragen standardmäßig `fail`; niemals globales `--approve-all`
+- MCP-Konfiguration als private `0600`-Datei und nur mit `mcpServers`
+- keine Provider-Tokens, Passwörter oder Browser-Credentials in `.acpxrc.json`
+- opake Zuordnung `task_session_id → cbm-<sha256>` ohne Kunden-/Projektname
+- Ereignisversion, Größe, Typen, Sequenz und Secret-Redaction vor Manager-Ingest prüfen
+- unbekannte additive Events als Status behandeln; inkompatible Envelope-Versionen fail-closed ablehnen
+
+### 14.3 Harness-Reihenfolge
 
 1. Browser Use als bestehender Referenzworker
 2. Stagehand als zweiter echter Worker
-3. Grok über natives ACP
-4. OpenCode über ACP
-5. Cursor und Claude Code über dokumentierte Streaming-JSON-Protokolle
-6. Codex über MCP/stabile strukturierte Oberflächen
+3. Grok Build über natives ACP via ACPX
+4. OpenCode über ACP via ACPX
+5. Cursor über natives ACP via ACPX
+6. Codex und Claude über die gepflegten ACPX-Adapter
 7. Unbrowse als kontrollierte Research-/Evidence-Capability
 8. Orca als optionaler Environment-/Terminal-Adapter
 
-### 14.3 Ein Harness gilt nur als verfügbar, wenn
+### 14.4 Ein Harness gilt nur als verfügbar, wenn
 
 - Descriptor registriert ist
 - Worker-Heartbeat frisch ist
@@ -1330,4 +1344,3 @@ Die belastbarste und leichteste Architektur ist:
 > **CloakBrowser Manager für SystemIdentity, Profile, Proxys, Runtimes, Zuordnungen, Policies, Harnesses und Live-Browser**
 
 Vor produktiver Installation ist die VCVM-Speicherkapazität sicher zu bereinigen oder zu erweitern. Danach kann die Umsetzung entlang des versionierten Command-Wall-Plans testgetrieben beginnen.
-

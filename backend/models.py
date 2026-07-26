@@ -21,6 +21,7 @@ Harness = Literal[
     "browser-harness",
     "unbrowse",
     "stagehand",
+    "acpx",
 ]
 ProfileHealthState = Literal["pending", "running", "passed", "warning", "failed", "unavailable"]
 ProfileHealthSourceState = Literal["missing", "measured", "derived", "unavailable", "skipped"]
@@ -1376,4 +1377,3 @@ class OrcaSessionSendResponse(BaseModel):
     ok: bool
     status: OrcaSessionStatus
     capabilities: OrcaSessionCapabilities
-

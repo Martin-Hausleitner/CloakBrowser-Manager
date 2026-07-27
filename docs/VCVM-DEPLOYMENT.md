@@ -189,6 +189,23 @@ receipt with `scripts/provision_acpx_worker.py`. The provisioner creates only
 the explicit local key/unit paths and does not run `systemctl`, SSH, `pip`,
 `uv`, or `npm`. See [ACPX_WORKER.md](./ACPX_WORKER.md).
 
+The independent VCVM release transaction also has an explicit
+`bootstrap_acpx` engine mode for the first ACPX promotion candidate. It is not
+part of the public deploy/rollback wrappers. Normal releases still require the
+existing ACPX preflight to pass before any mutation. In bootstrap mode the
+engine first probes for genuine absence only: missing ACPX binary, systemd
+unit, key, venv or capability directory. Existing but stale, misconfigured,
+bad-auth or wrong-version ACPX state remains blocking.
+
+When that absence gate passes, the transaction stages release-specific ACPX
+npm/Python runtimes from the checked-in locks, provisions a temporary
+candidate-bound worker against Manager `127.0.0.1:18116`, and verifies worker
+presence plus adapter readiness before stopping the old Manager or workers.
+After the normal Manager switch, the worker is promoted to
+`127.0.0.1:18115` and verified with the release runtime. Any failure cleans up
+only release-specific temporary ACPX artifacts; failures after quiesce also
+restore the captured old Manager/runtime/unit state before returning failure.
+
 ### Optional VCVM-local proxychecker
 
 First ensure the already-authorized proxychecker listens only on the VCVM's

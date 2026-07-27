@@ -330,3 +330,287 @@ def test_restore_dropin_rejects_symlink_temp_file(monkeypatch: pytest.MonkeyPatc
         remote._restore_release_dropin("cloakbrowser-browser-use.service", capture, "browser_use")
 
     assert target.read_text(encoding="utf-8") == "do-not-touch"
+
+
+def test_bootstrap_candidate_verify_uses_candidate_manager_presence_and_adapter_preflights(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    acpx_executable = paths["releases"] / "release-0000001" / "acpx-bootstrap" / "node-runtime" / "node_modules" / ".bin" / "acpx"
+    acpx_executable.parent.mkdir(parents=True)
+    acpx_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    manager_calls: list[tuple[int, str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[:4] == ["systemctl", "--user", "is-active", "acpx-candidate-release-0000001.service"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    def fake_manager_json(port: int, path: str) -> dict[str, object]:
+        manager_calls.append((port, path))
+        if path == "/api/task-harnesses/acpx/presence":
+            return {"worker_seen_recently": True, "state": "polling"}
+        if path == "/api/task-harnesses/acpx/preflights":
+            return {
+                "agents": [
+                    {"agent": "codex", "ready": True, "state": "ready", "reason_code": "ok"},
+                    {"agent": "claude", "ready": True, "state": "ready", "reason_code": "ok"},
+                    {"agent": "cursor", "ready": True, "state": "ready", "reason_code": "ok"},
+                    {"agent": "grok-build", "ready": True, "state": "ready", "reason_code": "ok"},
+                    {"agent": "opencode", "ready": True, "state": "ready", "reason_code": "ok"},
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/local/bin/acpx" if name == "acpx" else None)
+    monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
+
+    result = remote.op_bootstrap_acpx_verify_candidate(
+        {
+            "release_id": "release-0000001",
+            "worker_id": "acpx-candidate-release-0000001",
+            "manager_port": 18116,
+            "acpx_executable": str(acpx_executable),
+        }
+    )
+
+    assert result["present"] is True
+    assert result["adapters_ready"] is True
+    assert manager_calls == [
+        (18116, "/api/task-harnesses/acpx/presence"),
+        (18116, "/api/task-harnesses/acpx/preflights"),
+    ]
+
+
+def test_bootstrap_candidate_verify_rejects_missing_adapter_preflight(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    acpx_executable = paths["releases"] / "release-0000001" / "acpx-bootstrap" / "node-runtime" / "node_modules" / ".bin" / "acpx"
+    acpx_executable.parent.mkdir(parents=True)
+    acpx_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+
+    def fake_manager_json(port: int, path: str) -> dict[str, object]:
+        assert port == 18116
+        if path.endswith("/presence"):
+            return {"worker_seen_recently": True, "state": "polling"}
+        return {"agents": [{"agent": "codex", "ready": False, "state": "failed", "reason_code": "auth_required"}]}
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/local/bin/acpx" if name == "acpx" else None)
+    monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
+
+    result = remote.op_bootstrap_acpx_verify_candidate(
+        {
+            "release_id": "release-0000001",
+            "worker_id": "acpx-candidate-release-0000001",
+            "manager_port": 18116,
+            "acpx_executable": str(acpx_executable),
+        }
+    )
+
+    assert result["present"] is True
+    assert result["adapters_ready"] is False
+
+
+def test_bootstrap_probe_blocks_partial_acpx_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    unit = paths["home"] / ".config" / "systemd" / "user" / "cloakbrowser-acpx.service"
+    unit.write_text("[Service]\nExecStart=old-acpx\n", encoding="utf-8")
+
+    result = remote.op_bootstrap_acpx_probe({"release_id": "release-0000001"})
+
+    assert result["state"] == "blocking"
+    assert result["reason_code"] == "misconfigured"
+    assert "unit" not in result["missing"]
+
+
+def test_bootstrap_candidate_verify_rejects_non_release_acpx_executable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr=""))
+
+    with pytest.raises(remote.HelperError, match="ACPX executable"):
+        remote.op_bootstrap_acpx_verify_candidate(
+            {
+                "release_id": "release-0000001",
+                "worker_id": "acpx-candidate-release-0000001",
+                "manager_port": 18116,
+                "acpx_executable": "/usr/local/bin/acpx",
+            }
+        )
+
+
+def test_capture_state_records_prior_acpx_absence_without_strict_preflight(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fail_strict_acpx(args: dict[str, object]) -> dict[str, object]:
+        del args
+        raise remote.HelperError("ACPX unit is missing")
+
+    monkeypatch.setattr(remote, "op_preflight_manager", lambda _args: {"revision": "1" * 40, "image_digest": "d" * 64, "image_id": "sha256:" + ("d" * 64)})
+    monkeypatch.setattr(
+        remote,
+        "op_preflight_browser_use",
+        lambda _args: {
+            "unit_sha256": "1" * 64,
+            "unit_path": str(remote.expected_unit_path("cloakbrowser-browser-use.service")),
+            "active_state": "active",
+            "dropin_path": str(remote.release_dropin("cloakbrowser-browser-use.service")),
+            "dropin_exists": False,
+            "dropin_content": "",
+            "dropin_sha256": "",
+        },
+    )
+    monkeypatch.setattr(remote, "op_preflight_acpx", fail_strict_acpx)
+    monkeypatch.setattr(
+        remote,
+        "_probe_acpx_state",
+        lambda: {"state": "absent", "missing": ["unit"], "reason_code": "missing_runtime"},
+        raising=False,
+    )
+    monkeypatch.setattr(remote, "json_file", lambda _path: {})
+    monkeypatch.setattr(remote, "CURRENT_LINK", tmp_path / "missing-current")
+
+    capture = remote.op_capture_state({"commit": "0" * 40})
+
+    assert capture["acpx_was_absent"] is True
+    assert capture["acpx_active_state"] == "absent"
+    assert capture["acpx_unit_sha256"] == "0" * 64
+
+
+def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_valid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    root = remote.acpx_bootstrap_dir("release-0000001")
+    for relative in (
+        "venv/bin/python",
+        "node-runtime/node_modules/.bin/acpx",
+        "capability/capability.json",
+    ):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+    key = root / "candidate.worker.key"
+    key.write_text("cbm_worker_" + ("1" * 64) + "\n", encoding="utf-8")
+    key.chmod(0o600)
+    unit = root / "acpx-candidate-release-0000001.service"
+    unit.write_text(f"ExecStart={root}/venv/bin/python --manager-url http://127.0.0.1:18116 --token-file {key}\n", encoding="utf-8")
+    unit.chmod(0o600)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+
+    version_checks: list[str] = []
+
+    def fake_run_with_version_capture(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[-1:] == ["--version"]:
+            version_checks.append(argv[0])
+        return fake_run(argv, **kwargs)
+
+    monkeypatch.setattr(remote, "run", fake_run_with_version_capture)
+    monkeypatch.setattr(remote.shutil, "which", lambda name: str(release_source / "acpx") if name == "acpx" else None)
+
+    result = remote.op_bootstrap_acpx_promote(
+        {
+            "release_id": "release-0000001",
+            "worker_id": "acpx-candidate-release-0000001",
+            "manager_port": 18115,
+            "release_source": str(release_source),
+            "acpx_executable": str(paths["releases"] / "release-0000001" / "acpx-runtime" / "node_modules" / ".bin" / "acpx"),
+        }
+    )
+    remote.op_bootstrap_acpx_cleanup({"release_id": "release-0000001"})
+
+    permanent_unit = paths["home"] / ".config" / "systemd" / "user" / "cloakbrowser-acpx.service"
+    unit_text = permanent_unit.read_text(encoding="utf-8")
+    assert result["active"] is True
+    assert "acpx-bootstrap" not in unit_text
+    assert "127.0.0.1:18115" in unit_text
+    assert (paths["releases"] / "release-0000001" / "acpx-runtime").exists()
+    assert version_checks == [str(paths["releases"] / "release-0000001" / "acpx-runtime" / "node_modules" / ".bin" / "acpx")]
+    assert not root.exists()
+
+
+def test_restore_runtime_removes_promoted_acpx_artifacts_when_old_state_was_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    capture = valid_capture(paths)
+    capture.update(
+        {
+            "acpx_was_absent": True,
+            "acpx_active_state": "absent",
+            "acpx_unit_sha256": "0" * 64,
+            "acpx_dropin_exists": False,
+            "acpx_bootstrap_release_id": "release-0000001",
+        }
+    )
+    release_acpx = paths["releases"] / "release-0000001" / "acpx-runtime"
+    release_acpx.mkdir(parents=True)
+    acpx_unit = paths["home"] / ".config" / "systemd" / "user" / "cloakbrowser-acpx.service"
+    acpx_unit.write_text("[Service]\nExecStart=new-acpx\n", encoding="utf-8")
+    unrelated = paths["home"] / ".config" / "systemd" / "user" / "unrelated.service"
+    unrelated.write_text("keep\n", encoding="utf-8")
+
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+    remote.op_restore_runtime({"capture": capture, "backup": write_backup(paths)})
+
+    assert not acpx_unit.exists()
+    assert not release_acpx.exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_verify_acpx_expected_absent_uses_absence_probe_before_strict_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_strict_acpx(args: dict[str, object]) -> dict[str, object]:
+        del args
+        raise AssertionError("strict ACPX preflight must not run for expected absence")
+
+    monkeypatch.setattr(remote, "op_preflight_acpx", fail_strict_acpx)
+    monkeypatch.setattr(
+        remote,
+        "_probe_acpx_state",
+        lambda: {"state": "absent", "missing": list(remote.ACPX_ABSENCE_COMPONENTS), "reason_code": "missing_runtime"},
+    )
+
+    result = remote.op_verify_acpx({"release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source", "expected_absent": True})
+
+    assert result["absent"] is True
+    assert sorted(result["missing"]) == sorted(remote.ACPX_ABSENCE_COMPONENTS)
+
+
+def test_verify_acpx_expected_absent_rejects_partial_absence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(remote, "op_preflight_acpx", lambda _args: (_ for _ in ()).throw(AssertionError("strict preflight must not run")))
+    monkeypatch.setattr(remote, "_probe_acpx_state", lambda: {"state": "blocking", "missing": ["unit"], "reason_code": "misconfigured"})
+
+    with pytest.raises(remote.HelperError, match="absence"):
+        remote.op_verify_acpx({"release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source", "expected_absent": True})
+
+
+def test_bootstrap_cleanup_does_not_report_success_when_rmtree_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_remote_paths(monkeypatch, tmp_path)
+    root = remote.acpx_bootstrap_dir("release-0000001")
+    root.mkdir(parents=True)
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+    monkeypatch.setattr(remote.shutil, "rmtree", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("refuse removal")))
+
+    with pytest.raises(remote.HelperError, match="cleanup failed"):
+        remote.op_bootstrap_acpx_cleanup({"release_id": "release-0000001"})
+
+    assert root.exists()

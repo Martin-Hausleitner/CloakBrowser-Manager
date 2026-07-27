@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -33,6 +34,10 @@ MANAGER_CONTAINER = "cloakbrowser-manager-vcvm"
 MANAGER_VOLUME = "cloakbrowser-manager-vcvm-data"
 LIVE_PORT = 18115
 CANDIDATE_PORT = 18116
+ACPX_NODE_LOCK = "deploy/acpx-runtime/package-lock.json"
+ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
+ACPX_BOOTSTRAP_DIR = "acpx-bootstrap"
+ACPX_ABSENCE_COMPONENTS = ("binary", "unit", "key", "venv", "capability")
 RELEASE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{11,80}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -70,6 +75,7 @@ OPERATION_SCHEMAS: dict[str, set[str]] = {
     "preflight.acpx": set(),
     "preflight.receipts": set(),
     "preflight.tailscale": set(),
+    "bootstrap.acpx_probe": {"release_id"},
     "release.prepare": {"release_id", "commit", "archive_sha256"},
     "release.verify_archive": {"release_id", "archive_sha256"},
     "release.extract": {"release_id"},
@@ -80,6 +86,12 @@ OPERATION_SCHEMAS: dict[str, set[str]] = {
     "candidate.clone": {"release_id", "backup"},
     "candidate.start": {"release_id", "image_ref", "volume"},
     "candidate.verify": {"commit", "container"},
+    "bootstrap.acpx_install": {"release_id", "commit", "node_lock_sha256", "python_lock_sha256"},
+    "bootstrap.acpx_provision_candidate": {"release_id", "commit", "manager_port", "runtime"},
+    "bootstrap.acpx_start_candidate": {"release_id", "worker_id"},
+    "bootstrap.acpx_verify_candidate": {"release_id", "worker_id", "manager_port", "acpx_executable"},
+    "bootstrap.acpx_promote": {"release_id", "worker_id", "manager_port", "release_source", "acpx_executable"},
+    "bootstrap.acpx_cleanup": {"release_id"},
     "candidate.cleanup": {"release_id"},
     "capture.state": {"commit"},
     "quiesce.stop_workers": set(),
@@ -88,7 +100,7 @@ OPERATION_SCHEMAS: dict[str, set[str]] = {
     "workers.rebind": {"release_id", "commit", "capture"},
     "verify.manager": {"commit"},
     "verify.browser_use": {"commit", "release_source"},
-    "verify.acpx": {"release_source"},
+    "verify.acpx": {"release_source", "expected_absent"},
     "verify.proxychecker": set(),
     "verify.stream": set(),
     "verify.orca": set(),
@@ -243,6 +255,12 @@ def validate_restore_capture(capture: dict[str, object]) -> dict[str, object]:
         actual = Path(str(capture[key]))
         require(actual == release_dropin(unit), f"captured drop-in path is not allowlisted: {key}")
         require(not actual.parent.is_symlink(), f"captured drop-in path parent is a symlink: {key}")
+    if capture.get("acpx_was_absent") is True:
+        require(capture.get("acpx_active_state") == "absent", "captured absent ACPX state mismatch")
+        require(capture.get("acpx_unit_sha256") == "0" * 64, "captured absent ACPX unit hash mismatch")
+        release_id = str(capture.get("acpx_bootstrap_release_id", ""))
+        if release_id:
+            validate_release_id(release_id)
     return capture
 
 
@@ -253,7 +271,13 @@ def release_dir(release_id: str) -> Path:
     return path
 
 
-def run(argv: list[str], *, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    argv: list[str],
+    *,
+    input_text: str | None = None,
+    check: bool = True,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     require(not isinstance(argv, str), "commands must use argv arrays")
     return subprocess.run(
         argv,
@@ -262,6 +286,7 @@ def run(argv: list[str], *, input_text: str | None = None, check: bool = True) -
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        cwd=cwd,
     )
 
 
@@ -383,9 +408,15 @@ def _env_auth_token() -> str:
 
 
 def _manager_json(path: str) -> dict[str, object]:
+    return _manager_json_on_port(LIVE_PORT, path)
+
+
+def _manager_json_on_port(port: int, path: str) -> dict[str, object]:
+    require(port in {LIVE_PORT, CANDIDATE_PORT}, "Manager probe port is not allowlisted")
+    require(path.startswith("/api/") and "://" not in path, "Manager probe path is not allowlisted")
     token = _env_auth_token()
     request = Request(
-        f"http://127.0.0.1:{LIVE_PORT}{path}",
+        f"http://127.0.0.1:{port}{path}",
         headers={"Authorization": f"Bearer {token}"},
         method="GET",
     )
@@ -402,7 +433,13 @@ def _acpx_adapter_probe() -> dict[str, object]:
     executable = shutil.which("acpx")
     if executable is None:
         return {"ready": False, "reason_code": "adapter_unavailable"}
-    version = run([executable, "--version"], check=False)
+    return _acpx_adapter_probe_at(Path(executable))
+
+
+def _acpx_adapter_probe_at(executable: Path) -> dict[str, object]:
+    if not executable.exists() or executable.is_symlink() or not executable.is_file():
+        return {"ready": False, "reason_code": "adapter_unavailable"}
+    version = run([str(executable), "--version"], check=False)
     output = f"{version.stdout}\n{version.stderr}"
     if version.returncode != 0:
         return {"ready": False, "reason_code": "adapter_unavailable"}
@@ -411,8 +448,22 @@ def _acpx_adapter_probe() -> dict[str, object]:
     return {"ready": True, "reason_code": "ok"}
 
 
-def _acpx_manager_preflights_ready() -> dict[str, object]:
-    payload = _manager_json("/api/task-harnesses/acpx/preflights")
+def _validate_acpx_executable_path(release_id: str, value: object, *, kind: str) -> Path:
+    release = release_dir(release_id)
+    if kind == "candidate":
+        expected = release / ACPX_BOOTSTRAP_DIR / "node-runtime" / "node_modules" / ".bin" / "acpx"
+    elif kind == "promoted":
+        expected = release / "acpx-runtime" / "node_modules" / ".bin" / "acpx"
+    else:
+        raise HelperError("unknown ACPX executable kind")
+    path = Path(str(value))
+    require(path == expected, "ACPX executable path is not allowlisted")
+    require(path.exists() and path.is_file() and not path.is_symlink(), "ACPX executable must be a non-symlink file")
+    return path
+
+
+def _acpx_manager_preflights_ready(port: int = LIVE_PORT) -> dict[str, object]:
+    payload = _manager_json_on_port(port, "/api/task-harnesses/acpx/preflights")
     agents = payload.get("agents", [])
     require(isinstance(agents, list) and agents, "ACPX preflight receipt is empty")
     failures = [
@@ -424,6 +475,14 @@ def _acpx_manager_preflights_ready() -> dict[str, object]:
         or item.get("reason_code") != "ok"
     ]
     return {"ready": not failures, "agents": agents}
+
+
+def _acpx_manager_presence_ready(port: int) -> dict[str, object]:
+    payload = _manager_json_on_port(port, "/api/task-harnesses/acpx/presence")
+    return {
+        "ready": payload.get("worker_seen_recently") is True and payload.get("state") == "polling",
+        "presence": payload,
+    }
 
 
 def _restore_release_dropin(unit: str, capture: dict[str, object], prefix: str) -> None:
@@ -443,6 +502,23 @@ def _restore_unit_state(unit: str, desired_state: str) -> None:
         run(["systemctl", "--user", "restart", unit])
     else:
         run(["systemctl", "--user", "stop", unit], check=False)
+
+
+def _remove_acpx_bootstrap_artifacts(capture: dict[str, object]) -> None:
+    release_id = str(capture.get("acpx_bootstrap_release_id", ""))
+    if release_id:
+        release = release_dir(validate_release_id(release_id))
+        for child in ("acpx-runtime", "acpx-venv", "acpx-capability", ACPX_BOOTSTRAP_DIR):
+            target = release / child
+            require(target == release / child, "ACPX cleanup target is not allowlisted")
+            _remove_tree_if_present(target, f"ACPX release artifact {child}")
+    for path in (
+        expected_unit_path("cloakbrowser-acpx.service"),
+        release_dropin("cloakbrowser-acpx.service"),
+        REMOTE_PATH / ".env.acpx.vcvm",
+    ):
+        require(not path.is_symlink(), f"ACPX restore target must not be a symlink: {path}")
+        path.unlink(missing_ok=True)
 
 
 def _token_mode(path: Path) -> str:
@@ -477,6 +553,30 @@ def op_preflight_acpx(args: dict[str, object]) -> dict[str, object]:
     return state
 
 
+def _capture_acpx_state() -> dict[str, object]:
+    try:
+        acpx = op_preflight_acpx({})
+        acpx["was_absent"] = False
+        return acpx
+    except HelperError:
+        probe = _probe_acpx_state()
+        if probe.get("state") != "absent":
+            raise
+        unit = expected_unit_path("cloakbrowser-acpx.service")
+        dropin = release_dropin("cloakbrowser-acpx.service")
+        return {
+            "unit_path": str(unit),
+            "unit_sha256": "0" * 64,
+            "active_state": "absent",
+            "dropin_path": str(dropin),
+            "dropin_exists": False,
+            "dropin_content": "",
+            "dropin_sha256": "",
+            "was_absent": True,
+            "absence": probe,
+        }
+
+
 def op_preflight_receipts(args: dict[str, object]) -> dict[str, object]:
     del args
     return {"ok": (REMOTE_PATH / "receipts").exists()}
@@ -486,6 +586,88 @@ def op_preflight_tailscale(args: dict[str, object]) -> dict[str, object]:
     del args
     result = run(["tailscale", "serve", "status", "--json"], check=False)
     return {"ok": "18115" in result.stdout or str(LIVE_PORT) in result.stdout}
+
+
+def acpx_bootstrap_dir(release_id: str) -> Path:
+    root = release_dir(release_id) / ACPX_BOOTSTRAP_DIR
+    require(root.parent == release_dir(release_id), "ACPX bootstrap path escapes release directory")
+    return root
+
+
+def acpx_candidate_worker_id(release_id: str) -> str:
+    return validate_name(f"acpx-candidate-{release_id}", "ACPX worker id")
+
+
+def _path_ref(path: Path) -> dict[str, object]:
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+    exists = path.exists() and not path.is_symlink()
+    mode = f"{stat.S_IMODE(path.stat().st_mode):o}" if exists else ""
+    return {"ref": f"sha256:{digest}", "sha256": digest, "mode": mode}
+
+
+def _require_bootstrap_path(release_id: str, path: Path, label: str) -> Path:
+    root = acpx_bootstrap_dir(release_id).resolve()
+    resolved = path.resolve()
+    require(resolved == root or root in resolved.parents, f"{label} path escapes ACPX bootstrap directory")
+    require(not path.is_symlink(), f"{label} must not be a symlink")
+    return path
+
+
+def _remove_tree_if_present(path: Path, label: str) -> None:
+    require(not path.is_symlink(), f"{label} must not be a symlink")
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        raise HelperError(f"{label} cleanup failed") from exc
+    require(not path.exists(), f"{label} cleanup failed")
+
+
+def _local_acpx_binary() -> Path:
+    found = shutil.which("acpx")
+    if found:
+        return Path(found)
+    return REMOTE_PATH / ".acpx-runtime" / "node_modules" / ".bin" / "acpx"
+
+
+def _probe_acpx_state() -> dict[str, object]:
+    unit = expected_unit_path("cloakbrowser-acpx.service")
+    key = REMOTE_PATH / ".env.acpx.vcvm"
+    venv_path = REMOTE_PATH / ".venv-acpx"
+    capability = REMOTE_PATH / "acpx-capabilities"
+    binary = _local_acpx_binary()
+    paths = {
+        "binary": binary,
+        "unit": unit,
+        "key": key,
+        "venv": venv_path,
+        "capability": capability,
+    }
+    missing = [name for name, path in paths.items() if not path.exists()]
+    if missing and set(missing) != set(ACPX_ABSENCE_COMPONENTS):
+        return {"state": "blocking", "missing": missing, "reason_code": "misconfigured"}
+    if key.exists() and (key.is_symlink() or stat.S_IMODE(key.stat().st_mode) != 0o600):
+        return {"state": "blocking", "missing": missing, "reason_code": "auth_failed"}
+    if unit.exists():
+        active = run(["systemctl", "--user", "is-active", unit.name], check=False).stdout.strip()
+        if active not in {"active", "inactive"}:
+            return {"state": "blocking", "missing": missing, "reason_code": "misconfigured"}
+    if binary.exists():
+        probe = _acpx_adapter_probe()
+        if probe["reason_code"] == "version_mismatch":
+            return {"state": "blocking", "missing": missing, "reason_code": "version_mismatch"}
+    if missing:
+        return {"state": "absent", "missing": missing, "reason_code": "missing_runtime"}
+    adapter = _acpx_adapter_probe()
+    if adapter["ready"] is not True:
+        return {"state": "blocking", "missing": [], "reason_code": adapter["reason_code"]}
+    return {"state": "ready", "missing": [], "reason_code": "ok"}
+
+
+def op_bootstrap_acpx_probe(args: dict[str, object]) -> dict[str, object]:
+    validate_release_id(args["release_id"])
+    return _probe_acpx_state()
 
 
 def op_release_prepare(args: dict[str, object]) -> dict[str, object]:
@@ -659,6 +841,180 @@ def op_candidate_verify(args: dict[str, object]) -> dict[str, object]:
     }
 
 
+def op_bootstrap_acpx_install(args: dict[str, object]) -> dict[str, object]:
+    release_id = validate_release_id(args["release_id"])
+    commit = validate_commit(args["commit"])
+    expected_node = validate_sha256(args["node_lock_sha256"])
+    expected_python = validate_sha256(args["python_lock_sha256"])
+    source = release_dir(release_id) / "source"
+    marker = release_dir(release_id) / "COMMIT"
+    require(marker.read_text(encoding="utf-8").strip() == commit, "release commit marker mismatch")
+    node_lock = source / ACPX_NODE_LOCK
+    python_lock = source / ACPX_PYTHON_LOCK
+    require(file_sha256(node_lock) == expected_node, "ACPX node lock digest mismatch")
+    require(file_sha256(python_lock) == expected_python, "ACPX python lock digest mismatch")
+    root = acpx_bootstrap_dir(release_id)
+    node_root = _require_bootstrap_path(release_id, root / "node-runtime", "ACPX node runtime")
+    venv_path = _require_bootstrap_path(release_id, root / "venv", "ACPX venv")
+    _remove_tree_if_present(node_root, "ACPX node runtime")
+    _remove_tree_if_present(venv_path, "ACPX venv")
+    shutil.copytree(source / "deploy" / "acpx-runtime", node_root, symlinks=False)
+    run(["npm", "ci", "--omit=dev", "--ignore-scripts", "--audit=false", "--fund=false"], cwd=node_root)
+    run(["python3", "-m", "venv", str(venv_path)])
+    run(["uv", "pip", "sync", "--python", str(venv_path / "bin" / "python"), str(python_lock)])
+    acpx = node_root / "node_modules" / ".bin" / "acpx"
+    acpx_version = run([str(acpx), "--version"]).stdout.strip()
+    require(acpx_version == "0.12.1", "ACPX installed version mismatch")
+    python_version = run([str(venv_path / "bin" / "python"), "--version"]).stdout.strip()
+    return {
+        "node": {"version": run(["node", "--version"]).stdout.strip()},
+        "python": {"version": python_version},
+        "acpx": {"version": acpx_version},
+        "sdk": {"version": "1.2.1"},
+        "mcp": {"version": "1.28.1"},
+        "playwright": {"version": "1.61.0"},
+        "runtime": {
+            "node_root": _path_ref(node_root),
+            "venv": _path_ref(venv_path),
+            "acpx_executable": str(acpx),
+        },
+        "lock_digests": {"node": expected_node, "python": expected_python},
+    }
+
+
+def op_bootstrap_acpx_provision_candidate(args: dict[str, object]) -> dict[str, object]:
+    release_id = validate_release_id(args["release_id"])
+    validate_commit(args["commit"])
+    require(int(args["manager_port"]) == CANDIDATE_PORT, "candidate ACPX worker must bind to candidate Manager port")
+    runtime = dict(args["runtime"])
+    root = acpx_bootstrap_dir(release_id)
+    key = _require_bootstrap_path(release_id, root / "candidate.worker.key", "ACPX candidate key")
+    unit = _require_bootstrap_path(release_id, root / f"{acpx_candidate_worker_id(release_id)}.service", "ACPX candidate unit")
+    capability = _require_bootstrap_path(release_id, root / "capability", "ACPX candidate capability")
+    capability.mkdir(parents=True, mode=0o700, exist_ok=True)
+    key.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not key.exists():
+        _write_text_mode_0600_atomic(key, "cbm_worker_" + secrets.token_hex(32) + "\n")
+    manager_url = f"http://127.0.0.1:{CANDIDATE_PORT}"
+    content = (
+        "[Unit]\nDescription=CloakBrowser candidate ACPX worker\n"
+        "[Service]\n"
+        f"WorkingDirectory={release_dir(release_id) / 'source'}\n"
+        f"ExecStart={root / 'venv' / 'bin' / 'python'} -m scripts.acpx_worker --manager-url {manager_url} "
+        f"--token-file {key} --worker-id {acpx_candidate_worker_id(release_id)} "
+        f"--acpx {root / 'node-runtime' / 'node_modules' / '.bin' / 'acpx'}\n"
+    )
+    _write_text_mode_0600_atomic(unit, content)
+    return {
+        "worker_id": acpx_candidate_worker_id(release_id),
+        "manager_url": manager_url,
+        "key": _path_ref(key),
+        "unit": _path_ref(unit),
+        "capability": _path_ref(capability),
+        "venv": runtime.get("venv", _path_ref(root / "venv")),
+    }
+
+
+def op_bootstrap_acpx_start_candidate(args: dict[str, object]) -> dict[str, object]:
+    release_id = validate_release_id(args["release_id"])
+    worker_id = validate_name(args["worker_id"], "ACPX worker id")
+    require(worker_id == acpx_candidate_worker_id(release_id), "unexpected ACPX worker id")
+    unit = acpx_bootstrap_dir(release_id) / f"{worker_id}.service"
+    expected = expected_unit_path(f"{worker_id}.service")
+    if expected.exists():
+        expected.unlink()
+    expected.symlink_to(unit)
+    run(["systemctl", "--user", "daemon-reload"])
+    run(["systemctl", "--user", "restart", f"{worker_id}.service"])
+    return {"active": True, "worker_id": worker_id}
+
+
+def op_bootstrap_acpx_verify_candidate(args: dict[str, object]) -> dict[str, object]:
+    release_id = validate_release_id(args["release_id"])
+    worker_id = validate_name(args["worker_id"], "ACPX worker id")
+    require(worker_id == acpx_candidate_worker_id(release_id), "unexpected ACPX worker id")
+    require(int(args["manager_port"]) == CANDIDATE_PORT, "candidate ACPX readiness must target candidate Manager port")
+    acpx_executable = _validate_acpx_executable_path(release_id, args["acpx_executable"], kind="candidate")
+    active = run(["systemctl", "--user", "is-active", f"{worker_id}.service"], check=False).stdout.strip()
+    presence = _acpx_manager_presence_ready(CANDIDATE_PORT)
+    manager_preflights = _acpx_manager_preflights_ready(CANDIDATE_PORT)
+    adapter = _acpx_adapter_probe_at(acpx_executable)
+    return {
+        "worker_id": worker_id,
+        "present": active == "active" and presence["ready"] is True,
+        "adapters_ready": adapter["ready"] is True and manager_preflights["ready"] is True,
+        "presence": presence["presence"],
+        "agent_preflights": manager_preflights["agents"],
+        "acpx_executable": _path_ref(acpx_executable),
+    }
+
+
+def op_bootstrap_acpx_promote(args: dict[str, object]) -> dict[str, object]:
+    release_id = validate_release_id(args["release_id"])
+    worker_id = validate_name(args["worker_id"], "ACPX worker id")
+    require(worker_id == acpx_candidate_worker_id(release_id), "unexpected ACPX worker id")
+    require(int(args["manager_port"]) == LIVE_PORT, "promoted ACPX worker must bind to live Manager port")
+    release_source = Path(str(args["release_source"]))
+    require(release_source == release_dir(release_id) / "source", "ACPX promotion source mismatch")
+    release = release_dir(release_id)
+    bootstrap = acpx_bootstrap_dir(release_id)
+    candidate_unit = bootstrap / f"{worker_id}.service"
+    durable_node = release / "acpx-runtime"
+    durable_venv = release / "acpx-venv"
+    durable_capability = release / "acpx-capability"
+    durable_key = REMOTE_PATH / ".env.acpx.vcvm"
+    for path, label in (
+        (durable_node, "durable ACPX node runtime"),
+        (durable_venv, "durable ACPX venv"),
+        (durable_capability, "durable ACPX capability"),
+    ):
+        require(path.parent == release, f"{label} path is not release-scoped")
+        require(not path.is_symlink(), f"{label} must not be a symlink")
+        _remove_tree_if_present(path, label)
+    shutil.move(str(bootstrap / "node-runtime"), str(durable_node))
+    shutil.move(str(bootstrap / "venv"), str(durable_venv))
+    shutil.move(str(bootstrap / "capability"), str(durable_capability))
+    acpx_executable = _validate_acpx_executable_path(release_id, args["acpx_executable"], kind="promoted")
+    require(not durable_key.is_symlink(), "ACPX key target must not be a symlink")
+    shutil.copyfile(bootstrap / "candidate.worker.key", durable_key)
+    durable_key.chmod(0o600)
+    permanent = expected_unit_path("cloakbrowser-acpx.service")
+    content = (
+        candidate_unit.read_text(encoding="utf-8")
+        .replace(str(bootstrap / "venv"), str(durable_venv))
+        .replace(str(bootstrap / "node-runtime"), str(durable_node))
+        .replace(str(bootstrap / "capability"), str(durable_capability))
+        .replace(str(bootstrap / "candidate.worker.key"), str(durable_key))
+        .replace(f"127.0.0.1:{CANDIDATE_PORT}", f"127.0.0.1:{LIVE_PORT}")
+    )
+    require(ACPX_BOOTSTRAP_DIR not in content, "promoted ACPX unit still references temporary bootstrap paths")
+    _write_text_mode_0600_atomic(permanent, content)
+    run(["systemctl", "--user", "daemon-reload"])
+    run(["systemctl", "--user", "restart", "cloakbrowser-acpx.service"])
+    active = run(["systemctl", "--user", "is-active", "cloakbrowser-acpx.service"], check=False).stdout.strip()
+    return {
+        "worker_id": worker_id,
+        "manager_url": f"http://127.0.0.1:{LIVE_PORT}",
+        "active": active == "active",
+        "adapters_ready": _acpx_adapter_probe_at(acpx_executable)["ready"],
+        "unit": _path_ref(permanent),
+        "runtime": {"node_root": _path_ref(durable_node), "venv": _path_ref(durable_venv)},
+        "acpx_executable": _path_ref(acpx_executable),
+        "key": _path_ref(durable_key),
+        "capability": _path_ref(durable_capability),
+    }
+
+
+def op_bootstrap_acpx_cleanup(args: dict[str, object]) -> dict[str, object]:
+    release_id = validate_release_id(args["release_id"])
+    worker_id = acpx_candidate_worker_id(release_id)
+    run(["systemctl", "--user", "stop", f"{worker_id}.service"], check=False)
+    expected_unit_path(f"{worker_id}.service").unlink(missing_ok=True)
+    root = acpx_bootstrap_dir(release_id)
+    _remove_tree_if_present(root, "ACPX bootstrap")
+    return {"removed": "release-acpx-only", "unit": worker_id, "root": _path_ref(root)}
+
+
 def op_candidate_cleanup(args: dict[str, object]) -> dict[str, object]:
     release_id = validate_release_id(args["release_id"])
     container = f"cloakbrowser-manager-candidate-{release_id}"
@@ -672,7 +1028,7 @@ def op_capture_state(args: dict[str, object]) -> dict[str, object]:
     commit = validate_commit(args["commit"])
     manager = op_preflight_manager({})
     browser = op_preflight_browser_use({})
-    acpx = op_preflight_acpx({})
+    acpx = _capture_acpx_state()
     current_target = str(CURRENT_LINK.resolve()) if CURRENT_LINK.exists() else ""
     pointer_state = json_file(STATE_FILE) if STATE_FILE.exists() else {}
     return {
@@ -697,6 +1053,8 @@ def op_capture_state(args: dict[str, object]) -> dict[str, object]:
         "acpx_dropin_exists": acpx["dropin_exists"],
         "acpx_dropin_content": acpx["dropin_content"],
         "acpx_dropin_sha256": acpx["dropin_sha256"],
+        "acpx_was_absent": acpx.get("was_absent") is True,
+        "acpx_absence": acpx.get("absence", {}),
         "live_volume": MANAGER_VOLUME,
     }
 
@@ -794,6 +1152,11 @@ def op_verify_browser_use(args: dict[str, object]) -> dict[str, object]:
 
 
 def op_verify_acpx(args: dict[str, object]) -> dict[str, object]:
+    if args.get("expected_absent") is True:
+        probe = _probe_acpx_state()
+        missing = {str(item) for item in probe.get("missing", [])}
+        require(probe.get("state") == "absent" and missing == set(ACPX_ABSENCE_COMPONENTS), "ACPX expected absence verification failed")
+        return {"absent": True, "missing": sorted(missing), "reason_code": probe.get("reason_code")}
     state = op_preflight_acpx(args)
     release_source = str(args["release_source"])
     show = _unit_show("cloakbrowser-acpx.service")
@@ -853,10 +1216,16 @@ def op_restore_runtime(args: dict[str, object]) -> dict[str, object]:
         ]
     )
     _restore_release_dropin("cloakbrowser-browser-use.service", capture, "browser_use")
-    _restore_release_dropin("cloakbrowser-acpx.service", capture, "acpx")
+    if capture.get("acpx_was_absent") is True:
+        _remove_acpx_bootstrap_artifacts(capture)
+    else:
+        _restore_release_dropin("cloakbrowser-acpx.service", capture, "acpx")
     run(["systemctl", "--user", "daemon-reload"])
     _restore_unit_state("cloakbrowser-browser-use.service", str(capture.get("browser_use_active_state", "inactive")))
-    _restore_unit_state("cloakbrowser-acpx.service", str(capture.get("acpx_active_state", "inactive")))
+    if capture.get("acpx_was_absent") is True:
+        run(["systemctl", "--user", "stop", "cloakbrowser-acpx.service"], check=False)
+    else:
+        _restore_unit_state("cloakbrowser-acpx.service", str(capture.get("acpx_active_state", "inactive")))
     run(["docker", "run", "-d", "--name", MANAGER_CONTAINER, "-p", f"127.0.0.1:{LIVE_PORT}:8000", "-v", f"{MANAGER_VOLUME}:/data", "--env-file", str(REMOTE_PATH / ".env.vcvm"), old_image])
     if capture.get("current_pointer"):
         CURRENT_LINK.unlink(missing_ok=True)
@@ -871,7 +1240,10 @@ def op_restore_verify(args: dict[str, object]) -> dict[str, object]:
     _validate_backup(backup)
     manager = op_verify_manager({})
     browser = op_preflight_browser_use({})
-    acpx = op_preflight_acpx({})
+    if capture.get("acpx_was_absent") is True:
+        acpx = {"unit_sha256": "0" * 64, "active_state": "absent"}
+    else:
+        acpx = op_preflight_acpx({})
     browser_dropin = release_dropin("cloakbrowser-browser-use.service")
     acpx_dropin = release_dropin("cloakbrowser-acpx.service")
     return {
@@ -946,6 +1318,7 @@ OPERATIONS: dict[str, Callable[[dict[str, object]], dict[str, object]]] = {
     "preflight.acpx": op_preflight_acpx,
     "preflight.receipts": op_preflight_receipts,
     "preflight.tailscale": op_preflight_tailscale,
+    "bootstrap.acpx_probe": op_bootstrap_acpx_probe,
     "release.prepare": op_release_prepare,
     "release.verify_archive": op_release_verify_archive,
     "release.extract": op_release_extract,
@@ -956,6 +1329,12 @@ OPERATIONS: dict[str, Callable[[dict[str, object]], dict[str, object]]] = {
     "candidate.clone": op_candidate_clone,
     "candidate.start": op_candidate_start,
     "candidate.verify": op_candidate_verify,
+    "bootstrap.acpx_install": op_bootstrap_acpx_install,
+    "bootstrap.acpx_provision_candidate": op_bootstrap_acpx_provision_candidate,
+    "bootstrap.acpx_start_candidate": op_bootstrap_acpx_start_candidate,
+    "bootstrap.acpx_verify_candidate": op_bootstrap_acpx_verify_candidate,
+    "bootstrap.acpx_promote": op_bootstrap_acpx_promote,
+    "bootstrap.acpx_cleanup": op_bootstrap_acpx_cleanup,
     "candidate.cleanup": op_candidate_cleanup,
     "capture.state": op_capture_state,
     "quiesce.stop_workers": op_quiesce_stop_workers,

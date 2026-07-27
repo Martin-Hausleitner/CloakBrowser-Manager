@@ -67,6 +67,21 @@ def fixture_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def add_acpx_locks(repo: Path) -> None:
+    for relative in (
+        "deploy/acpx-runtime/package.json",
+        "deploy/acpx-runtime/package-lock.json",
+        "scripts/requirements-acpx-worker.in",
+        "scripts/requirements-acpx-worker.linux-x86_64.py312.txt",
+        "scripts/requirements-acpx-worker.txt",
+    ):
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
+    run("git", "add", ".", cwd=repo)
+    run("git", "commit", "-m", "add acpx locks", cwd=repo)
+
+
 def release_config(repo: Path, **overrides: object):
     payload = {
         "source_root": repo,
@@ -89,11 +104,12 @@ class FakeRemoteExecutor:
         self.live_generation = "old"
         self.candidate_removed = False
         self.fail_phase = str(facts.pop("fail_phase", ""))
+        self.fail_with_called_process = bool(facts.pop("fail_with_called_process", False))
         self.rollback_verify_fails = bool(facts.pop("rollback_verify_fails", False))
         self.facts = {
             "disk_free_bytes": 9 * 1024**3,
             "helper_version": "vcvm-release-helper-v1",
-            "helper_operations": ["preflight.disk", "release.extract", "state.commit"],
+            "helper_operations": sorted(remote_mod.OPERATION_SCHEMAS),
             "marker_owner": "coder",
             "commands_present": True,
             "env_mode": "600",
@@ -113,6 +129,13 @@ class FakeRemoteExecutor:
             "acpx_adapters_ready": True,
             "acpx_unit_path": "/home/coder/.config/systemd/user/acpx.service",
             "acpx_unit_sha256": "2" * 64,
+            "acpx_bootstrap_state": "absent",
+            "acpx_absent_missing": ["binary", "unit", "key", "venv", "capability"],
+            "acpx_bootstrap_reason": "missing_runtime",
+            "acpx_candidate_ready": True,
+            "acpx_promoted_ready": True,
+            "bootstrap_cleanup_ok": True,
+            "rollback_capture_acpx_absent": False,
             "service_receipts": True,
             "tailscale_route": True,
             "release_exists": False,
@@ -198,6 +221,12 @@ class FakeRemoteExecutor:
                 "unit_path": self.facts["acpx_unit_path"],
                 "unit_sha256": self.facts["acpx_unit_sha256"],
             }
+        if phase == "bootstrap.acpx_probe":
+            return {
+                "state": self.facts["acpx_bootstrap_state"],
+                "missing": self.facts["acpx_absent_missing"],
+                "reason_code": self.facts["acpx_bootstrap_reason"],
+            }
         if phase == "preflight.receipts":
             return {"ok": self.facts["service_receipts"]}
         if phase == "preflight.tailscale":
@@ -227,6 +256,39 @@ class FakeRemoteExecutor:
                 "migrations": self.facts["candidate_migrations"],
                 "revision": self.facts["candidate_revision"] or args["commit"],
             }
+        if phase == "bootstrap.acpx_install":
+            return {
+                "node": {"version": "v22.13.0"},
+                "python": {"version": "3.12.10"},
+                "acpx": {"version": "0.12.1"},
+                "sdk": {"version": "1.2.1"},
+                "mcp": {"version": "1.28.1"},
+                "playwright": {"version": "1.61.0"},
+                "runtime": {
+                    "node_root": {"ref": "sha256:" + ("6" * 64), "sha256": "6" * 64, "mode": "700"},
+                    "venv": {"ref": "sha256:" + ("7" * 64), "sha256": "7" * 64, "mode": "700"},
+                    "acpx_executable": "/home/coder/cloakbrowser-manager/releases/release-20260727-ac5840b00001/acpx-bootstrap/node-runtime/node_modules/.bin/acpx",
+                },
+                "lock_digests": {
+                    "node": args["node_lock_sha256"],
+                    "python": args["python_lock_sha256"],
+                },
+            }
+        if phase == "bootstrap.acpx_provision_candidate":
+            assert args["manager_port"] == 18116
+            return {
+                "worker_id": f"acpx-candidate-{args['release_id']}",
+                "manager_url": "http://127.0.0.1:18116",
+                "key": {"ref": "sha256:" + ("8" * 64), "sha256": "8" * 64, "mode": "600"},
+                "unit": {"ref": "sha256:" + ("9" * 64), "sha256": "9" * 64, "mode": "600"},
+                "capability": {"ref": "sha256:" + ("a" * 64), "sha256": "a" * 64, "mode": "700"},
+                "venv": {"ref": "sha256:" + ("7" * 64), "sha256": "7" * 64, "mode": "700"},
+            }
+        if phase == "bootstrap.acpx_start_candidate":
+            return {"active": True, "worker_id": args["worker_id"]}
+        if phase == "bootstrap.acpx_verify_candidate":
+            assert str(args["acpx_executable"]).endswith("/acpx-bootstrap/node-runtime/node_modules/.bin/acpx")
+            return {"worker_id": args["worker_id"], "present": True, "adapters_ready": self.facts["acpx_candidate_ready"]}
         if phase == "capture.state":
             payload = {
                 "source_revision": args["commit"],
@@ -267,11 +329,17 @@ class FakeRemoteExecutor:
                 "browser_use": {"token_mode": "600", "unit_sha256": "4" * 64, "active_state": "active", "commit": args["commit"]},
                 "acpx": {"token_mode": "600", "venv": True, "unit_sha256": "5" * 64, "active_state": "active", "preflights": True},
             }
+        if phase == "bootstrap.acpx_promote":
+            assert args["manager_port"] == 18115
+            assert str(args["acpx_executable"]).endswith("/acpx-runtime/node_modules/.bin/acpx")
+            return {"worker_id": args["worker_id"], "manager_url": "http://127.0.0.1:18115", "active": self.facts["acpx_promoted_ready"], "adapters_ready": self.facts["acpx_promoted_ready"]}
         if phase == "verify.manager":
             return {"health": self.facts["live_health"], "auth": self.facts["live_auth"], "revision": args.get("commit")}
         if phase == "verify.browser_use":
             return {"active": True, "bound": self.facts["browser_use_bound"]}
         if phase == "verify.acpx":
+            if args.get("expected_absent") is True:
+                return {"absent": True}
             return {"active": True, "preflights": self.facts["acpx_preflights"]}
         if phase == "verify.proxychecker":
             return {"ok": self.facts["proxychecker"]}
@@ -286,6 +354,8 @@ class FakeRemoteExecutor:
         if phase == "candidate.cleanup":
             self.candidate_removed = True
             return {"removed": "candidate-only"}
+        if phase == "bootstrap.acpx_cleanup":
+            return {"removed": "release-acpx-only", "ok": self.facts["bootstrap_cleanup_ok"]}
         if phase == "restore.runtime":
             assert args["backup"]["receipt_id"] in {"backup-final-old", "backup-live-old"}
             assert "old_image_digest" in args["capture"]
@@ -305,6 +375,9 @@ class FakeRemoteExecutor:
                 "acpx_active_state": "active",
             }
         if phase == "rollback.read_state":
+            capture = {"old_image_digest": "d" * 64, "browser_use_unit_sha256": "1" * 64, "acpx_unit_sha256": "2" * 64, "live_volume": "cloakbrowser-manager-vcvm-data"}
+            if self.facts["rollback_capture_acpx_absent"]:
+                capture.update({"acpx_was_absent": True, "acpx_unit_sha256": "0" * 64, "acpx_active_state": "absent"})
             return {
                 "current_release": "release-current-0001",
                 "previous_release": self.facts["state_previous_release"],
@@ -317,7 +390,7 @@ class FakeRemoteExecutor:
                     "compatible": True,
                 },
                 "image": {"image_ref": "sha256:" + ("e" * 64), "image_id": "sha256:" + ("e" * 64), "image_digest": "e" * 64, "revision": "0" * 40},
-                "capture": {"old_image_digest": "d" * 64, "browser_use_unit_sha256": "1" * 64, "acpx_unit_sha256": "2" * 64, "live_volume": "cloakbrowser-manager-vcvm-data"},
+                "capture": capture,
                 "previous_runtime": {"image_ref": "sha256:" + ("d" * 64), "image_id": "sha256:" + ("d" * 64), "image_digest": "d" * 64, "revision": self.facts["state_previous_runtime_revision"]},
             }
         if phase == "rollback.verify_backup":
@@ -336,6 +409,8 @@ class FakeRemoteExecutor:
 
     def _maybe_fail(self, phase: str) -> None:
         if phase == self.fail_phase:
+            if self.fail_with_called_process:
+                raise subprocess.CalledProcessError(255, ["ssh", "vcvm", phase], stderr="synthetic ssh failure")
             raise tx.TransactionError(f"synthetic failure at {phase}", phase=phase)
 
 
@@ -396,6 +471,154 @@ def test_successful_release_runs_exact_order_and_emits_secret_safe_receipt(tmp_p
     all_argv = "\n".join(" ".join(map(str, call["argv"])) for call in fake.calls)
     assert "prune" not in all_argv
     assert "token" not in all_argv.lower()
+
+
+def test_bootstrap_acpx_success_installs_candidate_worker_before_quiesce_and_promotes_after_switch(
+    tmp_path: Path,
+) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor()
+
+    receipt = tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    for phase in (
+        "bootstrap.acpx_probe",
+        "bootstrap.acpx_install",
+        "bootstrap.acpx_provision_candidate",
+        "bootstrap.acpx_start_candidate",
+        "bootstrap.acpx_verify_candidate",
+        "bootstrap.acpx_promote",
+        "bootstrap.acpx_cleanup",
+    ):
+        assert phase in fake.phases
+    assert fake.phases.index("bootstrap.acpx_verify_candidate") < fake.phases.index("quiesce.stop_workers")
+    assert fake.phases.index("workers.rebind") < fake.phases.index("bootstrap.acpx_promote")
+    bootstrap = receipt["acpx_bootstrap"]
+    assert bootstrap["source_commit"] == receipt["source"]["commit"]
+    assert bootstrap["candidate"]["port"] == 18116
+    assert bootstrap["candidate"]["container"] == "cbm-candidate-release"
+    assert bootstrap["promotion"]["port"] == 18115
+    assert bootstrap["worker_id"].startswith("acpx-candidate-")
+    assert bootstrap["versions"]["acpx"] == "0.12.1"
+    assert bootstrap["versions"]["sdk"] == "1.2.1"
+    assert bootstrap["run_started_at"]
+    assert bootstrap["preflight_completed_at"]
+    assert bootstrap["cleanup"]["removed"] == "release-acpx-only"
+    assert "cbm_worker_" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize(
+    ("facts", "message"),
+    [
+        ({"acpx_bootstrap_state": "ready", "acpx_absent_missing": []}, "not absent"),
+        ({"acpx_bootstrap_state": "blocking", "acpx_absent_missing": [], "acpx_bootstrap_reason": "version_mismatch"}, "version_mismatch"),
+        ({"acpx_bootstrap_state": "blocking", "acpx_absent_missing": [], "acpx_bootstrap_reason": "auth_failed"}, "auth_failed"),
+        ({"acpx_bootstrap_state": "blocking", "acpx_absent_missing": ["unit"], "acpx_bootstrap_reason": "misconfigured"}, "misconfigured"),
+    ],
+)
+def test_bootstrap_acpx_only_proceeds_for_genuine_absence(
+    tmp_path: Path,
+    facts: dict[str, object],
+    message: str,
+) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(**facts)
+
+    with pytest.raises(tx.TransactionError, match=message):
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert fake.mutated_phases == []
+    assert "release.upload_archive" not in fake.phases
+
+
+def test_bootstrap_acpx_rejects_partial_absence_before_remote_mutation(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(acpx_bootstrap_state="absent", acpx_absent_missing=["unit", "key"])
+
+    with pytest.raises(tx.TransactionError, match="partial ACPX"):
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert fake.mutated_phases == []
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "bootstrap.acpx_install",
+        "bootstrap.acpx_provision_candidate",
+        "bootstrap.acpx_start_candidate",
+        "bootstrap.acpx_verify_candidate",
+    ],
+)
+def test_bootstrap_acpx_candidate_stage_failure_cleans_up_and_preserves_live(tmp_path: Path, phase: str) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(fail_phase=phase)
+
+    with pytest.raises(tx.TransactionError):
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert "bootstrap.acpx_cleanup" in fake.phases
+    assert fake.live_generation == "old"
+    assert "quiesce.stop_live" not in fake.phases
+
+
+def test_bootstrap_called_process_failure_before_quiesce_is_wrapped_and_cleans_up(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(fail_phase="bootstrap.acpx_start_candidate", fail_with_called_process=True)
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert exc_info.value.phase == "bootstrap.acpx_start_candidate"
+    assert "bootstrap.acpx_cleanup" in fake.phases
+    assert "quiesce.stop_live" not in fake.phases
+
+
+def test_bootstrap_called_process_failure_after_quiesce_restores_and_cleans_up(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(fail_phase="bootstrap.acpx_promote", fail_with_called_process=True)
+
+    with pytest.raises(tx.TransactionError, match="release failed after quiesce"):
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert "restore.runtime" in fake.phases
+    assert "restore.verify" in fake.phases
+    assert "bootstrap.acpx_cleanup" in fake.phases
+
+
+def test_bootstrap_acpx_promotion_failure_restores_old_runtime_and_cleans_release_artifacts(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(fail_phase="bootstrap.acpx_promote")
+
+    with pytest.raises(tx.TransactionError, match="release failed after quiesce"):
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert "restore.runtime" in fake.phases
+    assert "restore.verify" in fake.phases
+    assert "bootstrap.acpx_cleanup" in fake.phases
+    assert fake.live_generation == "old"
+
+
+def test_bootstrap_cleanup_failure_fails_closed_before_state_commit_and_restores_old_runtime(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(fail_phase="bootstrap.acpx_cleanup")
+
+    with pytest.raises(tx.TransactionError, match="release failed after quiesce") as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert exc_info.value.phase == "bootstrap.acpx_cleanup"
+    assert "state.commit" not in fake.phases
+    assert "restore.runtime" in fake.phases
+    assert "restore.verify" in fake.phases
+    assert fake.live_generation == "old"
 
 
 @pytest.mark.parametrize(
@@ -611,6 +834,26 @@ def test_rollback_verifies_and_starts_recorded_old_revision(tmp_path: Path) -> N
     start_request = next(json.loads(str(call["argv"][0])) for call in fake.calls if call["phase"] == "rollback.start_previous")
     assert verify_request["args"]["previous_runtime"]["revision"] == old_revision
     assert start_request["args"]["previous_runtime"]["revision"] == old_revision
+
+
+def test_rollback_runtime_verification_honors_captured_acpx_absence(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(rollback_capture_acpx_absent=True)
+
+    receipt = tx.run_rollback(
+        tx.RollbackConfig(
+            source_root=repo,
+            host="vcvm",
+            remote_path="/home/coder/cloakbrowser-manager",
+            target_release="release-previous-0001",
+            apply=True,
+        ),
+        fake,
+    )
+
+    verify_acpx_request = next(json.loads(str(call["argv"][0])) for call in fake.calls if call["phase"] == "verify.acpx")
+    assert verify_acpx_request["args"]["expected_absent"] is True
+    assert receipt["status"] == "rolled_back"
 
 
 def test_rollback_refuses_unrecorded_target_before_mutation(tmp_path: Path) -> None:

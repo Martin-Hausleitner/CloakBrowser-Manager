@@ -29,6 +29,9 @@ DEFAULT_VOLUME = "cloakbrowser-manager-vcvm-data"
 DEFAULT_MANAGER_CONTAINER = "cloakbrowser-manager-vcvm"
 DEFAULT_CANDIDATE_PORT = 18116
 DEFAULT_LIVE_PORT = 18115
+ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
+ACPX_NODE_LOCK = "deploy/acpx-runtime/package-lock.json"
+ACPX_ABSENCE_COMPONENTS = {"binary", "unit", "key", "venv", "capability"}
 RELEASE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{11,80}$")
 HOST_RE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9._-]{0,31}@)?vcvm$")
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -96,6 +99,7 @@ PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "preflight.acpx": ("cbm-release-probe", "acpx", "{}"),
     "preflight.receipts": ("cbm-release-probe", "receipts", "{}"),
     "preflight.tailscale": ("cbm-release-probe", "tailscale", "{}"),
+    "bootstrap.acpx_probe": ("cbm-release", "bootstrap-acpx-probe", json.dumps({"release_id": "release-0000001"})),
     "release.prepare": ("cbm-release", "prepare", json.dumps({"release_id": "release-0000001", "commit": _COMMIT, "archive_sha256": _SHA})),
     "release.verify_archive": ("cbm-release", "verify-archive", json.dumps({"release_id": "release-0000001", "archive_sha256": _SHA})),
     "release.extract": ("cbm-release", "extract", json.dumps({"release_id": "release-0000001"})),
@@ -106,6 +110,12 @@ PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "candidate.clone": ("cbm-release", "clone-candidate-volume", json.dumps({"release_id": "release-0000001", "backup": _BACKUP})),
     "candidate.start": ("cbm-release", "start-candidate", json.dumps({"release_id": "release-0000001", "image_ref": "sha256:" + _SHA, "volume": DEFAULT_VOLUME + "-candidate-release-0000001"})),
     "candidate.verify": ("cbm-release", "verify-candidate", json.dumps({"commit": _COMMIT, "container": "cloakbrowser-manager-candidate-release-0000001"})),
+    "bootstrap.acpx_install": ("cbm-release", "bootstrap-acpx-install", json.dumps({"release_id": "release-0000001", "commit": _COMMIT, "node_lock_sha256": _SHA, "python_lock_sha256": _SHA})),
+    "bootstrap.acpx_provision_candidate": ("cbm-release", "bootstrap-acpx-provision-candidate", json.dumps({"release_id": "release-0000001", "commit": _COMMIT, "manager_port": DEFAULT_CANDIDATE_PORT, "runtime": {"node_root": {"ref": "sha256:" + _SHA, "sha256": _SHA, "mode": "700"}, "venv": {"ref": "sha256:" + _SHA, "sha256": _SHA, "mode": "700"}}})),
+    "bootstrap.acpx_start_candidate": ("cbm-release", "bootstrap-acpx-start-candidate", json.dumps({"release_id": "release-0000001", "worker_id": "acpx-candidate-release-0000001"})),
+    "bootstrap.acpx_verify_candidate": ("cbm-release", "bootstrap-acpx-verify-candidate", json.dumps({"release_id": "release-0000001", "worker_id": "acpx-candidate-release-0000001", "manager_port": DEFAULT_CANDIDATE_PORT, "acpx_executable": "/home/coder/cloakbrowser-manager/releases/release-0000001/acpx-bootstrap/node-runtime/node_modules/.bin/acpx"})),
+    "bootstrap.acpx_promote": ("cbm-release", "bootstrap-acpx-promote", json.dumps({"release_id": "release-0000001", "worker_id": "acpx-candidate-release-0000001", "manager_port": DEFAULT_LIVE_PORT, "release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source", "acpx_executable": "/home/coder/cloakbrowser-manager/releases/release-0000001/acpx-runtime/node_modules/.bin/acpx"})),
+    "bootstrap.acpx_cleanup": ("cbm-release", "bootstrap-acpx-cleanup", json.dumps({"release_id": "release-0000001"})),
     "candidate.cleanup": ("cbm-release", "candidate-cleanup", json.dumps({"release_id": "release-0000001"})),
     "capture.state": ("cbm-release", "capture-live-state", json.dumps({"commit": _COMMIT})),
     "quiesce.stop_workers": ("cbm-release", "stop-workers", "{}"),
@@ -114,7 +124,7 @@ PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "workers.rebind": ("cbm-release", "rebind-workers", json.dumps({"release_id": "release-0000001", "commit": _COMMIT, "capture": _CAPTURE})),
     "verify.manager": ("cbm-release", "verify-manager", json.dumps({"commit": _COMMIT})),
     "verify.browser_use": ("cbm-release", "verify-browser-use", json.dumps({"commit": _COMMIT, "release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source"})),
-    "verify.acpx": ("cbm-release", "verify-acpx", json.dumps({"release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source"})),
+    "verify.acpx": ("cbm-release", "verify-acpx", json.dumps({"release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source", "expected_absent": False})),
     "verify.proxychecker": ("cbm-release", "verify-proxychecker", "{}"),
     "verify.stream": ("cbm-release", "verify-stream", "{}"),
     "verify.orca": ("cbm-release", "verify-orca", "{}"),
@@ -136,6 +146,7 @@ POST_QUIESCE_PHASES = {
     "verify.manager",
     "verify.browser_use",
     "verify.acpx",
+    "bootstrap.acpx_promote",
     "verify.proxychecker",
     "verify.stream",
     "verify.orca",
@@ -172,6 +183,7 @@ class ReleaseConfig:
     remote_path: str = DEFAULT_REMOTE_PATH
     apply: bool = False
     expected_current_worker_commit: str | None = None
+    bootstrap_acpx: bool = False
 
 
 @dataclass(frozen=True)
@@ -376,6 +388,15 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def checked_in_acpx_lock_digests(root: Path) -> dict[str, str]:
+    digests: dict[str, str] = {}
+    for key, relative in (("node", ACPX_NODE_LOCK), ("python", ACPX_PYTHON_LOCK)):
+        path = root / relative
+        require(path.is_file() and not path.is_symlink(), f"ACPX {key} lock is missing", phase="local.acpx_locks")
+        digests[key] = sha256_file(path)
+    return digests
+
+
 def create_git_archive(root: Path, commit: str) -> tuple[Path, str]:
     tmp = tempfile.NamedTemporaryFile(prefix=f"cbm-{commit[:12]}-", suffix=".tar", delete=False)
     tmp_path = Path(tmp.name)
@@ -430,7 +451,28 @@ def remote_manifest_path(config: ReleaseConfig) -> str:
 
 def _remote(executor: RemoteExecutor, phase: str, args: dict[str, object] | None = None, *, mutation: bool = False) -> dict[str, object]:
     request = remote_request(phase, args or {})
-    return executor.run_json(request, phase=phase, mutation=mutation)
+    try:
+        return executor.run_json(request, phase=phase, mutation=mutation)
+    except TransactionError:
+        raise
+    except (subprocess.CalledProcessError, OSError) as exc:
+        raise TransactionError(f"remote phase failed: {redact_text(exc)}", phase=phase) from exc
+
+
+def require_bootstrap_absence(probe: dict[str, object]) -> None:
+    state = str(probe.get("state", ""))
+    missing = probe.get("missing", [])
+    reason_code = str(probe.get("reason_code", ""))
+    require(isinstance(missing, list), "ACPX bootstrap probe returned invalid missing list", phase="bootstrap.acpx_probe")
+    missing_set = {str(item) for item in missing}
+    require(missing_set <= ACPX_ABSENCE_COMPONENTS, "ACPX bootstrap probe returned invalid absence component", phase="bootstrap.acpx_probe")
+    if state == "absent" and missing_set == ACPX_ABSENCE_COMPONENTS:
+        return
+    if state == "absent":
+        raise TransactionError("ACPX bootstrap refused: partial ACPX absence is misconfigured", phase="bootstrap.acpx_probe")
+    if state == "ready":
+        raise TransactionError("ACPX bootstrap requested but existing ACPX is not absent", phase="bootstrap.acpx_probe")
+    raise TransactionError(f"ACPX bootstrap refused: {reason_code or state}", phase="bootstrap.acpx_probe")
 
 
 def run_preflight(config: ReleaseConfig, executor: RemoteExecutor, source: dict[str, object]) -> dict[str, object]:
@@ -439,6 +481,20 @@ def run_preflight(config: ReleaseConfig, executor: RemoteExecutor, source: dict[
     require(capabilities.get("helper_version") == "vcvm-release-helper-v1", "helper capability/version check failed", phase="helper.capabilities")
     operations = set(capabilities.get("operations", []))
     require({"preflight.disk", "release.extract", "state.commit"}.issubset(operations), "helper capability/version check failed", phase="helper.capabilities")
+    if config.bootstrap_acpx:
+        require(
+            {
+                "bootstrap.acpx_probe",
+                "bootstrap.acpx_install",
+                "bootstrap.acpx_provision_candidate",
+                "bootstrap.acpx_start_candidate",
+                "bootstrap.acpx_verify_candidate",
+                "bootstrap.acpx_promote",
+                "bootstrap.acpx_cleanup",
+            }.issubset(operations),
+            "helper ACPX bootstrap capability check failed",
+            phase="helper.capabilities",
+        )
     disk = _remote(executor, "preflight.disk")
     require(int(disk.get("free_bytes", 0)) >= MIN_FREE_BYTES, "refusing release: less than 8 GiB free", phase="preflight.disk")
 
@@ -467,13 +523,17 @@ def run_preflight(config: ReleaseConfig, executor: RemoteExecutor, source: dict[
         phase="preflight.browser_use",
     )
 
-    acpx = _remote(executor, "preflight.acpx")
-    require(acpx.get("active") is True, "ACPX unit is missing or inactive", phase="preflight.acpx")
-    require(acpx.get("token_mode") == "600", "ACPX token must be mode 600", phase="preflight.acpx")
-    require(acpx.get("venv") is True, "ACPX venv is missing", phase="preflight.acpx")
-    require(acpx.get("adapters_ready") is True, "ACPX adapter preflight is missing", phase="preflight.acpx")
-    require(bool(acpx.get("unit_path")), "ACPX unit path is missing", phase="preflight.acpx")
-    validate_sha256(acpx.get("unit_sha256"), "ACPX unit hash")
+    if config.bootstrap_acpx:
+        acpx = _remote(executor, "bootstrap.acpx_probe", {"release_id": config.release_id})
+        require_bootstrap_absence(acpx)
+    else:
+        acpx = _remote(executor, "preflight.acpx")
+        require(acpx.get("active") is True, "ACPX unit is missing or inactive", phase="preflight.acpx")
+        require(acpx.get("token_mode") == "600", "ACPX token must be mode 600", phase="preflight.acpx")
+        require(acpx.get("venv") is True, "ACPX venv is missing", phase="preflight.acpx")
+        require(acpx.get("adapters_ready") is True, "ACPX adapter preflight is missing", phase="preflight.acpx")
+        require(bool(acpx.get("unit_path")), "ACPX unit path is missing", phase="preflight.acpx")
+        validate_sha256(acpx.get("unit_sha256"), "ACPX unit hash")
 
     receipts = _remote(executor, "preflight.receipts")
     require(receipts.get("ok") is True, "service receipt prerequisites are missing", phase="preflight.receipts")
@@ -533,6 +593,92 @@ def cleanup_candidate(executor: RemoteExecutor, config: ReleaseConfig) -> None:
         print(f"candidate cleanup failed: {redact_text(exc)}", file=sys.stderr)
 
 
+def cleanup_acpx_bootstrap(executor: RemoteExecutor, config: ReleaseConfig) -> dict[str, object]:
+    return _remote(executor, "bootstrap.acpx_cleanup", {"release_id": config.release_id}, mutation=True)
+
+
+def run_acpx_candidate_bootstrap(
+    config: ReleaseConfig,
+    executor: RemoteExecutor,
+    *,
+    source_commit: str,
+    lock_digests: dict[str, str],
+    candidate_container: str,
+    run_started_at: str,
+    preflight_completed_at: str,
+) -> dict[str, object]:
+    installed = _remote(
+        executor,
+        "bootstrap.acpx_install",
+        {
+            "release_id": config.release_id,
+            "commit": source_commit,
+            "node_lock_sha256": lock_digests["node"],
+            "python_lock_sha256": lock_digests["python"],
+        },
+        mutation=True,
+    )
+    runtime = dict(installed.get("runtime") or {})
+    candidate_acpx_executable = str(runtime.get("acpx_executable") or "")
+    require(bool(candidate_acpx_executable), "ACPX staged executable path is missing", phase="bootstrap.acpx_install")
+    provisioned = _remote(
+        executor,
+        "bootstrap.acpx_provision_candidate",
+        {
+            "release_id": config.release_id,
+            "commit": source_commit,
+            "manager_port": DEFAULT_CANDIDATE_PORT,
+            "runtime": runtime,
+        },
+        mutation=True,
+    )
+    worker_id = str(provisioned.get("worker_id", ""))
+    require(bool(worker_id), "ACPX bootstrap worker id is missing", phase="bootstrap.acpx_provision_candidate")
+    started = _remote(
+        executor,
+        "bootstrap.acpx_start_candidate",
+        {"release_id": config.release_id, "worker_id": worker_id},
+        mutation=True,
+    )
+    require(started.get("active") is True, "ACPX candidate worker did not start", phase="bootstrap.acpx_start_candidate")
+    candidate = _remote(
+        executor,
+        "bootstrap.acpx_verify_candidate",
+        {
+            "release_id": config.release_id,
+            "worker_id": worker_id,
+            "manager_port": DEFAULT_CANDIDATE_PORT,
+            "acpx_executable": candidate_acpx_executable,
+        },
+    )
+    require(
+        candidate.get("present") is True and candidate.get("adapters_ready") is True,
+        "ACPX candidate worker readiness failed",
+        phase="bootstrap.acpx_verify_candidate",
+    )
+    versions = {
+        "node": dict(installed.get("node") or {}).get("version", ""),
+        "python": dict(installed.get("python") or {}).get("version", ""),
+        "acpx": dict(installed.get("acpx") or {}).get("version", ""),
+        "sdk": dict(installed.get("sdk") or {}).get("version", ""),
+        "mcp": dict(installed.get("mcp") or {}).get("version", ""),
+        "playwright": dict(installed.get("playwright") or {}).get("version", ""),
+    }
+    return {
+        "source_commit": source_commit,
+        "lock_digests": lock_digests,
+        "versions": versions,
+        "worker_id": worker_id,
+        "run_started_at": run_started_at,
+        "preflight_completed_at": preflight_completed_at,
+        "candidate": {"container": candidate_container, "port": DEFAULT_CANDIDATE_PORT, "provision": provisioned, "readiness": candidate},
+        "runtime": runtime,
+        "started": started,
+        "acpx_executable": candidate_acpx_executable,
+        "installed_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+
+
 def restore_old_runtime(
     executor: RemoteExecutor,
     *,
@@ -570,12 +716,19 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
     source = source_metadata(config.source_root.resolve(), config.source_remote, config.expected_source_remote)
     archive_path, archive_sha256 = create_git_archive(config.source_root.resolve(), str(source["commit"]))
     manifest = transaction_manifest(config, source, archive_sha256)
+    lock_digests = checked_in_acpx_lock_digests(config.source_root.resolve()) if config.bootstrap_acpx else {}
+    run_started_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    preflight_completed_at = ""
     quiesce_started = False
     capture: dict[str, object] = {}
     final_backup: dict[str, object] = {}
     candidate_touched = False
+    acpx_bootstrap_touched = False
+    acpx_bootstrap: dict[str, object] = {}
+    acpx_cleanup: dict[str, object] = {}
     try:
         preflight = run_preflight(config, executor, source)
+        preflight_completed_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         prepare_release_source(config, executor, archive_path, archive_sha256, manifest)
         image = validate_image_result(
             _remote(executor, "build.image", {"release_id": config.release_id, "commit": str(source["commit"])}, mutation=True),
@@ -613,7 +766,20 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         ):
             cleanup_candidate(executor, config)
             raise TransactionError("candidate verification failed: migration set or runtime checks did not match", phase="candidate.verify")
+        if config.bootstrap_acpx:
+            acpx_bootstrap_touched = True
+            acpx_bootstrap = run_acpx_candidate_bootstrap(
+                config,
+                executor,
+                source_commit=str(source["commit"]),
+                lock_digests=lock_digests,
+                candidate_container=str(candidate_start["container"]),
+                run_started_at=run_started_at,
+                preflight_completed_at=preflight_completed_at,
+            )
         capture = _remote(executor, "capture.state", {"commit": str(source["commit"])})
+        if config.bootstrap_acpx:
+            capture["acpx_bootstrap_release_id"] = config.release_id
         validate_commit(capture.get("previous_revision"))
         validate_sha256(capture.get("old_image_digest"), "old image digest")
         validate_sha256(capture.get("container_config_receipt"), "container config receipt")
@@ -642,7 +808,29 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         require(rebind.get("release_source") == f"{remote_release_dir(config)}/source", "worker rebind source mismatch", phase="workers.rebind")
         require(rebind.get("commit_marker") == source["commit"], "worker rebind commit mismatch", phase="workers.rebind")
         release_source = f"{remote_release_dir(config)}/source"
+        if config.bootstrap_acpx:
+            promoted = _remote(
+                executor,
+                "bootstrap.acpx_promote",
+                {
+                    "release_id": config.release_id,
+                    "worker_id": str(acpx_bootstrap["worker_id"]),
+                    "manager_port": DEFAULT_LIVE_PORT,
+                    "release_source": release_source,
+                    "acpx_executable": f"{remote_release_dir(config)}/acpx-runtime/node_modules/.bin/acpx",
+                },
+                mutation=True,
+            )
+            require(
+                promoted.get("active") is True and promoted.get("adapters_ready") is True,
+                "ACPX promoted worker readiness failed",
+                phase="bootstrap.acpx_promote",
+            )
+            acpx_bootstrap["promotion"] = {"port": DEFAULT_LIVE_PORT, **promoted}
         verify_runtime(executor, str(source["commit"]), release_source)
+        if acpx_bootstrap_touched:
+            acpx_cleanup = cleanup_acpx_bootstrap(executor, config)
+            acpx_bootstrap["cleanup"] = acpx_cleanup
         previous_release = str(capture.get("state", {}).get("current_release") or capture.get("current_pointer") or "")
         state_payload = {
             "release_id": config.release_id,
@@ -663,10 +851,17 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         _remote(executor, "state.commit", state_payload, mutation=True)
         cleanup_candidate(executor, config)
     except TransactionError as exc:
+        if acpx_bootstrap_touched and exc.phase != "bootstrap.acpx_cleanup":
+            acpx_cleanup = cleanup_acpx_bootstrap(executor, config)
+            if acpx_bootstrap:
+                acpx_bootstrap["cleanup"] = acpx_cleanup
         if candidate_touched and exc.phase == "candidate.verify":
             cleanup_candidate(executor, config)
             raise
         if candidate_touched and exc.phase in {"candidate.clone", "candidate.start"}:
+            cleanup_candidate(executor, config)
+            raise
+        if candidate_touched and exc.phase.startswith("bootstrap.acpx_") and not quiesce_started:
             cleanup_candidate(executor, config)
             raise
         if quiesce_started or exc.phase in POST_QUIESCE_PHASES:
@@ -675,7 +870,7 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         raise
     finally:
         archive_path.unlink(missing_ok=True)
-    return {
+    receipt = {
         "status": "success",
         "release_id": config.release_id,
         "source": {
@@ -695,11 +890,17 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         "image": {"image_digest": image["image_digest"], "image_ref": image["image_ref"]},
         "preflight": {
             "disk_free_bytes": preflight["disk"]["free_bytes"],
+            "completed_at": preflight_completed_at,
         },
+        "run_started_at": run_started_at,
     }
+    if config.bootstrap_acpx:
+        acpx_bootstrap.setdefault("cleanup", acpx_cleanup)
+        receipt["acpx_bootstrap"] = acpx_bootstrap
+    return receipt
 
 
-def verify_runtime(executor: RemoteExecutor, commit: str, release_source: str) -> None:
+def verify_runtime(executor: RemoteExecutor, commit: str, release_source: str, *, expected_acpx_absent: bool = False) -> None:
     validate_commit(commit)
     require(bool(release_source), "runtime release source is required", phase="verify.runtime")
     manager = _remote(executor, "verify.manager", {"commit": commit})
@@ -707,8 +908,11 @@ def verify_runtime(executor: RemoteExecutor, commit: str, release_source: str) -
     require(manager_ok, "Manager verification failed", phase="verify.manager")
     browser_use = _remote(executor, "verify.browser_use", {"commit": commit, "release_source": release_source})
     require(browser_use.get("active") is True and browser_use.get("bound") is True, "Browser Use verification failed", phase="verify.browser_use")
-    acpx = _remote(executor, "verify.acpx", {"release_source": release_source})
-    require(acpx.get("active") is True and acpx.get("preflights") is True, "ACPX verification failed", phase="verify.acpx")
+    acpx = _remote(executor, "verify.acpx", {"release_source": release_source, "expected_absent": expected_acpx_absent})
+    if expected_acpx_absent:
+        require(acpx.get("absent") is True, "ACPX absence verification failed", phase="verify.acpx")
+    else:
+        require(acpx.get("active") is True and acpx.get("preflights") is True, "ACPX verification failed", phase="verify.acpx")
     proxychecker = _remote(executor, "verify.proxychecker")
     require(proxychecker.get("ok") is True, "proxychecker verification failed", phase="verify.proxychecker")
     stream = _remote(executor, "verify.stream")
@@ -742,7 +946,12 @@ def run_rollback(config: RollbackConfig, executor: RemoteExecutor) -> dict[str, 
         _remote(executor, "quiesce.stop_live", mutation=True)
         _remote(executor, "restore.runtime", {"capture": capture, "backup": backup_receipt}, mutation=True)
         _remote(executor, "rollback.start_previous", {"previous_runtime": previous_runtime}, mutation=True)
-        verify_runtime(executor, str(previous_runtime["revision"]), f"{config.remote_path}/releases/{config.target_release}/source")
+        verify_runtime(
+            executor,
+            str(previous_runtime["revision"]),
+            f"{config.remote_path}/releases/{config.target_release}/source",
+            expected_acpx_absent=dict(capture).get("acpx_was_absent") is True,
+        )
         state_payload = {
             "release_id": config.target_release,
             "current_release": config.target_release,

@@ -52,6 +52,8 @@ CANDIDATE_READINESS_TIMEOUT_SECONDS = 180.0
 CANDIDATE_READINESS_POLL_INTERVAL_SECONDS = 2.0
 CANDIDATE_PROBE_TIMEOUT_SECONDS = 10.0
 CANDIDATE_CURL_CONNECT_TIMEOUT_SECONDS = 2.0
+ACPX_CANDIDATE_PREFLIGHT_INTERVAL_SECONDS = 30
+ACPX_PRODUCTION_PREFLIGHT_INTERVAL_SECONDS = 240
 ACPX_NODE_LOCK = "deploy/acpx-runtime/package-lock.json"
 ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
 ACPX_BOOTSTRAP_DIR = "acpx-bootstrap"
@@ -1501,7 +1503,8 @@ def op_bootstrap_acpx_provision_candidate(args: dict[str, object]) -> dict[str, 
         f"--token-file {key} --worker-id {acpx_candidate_worker_id(release_id)} "
         f"--worktree {release_source} "
         f"--permission-policy {config_paths['policy']} --mcp-config {config_paths['mcp']} "
-        f"--capability-dir {capability} --acpx {_acpx_cli_under(root / 'node-runtime')}\n"
+        f"--capability-dir {capability} --acpx {_acpx_cli_under(root / 'node-runtime')} "
+        f"--preflight-interval {ACPX_CANDIDATE_PREFLIGHT_INTERVAL_SECONDS}\n"
     )
     _write_text_mode_0600_atomic(unit, content)
     return {
@@ -1801,6 +1804,18 @@ def op_bootstrap_acpx_promote(args: dict[str, object]) -> dict[str, object]:
         .replace(str(bootstrap / "capability"), str(durable_capability))
         .replace(str(bootstrap / "candidate.worker.key"), str(durable_key))
         .replace(f"127.0.0.1:{CANDIDATE_PORT}", f"127.0.0.1:{LIVE_PORT}")
+    )
+    interval_token = "--preflight-interval"
+    candidate_interval_arg = f" {interval_token} {ACPX_CANDIDATE_PREFLIGHT_INTERVAL_SECONDS}\n"
+    production_interval_arg = f" {interval_token} {ACPX_PRODUCTION_PREFLIGHT_INTERVAL_SECONDS}\n"
+    require(
+        content.count(interval_token) == 1 and content.count(candidate_interval_arg) == 1,
+        "promoted ACPX unit missing expected candidate preflight interval",
+    )
+    content = content.replace(candidate_interval_arg, production_interval_arg)
+    require(
+        content.count(interval_token) == 1 and content.count(production_interval_arg) == 1,
+        "promoted ACPX unit missing production preflight interval",
     )
     require(ACPX_BOOTSTRAP_DIR not in content, "promoted ACPX unit still references temporary bootstrap paths")
     require(f"--worktree {release / 'source'}" in content, "promoted ACPX unit missing release worktree path")

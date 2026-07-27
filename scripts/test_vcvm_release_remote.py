@@ -2544,6 +2544,8 @@ def test_bootstrap_acpx_provision_reuses_existing_canonical_worker_key_without_l
     assert f"--mcp-config {mcp}" in exec_start
     assert f"--capability-dir {capability}" in exec_start
     assert f"--acpx {root / 'node-runtime' / 'node_modules' / 'acpx' / 'dist' / 'cli.js'}" in exec_start
+    assert " --preflight-interval 30" in exec_start
+    assert " --preflight-interval 240" not in exec_start
     assert result["credential_reused"] is True
     assert result["credential_source"] == "browser_use_worker_key"
 
@@ -2901,7 +2903,8 @@ def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_v
         f"ExecStart={root}/venv/bin/python --manager-url http://127.0.0.1:18116 "
         f"--token-file {key} --worktree {release_source} "
         f"--permission-policy {policy} --mcp-config {mcp} --capability-dir {capability} "
-        f"--acpx {root / 'node-runtime' / 'node_modules' / 'acpx' / 'dist' / 'cli.js'}\n",
+        f"--acpx {root / 'node-runtime' / 'node_modules' / 'acpx' / 'dist' / 'cli.js'} "
+        "--preflight-interval 30\n",
         encoding="utf-8",
     )
     unit.chmod(0o600)
@@ -2938,6 +2941,8 @@ def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_v
     assert result["active"] is True
     assert "acpx-bootstrap" not in unit_text
     assert "127.0.0.1:18115" in unit_text
+    assert " --preflight-interval 240" in unit_text
+    assert " --preflight-interval 30" not in unit_text
     assert f"--worktree {release_source}" in unit_text
     durable_capability = paths["releases"] / "release-0000001" / "acpx-capability"
     assert f"--permission-policy {durable_capability / 'permission-policy.json'}" in unit_text
@@ -3004,6 +3009,78 @@ def test_bootstrap_promote_preserves_candidate_allowlisted_path_environment(
     assert "/tmp" not in unit_text
     assert "GH_TOKEN" not in unit_text
     assert "OPENAI_API_KEY" not in unit_text
+
+
+def test_bootstrap_promote_rejects_candidate_missing_bounded_preflight_interval_before_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    candidate = prepare_complete_bootstrap_candidate(paths)
+    restart_calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[:4] == ["systemctl", "--user", "restart", "cloakbrowser-acpx.service"]:
+            restart_calls.append(tuple(argv))
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    with pytest.raises(remote.HelperError, match="preflight interval"):
+        remote.op_bootstrap_acpx_promote(
+            {
+                "release_id": "release-0000001",
+                "worker_id": "acpx-candidate-release-0000001",
+                "manager_port": 18115,
+                "release_source": str(candidate["source"]),
+                "acpx_executable": str(candidate["release"] / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+            }
+        )
+
+    assert restart_calls == []
+    assert not (paths["home"] / ".config" / "systemd" / "user" / "cloakbrowser-acpx.service").exists()
+    assert candidate["root"].exists()
+
+
+def test_bootstrap_promote_rejects_candidate_preflight_interval_token_prefix_before_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    candidate = prepare_complete_bootstrap_candidate(paths)
+    candidate["unit"].write_text(
+        candidate["unit"].read_text(encoding="utf-8").rstrip("\n") + " --preflight-interval 300\n",
+        encoding="utf-8",
+    )
+    restart_calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[:4] == ["systemctl", "--user", "restart", "cloakbrowser-acpx.service"]:
+            restart_calls.append(tuple(argv))
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    with pytest.raises(remote.HelperError, match="preflight interval"):
+        remote.op_bootstrap_acpx_promote(
+            {
+                "release_id": "release-0000001",
+                "worker_id": "acpx-candidate-release-0000001",
+                "manager_port": 18115,
+                "release_source": str(candidate["source"]),
+                "acpx_executable": str(candidate["release"] / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+            }
+        )
+
+    assert restart_calls == []
+    assert not (paths["home"] / ".config" / "systemd" / "user" / "cloakbrowser-acpx.service").exists()
+    assert candidate["root"].exists()
 
 
 @pytest.mark.parametrize("source_kind", ["missing", "symlink", "foreign"])

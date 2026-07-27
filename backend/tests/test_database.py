@@ -52,6 +52,51 @@ def test_init_db_idempotent(tmp_db: Path):
     assert len(tables) >= 2
 
 
+def test_list_applied_schema_migrations_returns_sorted_release_ids(tmp_db: Path):
+    assert db.list_applied_schema_migrations() == [
+        "agent_workspace_v1",
+        "task_run_binding_v1",
+        "task_runs_acpx_v1",
+        "task_runs_v1",
+        "worker_harness_preflights_v1",
+        "worker_harness_presence_v1",
+        "worker_runtime_v1",
+    ]
+
+
+def test_list_applied_schema_migrations_fails_closed_when_table_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_file = tmp_path / "profiles.db"
+    monkeypatch.setattr(db, "DB_PATH", db_file)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute("CREATE TABLE profiles (id TEXT PRIMARY KEY)")
+        conn.commit()
+
+    assert db.list_applied_schema_migrations() == []
+
+
+def test_list_applied_schema_migrations_raises_sanitized_error_for_db_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def broken_get_db():
+        raise sqlite3.DatabaseError("database disk image is malformed: /tmp/profiles.db")
+
+    monkeypatch.setattr(db, "get_db", broken_get_db)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        db.list_applied_schema_migrations()
+
+    assert type(exc_info.value).__name__ == "SchemaMigrationStatusError"
+    assert str(exc_info.value) == "Schema migration status unavailable"
+    assert "malformed" not in str(exc_info.value)
+    assert "/tmp/profiles.db" not in str(exc_info.value)
+
+
 def test_init_db_adds_profile_health_to_existing_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db_file = tmp_path / "profiles.db"
     monkeypatch.setattr(db, "DB_PATH", db_file)

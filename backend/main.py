@@ -4435,6 +4435,18 @@ async def get_live_diagnostics(request: Request) -> dict[str, Any]:
     )
 
 
+@app.get("/api/admin/migrations", response_model=list[str])
+async def get_admin_migrations(request: Request) -> list[str]:
+    _require_admin(request.scope)
+    try:
+        return db.list_applied_schema_migrations()
+    except db.SchemaMigrationStatusError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=db.SCHEMA_MIGRATION_STATUS_UNAVAILABLE,
+        ) from exc
+
+
 @app.get("/api/benchmarks/latest")
 async def get_latest_benchmark_report(request: Request) -> dict[str, Any]:
     """Serve a redacted, administrator-only benchmark summary.

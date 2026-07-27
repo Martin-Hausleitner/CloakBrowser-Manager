@@ -16,6 +16,14 @@ ENV_DATA_DIR = "CLOAKBROWSER_MANAGER_DATA_DIR"
 DOCKER_DATA_DIR = Path("/data")
 LOCAL_DATA_DIR = Path(__file__).resolve().parent / ".data"
 PROFILE_HEALTH_SOURCE_STATES = {"missing", "measured", "derived", "unavailable", "skipped"}
+SCHEMA_MIGRATION_STATUS_UNAVAILABLE = "Schema migration status unavailable"
+
+
+class SchemaMigrationStatusError(RuntimeError):
+    """Sanitized schema migration status read failure."""
+
+    def __init__(self, *_details: object) -> None:
+        super().__init__(SCHEMA_MIGRATION_STATUS_UNAVAILABLE)
 
 
 def _is_usable_data_dir(path: Path) -> bool:
@@ -56,6 +64,33 @@ def get_db():
         yield conn
     finally:
         conn.close()
+
+
+def list_applied_schema_migrations() -> list[str]:
+    """Return deterministic applied schema migration IDs.
+
+    If the migration table is absent, return an empty list so uninitialized
+    databases fail closed. Other SQLite failures propagate a sanitized typed
+    error for API handlers to map without leaking database details.
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT version
+                FROM schema_migrations
+                WHERE version IS NOT NULL AND TRIM(version) != ''
+                ORDER BY version
+                """
+            ).fetchall()
+    except sqlite3.Error as exc:
+        if (
+            isinstance(exc, sqlite3.OperationalError)
+            and "no such table: schema_migrations" in str(exc).lower()
+        ):
+            return []
+        raise SchemaMigrationStatusError() from exc
+    return [str(row["version"]) for row in rows]
 
 
 def _create_workspace_task_sessions_table(conn: sqlite3.Connection, table_name: str) -> None:

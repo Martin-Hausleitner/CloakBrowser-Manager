@@ -57,6 +57,14 @@ MAX_STDERR_BYTES = 16_384
 CONTROL_TERMINATE_TIMEOUT_SECONDS = 2.0
 CLOSE_SESSION_ATTEMPTS = 2
 CLOSE_SESSION_RETRY_DELAY_SECONDS = 0.1
+PREFLIGHT_SCRUBBED_ENV_KEYS = frozenset(
+    {
+        "CBM_RUN_CAPABILITY_FILE",
+        "CBM_PROFILE_ID",
+        "CBM_TASK_RUN_ID",
+        "CBM_ALLOWED_ORIGINS",
+    }
+)
 
 
 class AcpxRuntimeError(RuntimeError):
@@ -112,10 +120,13 @@ class AcpxRuntime:
         *,
         timeout: float = 30.0,
         environment: dict[str, str] | None = None,
+        scrub_environment_keys: frozenset[str] | None = None,
     ) -> bytes:
         child_env = os.environ.copy()
         if environment:
             child_env.update(environment)
+        for key in scrub_environment_keys or frozenset():
+            child_env.pop(key, None)
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -214,7 +225,11 @@ class AcpxRuntime:
             mcp_config=mcp_config,
         )
         try:
-            await self._run_control(ensure_command, environment=environment)
+            await self._run_control(
+                ensure_command,
+                environment=environment,
+                scrub_environment_keys=PREFLIGHT_SCRUBBED_ENV_KEYS,
+            )
         except AcpxRuntimeError as exc:
             return {"ready": False, "reason_code": exc.reason_code}
         close_command = build_preflight_close_command(
@@ -226,7 +241,12 @@ class AcpxRuntime:
         )
         for attempt in range(CLOSE_SESSION_ATTEMPTS):
             try:
-                await self._run_control(close_command, timeout=10.0)
+                await self._run_control(
+                    close_command,
+                    timeout=10.0,
+                    environment=environment,
+                    scrub_environment_keys=PREFLIGHT_SCRUBBED_ENV_KEYS,
+                )
                 return {"ready": True, "reason_code": "ok"}
             except AcpxRuntimeError:
                 if attempt + 1 >= CLOSE_SESSION_ATTEMPTS:

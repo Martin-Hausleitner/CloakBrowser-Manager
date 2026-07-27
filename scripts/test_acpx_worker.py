@@ -467,6 +467,66 @@ elif 'ensure' in sys.argv or 'close' in sys.argv:
     }
 
 
+def test_real_preflight_scrubs_ambient_cbm_run_env_from_ensure_and_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    forbidden = [
+        "CBM_RUN_CAPABILITY_FILE",
+        "CBM_PROFILE_ID",
+        "CBM_TASK_RUN_ID",
+        "CBM_ALLOWED_ORIGINS",
+    ]
+    for key in forbidden:
+        monkeypatch.setenv(key, f"ambient-{key.lower()}")
+    monkeypatch.setenv("CBM_MANAGER_URL", "https://ambient-manager.local")
+
+    env_file = tmp_path / "preflight-env.jsonl"
+    executable = tmp_path / "fake-acpx-preflight-env"
+    executable.write_text(
+        f"""#!/usr/bin/env python3
+import json, os, pathlib, sys
+env_file = pathlib.Path({str(env_file)!r})
+if '--version' in sys.argv:
+    print('0.12.1')
+elif 'ensure' in sys.argv or 'close' in sys.argv:
+    env_file.open('a', encoding='utf-8').write(json.dumps({{
+        'verb': 'ensure' if 'ensure' in sys.argv else 'close',
+        'manager': os.environ.get('CBM_MANAGER_URL'),
+        'forbidden': {{key: os.environ.get(key) for key in {forbidden!r}}},
+    }}) + '\\n')
+    print(json.dumps({{'ok': True}}))
+""",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(replace(make_config(tmp_path), acpx_executable=str(executable)))
+
+    result = asyncio.run(runtime.preflight_agent(
+        cwd=tmp_path,
+        agent="codex",
+        session_name="cbm-0123456789abcdef0123456789abcdef",
+        environment={
+            "CBM_MANAGER_URL": "https://manager.local",
+            "CBM_TASK_RUN_ID": "explicit-preflight-run",
+        },
+        mcp_config=write_preflight_mcp(tmp_path),
+    ))
+
+    records = [
+        json.loads(line)
+        for line in env_file.read_text(encoding="utf-8").splitlines()
+    ]
+    assert result == {"ready": True, "reason_code": "ok"}
+    assert [record["verb"] for record in records] == ["ensure", "close"]
+    assert {record["manager"] for record in records} == {"https://manager.local"}
+    assert all(
+        value is None
+        for record in records
+        for value in record["forbidden"].values()
+    )
+
+
 def test_preflight_reports_missing_adapter_separately_from_version_mismatch(tmp_path: Path):
     manager = FakeManager()
     config = replace(make_config(tmp_path), acpx_executable=str(tmp_path / "missing-acpx"))

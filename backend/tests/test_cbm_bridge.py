@@ -143,7 +143,8 @@ def test_bridge_rejects_tamper_expiry_equality_and_bad_principals(tmp_db):
         "bootstrap", None, SECRET, profile_id="p1", path_class=PATH_CLASS
     )
     payload, sig = token.split(".", 1)
-    assert access.verify_bridge_session(f"{payload}.{sig[:-1]}x", SECRET) is None
+    tampered_first = "A" if sig[0] != "A" else "B"
+    assert access.verify_bridge_session(f"{payload}.{tampered_first}{sig[1:]}", SECRET) is None
 
     now = int(time.time())
     expired = access.create_bridge_session(

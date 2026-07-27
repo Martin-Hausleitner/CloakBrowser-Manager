@@ -352,7 +352,15 @@ class FakeRemoteExecutor:
         if phase == "bootstrap.acpx_promote":
             assert args["manager_port"] == 18115
             assert str(args["acpx_executable"]).endswith("/acpx-runtime/node_modules/acpx/dist/cli.js")
-            return {"worker_id": args["worker_id"], "manager_url": "http://127.0.0.1:18115", "active": self.facts["acpx_promoted_ready"], "adapters_ready": self.facts["acpx_promoted_ready"]}
+            return {
+                "worker_id": args["worker_id"],
+                "manager_url": "http://127.0.0.1:18115",
+                "active": self.facts["acpx_promoted_ready"],
+                "adapters_ready": self.facts["acpx_promoted_ready"],
+                "bound": self.facts.get("acpx_promoted_bound", True),
+                "preflights": self.facts.get("acpx_promoted_preflights", True),
+                "components": {"unit": {"ready": self.facts["acpx_promoted_ready"]}},
+            }
         if phase == "verify.manager":
             return {
                 "health": self.facts["live_health"],
@@ -366,7 +374,7 @@ class FakeRemoteExecutor:
         if phase == "verify.acpx":
             if args.get("expected_absent") is True:
                 return {"absent": True}
-            return {"active": True, "preflights": self.facts["acpx_preflights"]}
+            return {"active": True, "bound": self.facts.get("acpx_bound", True), "preflights": self.facts["acpx_preflights"]}
         if phase == "verify.proxychecker":
             return {"ok": self.facts["proxychecker"]}
         if phase == "verify.stream":
@@ -567,6 +575,32 @@ def test_bootstrap_acpx_success_installs_candidate_worker_before_quiesce_and_pro
     assert "cbm_worker_" not in json.dumps(receipt)
 
 
+@pytest.mark.parametrize(
+    ("facts", "missing_field"),
+    [
+        ({"acpx_promoted_bound": False}, "bound"),
+        ({"acpx_promoted_preflights": False}, "preflights"),
+    ],
+)
+def test_bootstrap_acpx_promotion_gate_requires_bound_and_preflights_before_success(
+    tmp_path: Path,
+    facts: dict[str, object],
+    missing_field: str,
+) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(**facts)
+
+    with pytest.raises(tx.TransactionError, match="ACPX promoted worker readiness failed") as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert exc_info.value.phase == "bootstrap.acpx_promote"
+    assert "restore.runtime" in fake.phases
+    assert "restore.verify" in fake.phases
+    assert "state.commit" not in fake.phases
+    assert missing_field in {"bound", "preflights"}
+
+
 def test_bootstrap_acpx_accepts_unlabeled_legacy_manager_without_inventing_revision(tmp_path: Path) -> None:
     repo = fixture_repo(tmp_path)
     add_acpx_locks(repo)
@@ -666,6 +700,31 @@ def test_bootstrap_acpx_readiness_failure_surfaces_safe_reason_and_cleans_up_bef
     assert "quiesce.stop_workers" not in fake.phases
     assert "quiesce.stop_live" not in fake.phases
     assert "cbm_worker_" not in message
+
+
+@pytest.mark.parametrize(
+    ("facts", "message"),
+    [
+        ({"acpx_bound": False}, "ACPX verification failed"),
+        ({"acpx_preflights": False}, "ACPX verification failed"),
+    ],
+)
+def test_verify_runtime_requires_acpx_bound_and_preflights(
+    facts: dict[str, object],
+    message: str,
+) -> None:
+    fake = FakeRemoteExecutor(**facts)
+
+    with pytest.raises(tx.TransactionError, match=message) as exc_info:
+        tx.verify_runtime(
+            fake,
+            FULL_WORKER_COMMIT,
+            "/home/coder/cloakbrowser-manager/releases/release-20260727-ac5840b00001/source",
+            expected_image_id="sha256:" + ("e" * 64),
+        )
+
+    assert exc_info.value.phase == "verify.acpx"
+    assert fake.phases == ["verify.manager", "verify.browser_use", "verify.acpx"]
 
 
 def test_bootstrap_acpx_capture_state_failure_cleans_acpx_and_candidate_before_quiesce(tmp_path: Path) -> None:

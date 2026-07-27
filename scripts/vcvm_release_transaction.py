@@ -1030,7 +1030,10 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
                 mutation=True,
             )
             require(
-                promoted.get("active") is True and promoted.get("adapters_ready") is True,
+                promoted.get("active") is True
+                and promoted.get("adapters_ready") is True
+                and promoted.get("bound") is True
+                and promoted.get("preflights") is True,
                 "ACPX promoted worker readiness failed",
                 phase="bootstrap.acpx_promote",
             )
@@ -1177,7 +1180,11 @@ def verify_runtime(
     if expected_acpx_absent:
         require(acpx.get("absent") is True, "ACPX absence verification failed", phase="verify.acpx")
     else:
-        require(acpx.get("active") is True and acpx.get("preflights") is True, "ACPX verification failed", phase="verify.acpx")
+        require(
+            acpx.get("active") is True and acpx.get("bound") is True and acpx.get("preflights") is True,
+            "ACPX verification failed",
+            phase="verify.acpx",
+        )
     proxychecker = _remote(executor, "verify.proxychecker")
     require(proxychecker.get("ok") is True, "proxychecker verification failed", phase="verify.proxychecker")
     stream = _remote(executor, "verify.stream")

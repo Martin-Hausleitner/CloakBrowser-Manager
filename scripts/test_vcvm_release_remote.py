@@ -3104,6 +3104,13 @@ def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_v
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         del kwargs
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"WorkingDirectory={release_source}\nActiveState=active\nFragmentPath=/unit\n",
+                stderr="",
+            )
         if argv[-1:] == ["--version"]:
             return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
@@ -3117,6 +3124,21 @@ def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_v
 
     monkeypatch.setattr(remote, "run", fake_run_with_version_capture)
     monkeypatch.setattr(remote.shutil, "which", lambda name: str(release_source / "acpx") if name == "acpx" else None)
+    monkeypatch.setattr(
+        remote,
+        "_manager_json_on_port",
+        lambda port, path, timeout=None: (
+            {"worker_seen_recently": True, "state": "polling"}
+            if path.endswith("/presence")
+            else {
+                "agents": [
+                    {"agent": agent, "ready": True, "state": "ready", "reason_code": "ok"}
+                    for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+                ]
+            }
+        ),
+        raising=False,
+    )
 
     result = remote.op_bootstrap_acpx_promote(
         {
@@ -3180,11 +3202,33 @@ def test_bootstrap_promote_preserves_candidate_allowlisted_path_environment(
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         del kwargs
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"WorkingDirectory={release_source}\nActiveState=active\nFragmentPath=/unit\n",
+                stderr="",
+            )
         if argv[-1:] == ["--version"]:
             return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
 
     monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(
+        remote,
+        "_manager_json_on_port",
+        lambda port, path, timeout=None: (
+            {"worker_seen_recently": True, "state": "polling"}
+            if path.endswith("/presence")
+            else {
+                "agents": [
+                    {"agent": agent, "ready": True, "state": "ready", "reason_code": "ok"}
+                    for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+                ]
+            }
+        ),
+        raising=False,
+    )
     result = remote.op_bootstrap_acpx_promote(
         {
             "release_id": "release-0000001",
@@ -3202,6 +3246,184 @@ def test_bootstrap_promote_preserves_candidate_allowlisted_path_environment(
     assert "/tmp" not in unit_text
     assert "GH_TOKEN" not in unit_text
     assert "OPENAI_API_KEY" not in unit_text
+
+
+def test_bootstrap_promote_polls_live_readiness_until_bound_presence_and_preflights_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    candidate = prepare_complete_bootstrap_candidate(paths)
+    candidate["unit"].write_text(
+        candidate["unit"].read_text(encoding="utf-8").rstrip("\n") + " --preflight-interval 30\n",
+        encoding="utf-8",
+    )
+    clock = {"now": 0.0}
+    secret = "cbm_worker_" + ("1" * 64)
+    sleeps: list[float] = []
+    systemctl_checks = {"active": 0}
+    show_states = [
+        {"WorkingDirectory": "/home/coder/old-source", "ActiveState": "active"},
+        {"WorkingDirectory": str(candidate["source"]), "ActiveState": "active"},
+    ]
+    presence_states = [
+        {"worker_seen_recently": False, "state": "starting"},
+        {"worker_seen_recently": True, "state": "polling"},
+    ]
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs.get("timeout") is None or float(kwargs["timeout"]) <= 90.0
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            state = show_states.pop(0) if show_states else {"WorkingDirectory": str(candidate["source"]), "ActiveState": "active"}
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"WorkingDirectory={state['WorkingDirectory']}\nActiveState={state['ActiveState']}\nFragmentPath=/unit\n",
+                stderr="",
+            )
+        if argv[:4] == ["systemctl", "--user", "is-active", remote.ACPX_UNIT]:
+            systemctl_checks["active"] += 1
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        if argv[:3] == ["systemctl", "--user", "daemon-reload"] or argv[:4] == ["systemctl", "--user", "restart", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    def fake_manager_json(port: int, path: str, *, timeout: float | None = None) -> dict[str, object]:
+        assert port == 18115
+        assert timeout is not None and 0 < timeout <= 5.0
+        if path.endswith("/presence"):
+            return {"harness": "acpx", "last_seen_at": "2026-07-27T12:00:00Z", "token": secret, "unknown": "raw", **presence_states.pop(0)}
+        if path.endswith("/preflights"):
+            return {
+                "agents": [
+                    {"agent": "codex", "ready": True, "state": "ready", "reason_code": "ok"},
+                    *[
+                        {"agent": agent, "ready": False, "state": "failed", "reason_code": "auth_required"}
+                        for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+                        if agent != "codex"
+                    ],
+                ]
+            }
+        raise AssertionError(path)
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(remote, "ACPX_PROMOTED_READINESS_TIMEOUT_SECONDS", 1.0, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_POLL_INTERVAL_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(remote.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(remote.time, "sleep", fake_sleep)
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
+
+    result = remote.op_bootstrap_acpx_promote(
+        {
+            "release_id": "release-0000001",
+            "worker_id": "acpx-candidate-release-0000001",
+            "manager_port": 18115,
+            "release_source": str(candidate["source"]),
+            "acpx_executable": str(candidate["release"] / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+        }
+    )
+
+    assert result["active"] is True
+    assert result["adapters_ready"] is True
+    assert result["bound"] is True
+    assert result["preflights"] is True
+    assert result["readiness_reason"] == "ready"
+    assert result["components"]["binding"]["ready"] is True
+    assert result["components"]["presence"]["ready"] is True
+    assert result["presence"] == {
+        "harness": "acpx",
+        "worker_seen_recently": True,
+        "state": "polling",
+        "last_seen_at": "2026-07-27T12_00_00Z",
+    }
+    assert result["components"]["manager_preflights"]["auth_blocked_agents"] == [
+        "claude",
+        "cursor",
+        "grok-build",
+        "opencode",
+    ]
+    assert result["attempt_count"] == 3
+    assert sleeps == [0.1, 0.1]
+    assert systemctl_checks["active"] >= 2
+    receipt_json = json.dumps(result, sort_keys=True)
+    assert secret not in receipt_json
+    assert "token" not in receipt_json
+    assert "unknown" not in receipt_json
+
+
+def test_bootstrap_promote_times_out_with_sanitized_live_readiness_reason_without_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    candidate = prepare_complete_bootstrap_candidate(paths)
+    candidate["unit"].write_text(
+        candidate["unit"].read_text(encoding="utf-8").rstrip("\n") + " --preflight-interval 30\n",
+        encoding="utf-8",
+    )
+    clock = {"now": 0.0}
+    secret = "cbm_worker_" + ("1" * 64)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"WorkingDirectory={candidate['source']}\nActiveState=active\nFragmentPath=/unit\n",
+                stderr="",
+            )
+        if argv[:4] == ["systemctl", "--user", "is-active", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        if argv[:3] == ["systemctl", "--user", "daemon-reload"] or argv[:4] == ["systemctl", "--user", "restart", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    def fake_manager_json(port: int, path: str, *, timeout: float | None = None) -> dict[str, object]:
+        assert port == 18115
+        if path.endswith("/presence"):
+            return {"worker_seen_recently": True, "state": "polling", "token": secret}
+        if path.endswith("/preflights"):
+            return {
+                "agents": [
+                    {"agent": agent, "ready": False, "state": "failed", "reason_code": "auth_required", "token": secret}
+                    for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(remote, "ACPX_PROMOTED_READINESS_TIMEOUT_SECONDS", 0.15, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_POLL_INTERVAL_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(remote.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(remote.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
+
+    with pytest.raises(
+        remote.HelperError,
+        match=r"ACPX promoted readiness failed: attempt_count=2 .*deadline_seconds=0\.15 .*reason=manager_preflight_no_ready_agent",
+    ) as exc_info:
+        remote.op_bootstrap_acpx_promote(
+            {
+                "release_id": "release-0000001",
+                "worker_id": "acpx-candidate-release-0000001",
+                "manager_port": 18115,
+                "release_source": str(candidate["source"]),
+                "acpx_executable": str(candidate["release"] / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+            }
+        )
+
+    message = str(exc_info.value)
+    assert secret not in message
+    assert "token" not in message
+    assert "agents" not in message
 
 
 def test_bootstrap_promote_rejects_candidate_missing_bounded_preflight_interval_before_restart(

@@ -284,7 +284,7 @@ class FakeRemoteExecutor:
                 "runtime": {
                     "node_root": {"ref": "sha256:" + ("6" * 64), "sha256": "6" * 64, "mode": "700"},
                     "venv": {"ref": "sha256:" + ("7" * 64), "sha256": "7" * 64, "mode": "700"},
-                    "acpx_executable": "/home/coder/cloakbrowser-manager/releases/release-20260727-ac5840b00001/acpx-bootstrap/node-runtime/node_modules/.bin/acpx",
+                    "acpx_executable": "/home/coder/cloakbrowser-manager/releases/release-20260727-ac5840b00001/acpx-bootstrap/node-runtime/node_modules/acpx/dist/cli.js",
                 },
                 "lock_digests": {
                     "node": args["node_lock_sha256"],
@@ -304,7 +304,7 @@ class FakeRemoteExecutor:
         if phase == "bootstrap.acpx_start_candidate":
             return {"active": True, "worker_id": args["worker_id"]}
         if phase == "bootstrap.acpx_verify_candidate":
-            assert str(args["acpx_executable"]).endswith("/acpx-bootstrap/node-runtime/node_modules/.bin/acpx")
+            assert str(args["acpx_executable"]).endswith("/acpx-bootstrap/node-runtime/node_modules/acpx/dist/cli.js")
             return {"worker_id": args["worker_id"], "present": True, "adapters_ready": self.facts["acpx_candidate_ready"]}
         if phase == "capture.state":
             payload = {
@@ -349,7 +349,7 @@ class FakeRemoteExecutor:
             }
         if phase == "bootstrap.acpx_promote":
             assert args["manager_port"] == 18115
-            assert str(args["acpx_executable"]).endswith("/acpx-runtime/node_modules/.bin/acpx")
+            assert str(args["acpx_executable"]).endswith("/acpx-runtime/node_modules/acpx/dist/cli.js")
             return {"worker_id": args["worker_id"], "manager_url": "http://127.0.0.1:18115", "active": self.facts["acpx_promoted_ready"], "adapters_ready": self.facts["acpx_promoted_ready"]}
         if phase == "verify.manager":
             return {

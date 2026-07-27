@@ -1183,14 +1183,512 @@ def test_restore_dropin_rejects_symlink_temp_file(monkeypatch: pytest.MonkeyPatc
     assert target.read_text(encoding="utf-8") == "do-not-touch"
 
 
+def write_release_acpx_target(paths: dict[str, Path], release_id: str = "release-0000001", *, promoted: bool = False) -> Path:
+    runtime = "acpx-runtime" if promoted else "acpx-bootstrap/node-runtime"
+    target = paths["releases"] / release_id / runtime / "node_modules" / "acpx" / "dist" / "cli.js"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    target.chmod(0o700)
+    return target
+
+
+def write_npm_bin_symlink(paths: dict[str, Path], release_id: str = "release-0000001", *, promoted: bool = False) -> Path:
+    runtime = "acpx-runtime" if promoted else "acpx-bootstrap/node-runtime"
+    link = paths["releases"] / release_id / runtime / "node_modules" / ".bin" / "acpx"
+    link.parent.mkdir(parents=True)
+    link.symlink_to("../acpx/dist/cli.js")
+    return link
+
+
+def install_bootstrap_root_symlink(paths: dict[str, Path], release_id: str = "release-0000001") -> tuple[Path, Path]:
+    release = paths["releases"] / release_id
+    release.mkdir(parents=True, exist_ok=True)
+    outside = paths["root"].parent / "outside-bootstrap"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+    (release / "acpx-bootstrap").symlink_to(outside, target_is_directory=True)
+    return outside, sentinel
+
+
+def prepare_bootstrap_install_source(paths: dict[str, Path], release_id: str = "release-0000001") -> dict[str, object]:
+    release = paths["releases"] / release_id
+    source = release / "source"
+    node_lock = source / "deploy" / "acpx-runtime" / "package-lock.json"
+    python_lock = source / "scripts" / "requirements-acpx-worker.linux-x86_64.py312.txt"
+    node_lock.parent.mkdir(parents=True)
+    python_lock.parent.mkdir(parents=True)
+    node_lock.write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+    python_lock.write_text("# lock\n", encoding="utf-8")
+    (release / "COMMIT").write_text("0" * 40 + "\n", encoding="utf-8")
+    return {
+        "release_id": release_id,
+        "commit": "0" * 40,
+        "node_lock_sha256": remote.file_sha256(node_lock),
+        "python_lock_sha256": remote.file_sha256(python_lock),
+    }
+
+
+def assert_outside_bootstrap_untouched(outside: Path, sentinel: Path) -> None:
+    assert sentinel.read_text(encoding="utf-8") == "keep\n"
+    assert sorted(path.name for path in outside.iterdir()) == ["sentinel.txt"]
+
+
+def tree_snapshot(path: Path) -> dict[str, str]:
+    if not path.exists() and not path.is_symlink():
+        return {}
+    snapshot: dict[str, str] = {}
+    for item in sorted(path.rglob("*")):
+        relative = str(item.relative_to(path))
+        if item.is_symlink():
+            snapshot[relative] = f"symlink:{item.readlink()}"
+        elif item.is_dir():
+            snapshot[relative] = "dir"
+        else:
+            snapshot[relative] = item.read_text(encoding="utf-8")
+    return snapshot
+
+
+def install_release_id_symlink(paths: dict[str, Path], release_id: str = "release-0000001") -> tuple[Path, dict[str, str]]:
+    sibling = paths["releases"] / "release-sibling-0001"
+    sibling.mkdir()
+    (sibling / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+    (paths["releases"] / release_id).symlink_to(sibling, target_is_directory=True)
+    return sibling, tree_snapshot(sibling)
+
+
+def prepare_sibling_release_source(sibling: Path) -> None:
+    source = sibling / "source"
+    (source / "scripts").mkdir(parents=True, exist_ok=True)
+    (source / "scripts" / "cbm-mcp").write_text("#!/bin/sh\n", encoding="utf-8")
+    (source / "scripts" / "cbm-mcp").chmod(0o700)
+
+
+def prepare_sibling_install_source(sibling: Path) -> dict[str, object]:
+    source = sibling / "source"
+    node_lock = source / "deploy" / "acpx-runtime" / "package-lock.json"
+    python_lock = source / "scripts" / "requirements-acpx-worker.linux-x86_64.py312.txt"
+    node_lock.parent.mkdir(parents=True, exist_ok=True)
+    python_lock.parent.mkdir(parents=True, exist_ok=True)
+    node_lock.write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+    python_lock.write_text("# lock\n", encoding="utf-8")
+    (sibling / "COMMIT").write_text("0" * 40 + "\n", encoding="utf-8")
+    return {
+        "release_id": "release-0000001",
+        "commit": "0" * 40,
+        "node_lock_sha256": remote.file_sha256(node_lock),
+        "python_lock_sha256": remote.file_sha256(python_lock),
+    }
+
+
+def prepare_complete_bootstrap_candidate(paths: dict[str, Path], release_id: str = "release-0000001") -> dict[str, Path]:
+    release = paths["releases"] / release_id
+    source = release / "source"
+    source.mkdir(parents=True, exist_ok=True)
+    root = release / "acpx-bootstrap"
+    for relative in ("venv/bin/python", "node-runtime/node_modules/acpx/dist/cli.js"):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+        target.chmod(0o700)
+    capability = root / "capability"
+    capability.mkdir(parents=True, exist_ok=True)
+    policy = capability / "permission-policy.json"
+    policy.write_text(json.dumps({"defaultAction": "deny"}) + "\n", encoding="utf-8")
+    policy.chmod(0o600)
+    mcp = capability / "mcp-config.json"
+    mcp.write_text(
+        json.dumps({"mcpServers": [{"name": "cloakbrowser", "command": str(source / "scripts" / "cbm-mcp"), "args": []}]}) + "\n",
+        encoding="utf-8",
+    )
+    mcp.chmod(0o600)
+    key = root / "candidate.worker.key"
+    key.write_text("cbm_worker_" + ("1" * 64) + "\n", encoding="utf-8")
+    key.chmod(0o600)
+    unit = root / "acpx-candidate-release-0000001.service"
+    unit.write_text(
+        f"ExecStart={root}/venv/bin/python --manager-url http://127.0.0.1:18116 "
+        f"--token-file {key} --worktree {source} "
+        f"--permission-policy {policy} --mcp-config {mcp} --capability-dir {capability} "
+        f"--acpx {root / 'node-runtime' / 'node_modules' / 'acpx' / 'dist' / 'cli.js'}\n",
+        encoding="utf-8",
+    )
+    unit.chmod(0o600)
+    for name in ("acpx-runtime", "acpx-venv", "acpx-capability"):
+        durable = release / name
+        durable.mkdir(parents=True, exist_ok=True)
+        (durable / "sentinel.txt").write_text("durable\n", encoding="utf-8")
+    return {
+        "release": release,
+        "source": source,
+        "root": root,
+        "unit": unit,
+        "node": root / "node-runtime",
+        "venv": root / "venv",
+        "capability": capability,
+        "policy": policy,
+        "mcp": mcp,
+        "key": key,
+        "cli": root / "node-runtime" / "node_modules" / "acpx" / "dist" / "cli.js",
+    }
+
+
+def test_acpx_executable_contract_requires_direct_package_cli_not_npm_bin_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    direct = write_release_acpx_target(paths)
+    npm_symlink = write_npm_bin_symlink(paths)
+
+    assert remote._validate_acpx_executable_path("release-0000001", str(direct), kind="candidate") == direct
+    with pytest.raises(remote.HelperError, match="allowlisted|non-symlink"):
+        remote._validate_acpx_executable_path("release-0000001", str(npm_symlink), kind="candidate")
+
+
+@pytest.mark.parametrize(
+    "path_factory,kind,match",
+    [
+        (lambda paths: write_release_acpx_target(paths, "release-0000002"), "candidate", "allowlisted"),
+        (lambda paths: paths["root"] / "acpx-bootstrap" / "node-runtime" / "node_modules" / "acpx" / "dist" / "cli.js", "candidate", "allowlisted"),
+        (lambda paths: write_npm_bin_symlink(paths), "candidate", "allowlisted|non-symlink"),
+        (lambda paths: write_npm_bin_symlink(paths, promoted=True), "promoted", "allowlisted|non-symlink"),
+    ],
+)
+def test_acpx_executable_contract_rejects_wrong_release_root_or_symlink_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    path_factory: object,
+    kind: str,
+    match: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    write_release_acpx_target(paths)
+    write_release_acpx_target(paths, promoted=True)
+    path = path_factory(paths)
+    if not path.exists() and not path.is_symlink():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+        path.chmod(0o700)
+
+    with pytest.raises(remote.HelperError, match=match):
+        remote._validate_acpx_executable_path("release-0000001", str(path), kind=kind)
+
+
+def test_bootstrap_acpx_install_rejects_symlink_bootstrap_root_without_outside_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    args = prepare_bootstrap_install_source(paths)
+    outside, sentinel = install_bootstrap_root_symlink(paths)
+    monkeypatch.setattr(
+        remote,
+        "run",
+        lambda argv, **kwargs: (_ for _ in ()).throw(AssertionError(f"unexpected command: {argv}")),
+    )
+
+    with pytest.raises(remote.HelperError, match="symlink"):
+        remote.op_bootstrap_acpx_install(args)
+
+    assert_outside_bootstrap_untouched(outside, sentinel)
+
+
+@pytest.mark.parametrize("phase", ["provision", "start", "promote", "cleanup"])
+def test_bootstrap_acpx_phases_reject_symlink_bootstrap_root_without_outside_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    outside, sentinel = install_bootstrap_root_symlink(paths)
+    source_key = paths["home"] / ".config" / "cloakbrowser" / "browser-use-worker-key"
+    source_key.parent.mkdir(parents=True)
+    source_key.write_text("cbm_worker_" + ("ab" * 32) + "\n", encoding="utf-8")
+    source_key.chmod(0o600)
+    monkeypatch.setattr(remote, "BROWSER_USE_TOKEN_PATH", source_key)
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr=""))
+
+    with pytest.raises(remote.HelperError, match="symlink"):
+        if phase == "provision":
+            remote.op_bootstrap_acpx_provision_candidate(
+                {
+                    "release_id": "release-0000001",
+                    "commit": "0" * 40,
+                    "manager_port": 18116,
+                    "runtime": {},
+                }
+            )
+        elif phase == "start":
+            remote.op_bootstrap_acpx_start_candidate(
+                {"release_id": "release-0000001", "worker_id": "acpx-candidate-release-0000001"}
+            )
+        elif phase == "promote":
+            remote.op_bootstrap_acpx_promote(
+                {
+                    "release_id": "release-0000001",
+                    "worker_id": "acpx-candidate-release-0000001",
+                    "manager_port": 18115,
+                    "release_source": str(release_source),
+                    "acpx_executable": str(
+                        paths["releases"]
+                        / "release-0000001"
+                        / "acpx-runtime"
+                        / "node_modules"
+                        / "acpx"
+                        / "dist"
+                        / "cli.js"
+                    ),
+                }
+            )
+        else:
+            remote.op_bootstrap_acpx_cleanup({"release_id": "release-0000001"})
+
+    assert_outside_bootstrap_untouched(outside, sentinel)
+
+
+@pytest.mark.parametrize("phase", ["install", "provision", "start", "promote", "cleanup", "restore_cleanup"])
+def test_bootstrap_acpx_rejects_release_id_symlink_without_sibling_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    sibling, before = install_release_id_symlink(paths)
+    prepare_sibling_release_source(sibling)
+    before = tree_snapshot(sibling)
+    source_key = paths["home"] / ".config" / "cloakbrowser" / "browser-use-worker-key"
+    source_key.parent.mkdir(parents=True)
+    source_key.write_text("cbm_worker_" + ("ab" * 32) + "\n", encoding="utf-8")
+    source_key.chmod(0o600)
+    monkeypatch.setattr(remote, "BROWSER_USE_TOKEN_PATH", source_key)
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr=""))
+    if phase == "install":
+        args = prepare_sibling_install_source(sibling)
+        before = tree_snapshot(sibling)
+    if phase in {"promote", "cleanup", "restore_cleanup"}:
+        prepare_complete_bootstrap_candidate({"releases": paths["releases"]}, release_id="release-sibling-0001")
+        before = tree_snapshot(sibling)
+
+    with pytest.raises(remote.HelperError, match="release.*symlink|symlink"):
+        if phase == "install":
+            remote.op_bootstrap_acpx_install(args)
+        elif phase == "provision":
+            remote.op_bootstrap_acpx_provision_candidate(
+                {
+                    "release_id": "release-0000001",
+                    "commit": "0" * 40,
+                    "manager_port": 18116,
+                    "runtime": {},
+                }
+            )
+        elif phase == "start":
+            remote.op_bootstrap_acpx_start_candidate(
+                {"release_id": "release-0000001", "worker_id": "acpx-candidate-release-0000001"}
+            )
+        elif phase == "promote":
+            remote.op_bootstrap_acpx_promote(
+                {
+                    "release_id": "release-0000001",
+                    "worker_id": "acpx-candidate-release-0000001",
+                    "manager_port": 18115,
+                    "release_source": str(paths["releases"] / "release-0000001" / "source"),
+                    "acpx_executable": str(
+                        paths["releases"]
+                        / "release-0000001"
+                        / "acpx-runtime"
+                        / "node_modules"
+                        / "acpx"
+                        / "dist"
+                        / "cli.js"
+                    ),
+                }
+            )
+        elif phase == "cleanup":
+            remote.op_bootstrap_acpx_cleanup({"release_id": "release-0000001"})
+        else:
+            remote._remove_acpx_bootstrap_artifacts(
+                {"acpx_bootstrap_release_id": "release-0000001", "acpx_was_absent": True}
+            )
+
+    assert tree_snapshot(sibling) == before
+
+
+@pytest.mark.parametrize("artifact", ["missing", "symlink"])
+def test_bootstrap_start_requires_existing_regular_candidate_unit_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    patch_remote_paths(monkeypatch, tmp_path)
+    root = remote.acpx_bootstrap_dir("release-0000001")
+    unit = root / "acpx-candidate-release-0000001.service"
+    root.mkdir(parents=True, exist_ok=True)
+    if artifact == "symlink":
+        target = tmp_path / "outside-unit"
+        target.write_text("[Service]\n", encoding="utf-8")
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.symlink_to(target)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+
+    with pytest.raises(remote.HelperError, match="candidate unit"):
+        remote.op_bootstrap_acpx_start_candidate(
+            {"release_id": "release-0000001", "worker_id": "acpx-candidate-release-0000001"}
+        )
+
+    assert calls == []
+    assert not remote.expected_unit_path("acpx-candidate-release-0000001.service").exists()
+
+
+@pytest.mark.parametrize("missing", ["source", "unit", "node", "venv", "capability", "key", "cli"])
+def test_bootstrap_promote_preflights_all_candidate_artifacts_before_durable_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    missing: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    candidate = prepare_complete_bootstrap_candidate(paths)
+    if missing == "source":
+        candidate["source"].rmdir()
+    elif missing == "cli":
+        candidate["cli"].unlink()
+    else:
+        target = candidate[missing]
+        if target.is_dir():
+            remote.shutil.rmtree(target)
+        else:
+            target.unlink()
+    durable_before = {
+        name: tree_snapshot(candidate["release"] / name)
+        for name in ("acpx-runtime", "acpx-venv", "acpx-capability")
+    }
+    calls: list[list[str]] = []
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr=""))
+
+    with pytest.raises(remote.HelperError):
+        remote.op_bootstrap_acpx_promote(
+            {
+                "release_id": "release-0000001",
+                "worker_id": "acpx-candidate-release-0000001",
+                "manager_port": 18115,
+                "release_source": str(candidate["source"]),
+                "acpx_executable": str(candidate["release"] / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+            }
+        )
+
+    assert calls == []
+    assert {
+        name: tree_snapshot(candidate["release"] / name)
+        for name in ("acpx-runtime", "acpx-venv", "acpx-capability")
+    } == durable_before
+
+
+@pytest.mark.parametrize("config_name", ["policy", "mcp"])
+@pytest.mark.parametrize("bad_state", ["missing", "symlink", "wrong-mode", "wrong-content"])
+def test_bootstrap_promote_preflights_candidate_configs_before_durable_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    config_name: str,
+    bad_state: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    candidate = prepare_complete_bootstrap_candidate(paths)
+    config = candidate[config_name]
+    if bad_state == "missing":
+        config.unlink()
+    elif bad_state == "symlink":
+        config.unlink()
+        outside = tmp_path / f"outside-{config_name}.json"
+        outside.write_text("{}\n", encoding="utf-8")
+        config.symlink_to(outside)
+    elif bad_state == "wrong-mode":
+        config.chmod(0o644)
+    elif config_name == "policy":
+        config.write_text(json.dumps({"defaultAction": "escalate"}) + "\n", encoding="utf-8")
+    else:
+        config.write_text(
+            json.dumps({"mcpServers": [{"name": "cloakbrowser", "command": "cbm-mcp", "args": []}]}) + "\n",
+            encoding="utf-8",
+        )
+    durable_before = {
+        name: tree_snapshot(candidate["release"] / name)
+        for name in ("acpx-runtime", "acpx-venv", "acpx-capability")
+    }
+    calls: list[list[str]] = []
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr=""))
+
+    with pytest.raises(remote.HelperError):
+        remote.op_bootstrap_acpx_promote(
+            {
+                "release_id": "release-0000001",
+                "worker_id": "acpx-candidate-release-0000001",
+                "manager_port": 18115,
+                "release_source": str(candidate["source"]),
+                "acpx_executable": str(candidate["release"] / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+            }
+        )
+
+    assert calls == []
+    assert {
+        name: tree_snapshot(candidate["release"] / name)
+        for name in ("acpx-runtime", "acpx-venv", "acpx-capability")
+    } == durable_before
+
+
+@pytest.mark.parametrize("arg_name", ["worktree", "acpx"])
+@pytest.mark.parametrize("bad_state", ["missing", "wrong"])
+def test_bootstrap_promote_validates_permanent_unit_content_before_durable_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arg_name: str,
+    bad_state: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    candidate = prepare_complete_bootstrap_candidate(paths)
+    unit_text = candidate["unit"].read_text(encoding="utf-8")
+    if arg_name == "worktree":
+        original = f" --worktree {candidate['source']}"
+        replacement = "" if bad_state == "missing" else f" --worktree {tmp_path / 'foreign-worktree'}"
+    else:
+        original = f" --acpx {candidate['cli']}"
+        replacement = "" if bad_state == "missing" else f" --acpx {candidate['root'] / 'node-runtime' / 'node_modules' / '.bin' / 'acpx'}"
+    candidate["unit"].write_text(unit_text.replace(original, replacement), encoding="utf-8")
+    durable_before = {
+        name: tree_snapshot(candidate["release"] / name)
+        for name in ("acpx-runtime", "acpx-venv", "acpx-capability")
+    }
+    permanent = remote.expected_unit_path(remote.ACPX_UNIT)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr=""))
+
+    with pytest.raises(remote.HelperError):
+        remote.op_bootstrap_acpx_promote(
+            {
+                "release_id": "release-0000001",
+                "worker_id": "acpx-candidate-release-0000001",
+                "manager_port": 18115,
+                "release_source": str(candidate["source"]),
+                "acpx_executable": str(candidate["release"] / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+            }
+        )
+
+    assert calls == []
+    assert not permanent.exists()
+    assert {
+        name: tree_snapshot(candidate["release"] / name)
+        for name in ("acpx-runtime", "acpx-venv", "acpx-capability")
+    } == durable_before
+
+
 def test_bootstrap_candidate_verify_uses_candidate_manager_presence_and_adapter_preflights(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     paths = patch_remote_paths(monkeypatch, tmp_path)
-    acpx_executable = paths["releases"] / "release-0000001" / "acpx-bootstrap" / "node-runtime" / "node_modules" / ".bin" / "acpx"
-    acpx_executable.parent.mkdir(parents=True)
-    acpx_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    acpx_executable = write_release_acpx_target(paths)
     manager_calls: list[tuple[int, str]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1240,9 +1738,7 @@ def test_bootstrap_candidate_verify_uses_candidate_manager_presence_and_adapter_
 
 def test_bootstrap_candidate_verify_rejects_missing_adapter_preflight(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     paths = patch_remote_paths(monkeypatch, tmp_path)
-    acpx_executable = paths["releases"] / "release-0000001" / "acpx-bootstrap" / "node-runtime" / "node_modules" / ".bin" / "acpx"
-    acpx_executable.parent.mkdir(parents=True)
-    acpx_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    acpx_executable = write_release_acpx_target(paths)
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         del kwargs
@@ -1304,6 +1800,8 @@ def test_bootstrap_acpx_provision_reuses_existing_canonical_worker_key_without_l
     tmp_path: Path,
 ) -> None:
     paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
     source_key = paths["home"] / ".config" / "cloakbrowser" / "browser-use-worker-key"
     source_key.parent.mkdir(parents=True)
     token = "cbm_worker_" + ("ab" * 32)
@@ -1323,12 +1821,60 @@ def test_bootstrap_acpx_provision_reuses_existing_canonical_worker_key_without_l
     root = remote.acpx_bootstrap_dir("release-0000001")
     candidate_key = root / "candidate.worker.key"
     unit = root / "acpx-candidate-release-0000001.service"
+    capability = root / "capability"
+    policy = capability / "permission-policy.json"
+    mcp = capability / "mcp-config.json"
     assert candidate_key.read_text(encoding="utf-8") == token + "\n"
     assert stat.S_IMODE(candidate_key.stat().st_mode) == 0o600
-    serialized = json.dumps(result, sort_keys=True) + unit.read_text(encoding="utf-8")
+    unit_text = unit.read_text(encoding="utf-8")
+    serialized = json.dumps(result, sort_keys=True) + unit_text + policy.read_text(encoding="utf-8") + mcp.read_text(encoding="utf-8")
     assert token not in serialized
+    assert stat.S_IMODE(capability.stat().st_mode) == 0o700
+    assert stat.S_IMODE(policy.stat().st_mode) == 0o600
+    assert stat.S_IMODE(mcp.stat().st_mode) == 0o600
+    assert json.loads(policy.read_text(encoding="utf-8")) == {"defaultAction": "deny"}
+    assert json.loads(mcp.read_text(encoding="utf-8")) == {
+        "mcpServers": [
+            {
+                "name": "cloakbrowser",
+                "command": str(release_source / "scripts" / "cbm-mcp"),
+                "args": [],
+            }
+        ]
+    }
+    exec_start = next(line for line in unit_text.splitlines() if line.startswith("ExecStart="))
+    assert f"--worktree {release_source}" in exec_start
+    assert f"--permission-policy {policy}" in exec_start
+    assert f"--mcp-config {mcp}" in exec_start
+    assert f"--capability-dir {capability}" in exec_start
+    assert f"--acpx {root / 'node-runtime' / 'node_modules' / 'acpx' / 'dist' / 'cli.js'}" in exec_start
     assert result["credential_reused"] is True
     assert result["credential_source"] == "browser_use_worker_key"
+
+
+def test_bootstrap_acpx_provision_requires_existing_release_source_worktree_before_unit_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    (paths["releases"] / "release-0000001").mkdir()
+    source_key = paths["home"] / ".config" / "cloakbrowser" / "browser-use-worker-key"
+    source_key.parent.mkdir(parents=True)
+    source_key.write_text("cbm_worker_" + ("ab" * 32) + "\n", encoding="utf-8")
+    source_key.chmod(0o600)
+    monkeypatch.setattr(remote, "BROWSER_USE_TOKEN_PATH", source_key)
+
+    with pytest.raises(remote.HelperError, match="worktree"):
+        remote.op_bootstrap_acpx_provision_candidate(
+            {
+                "release_id": "release-0000001",
+                "commit": "0" * 40,
+                "manager_port": 18116,
+                "runtime": {},
+            }
+        )
+
+    assert not (remote.acpx_bootstrap_dir("release-0000001") / "acpx-candidate-release-0000001.service").exists()
 
 
 @pytest.mark.parametrize(
@@ -1346,6 +1892,7 @@ def test_bootstrap_acpx_provision_rejects_missing_invalid_or_insecure_source_key
     mode: int,
 ) -> None:
     paths = patch_remote_paths(monkeypatch, tmp_path)
+    (paths["releases"] / "release-0000001" / "source").mkdir(parents=True)
     source_key = paths["home"] / ".config" / "cloakbrowser" / "browser-use-worker-key"
     source_key.parent.mkdir(parents=True)
     if content is not None:
@@ -1424,17 +1971,34 @@ def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_v
     root = remote.acpx_bootstrap_dir("release-0000001")
     for relative in (
         "venv/bin/python",
-        "node-runtime/node_modules/.bin/acpx",
-        "capability/capability.json",
+        "node-runtime/node_modules/acpx/dist/cli.js",
     ):
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("x\n", encoding="utf-8")
+        target.chmod(0o700)
+    capability = root / "capability"
+    capability.mkdir(parents=True, mode=0o700, exist_ok=True)
+    policy = capability / "permission-policy.json"
+    policy.write_text('{"defaultAction":"deny"}\n', encoding="utf-8")
+    policy.chmod(0o600)
+    mcp = capability / "mcp-config.json"
+    mcp.write_text(
+        json.dumps({"mcpServers": [{"name": "cloakbrowser", "command": str(release_source / "scripts" / "cbm-mcp"), "args": []}]}),
+        encoding="utf-8",
+    )
+    mcp.chmod(0o600)
     key = root / "candidate.worker.key"
     key.write_text("cbm_worker_" + ("1" * 64) + "\n", encoding="utf-8")
     key.chmod(0o600)
     unit = root / "acpx-candidate-release-0000001.service"
-    unit.write_text(f"ExecStart={root}/venv/bin/python --manager-url http://127.0.0.1:18116 --token-file {key}\n", encoding="utf-8")
+    unit.write_text(
+        f"ExecStart={root}/venv/bin/python --manager-url http://127.0.0.1:18116 "
+        f"--token-file {key} --worktree {release_source} "
+        f"--permission-policy {policy} --mcp-config {mcp} --capability-dir {capability} "
+        f"--acpx {root / 'node-runtime' / 'node_modules' / 'acpx' / 'dist' / 'cli.js'}\n",
+        encoding="utf-8",
+    )
     unit.chmod(0o600)
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1459,7 +2023,7 @@ def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_v
             "worker_id": "acpx-candidate-release-0000001",
             "manager_port": 18115,
             "release_source": str(release_source),
-            "acpx_executable": str(paths["releases"] / "release-0000001" / "acpx-runtime" / "node_modules" / ".bin" / "acpx"),
+            "acpx_executable": str(paths["releases"] / "release-0000001" / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
         }
     )
     remote.op_bootstrap_acpx_cleanup({"release_id": "release-0000001"})
@@ -1469,9 +2033,68 @@ def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_v
     assert result["active"] is True
     assert "acpx-bootstrap" not in unit_text
     assert "127.0.0.1:18115" in unit_text
+    assert f"--worktree {release_source}" in unit_text
+    durable_capability = paths["releases"] / "release-0000001" / "acpx-capability"
+    assert f"--permission-policy {durable_capability / 'permission-policy.json'}" in unit_text
+    assert f"--mcp-config {durable_capability / 'mcp-config.json'}" in unit_text
+    assert f"--capability-dir {durable_capability}" in unit_text
+    assert json.loads((durable_capability / "permission-policy.json").read_text(encoding="utf-8")) == {"defaultAction": "deny"}
+    assert json.loads((durable_capability / "mcp-config.json").read_text(encoding="utf-8"))["mcpServers"][0]["command"] == str(
+        release_source / "scripts" / "cbm-mcp"
+    )
     assert (paths["releases"] / "release-0000001" / "acpx-runtime").exists()
-    assert version_checks == [str(paths["releases"] / "release-0000001" / "acpx-runtime" / "node_modules" / ".bin" / "acpx")]
+    assert version_checks == [str(paths["releases"] / "release-0000001" / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js")]
     assert not root.exists()
+
+
+@pytest.mark.parametrize("source_kind", ["missing", "symlink", "foreign"])
+def test_bootstrap_promote_rejects_missing_symlink_or_foreign_worktree_before_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    root = remote.acpx_bootstrap_dir("release-0000001")
+    for relative in (
+        "venv/bin/python",
+        "node-runtime/node_modules/acpx/dist/cli.js",
+        "capability/capability.json",
+    ):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+        target.chmod(0o700)
+    key = root / "candidate.worker.key"
+    key.write_text("cbm_worker_" + ("1" * 64) + "\n", encoding="utf-8")
+    candidate_unit = root / "acpx-candidate-release-0000001.service"
+    candidate_unit.write_text("ExecStart=placeholder\n", encoding="utf-8")
+    expected_source = paths["releases"] / "release-0000001" / "source"
+    if source_kind == "symlink":
+        target = tmp_path / "outside-worktree"
+        target.mkdir()
+        expected_source.symlink_to(target)
+        release_source = expected_source
+        match = "worktree"
+    elif source_kind == "foreign":
+        release_source = tmp_path / "foreign"
+        release_source.mkdir()
+        match = "source mismatch"
+    else:
+        release_source = expected_source
+        match = "worktree"
+
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr=""))
+
+    with pytest.raises(remote.HelperError, match=match):
+        remote.op_bootstrap_acpx_promote(
+            {
+                "release_id": "release-0000001",
+                "worker_id": "acpx-candidate-release-0000001",
+                "manager_port": 18115,
+                "release_source": str(release_source),
+                "acpx_executable": str(paths["releases"] / "release-0000001" / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+            }
+        )
 
 
 def test_restore_runtime_removes_promoted_acpx_artifacts_when_old_state_was_absent(

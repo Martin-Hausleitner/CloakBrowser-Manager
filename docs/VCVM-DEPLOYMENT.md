@@ -219,10 +219,19 @@ When that absence gate passes, the transaction stages release-specific ACPX
 npm/Python runtimes from the checked-in locks, provisions a temporary
 candidate-bound worker against Manager `127.0.0.1:18116`, and verifies worker
 presence plus adapter readiness before stopping the old Manager or workers.
-After the normal Manager switch, the worker is promoted to
-`127.0.0.1:18115` and verified with the release runtime. Any failure cleans up
-only release-specific temporary ACPX artifacts; failures after quiesce also
-restore the captured old Manager/runtime/unit state before returning failure.
+The ACPX executable contract is the package target
+`node_modules/acpx/dist/cli.js`; npm's `node_modules/.bin/acpx` symlink is not
+accepted as the required release executable. Candidate units pass the exact
+release source worktree, direct ACPX target, private default-deny permission
+policy, single CloakBrowser MCP descriptor and release-scoped capability
+directory to `scripts.acpx_worker`.
+
+After the normal Manager switch, the worker is promoted to `127.0.0.1:18115`
+and verified with the durable release runtime. Promotion rewrites the unit from
+temporary `acpx-bootstrap` paths to durable `acpx-runtime`, `acpx-venv` and
+`acpx-capability` paths before cleanup. Any failure cleans up only
+release-specific temporary ACPX artifacts; failures after quiesce also restore
+the captured old Manager/runtime/unit state before returning failure.
 
 For the first ACPX rollout only, `--bootstrap-acpx --apply` also accepts the
 legacy live Manager image if it has an immutable image id/digest but no OCI

@@ -55,6 +55,7 @@ CANDIDATE_CURL_CONNECT_TIMEOUT_SECONDS = 2.0
 ACPX_NODE_LOCK = "deploy/acpx-runtime/package-lock.json"
 ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
 ACPX_BOOTSTRAP_DIR = "acpx-bootstrap"
+ACPX_DIRECT_CLI = Path("node_modules/acpx/dist/cli.js")
 ACPX_ABSENCE_COMPONENTS = ("binary", "unit", "key", "venv", "capability")
 RELEASE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{11,80}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -366,8 +367,29 @@ def validate_restore_capture(capture: dict[str, object]) -> dict[str, object]:
 
 def release_dir(release_id: str) -> Path:
     release_id = validate_release_id(release_id)
-    path = (RELEASES_PATH / release_id).resolve()
-    require(path.parent == RELEASES_PATH.resolve(), "release path escapes releases directory")
+    path = RELEASES_PATH / release_id
+    require(path.parent == RELEASES_PATH, "release path escapes releases directory")
+    if path.exists() or path.is_symlink():
+        stat_result = path.lstat()
+        require(not stat.S_ISLNK(stat_result.st_mode), "release directory must not be a symlink")
+        require(stat.S_ISDIR(stat_result.st_mode), "release path must be a directory")
+    return path
+
+
+def release_dir_for_create(release_id: str) -> Path:
+    path = release_dir(release_id)
+    require(not path.is_symlink(), "release create target must not be a symlink")
+    return path
+
+
+def require_existing_release_dir(release_id: str) -> Path:
+    path = release_dir(release_id)
+    try:
+        stat_result = path.lstat()
+    except FileNotFoundError as exc:
+        raise HelperError("release directory is missing") from exc
+    require(not stat.S_ISLNK(stat_result.st_mode), "release directory must not be a symlink")
+    require(stat.S_ISDIR(stat_result.st_mode), "release path must be a directory")
     return path
 
 
@@ -568,14 +590,21 @@ def _acpx_adapter_probe_at(executable: Path) -> dict[str, object]:
 def _validate_acpx_executable_path(release_id: str, value: object, *, kind: str) -> Path:
     release = release_dir(release_id)
     if kind == "candidate":
-        expected = release / ACPX_BOOTSTRAP_DIR / "node-runtime" / "node_modules" / ".bin" / "acpx"
+        expected = release / ACPX_BOOTSTRAP_DIR / "node-runtime" / ACPX_DIRECT_CLI
     elif kind == "promoted":
-        expected = release / "acpx-runtime" / "node_modules" / ".bin" / "acpx"
+        expected = release / "acpx-runtime" / ACPX_DIRECT_CLI
     else:
         raise HelperError("unknown ACPX executable kind")
     path = Path(str(value))
     require(path == expected, "ACPX executable path is not allowlisted")
+    parent = path.parent
+    while parent != release.parent:
+        require(parent.exists() and parent.is_dir() and not parent.is_symlink(), "ACPX executable parent path is unsafe")
+        if parent == release:
+            break
+        parent = parent.parent
     require(path.exists() and path.is_file() and not path.is_symlink(), "ACPX executable must be a non-symlink file")
+    require(os.access(path, os.R_OK | os.X_OK), "ACPX executable must be readable and executable")
     return path
 
 
@@ -751,11 +780,105 @@ def _path_ref(path: Path) -> dict[str, object]:
 
 
 def _require_bootstrap_path(release_id: str, path: Path, label: str) -> Path:
-    root = acpx_bootstrap_dir(release_id).resolve()
-    resolved = path.resolve()
-    require(resolved == root or root in resolved.parents, f"{label} path escapes ACPX bootstrap directory")
-    require(not path.is_symlink(), f"{label} must not be a symlink")
+    root = acpx_bootstrap_dir(release_id)
+    require(path == root or root in path.parents, f"{label} path escapes ACPX bootstrap directory")
+    current = root
+    while True:
+        try:
+            stat_result = current.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            require(not stat.S_ISLNK(stat_result.st_mode), f"{label} path contains symlink")
+            if current != path:
+                require(stat.S_ISDIR(stat_result.st_mode), f"{label} parent path is not a directory")
+        if current == path:
+            break
+        try:
+            current = current / path.relative_to(current).parts[0]
+        except (IndexError, ValueError):
+            raise HelperError(f"{label} path escapes ACPX bootstrap directory") from None
     return path
+
+
+def _require_existing_bootstrap_dir(release_id: str, path: Path, label: str) -> Path:
+    path = _require_bootstrap_path(release_id, path, label)
+    try:
+        stat_result = path.lstat()
+    except FileNotFoundError as exc:
+        raise HelperError(f"{label} is missing") from exc
+    require(not stat.S_ISLNK(stat_result.st_mode), f"{label} must not be a symlink")
+    require(stat.S_ISDIR(stat_result.st_mode), f"{label} must be a directory")
+    return path
+
+
+def _require_existing_bootstrap_file(release_id: str, path: Path, label: str, *, executable: bool = False) -> Path:
+    path = _require_bootstrap_path(release_id, path, label)
+    try:
+        stat_result = path.lstat()
+    except FileNotFoundError as exc:
+        raise HelperError(f"{label} is missing") from exc
+    require(not stat.S_ISLNK(stat_result.st_mode), f"{label} must not be a symlink")
+    require(stat.S_ISREG(stat_result.st_mode), f"{label} must be a regular file")
+    require(os.access(path, os.R_OK), f"{label} must be readable")
+    if executable:
+        require(os.access(path, os.X_OK), f"{label} must be executable")
+    return path
+
+
+def _require_bootstrap_json_config(
+    release_id: str,
+    path: Path,
+    label: str,
+    expected: dict[str, object],
+) -> Path:
+    path = _require_existing_bootstrap_file(release_id, path, label)
+    mode = stat.S_IMODE(path.lstat().st_mode)
+    require(mode == 0o600, f"{label} must use mode 0600")
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HelperError(f"{label} must contain valid JSON") from exc
+    require(parsed == expected, f"{label} content mismatch")
+    return path
+
+
+def _release_source_worktree(release_id: str, value: object | None = None) -> Path:
+    expected = require_existing_release_dir(release_id) / "source"
+    path = expected if value is None else Path(str(value))
+    require(path == expected, "ACPX promotion source mismatch")
+    require(
+        path.exists() and path.is_dir() and not path.is_symlink(),
+        "ACPX worktree must be an existing non-symlink release source directory",
+    )
+    return path
+
+
+def _acpx_cli_under(runtime_root: Path) -> Path:
+    return runtime_root / ACPX_DIRECT_CLI
+
+
+def _write_acpx_bootstrap_configs(release_id: str, release_source: Path, capability: Path) -> dict[str, Path]:
+    require(capability == acpx_bootstrap_dir(release_id) / "capability", "ACPX capability path is not allowlisted")
+    require(not capability.is_symlink(), "ACPX capability directory must not be a symlink")
+    capability.mkdir(parents=True, mode=0o700, exist_ok=True)
+    capability.chmod(0o700)
+    policy = _require_bootstrap_path(release_id, capability / "permission-policy.json", "ACPX permission policy")
+    mcp = _require_bootstrap_path(release_id, capability / "mcp-config.json", "ACPX MCP config")
+    _write_json_mode_0600(policy, {"defaultAction": "deny"})
+    _write_json_mode_0600(
+        mcp,
+        {
+            "mcpServers": [
+                {
+                    "name": "cloakbrowser",
+                    "command": str(release_source / "scripts" / "cbm-mcp"),
+                    "args": [],
+                }
+            ]
+        },
+    )
+    return {"policy": policy, "mcp": mcp}
 
 
 def _remove_tree_if_present(path: Path, label: str) -> None:
@@ -1154,8 +1277,9 @@ def op_bootstrap_acpx_install(args: dict[str, object]) -> dict[str, object]:
     commit = validate_commit(args["commit"])
     expected_node = validate_sha256(args["node_lock_sha256"])
     expected_python = validate_sha256(args["python_lock_sha256"])
-    source = release_dir(release_id) / "source"
-    marker = release_dir(release_id) / "COMMIT"
+    release = require_existing_release_dir(release_id)
+    source = release / "source"
+    marker = release / "COMMIT"
     require(marker.read_text(encoding="utf-8").strip() == commit, "release commit marker mismatch")
     node_lock = source / ACPX_NODE_LOCK
     python_lock = source / ACPX_PYTHON_LOCK
@@ -1170,7 +1294,7 @@ def op_bootstrap_acpx_install(args: dict[str, object]) -> dict[str, object]:
     run(["npm", "ci", "--omit=dev", "--ignore-scripts", "--audit=false", "--fund=false"], cwd=node_root)
     run(["python3", "-m", "venv", str(venv_path)])
     run(["uv", "pip", "sync", "--python", str(venv_path / "bin" / "python"), str(python_lock)])
-    acpx = node_root / "node_modules" / ".bin" / "acpx"
+    acpx = _acpx_cli_under(node_root)
     acpx_version = run([str(acpx), "--version"]).stdout.strip()
     require(acpx_version == "0.12.1", "ACPX installed version mismatch")
     python_version = run([str(venv_path / "bin" / "python"), "--version"]).stdout.strip()
@@ -1195,21 +1319,24 @@ def op_bootstrap_acpx_provision_candidate(args: dict[str, object]) -> dict[str, 
     validate_commit(args["commit"])
     require(int(args["manager_port"]) == CANDIDATE_PORT, "candidate ACPX worker must bind to candidate Manager port")
     runtime = dict(args["runtime"])
+    release_source = _release_source_worktree(release_id)
     root = acpx_bootstrap_dir(release_id)
     key = _require_bootstrap_path(release_id, root / "candidate.worker.key", "ACPX candidate key")
     unit = _require_bootstrap_path(release_id, root / f"{acpx_candidate_worker_id(release_id)}.service", "ACPX candidate unit")
     capability = _require_bootstrap_path(release_id, root / "capability", "ACPX candidate capability")
-    capability.mkdir(parents=True, mode=0o700, exist_ok=True)
+    config_paths = _write_acpx_bootstrap_configs(release_id, release_source, capability)
     key.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     _write_text_mode_0600_atomic(key, _read_canonical_worker_key() + "\n")
     manager_url = f"http://127.0.0.1:{CANDIDATE_PORT}"
     content = (
         "[Unit]\nDescription=CloakBrowser candidate ACPX worker\n"
         "[Service]\n"
-        f"WorkingDirectory={release_dir(release_id) / 'source'}\n"
+        f"WorkingDirectory={release_source}\n"
         f"ExecStart={root / 'venv' / 'bin' / 'python'} -m scripts.acpx_worker --manager-url {manager_url} "
         f"--token-file {key} --worker-id {acpx_candidate_worker_id(release_id)} "
-        f"--acpx {root / 'node-runtime' / 'node_modules' / '.bin' / 'acpx'}\n"
+        f"--worktree {release_source} "
+        f"--permission-policy {config_paths['policy']} --mcp-config {config_paths['mcp']} "
+        f"--capability-dir {capability} --acpx {_acpx_cli_under(root / 'node-runtime')}\n"
     )
     _write_text_mode_0600_atomic(unit, content)
     return {
@@ -1218,6 +1345,8 @@ def op_bootstrap_acpx_provision_candidate(args: dict[str, object]) -> dict[str, 
         "key": _path_ref(key),
         "unit": _path_ref(unit),
         "capability": _path_ref(capability),
+        "permission_policy": _path_ref(config_paths["policy"]),
+        "mcp_config": _path_ref(config_paths["mcp"]),
         "venv": runtime.get("venv", _path_ref(root / "venv")),
         "credential_reused": True,
         "credential_source": "browser_use_worker_key",
@@ -1228,7 +1357,12 @@ def op_bootstrap_acpx_start_candidate(args: dict[str, object]) -> dict[str, obje
     release_id = validate_release_id(args["release_id"])
     worker_id = validate_name(args["worker_id"], "ACPX worker id")
     require(worker_id == acpx_candidate_worker_id(release_id), "unexpected ACPX worker id")
-    unit = acpx_bootstrap_dir(release_id) / f"{worker_id}.service"
+    require_existing_release_dir(release_id)
+    unit = _require_existing_bootstrap_file(
+        release_id,
+        acpx_bootstrap_dir(release_id) / f"{worker_id}.service",
+        "ACPX candidate unit",
+    )
     expected = expected_unit_path(f"{worker_id}.service")
     if expected.exists():
         expected.unlink()
@@ -1263,30 +1397,41 @@ def op_bootstrap_acpx_promote(args: dict[str, object]) -> dict[str, object]:
     worker_id = validate_name(args["worker_id"], "ACPX worker id")
     require(worker_id == acpx_candidate_worker_id(release_id), "unexpected ACPX worker id")
     require(int(args["manager_port"]) == LIVE_PORT, "promoted ACPX worker must bind to live Manager port")
-    release_source = Path(str(args["release_source"]))
-    require(release_source == release_dir(release_id) / "source", "ACPX promotion source mismatch")
-    release = release_dir(release_id)
+    _release_source_worktree(release_id, args["release_source"])
+    release = require_existing_release_dir(release_id)
     bootstrap = acpx_bootstrap_dir(release_id)
-    candidate_unit = bootstrap / f"{worker_id}.service"
+    promoted_acpx_arg = Path(str(args["acpx_executable"]))
+    require(promoted_acpx_arg == release / "acpx-runtime" / ACPX_DIRECT_CLI, "ACPX executable path is not allowlisted")
+    candidate_unit = _require_existing_bootstrap_file(release_id, bootstrap / f"{worker_id}.service", "ACPX candidate unit")
+    bootstrap_node = _require_existing_bootstrap_dir(release_id, bootstrap / "node-runtime", "ACPX node runtime")
+    bootstrap_venv = _require_existing_bootstrap_dir(release_id, bootstrap / "venv", "ACPX venv")
+    bootstrap_capability = _require_existing_bootstrap_dir(release_id, bootstrap / "capability", "ACPX capability")
+    bootstrap_key = _require_existing_bootstrap_file(release_id, bootstrap / "candidate.worker.key", "ACPX candidate key")
+    _require_existing_bootstrap_file(release_id, _acpx_cli_under(bootstrap_node), "ACPX candidate executable", executable=True)
+    bootstrap_policy = _require_bootstrap_json_config(
+        release_id,
+        bootstrap_capability / "permission-policy.json",
+        "ACPX permission policy",
+        {"defaultAction": "deny"},
+    )
+    bootstrap_mcp = _require_bootstrap_json_config(
+        release_id,
+        bootstrap_capability / "mcp-config.json",
+        "ACPX MCP config",
+        {
+            "mcpServers": [
+                {
+                    "name": "cloakbrowser",
+                    "command": str(release / "source" / "scripts" / "cbm-mcp"),
+                    "args": [],
+                }
+            ]
+        },
+    )
     durable_node = release / "acpx-runtime"
     durable_venv = release / "acpx-venv"
     durable_capability = release / "acpx-capability"
     durable_key = REMOTE_PATH / ".env.acpx.vcvm"
-    for path, label in (
-        (durable_node, "durable ACPX node runtime"),
-        (durable_venv, "durable ACPX venv"),
-        (durable_capability, "durable ACPX capability"),
-    ):
-        require(path.parent == release, f"{label} path is not release-scoped")
-        require(not path.is_symlink(), f"{label} must not be a symlink")
-        _remove_tree_if_present(path, label)
-    shutil.move(str(bootstrap / "node-runtime"), str(durable_node))
-    shutil.move(str(bootstrap / "venv"), str(durable_venv))
-    shutil.move(str(bootstrap / "capability"), str(durable_capability))
-    acpx_executable = _validate_acpx_executable_path(release_id, args["acpx_executable"], kind="promoted")
-    require(not durable_key.is_symlink(), "ACPX key target must not be a symlink")
-    shutil.copyfile(bootstrap / "candidate.worker.key", durable_key)
-    durable_key.chmod(0o600)
     permanent = expected_unit_path(ACPX_UNIT)
     content = (
         candidate_unit.read_text(encoding="utf-8")
@@ -1297,6 +1442,35 @@ def op_bootstrap_acpx_promote(args: dict[str, object]) -> dict[str, object]:
         .replace(f"127.0.0.1:{CANDIDATE_PORT}", f"127.0.0.1:{LIVE_PORT}")
     )
     require(ACPX_BOOTSTRAP_DIR not in content, "promoted ACPX unit still references temporary bootstrap paths")
+    require(f"--worktree {release / 'source'}" in content, "promoted ACPX unit missing release worktree path")
+    require(
+        f"--acpx {durable_node / ACPX_DIRECT_CLI}" in content,
+        "promoted ACPX unit missing durable ACPX executable path",
+    )
+    require(
+        f"--permission-policy {durable_capability / bootstrap_policy.name}" in content,
+        "promoted ACPX unit missing durable permission policy path",
+    )
+    require(
+        f"--mcp-config {durable_capability / bootstrap_mcp.name}" in content,
+        "promoted ACPX unit missing durable MCP config path",
+    )
+    require(f"--capability-dir {durable_capability}" in content, "promoted ACPX unit missing durable capability path")
+    for path, label in (
+        (durable_node, "durable ACPX node runtime"),
+        (durable_venv, "durable ACPX venv"),
+        (durable_capability, "durable ACPX capability"),
+    ):
+        require(path.parent == release, f"{label} path is not release-scoped")
+        require(not path.is_symlink(), f"{label} must not be a symlink")
+        _remove_tree_if_present(path, label)
+    shutil.move(str(bootstrap_node), str(durable_node))
+    shutil.move(str(bootstrap_venv), str(durable_venv))
+    shutil.move(str(bootstrap_capability), str(durable_capability))
+    acpx_executable = _validate_acpx_executable_path(release_id, promoted_acpx_arg, kind="promoted")
+    require(not durable_key.is_symlink(), "ACPX key target must not be a symlink")
+    shutil.copyfile(bootstrap_key, durable_key)
+    durable_key.chmod(0o600)
     _write_text_mode_0600_atomic(permanent, content)
     run(["systemctl", "--user", "daemon-reload"])
     run(["systemctl", "--user", "restart", ACPX_UNIT])
@@ -1317,9 +1491,10 @@ def op_bootstrap_acpx_promote(args: dict[str, object]) -> dict[str, object]:
 def op_bootstrap_acpx_cleanup(args: dict[str, object]) -> dict[str, object]:
     release_id = validate_release_id(args["release_id"])
     worker_id = acpx_candidate_worker_id(release_id)
+    require_existing_release_dir(release_id)
+    root = _require_existing_bootstrap_dir(release_id, acpx_bootstrap_dir(release_id), "ACPX bootstrap")
     run(["systemctl", "--user", "stop", f"{worker_id}.service"], check=False)
     expected_unit_path(f"{worker_id}.service").unlink(missing_ok=True)
-    root = acpx_bootstrap_dir(release_id)
     _remove_tree_if_present(root, "ACPX bootstrap")
     return {"removed": "release-acpx-only", "unit": worker_id, "root": _path_ref(root)}
 

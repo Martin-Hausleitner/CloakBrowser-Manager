@@ -119,6 +119,20 @@ def validate_mcp_config(path: Path) -> Path:
     return value
 
 
+def validate_preflight_mcp_config(path: Path) -> Path:
+    """Require the sterile preflight descriptor that disables all MCP servers."""
+    value = _validate_private_file(path, label="preflight MCP config")
+    try:
+        parsed = json.loads(value.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("preflight MCP config must be valid JSON") from exc
+    if not isinstance(parsed, dict) or set(parsed) != {"mcpServers"}:
+        raise ValueError("preflight MCP config may contain only mcpServers")
+    if parsed["mcpServers"] != []:
+        raise ValueError("preflight MCP config must contain empty mcpServers")
+    return value
+
+
 def validate_permission_policy(path: Path) -> Path:
     """Accept only a private policy with no automatic approvals."""
     value = _validate_private_file(path, label="permission policy")
@@ -160,6 +174,46 @@ def build_ensure_command(
     safe_session = _validate_session_name(session_name)
     policy = validate_permission_policy(permission_policy)
     mcp = validate_mcp_config(mcp_config)
+    return [
+        str(executable),
+        "--cwd",
+        str(safe_cwd),
+        "--format",
+        "json",
+        "--json-strict",
+        "--suppress-reads",
+        "--auth-policy",
+        "fail",
+        "--no-terminal",
+        "--non-interactive-permissions",
+        "fail",
+        "--permission-policy",
+        str(policy),
+        "--mcp-config",
+        str(mcp),
+        safe_agent,
+        "sessions",
+        "ensure",
+        "--name",
+        safe_session,
+    ]
+
+
+def build_preflight_ensure_command(
+    *,
+    executable: str,
+    cwd: Path,
+    agent: str,
+    session_name: str,
+    permission_policy: Path,
+    mcp_config: Path,
+) -> list[str]:
+    """Build an ACP session readiness probe with ambient MCP config disabled."""
+    safe_cwd = _validate_cwd(cwd)
+    safe_agent = _validate_agent(agent)
+    safe_session = _validate_session_name(session_name)
+    policy = validate_permission_policy(permission_policy)
+    mcp = validate_preflight_mcp_config(mcp_config)
     return [
         str(executable),
         "--cwd",
@@ -250,6 +304,31 @@ def build_close_command(
         "--format",
         "json",
         "--json-strict",
+        _validate_agent(agent),
+        "sessions",
+        "close",
+        _validate_session_name(session_name),
+    ]
+
+
+def build_preflight_close_command(
+    *,
+    executable: str,
+    cwd: Path,
+    agent: str,
+    session_name: str,
+    mcp_config: Path,
+) -> list[str]:
+    """Build cleanup for a sterile preflight session without ambient MCP config."""
+    return [
+        str(executable),
+        "--cwd",
+        str(_validate_cwd(cwd)),
+        "--format",
+        "json",
+        "--json-strict",
+        "--mcp-config",
+        str(validate_preflight_mcp_config(mcp_config)),
         _validate_agent(agent),
         "sessions",
         "close",
@@ -398,6 +477,8 @@ __all__ = [
     "SUPPORTED_AGENTS",
     "build_close_command",
     "build_ensure_command",
+    "build_preflight_close_command",
+    "build_preflight_ensure_command",
     "build_prompt_command",
     "classify_acpx_control_failure",
     "derive_session_name",
@@ -405,5 +486,6 @@ __all__ = [
     "parse_acpx_event",
     "validate_acpx_version",
     "validate_mcp_config",
+    "validate_preflight_mcp_config",
     "validate_permission_policy",
 ]

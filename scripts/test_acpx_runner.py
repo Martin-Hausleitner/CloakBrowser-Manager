@@ -11,6 +11,8 @@ from scripts.acpx_runner import (
     ACPX_VERSION,
     build_close_command,
     build_ensure_command,
+    build_preflight_close_command,
+    build_preflight_ensure_command,
     build_prompt_command,
     classify_acpx_control_failure,
     derive_session_name,
@@ -18,6 +20,7 @@ from scripts.acpx_runner import (
     parse_acpx_event,
     validate_acpx_version,
     validate_mcp_config,
+    validate_preflight_mcp_config,
     validate_permission_policy,
 )
 
@@ -138,6 +141,47 @@ def test_ensure_command_is_strict_and_repo_scoped(tmp_path: Path):
     ]
 
 
+def test_preflight_ensure_command_requires_exact_empty_mcp_config(tmp_path: Path):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"defaultAction":"deny"}', encoding="utf-8")
+    os.chmod(policy, 0o600)
+    mcp = tmp_path / "preflight-mcp.json"
+    mcp.write_text('{"mcpServers":[]}', encoding="utf-8")
+    os.chmod(mcp, 0o600)
+
+    command = build_preflight_ensure_command(
+        executable="acpx",
+        cwd=tmp_path,
+        agent="codex",
+        session_name="cbm-0123456789abcdef0123456789abcdef",
+        permission_policy=policy,
+        mcp_config=mcp,
+    )
+
+    assert validate_preflight_mcp_config(mcp) == mcp.resolve()
+    assert command[command.index("--mcp-config") + 1] == str(mcp.resolve())
+    assert command[-5:] == [
+        "codex", "sessions", "ensure", "--name", "cbm-0123456789abcdef0123456789abcdef",
+    ]
+
+
+def test_preflight_close_command_requires_same_empty_mcp_config(tmp_path: Path):
+    mcp = tmp_path / "preflight-mcp.json"
+    mcp.write_text('{"mcpServers":[]}', encoding="utf-8")
+    os.chmod(mcp, 0o600)
+
+    command = build_preflight_close_command(
+        executable="acpx",
+        cwd=tmp_path,
+        agent="codex",
+        session_name="cbm-0123456789abcdef0123456789abcdef",
+        mcp_config=mcp,
+    )
+
+    assert command[command.index("--mcp-config") + 1] == str(mcp.resolve())
+    assert command[-2:] == ["close", "cbm-0123456789abcdef0123456789abcdef"]
+
+
 def test_prompt_command_uses_stdin_and_fail_closed_permissions(tmp_path: Path):
     policy = tmp_path / "policy.json"
     policy.write_text('{"defaultAction":"deny"}', encoding="utf-8")
@@ -209,6 +253,74 @@ def test_mcp_config_must_be_private_and_only_contain_mcp_servers(tmp_path: Path)
     config.write_text(json.dumps({"mcpServers": {}, "authorization": "secret"}), encoding="utf-8")
     with pytest.raises(ValueError, match="only mcpServers"):
         validate_mcp_config(config)
+
+
+def test_real_run_builder_rejects_empty_preflight_mcp_config(tmp_path: Path):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"defaultAction":"deny"}', encoding="utf-8")
+    os.chmod(policy, 0o600)
+    empty = tmp_path / "empty-mcp.json"
+    empty.write_text('{"mcpServers":[]}', encoding="utf-8")
+    os.chmod(empty, 0o600)
+
+    with pytest.raises(ValueError, match="exactly the cloakbrowser server"):
+        build_ensure_command(
+            executable="acpx",
+            cwd=tmp_path,
+            agent="codex",
+            session_name="cbm-0123456789abcdef0123456789abcdef",
+            permission_policy=policy,
+            mcp_config=empty,
+        )
+
+
+def test_preflight_builder_rejects_cloakbrowser_mcp_and_weak_files(tmp_path: Path):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"defaultAction":"deny"}', encoding="utf-8")
+    os.chmod(policy, 0o600)
+    cloakbrowser = tmp_path / "cloakbrowser-mcp.json"
+    cloakbrowser.write_text(
+        json.dumps(
+            {"mcpServers": [{"name": "cloakbrowser", "command": "cbm-mcp", "args": []}]}
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(cloakbrowser, 0o600)
+
+    with pytest.raises(ValueError, match="empty mcpServers"):
+        build_preflight_ensure_command(
+            executable="acpx",
+            cwd=tmp_path,
+            agent="codex",
+            session_name="cbm-0123456789abcdef0123456789abcdef",
+            permission_policy=policy,
+            mcp_config=cloakbrowser,
+        )
+
+    loose = tmp_path / "loose-mcp.json"
+    loose.write_text('{"mcpServers":[]}', encoding="utf-8")
+    os.chmod(loose, 0o644)
+    with pytest.raises(ValueError, match="mode 0600"):
+        validate_preflight_mcp_config(loose)
+
+    bad_json = tmp_path / "bad-mcp.json"
+    bad_json.write_text('{"mcpServers":{}', encoding="utf-8")
+    os.chmod(bad_json, 0o600)
+    with pytest.raises(ValueError, match="valid JSON"):
+        validate_preflight_mcp_config(bad_json)
+
+    permissive = tmp_path / "permissive-policy.json"
+    permissive.write_text('{"defaultAction":"approve"}', encoding="utf-8")
+    os.chmod(permissive, 0o600)
+    with pytest.raises(ValueError, match="deny or escalate"):
+        build_preflight_ensure_command(
+            executable="acpx",
+            cwd=tmp_path,
+            agent="codex",
+            session_name="cbm-0123456789abcdef0123456789abcdef",
+            permission_policy=permissive,
+            mcp_config=bad_json,
+        )
 
 
 def test_mcp_config_rejects_arbitrary_servers_and_secret_env(tmp_path: Path):

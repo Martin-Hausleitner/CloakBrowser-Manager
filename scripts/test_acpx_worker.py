@@ -162,6 +162,13 @@ def write_worker_key(tmp_path: Path, token: str = "cbm_worker_private") -> Path:
     return key
 
 
+def write_preflight_mcp(tmp_path: Path) -> Path:
+    mcp = tmp_path / "preflight-mcp.json"
+    mcp.write_text('{"mcpServers":[]}', encoding="utf-8")
+    os.chmod(mcp, 0o600)
+    return mcp
+
+
 def claim(**overrides):
     body = {
         "id": "run-1",
@@ -207,7 +214,7 @@ def test_worker_executes_acpx_session_streams_outputs_and_cleans_capability(tmp_
     assert list((tmp_path / "capabilities").iterdir()) == []
 
 
-def test_worker_reports_agent_preflights_and_cleans_doctor_capability(tmp_path: Path):
+def test_worker_reports_agent_preflights_and_cleans_empty_mcp_config(tmp_path: Path):
     manager = FakeManager()
 
     class DoctorRuntime(FakeRuntime):
@@ -215,10 +222,11 @@ def test_worker_reports_agent_preflights_and_cleans_doctor_capability(tmp_path: 
             super().__init__()
             self.preflight_calls = []
 
-        async def preflight_agent(self, *, cwd, agent, session_name, environment):
-            capability_file = Path(environment["CBM_RUN_CAPABILITY_FILE"])
-            assert capability_file.is_file()
-            assert capability_file.stat().st_mode & 0o077 == 0
+        async def preflight_agent(self, *, cwd, agent, session_name, environment, mcp_config):
+            assert environment == {"CBM_MANAGER_URL": "https://manager.local"}
+            assert json.loads(Path(mcp_config).read_text(encoding="utf-8")) == {
+                "mcpServers": []
+            }
             self.preflight_calls.append((agent, session_name))
             if agent == "cursor":
                 return {"ready": True, "reason_code": "ok"}
@@ -244,6 +252,70 @@ def test_worker_reports_agent_preflights_and_cleans_doctor_capability(tmp_path: 
     assert ("cursor", True, "ok") in manager.preflights
     assert ("codex", False, "auth_required") in manager.preflights
     assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_preflight_uses_private_empty_mcp_without_cbm_run_env(tmp_path: Path):
+    manager = FakeManager()
+    seen_mcp_paths: list[Path] = []
+
+    class EmptyMcpRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.preflight_calls = []
+
+        async def preflight_agent(
+            self,
+            *,
+            cwd,
+            agent,
+            session_name,
+            environment,
+            mcp_config,
+        ):
+            forbidden = {
+                "CBM_RUN_CAPABILITY_FILE",
+                "CBM_PROFILE_ID",
+                "CBM_TASK_RUN_ID",
+                "CBM_ALLOWED_ORIGINS",
+            }
+            assert forbidden.isdisjoint(environment)
+            assert environment == {"CBM_MANAGER_URL": "https://manager.local"}
+            mcp_path = Path(mcp_config)
+            assert mcp_path.is_file()
+            assert mcp_path.stat().st_mode & 0o077 == 0
+            assert json.loads(mcp_path.read_text(encoding="utf-8")) == {"mcpServers": []}
+            seen_mcp_paths.append(mcp_path)
+            self.preflight_calls.append((agent, session_name))
+            return {"ready": True, "reason_code": "ok"}
+
+    runtime = EmptyMcpRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert {path.exists() for path in seen_mcp_paths} == {False}
+    assert manager.preflights
+    assert {ready for _agent, ready, _reason in manager.preflights} == {True}
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_preflight_empty_mcp_file_is_cleaned_after_runtime_error(tmp_path: Path):
+    manager = FakeManager()
+    seen_mcp_paths: list[Path] = []
+
+    class FailingPreflightRuntime(FakeRuntime):
+        async def preflight_agent(self, *, mcp_config, **_kwargs):
+            seen_mcp_paths.append(Path(mcp_config))
+            raise RuntimeError("boom")
+
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=FailingPreflightRuntime())
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert seen_mcp_paths
+    assert {path.exists() for path in seen_mcp_paths} == {False}
+    assert {ready for _agent, ready, _reason in manager.preflights} == {False}
+    assert {reason for _agent, _ready, reason in manager.preflights} == {"protocol_error"}
 
 
 def test_worker_keeps_claim_polling_while_preflight_runs_in_background(tmp_path: Path):
@@ -307,6 +379,7 @@ elif 'close' in sys.argv:
         agent="codex",
         session_name="cbm-0123456789abcdef0123456789abcdef",
         environment={},
+        mcp_config=write_preflight_mcp(tmp_path),
     ))
 
     assert result == {"ready": False, "reason_code": "protocol_error"}
@@ -341,10 +414,57 @@ elif 'close' in sys.argv:
         agent="codex",
         session_name="cbm-0123456789abcdef0123456789abcdef",
         environment={},
+        mcp_config=write_preflight_mcp(tmp_path),
     ))
 
     assert result == {"ready": True, "reason_code": "ok"}
     assert count_file.read_text(encoding="utf-8") == "2"
+
+
+def test_real_preflight_passes_same_empty_mcp_config_to_ensure_and_close(tmp_path: Path):
+    commands_file = tmp_path / "commands.jsonl"
+    executable = tmp_path / "fake-acpx-preflight-mcp"
+    executable.write_text(
+        f"""#!/usr/bin/env python3
+import json, pathlib, stat, sys
+commands_file = pathlib.Path({str(commands_file)!r})
+if '--version' in sys.argv:
+    print('0.12.1')
+elif 'ensure' in sys.argv or 'close' in sys.argv:
+    mcp = pathlib.Path(sys.argv[sys.argv.index('--mcp-config') + 1])
+    commands_file.open('a', encoding='utf-8').write(json.dumps({{
+        'verb': 'ensure' if 'ensure' in sys.argv else 'close',
+        'mcp': str(mcp),
+        'mode': stat.S_IMODE(mcp.stat().st_mode),
+        'body': json.loads(mcp.read_text(encoding='utf-8')),
+    }}) + '\\n')
+    print(json.dumps({{'ok': True}}))
+""",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(replace(make_config(tmp_path), acpx_executable=str(executable)))
+    preflight_mcp = write_preflight_mcp(tmp_path)
+
+    result = asyncio.run(runtime.preflight_agent(
+        cwd=tmp_path,
+        agent="codex",
+        session_name="cbm-0123456789abcdef0123456789abcdef",
+        environment={},
+        mcp_config=preflight_mcp,
+    ))
+
+    commands = [
+        json.loads(line)
+        for line in commands_file.read_text(encoding="utf-8").splitlines()
+    ]
+    assert result == {"ready": True, "reason_code": "ok"}
+    assert [command["verb"] for command in commands] == ["ensure", "close"]
+    assert {command["mcp"] for command in commands} == {str(preflight_mcp.resolve())}
+    assert {command["mode"] for command in commands} == {0o600}
+    assert {json.dumps(command["body"], sort_keys=True) for command in commands} == {
+        '{"mcpServers": []}'
+    }
 
 
 def test_preflight_reports_missing_adapter_separately_from_version_mismatch(tmp_path: Path):
@@ -417,6 +537,44 @@ def test_worker_propagates_manager_cancellation_to_acpx(tmp_path: Path):
     assert runtime.cancel_calls and runtime.cancel_calls[0][1] == "cursor"
     assert manager.completed == []
     assert manager.failed == []
+    assert manager.revoked == ["run-1"]
+
+
+def test_worker_execute_claim_uses_manager_capability_and_real_mcp_config(tmp_path: Path):
+    manager = FakeManager()
+    config = make_config(tmp_path)
+
+    class RealRunRuntime(FakeRuntime):
+        async def ensure_session(self, *, cwd, agent, session_name, environment):
+            assert environment["CBM_RUN_CAPABILITY_FILE"]
+            assert Path(environment["CBM_RUN_CAPABILITY_FILE"]).read_text(
+                encoding="utf-8"
+            ) == "cbm_run_private_capability"
+            assert environment["CBM_PROFILE_ID"] == "profile-1"
+            assert environment["CBM_TASK_RUN_ID"] == "run-1"
+            assert json.loads(environment["CBM_ALLOWED_ORIGINS"]) == ["https://app.local"]
+            assert json.loads(
+                Path(config.mcp_config).read_text(encoding="utf-8")
+            ) == {
+                "mcpServers": [
+                    {"name": "cloakbrowser", "command": "cbm-mcp", "args": []}
+                ]
+            }
+            await super().ensure_session(
+                cwd=cwd,
+                agent=agent,
+                session_name=session_name,
+                environment=environment,
+            )
+
+    runtime = RealRunRuntime()
+    worker = AcpxWorker(manager, config, runtime=runtime)
+
+    result = asyncio.run(
+        worker.execute_claim(claim(allowed_origins=["https://app.local"]))
+    )
+
+    assert result == {"status": "succeeded"}
     assert manager.revoked == ["run-1"]
 
 

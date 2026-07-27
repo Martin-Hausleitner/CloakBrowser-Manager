@@ -15,7 +15,6 @@ import asyncio
 import json
 import logging
 import os
-import secrets
 import signal
 import stat
 import sys
@@ -29,6 +28,8 @@ from scripts.acpx_runner import (
     SUPPORTED_AGENTS,
     build_close_command,
     build_ensure_command,
+    build_preflight_close_command,
+    build_preflight_ensure_command,
     build_prompt_command,
     classify_acpx_control_failure,
     derive_session_name,
@@ -36,6 +37,7 @@ from scripts.acpx_runner import (
     parse_acpx_event,
     validate_acpx_version,
     validate_mcp_config,
+    validate_preflight_mcp_config,
     validate_permission_policy,
 )
 from scripts.browser_use_worker import (
@@ -201,25 +203,36 @@ class AcpxRuntime:
         agent: str,
         session_name: str,
         environment: dict[str, str],
+        mcp_config: Path,
     ) -> dict[str, Any]:
+        ensure_command = build_preflight_ensure_command(
+            executable=self.config.acpx_executable,
+            cwd=cwd,
+            agent=agent,
+            session_name=session_name,
+            permission_policy=self.config.permission_policy,
+            mcp_config=mcp_config,
+        )
         try:
-            await self.ensure_session(
-                cwd=cwd,
-                agent=agent,
-                session_name=session_name,
-                environment=environment,
-            )
+            await self._run_control(ensure_command, environment=environment)
         except AcpxRuntimeError as exc:
             return {"ready": False, "reason_code": exc.reason_code}
-        try:
-            await self.close_session(
-                cwd=cwd,
-                agent=agent,
-                session_name=session_name,
-            )
-        except AcpxRuntimeError:
-            return {"ready": False, "reason_code": "protocol_error"}
-        return {"ready": True, "reason_code": "ok"}
+        close_command = build_preflight_close_command(
+            executable=self.config.acpx_executable,
+            cwd=cwd,
+            agent=agent,
+            session_name=session_name,
+            mcp_config=mcp_config,
+        )
+        for attempt in range(CLOSE_SESSION_ATTEMPTS):
+            try:
+                await self._run_control(close_command, timeout=10.0)
+                return {"ready": True, "reason_code": "ok"}
+            except AcpxRuntimeError:
+                if attempt + 1 >= CLOSE_SESSION_ATTEMPTS:
+                    break
+                await asyncio.sleep(CLOSE_SESSION_RETRY_DELAY_SECONDS)
+        return {"ready": False, "reason_code": "protocol_error"}
 
     async def cancel(self, *, cwd: Path, agent: str, session_name: str) -> None:
         command = [
@@ -477,17 +490,30 @@ class AcpxWorker:
             raise
         return path
 
+    def _write_preflight_mcp_config(self) -> Path:
+        fd, raw_path = tempfile.mkstemp(
+            prefix="cbm-preflight-mcp-", suffix=".json", dir=self.config.capability_dir
+        )
+        path = Path(raw_path)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8", closefd=True) as handle:
+                json.dump({"mcpServers": []}, handle, separators=(",", ":"))
+                handle.flush()
+            return validate_preflight_mcp_config(path)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            path.unlink(missing_ok=True)
+            raise
+
     async def refresh_preflights(self) -> None:
         """Probe every supported ACP adapter without exposing credentials."""
-        capability_file = self._write_capability_file(
-            f"cbm_run_{secrets.token_hex(32)}"
-        )
+        mcp_config = self._write_preflight_mcp_config()
         environment = {
             "CBM_MANAGER_URL": self.config.manager_url,
-            "CBM_RUN_CAPABILITY_FILE": str(capability_file),
-            "CBM_PROFILE_ID": "preflight-profile",
-            "CBM_TASK_RUN_ID": "preflight-run",
-            "CBM_ALLOWED_ORIGINS": "[]",
         }
         try:
             try:
@@ -513,7 +539,7 @@ class AcpxWorker:
 
             for agent in sorted(SUPPORTED_AGENTS):
                 session_name = derive_session_name(
-                    f"preflight:{self.config.worker_id}:{self.config.worktree}:{agent}"
+                    f"preflight-v2:{self.config.worker_id}:{self.config.worktree}:{agent}"
                 )
                 try:
                     result = await self.runtime.preflight_agent(
@@ -521,6 +547,7 @@ class AcpxWorker:
                         agent=agent,
                         session_name=session_name,
                         environment=environment,
+                        mcp_config=mcp_config,
                     )
                     ready = bool(result.get("ready"))
                     reason_code = str(result.get("reason_code") or "protocol_error")
@@ -534,7 +561,7 @@ class AcpxWorker:
                     reason_code=reason_code,
                 )
         finally:
-            capability_file.unlink(missing_ok=True)
+            mcp_config.unlink(missing_ok=True)
 
     async def execute_claim(self, claim: dict[str, Any]) -> dict[str, str]:
         run_id = str(claim.get("id") or "")

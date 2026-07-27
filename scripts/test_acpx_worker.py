@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -152,6 +153,13 @@ def make_config(tmp_path: Path) -> AcpxWorkerConfig:
         token="cbm_worker_private",
         heartbeat_interval_seconds=0.01,
     )
+
+
+def write_worker_key(tmp_path: Path, token: str = "cbm_worker_private") -> Path:
+    key = tmp_path / "worker.key"
+    key.write_text(token + "\n", encoding="utf-8")
+    os.chmod(key, 0o600)
+    return key
 
 
 def claim(**overrides):
@@ -461,13 +469,14 @@ def test_build_worker_config_requires_private_files_and_absolute_worktree(tmp_pa
     os.chmod(mcp, 0o600)
     cap = tmp_path / "cap"
     cap.mkdir(mode=0o700)
+    token_file = write_worker_key(tmp_path)
 
     config = build_worker_config(
         [
             "--manager-url",
             "https://manager.local",
-            "--token",
-            "cbm_worker_private",
+            "--token-file",
+            str(token_file),
             "--worktree",
             str(tmp_path),
             "--permission-policy",
@@ -485,8 +494,8 @@ def test_build_worker_config_requires_private_files_and_absolute_worktree(tmp_pa
             [
                 "--manager-url",
                 "https://manager.local",
-                "--token",
-                "cbm_worker_private",
+                "--token-file",
+                str(token_file),
                 "--worktree",
                 "relative",
                 "--permission-policy",
@@ -497,6 +506,141 @@ def test_build_worker_config_requires_private_files_and_absolute_worktree(tmp_pa
                 str(cap),
             ]
         )
+
+
+def test_build_worker_config_rejects_inline_cli_token_and_env_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    token = "cbm_worker_" + ("ab" * 32)
+    with pytest.raises(ValueError, match="token file"):
+        build_worker_config(["--manager-url", "https://manager.local", "--token", token])
+
+    monkeypatch.setenv("CBM_WORKER_TOKEN", token)
+    monkeypatch.delenv("CBM_WORKER_TOKEN_FILE", raising=False)
+    with pytest.raises(ValueError, match="token file"):
+        build_worker_config(["--manager-url", "https://manager.local"])
+
+
+def test_build_worker_config_requires_private_regular_token_file(tmp_path: Path):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"defaultAction":"deny"}', encoding="utf-8")
+    os.chmod(policy, 0o600)
+    mcp = tmp_path / "mcp.json"
+    mcp.write_text(
+        json.dumps(
+            {"mcpServers": [{"name": "cloakbrowser", "command": "cbm-mcp", "args": []}]}
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(mcp, 0o600)
+    cap = tmp_path / "cap"
+    cap.mkdir(mode=0o700)
+    good = write_worker_key(tmp_path)
+    base = [
+        "--manager-url",
+        "https://manager.local",
+        "--worktree",
+        str(tmp_path),
+        "--permission-policy",
+        str(policy),
+        "--mcp-config",
+        str(mcp),
+        "--capability-dir",
+        str(cap),
+    ]
+
+    config = build_worker_config(["--token-file", str(good), *base])
+    assert config.token == "cbm_worker_private"
+    assert config.token_file == str(good)
+
+    missing = tmp_path / "missing.key"
+    with pytest.raises(ValueError, match="token file"):
+        build_worker_config(["--token-file", str(missing), *base])
+
+    public = tmp_path / "public.key"
+    public.write_text("cbm_worker_private\n", encoding="utf-8")
+    os.chmod(public, 0o644)
+    with pytest.raises(ValueError, match="0600"):
+        build_worker_config(["--token-file", str(public), *base])
+
+    owner_execute = tmp_path / "owner-execute.key"
+    owner_execute.write_text("cbm_worker_private\n", encoding="utf-8")
+    os.chmod(owner_execute, 0o700)
+    with pytest.raises(ValueError, match="0600"):
+        build_worker_config(["--token-file", str(owner_execute), *base])
+
+    read_only = tmp_path / "read-only.key"
+    read_only.write_text("cbm_worker_private\n", encoding="utf-8")
+    os.chmod(read_only, 0o400)
+    with pytest.raises(ValueError, match="0600"):
+        build_worker_config(["--token-file", str(read_only), *base])
+
+    special_bits = tmp_path / "special-bits.key"
+    special_bits.write_text("cbm_worker_private\n", encoding="utf-8")
+    os.chmod(special_bits, 0o4600)
+    with pytest.raises(ValueError, match="0600"):
+        build_worker_config(["--token-file", str(special_bits), *base])
+
+    real = tmp_path / "real.key"
+    real.write_text("cbm_worker_private\n", encoding="utf-8")
+    os.chmod(real, 0o600)
+    link = tmp_path / "linked.key"
+    link.symlink_to(real)
+    with pytest.raises(ValueError, match="symlink"):
+        build_worker_config(["--token-file", str(link), *base])
+
+
+def test_acpx_worker_main_sanitizes_inline_token_rejection(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    from scripts import acpx_worker
+
+    token = "cbm_worker_" + ("cd" * 32)
+    rc = acpx_worker.main(["--manager-url", "https://manager.local", "--token", token])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert token not in captured.out + captured.err
+    assert "CBM_WORKER_TOKEN" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--bogus", "cbm_worker_" + ("ef" * 32)],
+        ["--poll-interval", "cbm_worker_" + ("01" * 32)],
+        ["--token=cbm_worker_" + ("23" * 32)],
+    ],
+)
+def test_acpx_worker_main_intercepts_argparse_errors_without_systemexit_or_secret_leak(
+    argv: list[str],
+    capsys: pytest.CaptureFixture[str],
+):
+    from scripts import acpx_worker
+
+    rc = acpx_worker.main(argv)
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert rc == 2
+    assert "usage:" not in combined.lower()
+    assert "--bogus" not in combined
+    assert "--poll-interval" not in combined
+    assert "--token" not in combined
+    assert "CBM_WORKER_TOKEN" not in combined
+    assert re.search(r"cbm_worker_[0-9a-fA-F]{16,}", combined) is None
+
+
+def test_acpx_worker_main_help_exits_without_systemexit_or_secret_error(
+    capsys: pytest.CaptureFixture[str],
+):
+    from scripts import acpx_worker
+
+    rc = acpx_worker.main(["--help"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "usage:" in captured.out.lower()
+    assert captured.err == ""
 
 
 def test_real_runtime_streams_versioned_acpx_events_from_stdin(tmp_path: Path):

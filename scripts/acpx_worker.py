@@ -17,6 +17,7 @@ import logging
 import os
 import secrets
 import signal
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -690,11 +691,56 @@ def _absolute_directory(raw: str, *, label: str, private: bool = False) -> Path:
     return resolved
 
 
+def _read_private_worker_token_file(raw: str) -> tuple[str, str]:
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ValueError("worker token file must be an existing absolute regular file")
+    if path.is_symlink():
+        raise ValueError("worker token file must not be a symlink")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(str(path), flags)
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError("worker token file must be an existing absolute regular file")
+        if stat.S_IMODE(file_stat.st_mode) != 0o600:
+            raise ValueError("worker token file must use mode 0600")
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = None
+            token = validate_worker_token(handle.read().strip())
+    except OSError as exc:
+        raise ValueError("worker token file must be an existing absolute regular file") from exc
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return token, str(path)
+
+
+class _ArgumentParserExit(Exception):
+    def __init__(self, status: int) -> None:
+        super().__init__("argument parser exit")
+        self.status = int(status)
+
+
+class _SecretSafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise _ArgumentParserExit(2)
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        raise _ArgumentParserExit(status)
+
+
 def build_worker_config(argv: list[str] | None = None) -> AcpxWorkerConfig:
-    parser = argparse.ArgumentParser(prog="acpx_worker")
+    raw_argv = list(argv if argv is not None else sys.argv[1:])
+    if any(arg == "--token" or arg.startswith("--token=") for arg in raw_argv):
+        raise ValueError("worker token file is required")
+    parser = _SecretSafeArgumentParser(prog="acpx_worker")
     parser.add_argument("--manager-url", default=os.environ.get("CBM_MANAGER_URL") or "")
     parser.add_argument("--worker-id", default=os.environ.get("CBM_WORKER_ID") or "acpx-worker")
-    parser.add_argument("--token", default=os.environ.get("CBM_WORKER_TOKEN") or "")
     parser.add_argument("--token-file", default=os.environ.get("CBM_WORKER_TOKEN_FILE") or "")
     parser.add_argument("--worktree", default=os.environ.get("CBM_ACPX_WORKTREE") or "")
     parser.add_argument(
@@ -709,19 +755,15 @@ def build_worker_config(argv: list[str] | None = None) -> AcpxWorkerConfig:
     parser.add_argument("--acpx", default=os.environ.get("CBM_ACPX_EXECUTABLE") or "acpx")
     parser.add_argument("--poll-interval", type=float, default=2.0)
     parser.add_argument("--preflight-interval", type=float, default=240.0)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
 
     manager_url = str(args.manager_url or "").strip().rstrip("/")
     if not manager_url:
         raise ValueError("manager URL is required")
     token_file = str(args.token_file or "").strip() or None
-    token = str(args.token or "").strip() or None
-    if token_file:
-        token = validate_worker_token(Path(token_file).read_text(encoding="utf-8").strip())
-    elif token:
-        token = validate_worker_token(token)
-    else:
-        raise ValueError("worker token or token file is required")
+    if not token_file:
+        raise ValueError("worker token file is required")
+    token, token_file = _read_private_worker_token_file(token_file)
 
     worktree = _absolute_directory(str(args.worktree or ""), label="worktree")
     capability_dir = _absolute_directory(
@@ -750,6 +792,11 @@ def build_worker_config(argv: list[str] | None = None) -> AcpxWorkerConfig:
 def main(argv: list[str] | None = None) -> int:
     try:
         config = build_worker_config(argv if argv is not None else sys.argv[1:])
+    except _ArgumentParserExit as exc:
+        if exc.status == 0:
+            return 0
+        print(sanitize_manager_error_message("invalid arguments"), file=sys.stderr)
+        return exc.status or 2
     except Exception as exc:  # noqa: BLE001 - sanitized CLI error
         print(sanitize_manager_error_message(str(exc)), file=sys.stderr)
         return 2

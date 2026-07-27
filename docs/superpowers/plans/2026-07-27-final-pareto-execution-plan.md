@@ -27,7 +27,7 @@ The product therefore optimizes for five outcomes:
 The shortest credible path is:
 
 ```text
-Canonical state + feature presence
+Canonical state + ticket intake + integration baseline + feature presence
         -> atomic VCVM release and rollback
         -> one real Browser Use success + cancellation proof
         -> compact desktop/mobile workspace polish
@@ -49,6 +49,7 @@ This deliberately rejects the tempting order of installing a workflow platform, 
 - Federation synchronizes signed receipts and public metadata only. Secrets, cookies, profiles and browser storage stay node-local.
 - Governance/DAO voting never participates in request-time authorization.
 - Deliberate account bans, refund abuse, bypass/evasion optimization and jailbreak automation from the transcript are excluded. Defensive health checks, legitimate account recovery and authorized security testing are allowed.
+- Explicitly excluded workflow classes: induced bans, refund abuse, account marketplace automation, credential exposure, jailbreak/refusal bypass, NSFW workflows, fraud and liability-shifting automation.
 
 ## 4. Current evidence-backed status
 
@@ -59,7 +60,7 @@ This deliberately rejects the tempting order of installing a workflow platform, 
 | CBM-003 | [#5](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/5) | Static gate implemented | `214ba4e`; live smoke and screenshot freshness remain. |
 | CBM-004 | [#6](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/6) | Implemented | `1e9d509`; stable UI state graph and transition tests. |
 | CBM-005 | [#7](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/7) | Implemented | `d645056`; cancellation cleanup and error classification. |
-| CBM-006 | [#8](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/8) | Implemented locally | `bcde1d2`; requires exact live VCVM migration/worker proof. |
+| CBM-006 | [#8](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/8) | Migration exact-set repair in progress | Not accepted until the repair is committed and live-proven on VCVM with exact Manager/worker commits. |
 | CBM-007 | [#9](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/9) | Partial | `293b0ab`; discovery is truthful, broad mutation parity remains unavailable. |
 | CBM-008 | [#10](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/10) | Gate implemented, acceptance red | `0355238`; live Manager/worker commits and run proof still mismatch. |
 | CBM-009 | [#11](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/11) | Implemented | `8f8fd1e`; release must deploy the same commit to Manager and workers. |
@@ -78,6 +79,8 @@ This deliberately rejects the tempting order of installing a workflow platform, 
 | CBM-022 | [#24](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/24) | Transaction reviewed, apply disabled | Spec and quality/security reviews approve the transaction engine; live apply still waits for exact VCVM preflight and a reviewed wrapper-enable change. |
 | CBM-023 | [#25](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/25) | Architecture only | Defer runtime implementation until single-node SLOs are met. |
 | CBM-024 | [#26](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/26) | Planned | Final real screenshots/report only after live acceptance. |
+| CBM-025 | TBD | Planned | Global ticket-intake schema, cold-start replay proof and integration-baseline ownership. |
+| CBM-026 | TBD | Planned | Active-lane operator-change routing metadata and capability-aware login surface. |
 
 ## 5. Transcript problem-to-ticket map
 
@@ -85,12 +88,17 @@ This deliberately rejects the tempting order of installing a workflow platform, 
 |---|---|---|
 | Feature or button disappears after deploy | CBM-003, CBM-021, CBM-022 | Manifest locator + mounted state + route smoke + commit-bound screenshot. |
 | New manager cannot continue the previous manager's work | CBM-001 | Strict ProjectStateV1 receipt consumed before task dispatch. |
+| Cold-start manager cannot prove ProjectStateV1 replay | CBM-001, CBM-025 | Fresh process reconstructs active ticket, lane, worktree, receipts and stop condition from receipts only. |
+| Ticket format differs by agent or transcript | CBM-025 | One global intake schema with source transcript, acceptance, dependencies, exclusions and evidence fields. |
 | Unknown dirty/unmerged worktrees consume disk | CBM-002 | Read-only audit with merge/upstream/size state before spawning work. |
+| Worktree starts from stale or ambiguous baseline | CBM-002, CBM-025 | Integration baseline, merge owner and no-stale-baseline check are recorded before edits. |
 | Agent edits the wrong panel or validates the wrong view | CBM-004 | Stable `data-ui-state` and expected transition path. |
+| Operator changes lane mid-run without routed metadata | CBM-026 | Active-lane routing records operator change, authority, affected repo/worktree/features and next proof. |
 | Local text/UI iteration accidentally redeploys VCVM | CBM-001, CBM-022 | Explicit mode receipt; release wrapper refuses dirty/incorrect mode. |
 | Frontend exists but backend route is absent or old | CBM-003, CBM-021 | Static API/UI contract plus isolated Docker smoke. |
+| Feature evidence ignores repo overlap | CBM-003, CBM-024, CBM-025 | Final report includes repo x feature overlap matrix tied to commit and screenshots. |
 | Harness/model runs out of auth, capacity or availability | CBM-006, CBM-017, CBM-020 | Per-adapter readiness, bounded failover policy and approval for account changes. |
-| OIDC/device-code/passkey login cannot finish | CBM-018 | Capability-aware login test and human handoff for device-bound credentials. |
+| OIDC/device-code/passkey login cannot finish | CBM-018, CBM-026 | Reachable operator login surface exists for each declared auth capability; device-bound credentials pause for handoff. |
 | Operator must explain the same UX flow repeatedly | CBM-004, CBM-010, CBM-024 | UI graph, compact workspace and reusable visual acceptance evidence. |
 | Work is hard to observe or replay | CBM-019, CBM-020 | Outer workflow run + ACPX session replay + linked Manager run/profile IDs. |
 | Too much concurrency crashes Mac/VCVM | CBM-002, CBM-020, CBM-022 | Admission budget for RAM/disk/workers; no unbounded agent fan-out. |
@@ -99,6 +107,24 @@ This deliberately rejects the tempting order of installing a workflow platform, 
 ## 6. Execution waves and ticket definitions
 
 ### Wave P0-A — Make releases boring
+
+#### Ticket CBM-025: Ticket intake and integration baseline
+
+**Business value:** Makes every new request dispatchable, replayable and mergeable before implementation starts.
+
+**Owned surfaces:** Project-state/ticket schemas, handoff receipt validation, worktree admission metadata, final evidence templates and tests.
+
+**Dependencies:** CBM-001 and CBM-002.
+
+**Acceptance:**
+
+- One global ticket-intake schema captures source, scope, owner, dependencies, acceptance, exclusions, tests/proofs, rollback/hold conditions and evidence artifacts.
+- Cold-start `ProjectStateV1` replay proves active ticket, current lane, worktree path, baseline commit, completed receipts, unmerged changes, next action and stop condition without reading chat history.
+- Worktree integration metadata records baseline commit, upstream/merge target, merge owner and `no_stale_baseline` result before writes.
+- Final evidence includes a repo x feature overlap matrix that maps every claimed feature to route/API/UI/test/screenshot evidence or marks it explicitly absent/deferred.
+- Schema migration has exact-set tests and fixture replay from current receipts.
+
+**Rollback / hold:** Hold implementation dispatch when intake is incomplete, baseline is stale, merge owner is missing or replay cannot reconstruct state from receipts only.
 
 #### Ticket CBM-022: Atomic VCVM release and rollback
 
@@ -128,6 +154,24 @@ uv run --with pytest==8.3.5 python -m pytest \
 ```
 
 ### Wave P0-B — Deploy one exact version and prove one task
+
+#### Ticket CBM-026: Operator change router
+
+**Business value:** Keeps active agent lanes correct when an operator changes profile, auth path, repo, feature target or release mode during a run.
+
+**Owned surfaces:** Active-lane routing metadata, operator-change events, auth-capability routing UI/API, run receipts and tests.
+
+**Dependencies:** CBM-001, CBM-004, CBM-017, CBM-018 and CBM-025.
+
+**Acceptance:**
+
+- Operator changes are typed as lane-affecting or lane-local and record actor, time, affected repo/worktree/features, current UI state, auth capability and required next proof.
+- Lane-affecting changes either update the active ticket receipt before the next tool action or fence the run until a manager accepts the reroute.
+- Each auth capability has a reachable operator login surface: password/use lease, OIDC redirect, device code, TOTP, software/synced passkey and device-bound passkey handoff.
+- Routing never exposes credentials, raw cookies, proxy secrets or device-bound keys to agent prompts/logs.
+- Tests cover mid-run profile switch, mode switch, auth-capability change, stale-baseline reroute and refusal of excluded workflow classes.
+
+**Rollback / hold:** Hold the lane when routing metadata is missing, the operator surface is unreachable, a credential would be exposed, or the requested workflow matches an explicit exclusion.
 
 #### Ticket CBM-008: Browser Use success and cancellation proof
 
@@ -227,6 +271,7 @@ Every ticket passes these gates in order:
 5. **Repository gate:** Backend suite, frontend tests/build, Ruff, actionlint, feature manifest, schema validation, Docker smoke and secret scan.
 6. **Runtime gate:** Exact Manager/worker commit, migrations, health/auth, Tailscale route and real browser interaction.
 7. **Visual gate:** Desktop and iPhone viewport screenshots are tied to commit, URL class, UI state and run/profile IDs.
+8. **Final evidence gate:** Repo x feature overlap matrix, ticket-intake receipt, integration-baseline receipt and operator-change routing receipt are complete or explicitly marked not applicable.
 
 No green test output is reused from a previous commit as evidence for a new one.
 
@@ -249,4 +294,5 @@ This plan is not complete when code is merged. It is complete only when:
 - Browser Use completes one harmless profile-bound task and cancellation is fenced;
 - the compact workspace works at desktop and iPhone viewport through Tailscale;
 - the feature manifest, release receipt, screenshots and README all reference the same commit;
+- cold-start ProjectStateV1 replay, ticket-intake schema, integration baseline and operator-change routing are proven or held with explicit blockers;
 - remaining tickets are truthfully marked partial, blocked or deferred with no fabricated capability or benchmark result.

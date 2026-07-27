@@ -135,7 +135,7 @@ No transcript recommendation is a production decision until its ticket passes.
 - **Wave 0B — truth and safety:** CBM-001 through CBM-006; CBM-003 starts only after CBM-021 owns the CI workflow.
 - **Wave 1 — real browser MVP:** CBM-007 through CBM-013.
 - **Wave 2 — secrets, identity, and streaming:** CBM-014 through CBM-018.
-- **Wave 3 — durable graphs and federation:** CBM-019 through CBM-023.
+- **Wave 3 — durable graphs and federation:** CBM-019, CBM-020, then CBM-023.
 - **Wave 4 — atomic release and evidence:** CBM-022, then CBM-024.
 
 Only tickets with disjoint file ownership run concurrently. Integration and full-suite gates remain leader-owned.
@@ -294,7 +294,7 @@ Only tickets with disjoint file ownership run concurrently. Integration and full
 ## CBM-010 — One compact Browser Use/Orca adaptive workspace
 
 **Priority:** P1
-**Depends on:** CBM-004, CBM-006, and CBM-009.
+**Depends on:** CBM-004, CBM-006, CBM-009, and CBM-011.
 **Files:** Modify `frontend/src/App.tsx`, `BrowserUseHome.tsx`, `AgentBrowserWorkspace.tsx`, `ProfileList.tsx`, `AgentOutputTimeline.tsx`, and tests.
 
 - [ ] Merge Browser Use composer behavior into `AgentBrowserWorkspace` and remove the standalone route only after route compatibility tests pass.
@@ -309,6 +309,7 @@ Only tickets with disjoint file ownership run concurrently. Integration and full
 ## CBM-011 — Fullscreen, Phone Fit, viewport, and keyboard parity
 
 **Priority:** P1
+**Depends on:** CBM-004, CBM-006, and CBM-009.
 **Files:** Modify shared browser controls, `MobileSplitScreen.tsx`, `AgentBrowserWorkspace.tsx`, `ProfileViewer.tsx`, styles, and tests.
 
 - [ ] Share one view-state model for fit, zoom, viewport preset/custom values, Phone Fit, reset, fullscreen, screenshot, copy/paste, sessions, and exit.
@@ -355,12 +356,13 @@ Only tickets with disjoint file ownership run concurrently. Integration and full
 ## CBM-014 — Trusted extension artifact pipeline
 
 **Priority:** P1
-**Files:** Extend `backend/extension_catalog.py`, extension APIs/CLI, catalog UI, tests, and docs.
+**Files:** Modify `backend/extension_catalog.py`, `backend/extensions.py`, `backend/main.py`, `backend/tests/test_extensions.py`, `backend/tests/test_extensions_api.py`, `backend/tests/test_extension_defaults_api.py`, `scripts/cbm_agent_ctl.py`, `scripts/cbm_mcp.py`, `scripts/test_cbm_agent_ctl.py`, `scripts/test_cbm_mcp.py`, `frontend/src/components/ProfileForm.tsx`, `frontend/src/components/CreateProfileFlow.tsx`, `frontend/src/components/CreateProfileFlow.test.tsx`, `config/extension-catalog.json`; create `frontend/src/components/ProfileForm.test.tsx` and `docs/EXTENSION-ARTIFACT-PIPELINE.md`.
 
 - [ ] Add immutable version, SHA-256 digest, source/store URL, icon artifact, signer/provenance, review state, and profile usage.
 - [ ] Reject symlink escapes, digest drift, unknown IDs, mutable unpacked paths, and raw `--load-extension` arguments.
 - [ ] Keep installation/configuration CLI/agent-owned; UI remains read-only.
 - [ ] Add rollback to the previous reviewed artifact version.
+- [ ] Run `pytest backend/tests/test_extensions.py backend/tests/test_extensions_api.py backend/tests/test_extension_defaults_api.py scripts/test_cbm_agent_ctl.py scripts/test_cbm_mcp.py -q` and `npm test -- --run src/components/ProfileForm.test.tsx src/components/CreateProfileFlow.test.tsx`.
 - [ ] Commit as `feat(extensions): Pin trusted extension artifacts`.
 
 **Acceptance:** Every displayed extension is traceable to a reviewed immutable artifact.
@@ -532,7 +534,7 @@ The first safe parallel wave is:
 | D | CBM-019 | benchmark research/report/screenshots only |
 | E | CBM-001 | project-state model/CLI/tests only |
 
-After lane B lands, CBM-003 owns `acceptance/`, its verifier/tests, and only the feature-manifest step inside the existing CI workflow. CBM-002 starts after CBM-001 because both edit `scripts/cbm_agent_ctl.py`. The leader integrates CBM-006 because `backend/database.py`, `backend/main.py`, `backend/models.py`, and `backend/worker_runtime.py` already contain shared ACPX work. CBM-010/CBM-011 remain sequential because they share workspace/viewer state. CBM-022 remains blocked on explicit shared-host storage authorization or added capacity.
+After lane B lands, CBM-003 owns `acceptance/`, its verifier/tests, and only the feature-manifest step inside the existing CI workflow. CBM-002 starts after CBM-001 because both edit `scripts/cbm_agent_ctl.py`. The leader integrates CBM-006 because `backend/database.py`, `backend/main.py`, `backend/models.py`, and `backend/worker_runtime.py` already contain shared ACPX work. CBM-011 lands before CBM-010 so the shared view-state contract is stable before workspace convergence. CBM-022 remains blocked on explicit shared-host storage authorization or added capacity.
 
 ## 8. Safety and compliance exclusions
 

@@ -135,7 +135,7 @@ PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "workers.rebind": ("cbm-release", "rebind-workers", json.dumps({"release_id": "release-0000001", "commit": _COMMIT, "capture": _CAPTURE})),
     "verify.manager": ("cbm-release", "verify-manager", json.dumps({"commit": _COMMIT, "revision_available": True, "image_id": "sha256:" + _SHA})),
     "verify.browser_use": ("cbm-release", "verify-browser-use", json.dumps({"commit": _COMMIT, "release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source"})),
-    "verify.acpx": ("cbm-release", "verify-acpx", json.dumps({"release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source", "expected_absent": False})),
+    "verify.acpx": ("cbm-release", "verify-acpx", json.dumps({"release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source", "expected_absent": False, "acpx_executable": "/home/coder/cloakbrowser-manager/releases/release-0000001/acpx-runtime/node_modules/acpx/dist/cli.js"})),
     "verify.proxychecker": ("cbm-release", "verify-proxychecker", "{}"),
     "verify.stream": ("cbm-release", "verify-stream", "{}"),
     "verify.orca": ("cbm-release", "verify-orca", "{}"),
@@ -147,6 +147,9 @@ PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "rollback.verify_previous": ("cbm-release", "verify-previous", json.dumps({"previous_runtime": _IMAGE})),
     "rollback.start_previous": ("cbm-release", "start-previous", json.dumps({"previous_runtime": _IMAGE})),
     "state.commit": ("cbm-release", "commit-state", json.dumps({"release_id": "release-0000001", "current_release": "release-0000001", "previous_release": "release-previous-1", "image": _IMAGE, "final_backup": _BACKUP, "capture": _CAPTURE, "previous_runtime": {"image_ref": "sha256:" + ("d" * 64), "image_id": "sha256:" + ("d" * 64), "image_digest": "d" * 64, "revision": "1" * 40, "revision_available": True, "pointer": "release-previous-1"}})),
+}
+OPTIONAL_PHASE_ARGS: dict[str, set[str]] = {
+    "verify.acpx": {"acpx_executable"},
 }
 POST_QUIESCE_PHASES = {
     "quiesce.stop_workers",
@@ -491,10 +494,14 @@ def remote_request(phase: str, args: dict[str, object]) -> dict[str, object]:
     if phase not in PHASE_REQUEST_EXAMPLES:
         raise TransactionError(f"unknown remote phase: {phase}", phase=phase)
     expected = set(json.loads(PHASE_REQUEST_EXAMPLES[phase][-1]).keys())
+    optional = OPTIONAL_PHASE_ARGS.get(phase, set())
+    required = expected - optional
     actual = set(args)
-    if actual != expected:
+    missing = required - actual
+    extra = actual - expected
+    if missing or extra:
         raise TransactionError(
-            f"invalid args for remote phase {phase}: missing={sorted(expected - actual)} extra={sorted(actual - expected)}",
+            f"invalid args for remote phase {phase}: missing={sorted(missing)} extra={sorted(extra)}",
             phase=phase,
         )
     return {"operation": phase, "args": args}
@@ -1176,7 +1183,10 @@ def verify_runtime(
     require(manager_ok, "Manager verification failed", phase="verify.manager")
     browser_use = _remote(executor, "verify.browser_use", {"commit": commit, "release_source": release_source})
     require(browser_use.get("active") is True and browser_use.get("bound") is True, "Browser Use verification failed", phase="verify.browser_use")
-    acpx = _remote(executor, "verify.acpx", {"release_source": release_source, "expected_absent": expected_acpx_absent})
+    acpx_args: dict[str, object] = {"release_source": release_source, "expected_absent": expected_acpx_absent}
+    if not expected_acpx_absent:
+        acpx_args["acpx_executable"] = str(Path(release_source).parent / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js")
+    acpx = _remote(executor, "verify.acpx", acpx_args)
     if expected_acpx_absent:
         require(acpx.get("absent") is True, "ACPX absence verification failed", phase="verify.acpx")
     else:

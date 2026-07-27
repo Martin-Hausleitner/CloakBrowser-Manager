@@ -727,6 +727,44 @@ def test_verify_runtime_requires_acpx_bound_and_preflights(
     assert fake.phases == ["verify.manager", "verify.browser_use", "verify.acpx"]
 
 
+def test_verify_runtime_sends_release_scoped_promoted_acpx_executable_for_present_runtime() -> None:
+    fake = FakeRemoteExecutor()
+    release_source = "/home/coder/cloakbrowser-manager/releases/release-20260727-ac5840b00001/source"
+
+    tx.verify_runtime(
+        fake,
+        FULL_WORKER_COMMIT,
+        release_source,
+        expected_image_id="sha256:" + ("e" * 64),
+    )
+
+    verify_acpx_request = next(json.loads(str(call["argv"][0])) for call in fake.calls if call["phase"] == "verify.acpx")
+    assert verify_acpx_request["args"] == {
+        "release_source": release_source,
+        "expected_absent": False,
+        "acpx_executable": "/home/coder/cloakbrowser-manager/releases/release-20260727-ac5840b00001/acpx-runtime/node_modules/acpx/dist/cli.js",
+    }
+
+
+def test_verify_runtime_omits_acpx_executable_for_absence_verification() -> None:
+    fake = FakeRemoteExecutor()
+    release_source = "/home/coder/cloakbrowser-manager/releases/release-20260727-ac5840b00001/source"
+
+    tx.verify_runtime(
+        fake,
+        FULL_WORKER_COMMIT,
+        release_source,
+        expected_image_id="sha256:" + ("e" * 64),
+        expected_acpx_absent=True,
+    )
+
+    verify_acpx_request = next(json.loads(str(call["argv"][0])) for call in fake.calls if call["phase"] == "verify.acpx")
+    assert verify_acpx_request["args"] == {
+        "release_source": release_source,
+        "expected_absent": True,
+    }
+
+
 def test_bootstrap_acpx_capture_state_failure_cleans_acpx_and_candidate_before_quiesce(tmp_path: Path) -> None:
     repo = fixture_repo(tmp_path)
     add_acpx_locks(repo)

@@ -3839,6 +3839,134 @@ def test_verify_acpx_expected_absent_rejects_partial_absence(monkeypatch: pytest
         remote.op_verify_acpx({"release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source", "expected_absent": True})
 
 
+def test_verify_acpx_still_uses_promoted_release_executable_when_global_acpx_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    acpx_executable = write_release_acpx_target(paths, promoted=True)
+    release_venv = paths["releases"] / "release-0000001" / "acpx-venv"
+    release_venv.mkdir()
+    version_calls: list[list[str]] = []
+    manager_calls: list[tuple[int, str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[-1:] == ["--version"]:
+            version_calls.append([str(item) for item in argv])
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    def fake_manager_json(port: int, path: str, *, timeout: float | None = None) -> dict[str, object]:
+        del timeout
+        manager_calls.append((port, path))
+        return {
+            "agents": [
+                {"agent": agent, "ready": True, "state": "ready", "reason_code": "ok"}
+                for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+            ]
+        }
+
+    monkeypatch.setattr(remote.shutil, "which", lambda name: None if name == "acpx" else None)
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_unit_state", lambda unit: {"active_state": "active", "unit_sha256": "2" * 64})
+    monkeypatch.setattr(remote, "_unit_show", lambda unit: {"WorkingDirectory": str(release_source), "FragmentPath": "/unit"})
+    monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
+    monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
+
+    result = remote.op_verify_acpx(
+        {
+            "release_source": str(release_source),
+            "expected_absent": False,
+            "acpx_executable": str(acpx_executable),
+        }
+    )
+
+    assert result["active"] is True
+    assert result["bound"] is True
+    assert result["preflights"] is True
+    assert result["adapters_ready"] is True
+    assert result["adapter_reason_code"] == "ok"
+    assert result["venv"] is True
+    assert version_calls == [[str(acpx_executable), "--version"]]
+    assert manager_calls == [(18115, "/api/task-harnesses/acpx/preflights")]
+
+
+@pytest.mark.parametrize(
+    ("path_kind", "match"),
+    [
+        ("wrong_release", "allowlisted"),
+        ("global", "allowlisted"),
+        ("symlink", "symlink|non-symlink"),
+    ],
+)
+def test_verify_acpx_rejects_non_release_or_symlink_executable_before_manager_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    path_kind: str,
+    match: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    expected_acpx = write_release_acpx_target(paths, promoted=True)
+    if path_kind == "wrong_release":
+        acpx_executable = write_release_acpx_target(paths, "release-0000002", promoted=True)
+    elif path_kind == "global":
+        acpx_executable = tmp_path / "usr-local-bin-acpx"
+        acpx_executable.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+        acpx_executable.chmod(0o700)
+    else:
+        expected_acpx.unlink()
+        symlink_target = tmp_path / "outside-acpx"
+        symlink_target.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+        symlink_target.chmod(0o700)
+        expected_acpx.symlink_to(symlink_target)
+        acpx_executable = expected_acpx
+    manager_calls: list[tuple[int, str]] = []
+
+    monkeypatch.setattr(remote, "_manager_json_on_port", lambda port, path, timeout=None: manager_calls.append((port, path)) or {}, raising=False)
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: (_ for _ in ()).throw(AssertionError("adapter probe must not run")))
+
+    with pytest.raises(remote.HelperError, match=match):
+        remote.op_verify_acpx(
+            {
+                "release_source": str(release_source),
+                "expected_absent": False,
+                "acpx_executable": str(acpx_executable),
+            }
+        )
+
+    assert manager_calls == []
+
+
+def test_preflight_acpx_legacy_capture_still_uses_global_path_probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    global_acpx = tmp_path / "acpx"
+    global_acpx.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    global_acpx.chmod(0o700)
+    version_calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv == [str(global_acpx), "--version"]:
+            version_calls.append([str(item) for item in argv])
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote.shutil, "which", lambda name: str(global_acpx) if name == "acpx" else None)
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_unit_state", lambda unit: {"active_state": "active", "unit_sha256": "2" * 64})
+    monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
+
+    result = remote.op_preflight_acpx({})
+
+    assert result["adapters_ready"] is True
+    assert result["adapter_reason_code"] == "ok"
+    assert version_calls == [[str(global_acpx), "--version"]]
+
+
 def test_bootstrap_cleanup_does_not_report_success_when_rmtree_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

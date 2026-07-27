@@ -141,6 +141,9 @@ OPERATION_SCHEMAS: dict[str, set[str]] = {
     "rollback.start_previous": {"previous_runtime"},
     "state.commit": {"release_id", "current_release", "previous_release", "image", "final_backup", "capture", "previous_runtime"},
 }
+OPTIONAL_OPERATION_ARGS: dict[str, set[str]] = {
+    "verify.acpx": {"acpx_executable"},
+}
 SECRET_PATTERNS = (
     re.compile(r'(?i)"(?:helper_source|token|secret|password|passwd|apikey|api_key)"\s*:\s*"[^"]*"'),
     re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s]+@", re.IGNORECASE),
@@ -865,12 +868,11 @@ def op_preflight_browser_use(args: dict[str, object]) -> dict[str, object]:
     return state
 
 
-def op_preflight_acpx(args: dict[str, object]) -> dict[str, object]:
+def _preflight_acpx_with_adapter_probe(args: dict[str, object], adapter_probe: dict[str, object]) -> dict[str, object]:
     unit = str(args.get("unit", ACPX_UNIT))
     token_path = Path(str(args.get("token_path", REMOTE_PATH / ".env.acpx.vcvm")))
     venv = Path(str(args.get("venv", REMOTE_PATH / ".venv-acpx")))
     state = _unit_state(unit)
-    adapter_probe = _acpx_adapter_probe()
     state.update(
         {
             "active": state["active_state"] == "active",
@@ -881,6 +883,10 @@ def op_preflight_acpx(args: dict[str, object]) -> dict[str, object]:
         }
     )
     return state
+
+
+def op_preflight_acpx(args: dict[str, object]) -> dict[str, object]:
+    return _preflight_acpx_with_adapter_probe(args, _acpx_adapter_probe())
 
 
 def _capture_acpx_state() -> dict[str, object]:
@@ -1008,6 +1014,16 @@ def _release_source_worktree(release_id: str, value: object | None = None) -> Pa
         "ACPX worktree must be an existing non-symlink release source directory",
     )
     return path
+
+
+def _release_id_for_release_source(value: object) -> str:
+    source = Path(str(value))
+    require(source.name == "source", "release source must be the release source directory")
+    release = source.parent
+    require(release.parent == RELEASES_PATH, "release source is not release-scoped")
+    release_id = validate_release_id(release.name)
+    _release_source_worktree(release_id, source)
+    return release_id
 
 
 def _acpx_cli_under(runtime_root: Path) -> Path:
@@ -2421,8 +2437,13 @@ def op_verify_acpx(args: dict[str, object]) -> dict[str, object]:
         missing = {str(item) for item in probe.get("missing", [])}
         require(probe.get("state") == "absent" and missing == set(ACPX_ABSENCE_COMPONENTS), "ACPX expected absence verification failed")
         return {"absent": True, "missing": sorted(missing), "reason_code": probe.get("reason_code")}
-    state = op_preflight_acpx(args)
-    release_source = str(args["release_source"])
+    release_id = _release_id_for_release_source(args["release_source"])
+    release = release_dir(release_id)
+    acpx_executable = _validate_acpx_executable_path(release_id, args.get("acpx_executable"), kind="promoted")
+    verify_args = dict(args)
+    verify_args["venv"] = str(release / "acpx-venv")
+    state = _preflight_acpx_with_adapter_probe(verify_args, _acpx_adapter_probe_at(acpx_executable))
+    release_source = str(release / "source")
     show = _unit_show(ACPX_UNIT)
     manager_preflights = _acpx_manager_preflights_ready()
     state["bound"] = bool(release_source) and show.get("WorkingDirectory") == release_source
@@ -2684,9 +2705,10 @@ def handle_request(request: dict[str, object]) -> dict[str, object]:
     schema = OPERATION_SCHEMAS.get(operation)
     if schema is None:
         raise HelperError(f"unknown remote operation: {operation}")
+    optional = OPTIONAL_OPERATION_ARGS.get(operation, set())
     actual = set(args)
     missing = schema - actual
-    extra = actual - schema
+    extra = actual - schema - optional
     if missing or extra:
         raise HelperError(f"invalid args for {operation}: missing={sorted(missing)} extra={sorted(extra)}")
     handler = OPERATIONS.get(operation)

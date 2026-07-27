@@ -37,8 +37,8 @@ from scripts.acpx_runner import (
     parse_acpx_event,
     validate_acpx_version,
     validate_mcp_config,
-    validate_preflight_mcp_config,
     validate_permission_policy,
+    validate_preflight_mcp_config,
 )
 from scripts.browser_use_worker import (
     ManagerClient,

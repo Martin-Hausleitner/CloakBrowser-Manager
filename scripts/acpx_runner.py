@@ -486,6 +486,6 @@ __all__ = [
     "parse_acpx_event",
     "validate_acpx_version",
     "validate_mcp_config",
-    "validate_preflight_mcp_config",
     "validate_permission_policy",
+    "validate_preflight_mcp_config",
 ]

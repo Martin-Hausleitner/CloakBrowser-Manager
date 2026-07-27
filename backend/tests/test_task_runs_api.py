@@ -350,6 +350,46 @@ def test_cancel_is_idempotent_and_preserves_terminals(client_access: TestClient)
     assert second.json()["cancelled_at"] == first.json()["cancelled_at"]
 
 
+def test_cancelled_claim_clears_worker_ownership(client_access: TestClient):
+    """A cancelled run must not look owned after its lease has been revoked."""
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"])
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers={"Authorization": "Bearer cbm_worker_" + ("ab" * 32)},
+    )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["id"] == run["id"]
+    assert claimed.json()["worker_id"] == "browser-use-worker-1"
+
+    cancelled = client_access.post(f"/api/task-runs/{run['id']}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["worker_id"] is None
+
+    with db.get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT claimed_by, worker_id, claim_expires_at, lease_id, capability_digest
+            FROM task_runs WHERE id = ?
+            """,
+            (run["id"],),
+        ).fetchone()
+    assert row is not None
+    assert dict(row) == {
+        "claimed_by": None,
+        "worker_id": None,
+        "claim_expires_at": None,
+        "lease_id": None,
+        "capability_digest": None,
+    }
+
+
 def test_retry_health_refreshes_snapshot_without_duplicating_prompt(
     client_access: TestClient,
 ):

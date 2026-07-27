@@ -1065,6 +1065,7 @@ class WorkerRuntimeService:
                     SET status = 'cancelled',
                         cancelled_at = ?,
                         claimed_by = NULL,
+                        worker_id = NULL,
                         claim_expires_at = NULL,
                         capability_digest = NULL,
                         lease_id = NULL,

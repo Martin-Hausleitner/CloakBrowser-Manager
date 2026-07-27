@@ -1060,7 +1060,7 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         _remote(executor, "state.commit", state_payload, mutation=True)
         cleanup_candidate(executor, config)
     except TransactionError as exc:
-        cleanup_error: TransactionError | None = None
+        post_quiesce_cleanup_errors: list[TransactionError] = []
         pre_quiesce_cleanup_errors: list[TransactionError] = []
         if acpx_bootstrap_touched and exc.phase != "bootstrap.acpx_cleanup":
             try:
@@ -1071,7 +1071,7 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
                 if not (quiesce_started or exc.phase in POST_QUIESCE_PHASES):
                     pre_quiesce_cleanup_errors.append(cleanup_exc)
                 else:
-                    cleanup_error = cleanup_exc
+                    post_quiesce_cleanup_errors.append(cleanup_exc)
                     if acpx_bootstrap:
                         acpx_bootstrap["cleanup_error"] = {
                             "phase": cleanup_exc.phase,
@@ -1086,9 +1086,27 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
                 raise pre_quiesce_cleanup_failure(exc, pre_quiesce_cleanup_errors) from exc
             raise
         if quiesce_started or exc.phase in POST_QUIESCE_PHASES:
-            restore_old_runtime(executor, reason=exc, capture=capture, final_backup=final_backup or backup_live)
+            restore_error: TransactionError | None = None
+            try:
+                restore_old_runtime(executor, reason=exc, capture=capture, final_backup=final_backup or backup_live)
+            except TransactionError as restore_exc:
+                restore_error = restore_exc
+            if candidate_touched:
+                try:
+                    cleanup_candidate(executor, config, fail_closed=True)
+                except TransactionError as cleanup_exc:
+                    post_quiesce_cleanup_errors.append(cleanup_exc)
+            if restore_error is not None:
+                message = (
+                    "restore failed after release failure: "
+                    f"restore phase={restore_error.phase} error={bounded_error_message(restore_error)}; "
+                    f"original phase={exc.phase} error={bounded_error_message(exc)}"
+                )
+                for cleanup_error in post_quiesce_cleanup_errors:
+                    message = f"{message}; secondary cleanup phase={cleanup_error.phase} error={bounded_error_message(cleanup_error)}"
+                raise TransactionError(message, phase=restore_error.phase) from restore_error
             message = f"release failed after quiesce and old runtime was restored: {exc}"
-            if cleanup_error is not None:
+            for cleanup_error in post_quiesce_cleanup_errors:
                 message = f"{message}; secondary cleanup phase={cleanup_error.phase} error={bounded_error_message(cleanup_error)}"
             raise TransactionError(message, phase=exc.phase) from exc
         raise

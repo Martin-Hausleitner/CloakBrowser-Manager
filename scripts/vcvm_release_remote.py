@@ -1944,6 +1944,31 @@ def op_live_start(args: dict[str, object]) -> dict[str, object]:
     return {"container": MANAGER_CONTAINER, "port": LIVE_PORT, "container_port": MANAGER_CONTAINER_PORT, "manager_bind_mounts": manager_bind_mount_receipt(), "restart_policy": MANAGER_RESTART_POLICY}
 
 
+def _validate_acpx_bootstrap_absence_for_rebind(capture: dict[str, object], release_id: str) -> bool:
+    claims_bootstrap_absence = (
+        capture.get("acpx_was_absent") is True
+        or bool(capture.get("acpx_bootstrap_release_id"))
+        or bool(capture.get("acpx_absence"))
+    )
+    if not claims_bootstrap_absence:
+        return False
+
+    require(capture.get("acpx_bootstrap_release_id") == release_id, "captured ACPX bootstrap absence release mismatch")
+    require(capture.get("acpx_was_absent") is True, "captured ACPX bootstrap absence flag mismatch")
+    require(capture.get("acpx_active_state") == "absent", "captured ACPX bootstrap absence active state mismatch")
+    require(capture.get("acpx_unit_sha256") == "0" * 64, "captured ACPX bootstrap absence unit hash mismatch")
+    require(capture.get("acpx_dropin_exists") is False, "captured ACPX bootstrap absence drop-in mismatch")
+    absence = capture.get("acpx_absence")
+    require(isinstance(absence, dict), "captured ACPX bootstrap absence receipt is missing")
+    require(absence.get("state") == "absent", "captured ACPX bootstrap absence receipt state mismatch")
+    missing = absence.get("missing")
+    require(isinstance(missing, list), "captured ACPX bootstrap absence receipt missing list mismatch")
+    require(set(missing) == set(ACPX_ABSENCE_COMPONENTS), "captured ACPX bootstrap absence receipt missing components mismatch")
+    if "reason_code" in absence:
+        require(absence["reason_code"] == "missing_runtime", "captured ACPX bootstrap absence receipt reason mismatch")
+    return True
+
+
 def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
     release_id = validate_release_id(args["release_id"])
     commit = validate_commit(args["commit"])
@@ -1951,8 +1976,11 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
     marker = release_dir(release_id) / "COMMIT"
     require(marker.read_text(encoding="utf-8").strip() == commit, "release commit marker mismatch")
     capture = dict(args["capture"])
+    defer_acpx_rebind = _validate_acpx_bootstrap_absence_for_rebind(capture, release_id)
     dropins: dict[str, dict[str, object]] = {}
     for unit in (BROWSER_USE_UNIT, ACPX_UNIT):
+        if unit == ACPX_UNIT and defer_acpx_rebind:
+            continue
         validate_name(unit, "unit")
         unit_state = _unit_state(unit)
         require("ExecStart" in unit_state["content"], f"unexpected unit shape: {unit}")
@@ -1984,7 +2012,17 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
             "working_directory": show.get("WorkingDirectory", ""),
         }
     browser = op_preflight_browser_use({})
-    acpx = op_preflight_acpx({})
+    if defer_acpx_rebind:
+        acpx = {
+            "deferred": True,
+            "reason": "bootstrap_prior_absence",
+            "release_id": release_id,
+            "bootstrap_release_id": capture["acpx_bootstrap_release_id"],
+            "unit": ACPX_UNIT,
+            "promoted_by": "bootstrap.acpx_promote",
+        }
+    else:
+        acpx = op_preflight_acpx({})
     return {
         "release_source": str(source_path),
         "commit_marker": commit,

@@ -566,6 +566,199 @@ def test_manager_bind_source_validation_rejects_symlink_or_missing_source(
         remote._validate_manager_bind_sources()
 
 
+def write_release_commit(paths: dict[str, Path], release_id: str = "release-0000001", commit: str = REVISION) -> Path:
+    release = paths["releases"] / release_id
+    source = release / "source"
+    source.mkdir(parents=True)
+    (release / "COMMIT").write_text(commit + "\n", encoding="utf-8")
+    return source
+
+
+def rebind_systemctl_stub(
+    paths: dict[str, Path],
+    source_path: Path,
+    calls: list[tuple[str, ...]],
+    *,
+    acpx_fragment: str | None,
+) -> object:
+    browser_unit = paths["home"] / ".config" / "systemd" / "user" / BROWSER_USE_UNIT
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(str(item) for item in argv))
+        if argv == ["systemctl", "--user", "show", BROWSER_USE_UNIT, "-p", "FragmentPath", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{browser_unit}\n", stderr="")
+        if argv == ["systemctl", "--user", "is-active", BROWSER_USE_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        if argv == ["systemctl", "--user", "daemon-reload"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv == ["systemctl", "--user", "restart", BROWSER_USE_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv == [
+            "systemctl",
+            "--user",
+            "show",
+            BROWSER_USE_UNIT,
+            "-p",
+            "WorkingDirectory",
+            "-p",
+            "ActiveState",
+            "-p",
+            "FragmentPath",
+        ]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"WorkingDirectory={source_path}\nActiveState=active\nFragmentPath={browser_unit}\n",
+                stderr="",
+            )
+        if argv == ["systemctl", "--user", "show", remote.ACPX_UNIT, "-p", "FragmentPath", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{acpx_fragment or ''}\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    return fake_run
+
+
+def bootstrap_absent_capture(paths: dict[str, Path], release_id: object = "release-0000001") -> dict[str, object]:
+    capture = valid_capture(paths)
+    capture.update(
+        {
+            "acpx_was_absent": True,
+            "acpx_active_state": "absent",
+            "acpx_unit_sha256": "0" * 64,
+            "acpx_dropin_exists": False,
+            "acpx_absence": {
+                "state": "absent",
+                "missing": list(remote.ACPX_ABSENCE_COMPONENTS),
+                "reason_code": "missing_runtime",
+            },
+            "acpx_bootstrap_release_id": release_id,
+        }
+    )
+    return capture
+
+
+def corrupt_bootstrap_absence_capture(capture: dict[str, object], variant: str) -> None:
+    if variant == "mismatched_bootstrap_release_id":
+        capture["acpx_bootstrap_release_id"] = "release-other0001"
+    elif variant == "missing_bootstrap_release_id":
+        capture.pop("acpx_bootstrap_release_id")
+    elif variant == "was_absent_false":
+        capture["acpx_was_absent"] = False
+    elif variant == "active_state":
+        capture["acpx_active_state"] = "inactive"
+    elif variant == "unit_hash":
+        capture["acpx_unit_sha256"] = "2" * 64
+    elif variant == "dropin_exists":
+        capture["acpx_dropin_exists"] = True
+    elif variant == "missing_absence_receipt":
+        capture.pop("acpx_absence")
+    elif variant == "non_object_absence_receipt":
+        capture["acpx_absence"] = "absent"
+    elif variant == "wrong_absence_state":
+        absence = dict(capture["acpx_absence"])
+        absence["state"] = "blocking"
+        capture["acpx_absence"] = absence
+    elif variant == "partial_absence_missing":
+        absence = dict(capture["acpx_absence"])
+        absence["missing"] = ["unit"]
+        capture["acpx_absence"] = absence
+    elif variant == "extra_absence_missing":
+        absence = dict(capture["acpx_absence"])
+        absence["missing"] = [*remote.ACPX_ABSENCE_COMPONENTS, "extra"]
+        capture["acpx_absence"] = absence
+    elif variant == "wrong_absence_reason":
+        absence = dict(capture["acpx_absence"])
+        absence["reason_code"] = "misconfigured"
+        capture["acpx_absence"] = absence
+    else:
+        raise AssertionError(f"unknown bootstrap absence variant: {variant}")
+
+
+def test_workers_rebind_defers_acpx_when_bootstrap_capture_proves_prior_absence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    source_path = write_release_commit(paths)
+    capture = bootstrap_absent_capture(paths)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(remote, "run", rebind_systemctl_stub(paths, source_path, calls, acpx_fragment=None))
+    monkeypatch.setattr(remote, "_browser_use_worktree_commit", lambda _working_directory: REVISION)
+    monkeypatch.setattr(remote, "_token_mode", lambda _path: "600")
+    monkeypatch.setattr(remote, "op_preflight_acpx", lambda _args: (_ for _ in ()).throw(AssertionError("ACPX preflight must be deferred")))
+
+    result = remote.op_workers_rebind({"release_id": "release-0000001", "commit": REVISION, "capture": capture})
+
+    assert result["release_source"] == str(source_path)
+    assert result["acpx"] == {
+        "deferred": True,
+        "reason": "bootstrap_prior_absence",
+        "release_id": "release-0000001",
+        "bootstrap_release_id": "release-0000001",
+        "unit": remote.ACPX_UNIT,
+        "promoted_by": "bootstrap.acpx_promote",
+    }
+    assert BROWSER_USE_UNIT in result["dropins"]
+    assert remote.ACPX_UNIT not in result["dropins"]
+    assert ("systemctl", "--user", "show", remote.ACPX_UNIT, "-p", "FragmentPath", "--value") not in calls
+    assert ("systemctl", "--user", "restart", remote.ACPX_UNIT) not in calls
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "mismatched_bootstrap_release_id",
+        "missing_bootstrap_release_id",
+        "was_absent_false",
+        "active_state",
+        "unit_hash",
+        "dropin_exists",
+        "missing_absence_receipt",
+        "non_object_absence_receipt",
+        "wrong_absence_state",
+        "partial_absence_missing",
+        "extra_absence_missing",
+        "wrong_absence_reason",
+    ],
+)
+def test_workers_rebind_rejects_inconsistent_bootstrap_absence_before_browser_use_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    source_path = write_release_commit(paths)
+    capture = bootstrap_absent_capture(paths)
+    corrupt_bootstrap_absence_capture(capture, variant)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(remote, "run", rebind_systemctl_stub(paths, source_path, calls, acpx_fragment=None))
+
+    with pytest.raises(remote.HelperError, match="captured ACPX bootstrap absence"):
+        remote.op_workers_rebind({"release_id": "release-0000001", "commit": REVISION, "capture": capture})
+
+    assert calls == []
+    assert not remote.release_dropin(BROWSER_USE_UNIT).exists()
+
+
+def test_workers_rebind_normal_release_still_requires_existing_acpx_unit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    source_path = write_release_commit(paths)
+    capture = valid_capture(paths)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(remote, "run", rebind_systemctl_stub(paths, source_path, calls, acpx_fragment=None))
+    monkeypatch.setattr(remote, "_browser_use_worktree_commit", lambda _working_directory: REVISION)
+    monkeypatch.setattr(remote, "_token_mode", lambda _path: "600")
+
+    with pytest.raises(remote.HelperError, match="unit fragment path is missing: cloakbrowser-acpx.service"):
+        remote.op_workers_rebind({"release_id": "release-0000001", "commit": REVISION, "capture": capture})
+
+    assert ("systemctl", "--user", "show", remote.ACPX_UNIT, "-p", "FragmentPath", "--value") in calls
+
+
 def test_manager_docker_run_paths_publish_canonical_container_port_and_host_gateway(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     paths = patch_remote_paths(monkeypatch, tmp_path)
     calls: list[tuple[str, ...]] = []

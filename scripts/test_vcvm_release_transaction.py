@@ -110,6 +110,7 @@ class FakeRemoteExecutor:
         self.fail_with_timeout = bool(facts.pop("fail_with_timeout", False))
         self.fail_stderr = str(facts.pop("fail_stderr", "synthetic ssh failure"))
         self.fail_message = str(facts.pop("fail_message", ""))
+        self.fail_messages = dict(facts.pop("fail_messages", {}))
         self.rollback_verify_fails = bool(facts.pop("rollback_verify_fails", False))
         self.facts = {
             "disk_free_bytes": 9 * 1024**3,
@@ -454,7 +455,7 @@ class FakeRemoteExecutor:
                 raise OSError(self.fail_stderr)
             if self.fail_with_timeout:
                 raise subprocess.TimeoutExpired(["ssh", "vcvm", phase, "HELPER_SOURCE"], timeout=123, stderr=self.fail_stderr)
-            raise tx.TransactionError(self.fail_message or f"synthetic failure at {phase}", phase=phase)
+            raise tx.TransactionError(self.fail_messages.get(phase) or self.fail_message or f"synthetic failure at {phase}", phase=phase)
 
 
 def test_verify_manager_remote_request_requires_structured_identity_args() -> None:
@@ -514,6 +515,7 @@ def test_successful_release_runs_exact_order_and_emits_secret_safe_receipt(tmp_p
         "state.commit",
         "candidate.cleanup",
     ]
+    assert fake.phases.count("candidate.cleanup") == 1
     preflight_end = fake.phases.index("preflight.tailscale")
     assert not any(call["mutation"] for call in fake.calls[: preflight_end + 1])
     assert receipt["status"] == "success"
@@ -813,6 +815,7 @@ def test_bootstrap_cleanup_failure_fails_closed_before_state_commit_and_restores
     assert "state.commit" not in fake.phases
     assert "restore.runtime" in fake.phases
     assert "restore.verify" in fake.phases
+    assert "candidate.cleanup" in fake.phases
     assert fake.live_generation == "old"
 
 
@@ -1206,7 +1209,101 @@ def test_every_post_quiesce_failure_restores_old_runtime(tmp_path: Path, phase: 
         tx.run_release(release_config(repo), fake)
     assert "restore.runtime" in fake.phases
     assert "restore.verify" in fake.phases
+    assert "candidate.cleanup" in fake.phases
+    assert fake.phases.index("restore.verify") < fake.phases.index("candidate.cleanup")
     assert fake.live_generation == "old"
+
+
+def test_post_quiesce_candidate_cleanup_failure_is_bounded_secondary_evidence(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(
+        fail_phases={"workers.rebind", "candidate.cleanup"},
+        fail_messages={
+            "workers.rebind": "synthetic rebind failure",
+            "candidate.cleanup": f"candidate cleanup failed token={SECRET_TOKEN} " + ("x" * 600),
+        },
+    )
+
+    with pytest.raises(tx.TransactionError, match="release failed after quiesce") as exc_info:
+        tx.run_release(release_config(repo), fake)
+
+    message = str(exc_info.value)
+    assert exc_info.value.phase == "workers.rebind"
+    assert "restore.runtime" in fake.phases
+    assert "restore.verify" in fake.phases
+    assert "candidate.cleanup" in fake.phases
+    assert fake.phases.index("restore.verify") < fake.phases.index("candidate.cleanup")
+    assert "secondary cleanup phase=candidate.cleanup" in message
+    assert "<redacted>" in message
+    assert SECRET_TOKEN not in message
+    assert len(message) < 750
+    assert fake.live_generation == "old"
+
+
+def test_restore_runtime_failure_still_attempts_candidate_cleanup(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(
+        fail_phases={"workers.rebind", "restore.runtime"},
+        fail_messages={
+            "workers.rebind": "synthetic rebind failure",
+            "restore.runtime": "synthetic restore runtime failure",
+        },
+    )
+
+    with pytest.raises(tx.TransactionError, match="restore failed after release failure") as exc_info:
+        tx.run_release(release_config(repo), fake)
+
+    message = str(exc_info.value)
+    assert exc_info.value.phase == "restore.runtime"
+    assert "restore.runtime" in fake.phases
+    assert "candidate.cleanup" in fake.phases
+    assert fake.phases.index("restore.runtime") < fake.phases.index("candidate.cleanup")
+    assert "synthetic restore runtime failure" in message
+    assert "original phase=workers.rebind" in message
+    assert "synthetic rebind failure" in message
+
+
+def test_restore_verify_failure_still_attempts_candidate_cleanup(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(fail_phase="live.start", rollback_verify_fails=True)
+
+    with pytest.raises(tx.TransactionError, match="rollback verification failed") as exc_info:
+        tx.run_release(release_config(repo), fake)
+
+    message = str(exc_info.value)
+    assert exc_info.value.phase == "restore.verify"
+    assert "restore.verify" in fake.phases
+    assert "candidate.cleanup" in fake.phases
+    assert fake.phases.index("restore.verify") < fake.phases.index("candidate.cleanup")
+    assert "original phase=live.start" in message
+    assert fake.live_generation == "old"
+
+
+def test_restore_failure_keeps_restore_terminal_and_reports_cleanup_secondary(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(
+        fail_phases={"workers.rebind", "restore.runtime", "candidate.cleanup"},
+        fail_messages={
+            "workers.rebind": "synthetic rebind failure",
+            "restore.runtime": "synthetic restore runtime failure",
+            "candidate.cleanup": f"candidate cleanup failed token={SECRET_TOKEN} " + ("x" * 600),
+        },
+    )
+
+    with pytest.raises(tx.TransactionError, match="restore failed after release failure") as exc_info:
+        tx.run_release(release_config(repo), fake)
+
+    message = str(exc_info.value)
+    assert exc_info.value.phase == "restore.runtime"
+    assert "restore.runtime" in fake.phases
+    assert "candidate.cleanup" in fake.phases
+    assert fake.phases.index("restore.runtime") < fake.phases.index("candidate.cleanup")
+    assert "synthetic restore runtime failure" in message
+    assert "original phase=workers.rebind" in message
+    assert "secondary cleanup phase=candidate.cleanup" in message
+    assert "<redacted>" in message
+    assert SECRET_TOKEN not in message
+    assert len(message) < 850
 
 
 def test_restore_verification_failure_is_distinct_terminal_failure(tmp_path: Path) -> None:
@@ -1215,7 +1312,7 @@ def test_restore_verification_failure_is_distinct_terminal_failure(tmp_path: Pat
     with pytest.raises(tx.TransactionError, match="rollback verification failed"):
         tx.run_release(release_config(repo), fake)
     assert fake.live_generation == "old"
-    assert fake.phases[-1] == "restore.verify"
+    assert fake.phases[-1] == "candidate.cleanup"
 
 
 def test_retry_existing_release_with_matching_archive_is_idempotent(tmp_path: Path) -> None:

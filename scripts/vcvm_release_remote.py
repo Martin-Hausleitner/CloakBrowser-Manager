@@ -57,6 +57,7 @@ ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
 ACPX_BOOTSTRAP_DIR = "acpx-bootstrap"
 ACPX_DIRECT_CLI = Path("node_modules/acpx/dist/cli.js")
 ACPX_SYSTEMD_PATH = "/home/coder/.local/bin:/usr/local/bin:/usr/bin:/bin"
+UNIT_FRAGMENT_READ_MAX_BYTES = 1024 * 1024
 ACPX_ABSENCE_COMPONENTS = ("binary", "unit", "key", "venv", "capability")
 EXPECTED_ACPX_PREFLIGHT_AGENTS = ("codex", "claude", "cursor", "grok-build", "opencode")
 RELEASE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{11,80}$")
@@ -493,11 +494,47 @@ def _running_manager_image_id() -> str:
     return validate_immutable_image(container.get("Image"), "running Manager image id")
 
 
+def _read_unit_fragment(path: Path, name: str) -> str:
+    try:
+        stat_result = path.lstat()
+    except OSError as exc:
+        raise HelperError(f"unit fragment path cannot be inspected: {name}") from exc
+    require(not stat.S_ISLNK(stat_result.st_mode), f"unit fragment path is a symlink: {name}")
+    require(stat.S_ISREG(stat_result.st_mode), f"unit fragment path is not a regular file: {name}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags)
+        opened_stat = os.fstat(fd)
+        same_fragment = stat_result.st_dev == opened_stat.st_dev and stat_result.st_ino == opened_stat.st_ino
+        require(same_fragment, f"unit fragment changed before read: {name}")
+        require(stat.S_ISREG(opened_stat.st_mode), f"unit fragment path changed before read: {name}")
+        with os.fdopen(fd, "rb", closefd=True) as handle:
+            fd = None
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = handle.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                require(total <= UNIT_FRAGMENT_READ_MAX_BYTES, f"unit fragment content is too large: {name}")
+                chunks.append(chunk)
+    except OSError as exc:
+        raise HelperError(f"unit fragment path cannot be read safely: {name}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return b"".join(chunks).decode("utf-8")
+
+
 def _unit_state(name: str) -> dict[str, object]:
     path_result = run(["systemctl", "--user", "show", name, "-p", "FragmentPath", "--value"])
-    path = Path(path_result.stdout.strip())
+    path_value = path_result.stdout.strip()
+    require(bool(path_value), f"unit fragment path is missing: {name}")
+    path = Path(path_value)
+    content = _read_unit_fragment(path, name)
     active = run(["systemctl", "--user", "is-active", name], check=False).stdout.strip()
-    content = path.read_text(encoding="utf-8") if path.exists() else ""
     dropin = release_dropin(name)
     dropin_exists = dropin.exists() and not dropin.is_symlink()
     dropin_content = dropin.read_text(encoding="utf-8") if dropin_exists else ""

@@ -666,6 +666,78 @@ def test_bootstrap_acpx_readiness_failure_surfaces_safe_reason_and_cleans_up_bef
     assert "cbm_worker_" not in message
 
 
+def test_bootstrap_acpx_capture_state_failure_cleans_acpx_and_candidate_before_quiesce(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(fail_phase="capture.state")
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert exc_info.value.phase == "capture.state"
+    assert "bootstrap.acpx_cleanup" in fake.phases
+    assert "candidate.cleanup" in fake.phases
+    assert "quiesce.stop_workers" not in fake.phases
+    assert "quiesce.stop_live" not in fake.phases
+    assert "restore.runtime" not in fake.phases
+    assert "restore.verify" not in fake.phases
+
+
+def test_bootstrap_acpx_pre_quiesce_candidate_cleanup_failure_fails_closed(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(fail_phases={"capture.state", "candidate.cleanup"})
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert exc_info.value.phase == "candidate.cleanup"
+    assert "bootstrap.acpx_cleanup" in fake.phases
+    assert "candidate.cleanup" in fake.phases
+    assert "quiesce.stop_live" not in fake.phases
+    assert "restore.runtime" not in fake.phases
+
+
+def test_bootstrap_acpx_cleanup_failure_still_cleans_candidate_before_quiesce(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(fail_phases={"capture.state", "bootstrap.acpx_cleanup"})
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    message = str(exc_info.value)
+    assert exc_info.value.phase == "bootstrap.acpx_cleanup"
+    assert "original phase=capture.state" in message
+    assert "cleanup phase=bootstrap.acpx_cleanup" in message
+    assert "candidate.cleanup" in fake.phases
+    assert "quiesce.stop_workers" not in fake.phases
+    assert "quiesce.stop_live" not in fake.phases
+    assert "restore.runtime" not in fake.phases
+
+
+def test_bootstrap_acpx_pre_quiesce_both_cleanup_failures_are_reported_and_redacted(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(
+        fail_phases={"capture.state", "bootstrap.acpx_cleanup", "candidate.cleanup"},
+        fail_message=f"cleanup failed token={SECRET_TOKEN}",
+    )
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    message = str(exc_info.value)
+    assert exc_info.value.phase == "bootstrap.acpx_cleanup"
+    assert "original phase=capture.state" in message
+    assert "cleanup phase=bootstrap.acpx_cleanup" in message
+    assert "secondary cleanup phase=candidate.cleanup" in message
+    assert SECRET_TOKEN not in message
+    assert "candidate.cleanup" in fake.phases
+    assert "quiesce.stop_live" not in fake.phases
+    assert "restore.runtime" not in fake.phases
+
+
 def test_bootstrap_called_process_failure_before_quiesce_is_wrapped_and_cleans_up(tmp_path: Path) -> None:
     repo = fixture_repo(tmp_path)
     add_acpx_locks(repo)

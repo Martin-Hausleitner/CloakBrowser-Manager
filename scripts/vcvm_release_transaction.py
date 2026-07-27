@@ -711,15 +711,28 @@ def prepare_release_source(
     return existing
 
 
-def cleanup_candidate(executor: RemoteExecutor, config: ReleaseConfig) -> None:
+def cleanup_candidate(executor: RemoteExecutor, config: ReleaseConfig, *, fail_closed: bool = False) -> None:
     try:
         _remote(executor, "candidate.cleanup", {"release_id": config.release_id}, mutation=True)
     except Exception as exc:  # pragma: no cover - cleanup failure should not hide original candidate failure.
+        if fail_closed:
+            raise TransactionError(f"candidate cleanup failed: {bounded_error_message(exc)}", phase="candidate.cleanup") from exc
         print(f"candidate cleanup failed: {redact_text(exc)}", file=sys.stderr)
 
 
 def cleanup_acpx_bootstrap(executor: RemoteExecutor, config: ReleaseConfig) -> dict[str, object]:
     return _remote(executor, "bootstrap.acpx_cleanup", {"release_id": config.release_id}, mutation=True)
+
+
+def pre_quiesce_cleanup_failure(original: TransactionError, cleanup_errors: list[TransactionError]) -> TransactionError:
+    first = cleanup_errors[0]
+    parts = [
+        f"release failed before quiesce: original phase={original.phase} error={bounded_error_message(original)}",
+        f"cleanup phase={first.phase} error={bounded_error_message(first)}",
+    ]
+    for cleanup_error in cleanup_errors[1:]:
+        parts.append(f"secondary cleanup phase={cleanup_error.phase} error={bounded_error_message(cleanup_error)}")
+    return TransactionError("; ".join(parts), phase=first.phase)
 
 
 def run_acpx_candidate_bootstrap(
@@ -994,6 +1007,7 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         cleanup_candidate(executor, config)
     except TransactionError as exc:
         cleanup_error: TransactionError | None = None
+        pre_quiesce_cleanup_errors: list[TransactionError] = []
         if acpx_bootstrap_touched and exc.phase != "bootstrap.acpx_cleanup":
             try:
                 acpx_cleanup = cleanup_acpx_bootstrap(executor, config)
@@ -1001,21 +1015,21 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
                     acpx_bootstrap["cleanup"] = acpx_cleanup
             except TransactionError as cleanup_exc:
                 if not (quiesce_started or exc.phase in POST_QUIESCE_PHASES):
-                    raise
-                cleanup_error = cleanup_exc
-                if acpx_bootstrap:
-                    acpx_bootstrap["cleanup_error"] = {
-                        "phase": cleanup_exc.phase,
-                        "message": bounded_error_message(cleanup_exc),
-                    }
-        if candidate_touched and exc.phase == "candidate.verify":
-            cleanup_candidate(executor, config)
-            raise
-        if candidate_touched and exc.phase in {"candidate.clone", "candidate.start"}:
-            cleanup_candidate(executor, config)
-            raise
-        if candidate_touched and exc.phase.startswith("bootstrap.acpx_") and not quiesce_started:
-            cleanup_candidate(executor, config)
+                    pre_quiesce_cleanup_errors.append(cleanup_exc)
+                else:
+                    cleanup_error = cleanup_exc
+                    if acpx_bootstrap:
+                        acpx_bootstrap["cleanup_error"] = {
+                            "phase": cleanup_exc.phase,
+                            "message": bounded_error_message(cleanup_exc),
+                        }
+        if candidate_touched and not quiesce_started:
+            try:
+                cleanup_candidate(executor, config, fail_closed=True)
+            except TransactionError as cleanup_exc:
+                pre_quiesce_cleanup_errors.append(cleanup_exc)
+            if pre_quiesce_cleanup_errors:
+                raise pre_quiesce_cleanup_failure(exc, pre_quiesce_cleanup_errors) from exc
             raise
         if quiesce_started or exc.phase in POST_QUIESCE_PHASES:
             restore_old_runtime(executor, reason=exc, capture=capture, final_backup=final_backup or backup_live)

@@ -126,22 +126,25 @@ def test_remote_helper_capabilities_are_checked_in_and_versioned() -> None:
 
 def test_preflight_browser_use_uses_canonical_worker_unit_token_and_working_directory_commit(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     calls: list[tuple[str, ...]] = []
+    unit_path = tmp_path / "cloakbrowser-browser-use-worker.service"
+    unit_path.write_text("[Service]\nWorkingDirectory=/home/coder/vk-repos/CloakBrowser-Manager-browser-use\n", encoding="utf-8")
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         del kwargs
         calls.append(tuple(argv))
         if argv[:4] == ["systemctl", "--user", "show", BROWSER_USE_UNIT]:
             if "--value" in argv:
-                return subprocess.CompletedProcess(argv, 0, stdout="/home/coder/.config/systemd/user/cloakbrowser-browser-use-worker.service\n", stderr="")
+                return subprocess.CompletedProcess(argv, 0, stdout=f"{unit_path}\n", stderr="")
             return subprocess.CompletedProcess(
                 argv,
                 0,
                 stdout=(
                     "WorkingDirectory=/home/coder/vk-repos/CloakBrowser-Manager-browser-use\n"
                     "ActiveState=active\n"
-                    "FragmentPath=/home/coder/.config/systemd/user/cloakbrowser-browser-use-worker.service\n"
+                    f"FragmentPath={unit_path}\n"
                 ),
                 stderr="",
             )
@@ -164,7 +167,7 @@ def test_preflight_browser_use_uses_canonical_worker_unit_token_and_working_dire
     )
 
     assert result["unit"] == BROWSER_USE_UNIT
-    assert result["unit_path"] == "/home/coder/.config/systemd/user/cloakbrowser-browser-use-worker.service"
+    assert result["unit_path"] == str(unit_path)
     assert result["token_mode"] == f"mode:{BROWSER_USE_TOKEN_PATH}"
     assert result["commit"] == REVISION
     assert ("git", "-C", "/home/coder/cloakbrowser-manager", "rev-parse", "HEAD") not in calls
@@ -2604,6 +2607,181 @@ def test_capture_state_records_prior_acpx_absence_without_strict_preflight(monke
     assert capture["acpx_was_absent"] is True
     assert capture["acpx_active_state"] == "absent"
     assert capture["acpx_unit_sha256"] == "0" * 64
+
+
+@pytest.mark.parametrize("fragment_path", ["", "."])
+def test_capture_state_records_absent_acpx_when_unit_fragment_is_missing_or_not_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fragment_path: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    browser_unit = paths["home"] / ".config" / "systemd" / "user" / BROWSER_USE_UNIT
+    browser_unit.write_text("[Service]\nWorkingDirectory=/home/coder/browser-use\n", encoding="utf-8")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[:3] == ["docker", "inspect", remote.MANAGER_CONTAINER]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Name": f"/{remote.MANAGER_CONTAINER}",
+                            "Image": IMAGE_ID,
+                            "Config": {"Image": "cloakbrowser-manager:old", "Labels": {"org.opencontainers.image.revision": REVISION}},
+                            "Mounts": [{"Type": "volume", "Name": remote.MANAGER_VOLUME}],
+                            "HostConfig": {"RestartPolicy": {"Name": remote.MANAGER_RESTART_POLICY}, "NetworkMode": "bridge"},
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{REVISION}\n", stderr="")
+        if argv == ["systemctl", "--user", "show", BROWSER_USE_UNIT, "-p", "FragmentPath", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{browser_unit}\n", stderr="")
+        if argv == [
+            "systemctl",
+            "--user",
+            "show",
+            BROWSER_USE_UNIT,
+            "-p",
+            "WorkingDirectory",
+            "-p",
+            "ActiveState",
+            "-p",
+            "FragmentPath",
+        ]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"WorkingDirectory=/home/coder/browser-use\nActiveState=active\nFragmentPath={browser_unit}\n",
+                stderr="",
+            )
+        if argv == ["systemctl", "--user", "is-active", BROWSER_USE_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        if argv == ["systemctl", "--user", "show", remote.ACPX_UNIT, "-p", "FragmentPath", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{fragment_path}\n", stderr="")
+        if argv == ["systemctl", "--user", "is-active", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(argv, 3, stdout="inactive\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_validate_manager_bind_sources", lambda: None)
+    monkeypatch.setattr(remote, "_browser_use_worktree_commit", lambda _working_directory: REVISION)
+    monkeypatch.setattr(remote, "_token_mode", lambda _path: "600")
+    monkeypatch.setattr(
+        remote,
+        "_probe_acpx_state",
+        lambda: {"state": "absent", "missing": ["unit"], "reason_code": "missing_runtime"},
+        raising=False,
+    )
+    monkeypatch.setattr(remote, "CURRENT_LINK", tmp_path / "missing-current")
+
+    capture = remote.op_capture_state({"commit": REVISION})
+
+    assert capture["acpx_was_absent"] is True
+    assert capture["acpx_active_state"] == "absent"
+    assert capture["acpx_unit_path"] == str(remote.expected_unit_path(remote.ACPX_UNIT))
+    assert capture["acpx_absence"]["state"] == "absent"
+
+
+def test_unit_state_rejects_symlink_fragment_path_without_leaking_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "real.service"
+    target.write_text("[Service]\nExecStart=ok\n", encoding="utf-8")
+    link = tmp_path / "linked.service"
+    link.symlink_to(target)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv == ["systemctl", "--user", "show", remote.ACPX_UNIT, "-p", "FragmentPath", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{link}\n", stderr="")
+        if argv == ["systemctl", "--user", "is-active", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    with pytest.raises(remote.HelperError) as exc_info:
+        remote._unit_state(remote.ACPX_UNIT)
+
+    message = str(exc_info.value)
+    assert "symlink" in message
+    assert str(link) not in message
+    assert str(target) not in message
+
+
+def test_unit_state_rejects_fragment_path_swapped_after_lstat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unit = tmp_path / "acpx.service"
+    unit.write_text("[Service]\nExecStart=ok\n", encoding="utf-8")
+    real_open = remote.os.open
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv == ["systemctl", "--user", "show", remote.ACPX_UNIT, "-p", "FragmentPath", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{unit}\n", stderr="")
+        if argv == ["systemctl", "--user", "is-active", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    def swapping_open(path: str | bytes | int, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        del path, flags, mode
+        assert dir_fd is None
+        unit.unlink()
+        unit.mkdir()
+        return real_open(unit, remote.os.O_RDONLY)
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote.os, "open", swapping_open)
+
+    with pytest.raises(remote.HelperError) as exc_info:
+        remote._unit_state(remote.ACPX_UNIT)
+
+    assert "changed before read" in str(exc_info.value)
+
+
+def test_unit_state_rejects_fragment_path_swapped_to_different_regular_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unit = tmp_path / "acpx.service"
+    replacement = tmp_path / "replacement.service"
+    unit.write_text("[Service]\nExecStart=original\n", encoding="utf-8")
+    replacement.write_text("[Service]\nExecStart=replacement\n", encoding="utf-8")
+    real_open = remote.os.open
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv == ["systemctl", "--user", "show", remote.ACPX_UNIT, "-p", "FragmentPath", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{unit}\n", stderr="")
+        if argv == ["systemctl", "--user", "is-active", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    def swapping_open(path: str | bytes | int, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        assert dir_fd is None
+        unit.unlink()
+        replacement.rename(unit)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote.os, "open", swapping_open)
+
+    with pytest.raises(remote.HelperError) as exc_info:
+        remote._unit_state(remote.ACPX_UNIT)
+
+    message = str(exc_info.value)
+    assert message == f"unit fragment changed before read: {remote.ACPX_UNIT}"
+    assert str(unit) not in message
+    assert str(replacement) not in message
 
 
 def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_valid(

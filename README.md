@@ -220,6 +220,17 @@ python3 scripts/cbm_agent_ctl.py project-state \
 
 The command prints JSON only to stdout and atomically writes `.cbm/state/project-state-v1.json`. The contract is documented in [docs/contracts/project-state-v1.json](docs/contracts/project-state-v1.json); unknown or missing fields are rejected, modes are limited to `hot_reload`, `staging`, and `vcvm_release`, and token/cookie/auth/password fragments plus credentialed URLs are redacted or rejected before output.
 
+### Feature Manifest Gate
+
+Accepted UI capabilities are tracked in [acceptance/features.yaml](acceptance/features.yaml). The gate is intentionally source-backed: every feature must declare a route, role, required API routes, stable desktop/mobile `data-ui-state` locators, a screenshot state, and any feature flags. Run it locally with:
+
+```bash
+python3 scripts/verify_feature_manifest.py
+python3 -m pytest scripts/test_verify_feature_manifest.py -q
+```
+
+CI uploads manifest reports and optional live-smoke screenshots under `artifacts/ci/`; screenshots are not checked into the repo.
+
 ### Frontend
 
 ```bash

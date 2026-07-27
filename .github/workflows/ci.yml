@@ -204,6 +204,50 @@ jobs:
           name: frontend-build
           path: frontend/dist/
 
+  feature-manifest:
+    name: Feature manifest gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Prepare artifacts
+        run: mkdir -p "${CI_ARTIFACT_DIR}"
+
+      - name: Verify feature manifest
+        run: |
+          python scripts/verify_feature_manifest.py \
+            --json-output "${CI_ARTIFACT_DIR}/feature-manifest.json"
+
+      - name: Run feature manifest tests
+        run: |
+          python -m pytest scripts/test_verify_feature_manifest.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/feature-manifest-junit.xml"
+
+      - name: Run optional live feature smoke
+        if: ${{ env.FEATURE_MANIFEST_SMOKE_BASE_URL != '' }}
+        run: |
+          python -m pip install playwright
+          python -m playwright install chromium
+          python scripts/verify_feature_manifest.py \
+            --smoke-base-url "${FEATURE_MANIFEST_SMOKE_BASE_URL}" \
+            --artifact-dir "${CI_ARTIFACT_DIR}/feature-manifest-smoke" \
+            --json-output "${CI_ARTIFACT_DIR}/feature-manifest-smoke.json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: feature-manifest
+          path: artifacts/ci/
+
   lint:
     name: Python lint
     runs-on: ubuntu-latest

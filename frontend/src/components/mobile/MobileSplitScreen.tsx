@@ -22,7 +22,7 @@ import {
   Shrink,
   Square,
 } from "lucide-react";
-import type { Profile, ProfileHarness } from "../../lib/api";
+import type { Profile, ProfileHarness, TaskOutput } from "../../lib/api";
 import { compareOrganizedProfiles, profileOrganizationLabel } from "../../lib/profileOrganization";
 import {
   cloakServerProvider,
@@ -35,6 +35,7 @@ import {
 } from "../../lib/taskHarness";
 import { UI_STATE, uiStateAttr } from "../../lib/uiFlowRegistry";
 import { StatusIndicator } from "../StatusIndicator";
+import { AgentOutputTimeline } from "../workspace/AgentOutputTimeline";
 
 interface MobileSplitScreenProps {
   profiles: Profile[];
@@ -49,6 +50,7 @@ interface MobileSplitScreenProps {
   identityName: string | null;
   browserView: ReactNode;
   browserZoom: number;
+  taskOutputs?: TaskOutput[];
   browserConnectionStatus: "connecting" | "connected" | "reconnecting" | "failed" | null;
   remoteToolsOpen: boolean;
   onRemoteToolsOpenChange: (open: boolean) => void;
@@ -239,6 +241,7 @@ export function MobileSplitScreen({
   identityName,
   browserView,
   browserZoom,
+  taskOutputs = [],
   browserConnectionStatus,
   remoteToolsOpen,
   onRemoteToolsOpenChange,
@@ -1524,6 +1527,17 @@ export function MobileSplitScreen({
                 </div>
               ) : null}
             </div>
+          </section>
+        ) : null}
+
+        {taskOutputs.length ? (
+          <section
+            className="mobile-agent-output-panel min-h-0 max-h-48 shrink overflow-y-auto overscroll-contain border-t border-border bg-[#0a0a0a] px-2 py-1.5"
+            role="region"
+            aria-label="Managed task output"
+            tabIndex={0}
+          >
+            <AgentOutputTimeline outputs={taskOutputs} />
           </section>
         ) : null}
 

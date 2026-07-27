@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
-import { api, type Profile } from "../../lib/api";
+import { api, type Profile, type TaskOutput } from "../../lib/api";
 import { codexComputerUseProvider, taskHarnessReadyEvent } from "../../lib/taskHarness";
 import { UI_STATE, expectUiState } from "../../lib/uiFlowRegistry";
 import { MobileSplitScreen } from "./MobileSplitScreen";
@@ -64,6 +64,19 @@ const secondRunningProfile: Profile = {
   accent_color: "#22c55e",
   harness: "opencode",
 };
+
+const typedOutput = (overrides: Partial<TaskOutput>): TaskOutput => ({
+  id: "output-1",
+  run_id: "run-1",
+  sequence: 1,
+  idempotency_key: "output-1",
+  kind: "status",
+  summary: "Working",
+  payload: {},
+  created_at: "2026-07-26T00:00:00Z",
+  artifact_expired: false,
+  ...overrides,
+});
 
 function installTaskHarness() {
   const send = vi.fn().mockResolvedValue({
@@ -675,6 +688,47 @@ describe("MobileSplitScreen", () => {
     expect(screen.queryByText("Profile health")).toBeNull();
     expect(screen.queryByRole("button", { name: "Run health check" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Proxy check" })).toBeNull();
+  });
+
+  it("renders canonical managed task output cards above the composer in a scrollable region", async () => {
+    const { container } = runningSplit({
+      taskOutputs: [
+        typedOutput({
+          kind: "action",
+          summary: "Opened checkout",
+          payload: { name: "navigate", url: "https://example.test/checkout", step: 1 },
+        }),
+        typedOutput({
+          id: "shot-1",
+          sequence: 2,
+          kind: "screenshot",
+          summary: "Checkout screenshot",
+        }),
+        typedOutput({
+          id: "summary-1",
+          sequence: 3,
+          kind: "summary",
+          summary: "Task complete",
+          payload: { text: "Checkout is ready for review." },
+        }),
+      ],
+    });
+    expect(await screen.findByText("Codex Computer Use")).toBeTruthy();
+
+    const outputRegion = screen.getByRole("region", { name: "Managed task output" });
+    const composer = screen.getByRole("textbox", { name: "Browser task" }).closest("form");
+
+    expect(outputRegion.compareDocumentPosition(composer as HTMLElement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(outputRegion.className).toContain("mobile-agent-output-panel");
+    expect(outputRegion.getAttribute("tabindex")).toBe("0");
+    expect(within(outputRegion).getByRole("list", { name: /agent output/i })).toBeTruthy();
+    expect(within(outputRegion).getByText("navigate")).toBeTruthy();
+    expect(within(outputRegion).getByRole("img", { name: "Checkout screenshot" }).getAttribute("src")).toBe(
+      "/api/task-outputs/shot-1/screenshot",
+    );
+    expect(within(outputRegion).getByText("Checkout is ready for review.")).toBeTruthy();
+    expect(screen.getAllByText("VNC stream")).toHaveLength(1);
+    expect(container.querySelectorAll(".mobile-command-button")).toHaveLength(3);
   });
 
   it("lets the browser consume unused workspace until chat or tools are opened", () => {

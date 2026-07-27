@@ -1,3 +1,10 @@
 [tool.pytest.ini_options]
+minversion = "8.0"
 testpaths = ["backend/tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "anyio: run the test against AnyIO async backends",
+  "asyncio: run the test with pytest-asyncio",
+  "trio: run the test with pytest-trio",
+]

@@ -1,0 +1,297 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+  CI_ARTIFACT_DIR: artifacts/ci
+
+jobs:
+  project-gates:
+    name: Schema, env, version, and disk gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dev dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Prepare artifacts
+        run: mkdir -p "${CI_ARTIFACT_DIR}"
+
+      - name: Schema gate
+        run: |
+          python -m pytest backend/tests/test_models.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/schema-junit.xml"
+
+      - name: Environment gate
+        run: |
+          set -euo pipefail
+          tracked_env_files="$(git ls-files | grep -E '(^|/)\.env($|\.|/)|(^|/).*(secret|token).*$' || true)"
+          if [ -n "${tracked_env_files}" ]; then
+            printf '%s\n' "${tracked_env_files}" | tee "${CI_ARTIFACT_DIR}/tracked-env-files.txt"
+            exit 1
+          fi
+          printf 'no tracked env/token/secret files\n' | tee "${CI_ARTIFACT_DIR}/tracked-env-files.txt"
+
+      - name: Version gate
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          package = json.loads(Path("frontend/package.json").read_text(encoding="utf-8"))
+          version = package.get("version", "")
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version):
+              raise SystemExit(f"frontend/package.json version is not semver: {version!r}")
+
+          requirements = Path("backend/requirements.txt").read_text(encoding="utf-8")
+          if "cloakbrowser[geoip]>=" not in requirements:
+              raise SystemExit("backend requirements must keep an explicit cloakbrowser[geoip] lower bound")
+
+          Path("artifacts/ci/version-gate.txt").write_text(
+              f"frontend_version={version}\ncloakbrowser_requirement=present\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Disk gate
+        run: |
+          set -euo pipefail
+          df -h . | tee "${CI_ARTIFACT_DIR}/disk.txt"
+          python - <<'PY'
+          import shutil
+
+          free_gib = shutil.disk_usage(".").free / (1024 ** 3)
+          if free_gib < 2:
+              raise SystemExit(f"less than 2 GiB free for CI workspace: {free_gib:.2f} GiB")
+          print(f"free_gib={free_gib:.2f}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: project-gates
+          path: artifacts/ci/
+
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dev dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run backend tests
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          python -m pytest backend/tests -q \
+            --junitxml="${CI_ARTIFACT_DIR}/backend-junit.xml"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-tests
+          path: artifacts/ci/
+
+  migration-tests:
+    name: Migration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dev dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run migration tests
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          python -m pytest backend/tests/test_workspace_migration.py backend/tests/test_database.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/migration-junit.xml"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: migration-tests
+          path: artifacts/ci/
+
+  frontend-tests:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: |
+          mkdir -p ../artifacts/ci
+          npm test -- --reporter=default --reporter=junit --outputFile=../artifacts/ci/frontend-junit.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-tests
+          path: artifacts/ci/
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-build
+          path: frontend/dist/
+
+  lint:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install lint dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run ruff correctness lint
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          python -m ruff check backend scripts --select E9,F63,F7,F82 \
+            --output-format=github | tee "${CI_ARTIFACT_DIR}/ruff.txt"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint
+          path: artifacts/ci/
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for high-confidence secrets
+        run: |
+          set -euo pipefail
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          pattern='(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{36,255}|github_pat_[A-Za-z0-9_]{22,255}|xox[baprs]-[A-Za-z0-9-]{10,255}|-----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY-----|sk-[A-Za-z0-9]{32,})'
+          if git grep -nE -I -e "${pattern}" -- . ':!frontend/package-lock.json' ':!uv.lock' > "${CI_ARTIFACT_DIR}/secret-candidates.txt"; then
+            cat "${CI_ARTIFACT_DIR}/secret-candidates.txt"
+            exit 1
+          fi
+          printf 'no high-confidence secret patterns found\n' | tee "${CI_ARTIFACT_DIR}/secret-candidates.txt"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: secret-scan
+          path: artifacts/ci/
+
+  docker-smoke:
+    name: Docker smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start smoke compose
+        run: |
+          set -euo pipefail
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          docker compose -f deploy/ci/docker-compose.smoke.yml up -d --build
+
+      - name: Wait for health
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18080/health > "${CI_ARTIFACT_DIR}/docker-health.json"; then
+              cat "${CI_ARTIFACT_DIR}/docker-health.json"
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose -f deploy/ci/docker-compose.smoke.yml ps
+          exit 1
+
+      - name: Capture compose logs
+        if: always()
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          docker compose -f deploy/ci/docker-compose.smoke.yml ps > "${CI_ARTIFACT_DIR}/docker-compose-ps.txt" || true
+          docker compose -f deploy/ci/docker-compose.smoke.yml logs --no-color > "${CI_ARTIFACT_DIR}/docker-smoke.log" || true
+
+      - name: Stop smoke compose
+        if: always()
+        run: docker compose -f deploy/ci/docker-compose.smoke.yml down -v --remove-orphans
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-smoke
+          path: artifacts/ci/

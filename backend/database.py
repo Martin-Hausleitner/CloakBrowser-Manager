@@ -560,6 +560,72 @@ def _migrate_worker_harness_preflights_v1(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_task_run_binding_v1(conn: sqlite3.Connection) -> None:
+    """Persist immutable run/profile binding details used before CDP capability issue."""
+    migration_version = "task_run_binding_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        task_runs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+        ).fetchone()
+        if task_runs_exists is None:
+            conn.rollback()
+            return
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if "viewport_revision" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN viewport_revision TEXT")
+        if "launch_evidence_json" not in cols:
+            conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN launch_evidence_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        profile_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(profiles)").fetchall()
+        }
+        width_expr = (
+            "COALESCE(profiles.screen_width, 1920)"
+            if "screen_width" in profile_cols
+            else "1920"
+        )
+        height_expr = (
+            "COALESCE(profiles.screen_height, 1080)"
+            if "screen_height" in profile_cols
+            else "1080"
+        )
+        conn.execute(
+            f"""
+            UPDATE task_runs
+            SET viewport_revision = COALESCE(
+                viewport_revision,
+                (
+                    SELECT printf('%sx%s', {width_expr}, {height_expr})
+                    FROM profiles
+                    WHERE profiles.id = task_runs.profile_id_snapshot
+                )
+            )
+            WHERE viewport_revision IS NULL
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
@@ -832,6 +898,7 @@ def init_db():
         _migrate_task_runs_acpx_v1(conn)
         _migrate_worker_harness_presence_v1(conn)
         _migrate_worker_harness_preflights_v1(conn)
+        _migrate_task_run_binding_v1(conn)
 
 
 def _now() -> str:
@@ -1085,6 +1152,11 @@ def get_profile(profile_id: str) -> dict[str, Any] | None:
         ).fetchall()
         profile["tags"] = [dict(t) for t in tags]
         return profile
+
+
+def profile_viewport_revision(profile: dict[str, Any]) -> str:
+    """Return the immutable viewport binding token for a profile snapshot."""
+    return f"{int(profile.get('screen_width') or 1920)}x{int(profile.get('screen_height') or 1080)}"
 
 
 def list_profiles() -> list[dict[str, Any]]:
@@ -1678,6 +1750,8 @@ def _task_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
     run = dict(row)
     run["launch_if_stopped"] = bool(run.get("launch_if_stopped"))
     run["allowed_origins"] = _json_string_list(run.pop("allowed_origins_json", None))
+    launch_evidence = run.pop("launch_evidence_json", None)
+    run["launch_evidence"] = _json_object(launch_evidence)
     run["health_snapshot"] = _json_object(run.pop("health_snapshot_json", None))
     run["health_decision"] = _json_object(run.pop("health_decision_json", None))
     override = run.pop("health_override_json", None)
@@ -1894,6 +1968,15 @@ def _insert_task_run_on_conn(
     now: str,
 ) -> None:
     """Insert a task_run and bump session activity on an open connection."""
+    profile = conn.execute(
+        "SELECT screen_width, screen_height, updated_at FROM profiles WHERE id = ?",
+        (profile_id,),
+    ).fetchone()
+    viewport_revision = (
+        f"{int(profile['screen_width'] or 1920)}x{int(profile['screen_height'] or 1080)}"
+        if profile is not None
+        else "1920x1080"
+    )
     conn.execute(
         """INSERT INTO task_runs (
             id, task_session_id, task_message_id, profile_id, profile_id_snapshot,
@@ -1903,11 +1986,12 @@ def _insert_task_run_on_conn(
             retry_count, first_action_sequence, first_action_at, next_output_sequence,
             claimed_by, claim_expires_at, worker_id, claim_eligible_at, cancelled_at,
             created_by_kind, created_by_id, created_at, updated_at,
-            lease_id, capability_digest, error_code, error_message, queued_at
+            lease_id, capability_digest, error_code, error_message, queued_at,
+            viewport_revision, launch_evidence_json
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
             0, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?,
-            NULL, NULL, NULL, NULL, ?
+            NULL, NULL, NULL, NULL, ?, ?, '{}'
         )""",
         (
             run_id,
@@ -1932,6 +2016,7 @@ def _insert_task_run_on_conn(
             now,
             now,
             now if status == "queued" else None,
+            viewport_revision,
         ),
     )
     conn.execute(
@@ -2086,6 +2171,45 @@ def get_task_run(run_id: str) -> dict[str, Any] | None:
     with get_db() as conn:
         row = conn.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
         return _task_run_from_row(row) if row else None
+
+
+def record_task_run_launch_evidence(
+    run_id: str,
+    *,
+    evidence: dict[str, Any],
+) -> dict[str, Any] | None:
+    now = _now()
+    allowed_fields = {
+        "profile_id",
+        "user_data_dir_digest",
+        "display",
+        "vnc_ws_port",
+        "cdp_port",
+        "cdp_ready",
+        "cdp_browser",
+        "source",
+        "launched",
+        "validated_at",
+    }
+    safe_evidence: dict[str, Any] = {}
+    for key, value in evidence.items():
+        if key not in allowed_fields or not isinstance(
+            value, (str, int, float, bool, type(None))
+        ):
+            continue
+        safe_evidence[str(key)] = value[:512] if isinstance(value, str) else value
+    encoded = json.dumps(safe_evidence, separators=(",", ":"), sort_keys=True)
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE task_runs
+            SET launch_evidence_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (encoded, now, run_id),
+        )
+        conn.commit()
+    return get_task_run(run_id)
 
 
 def cancel_task_run(run_id: str) -> dict[str, Any] | None:

@@ -29,6 +29,7 @@ WORKER_MAINTENANCE_INTERVAL_SECONDS = 5
 HARNESS_PRESENCE_TTL_SECONDS = 45
 HARNESS_PREFLIGHT_TTL_SECONDS = 300
 ACPX_AGENTS = ("codex", "claude", "cursor", "grok-build", "opencode")
+UNIVERSAL_PROFILE_HARNESSES = frozenset({"codex"})
 
 ALLOWLISTED_FAIL_CODES = frozenset(
     {
@@ -764,6 +765,7 @@ class WorkerRuntimeService:
             "agent": run.get("agent"),
             "status": run["status"],
             "allowed_origins": run["allowed_origins"],
+            "viewport_revision": run.get("viewport_revision"),
             "max_steps": run["max_steps"],
             "timeout_seconds": run["timeout_seconds"],
             "model_alias": run.get("model_alias"),
@@ -868,6 +870,25 @@ class WorkerRuntimeService:
 
                 # Fresh health evaluation from current profile measurement.
                 profile_id = str(row["profile_id"] or row["profile_id_snapshot"])
+                profile = db.get_profile(profile_id)
+                if profile is None:
+                    conn.commit()
+                    raise WorkerNotFound(run_id)
+                profile_harness = str(profile.get("harness") or "codex")
+                run_harness = str(row["harness"] or "")
+                if (
+                    profile_harness != run_harness
+                    and profile_harness not in UNIVERSAL_PROFILE_HARNESSES
+                    and run_harness not in UNIVERSAL_PROFILE_HARNESSES
+                ):
+                    conn.commit()
+                    raise WorkerNotFound(run_id)
+                expected_viewport_revision = row["viewport_revision"]
+                if expected_viewport_revision and (
+                    db.profile_viewport_revision(profile) != str(expected_viewport_revision)
+                ):
+                    conn.commit()
+                    raise WorkerNotFound(run_id)
                 snapshot, decision = db.build_run_health_gate(profile_id)
                 # Also honour immutable override already on the run.
                 run_decision = db._json_object(row["health_decision_json"])
@@ -967,6 +988,11 @@ class WorkerRuntimeService:
                     "expires_at": _iso(expires_at),
                     "profile_id": profile_id,
                     "run_id": run_id,
+                    "harness": run_harness,
+                    "agent": row["agent"],
+                    "allowed_origins": db._json_string_list(row["allowed_origins_json"]),
+                    "viewport_revision": row["viewport_revision"],
+                    "launch_evidence": db._json_object(row["launch_evidence_json"]),
                 }
             except (WorkerNotFound, CapabilityConflict, CapabilityNotReady):
                 raise

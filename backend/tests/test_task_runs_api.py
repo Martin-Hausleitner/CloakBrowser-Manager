@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import concurrent.futures
-import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -156,6 +154,10 @@ def test_create_run_stores_prompt_once_and_copies_immutable_health(
     assert created["profile_id"] == profile["id"]
     assert created["profile_id_snapshot"] == profile["id"]
     assert created["allowed_origins"] == ["https://example.com"]
+    assert created["viewport_revision"] == (
+        f"{profile['screen_width']}x{profile['screen_height']}"
+    )
+    assert created["launch_evidence"] == {}
     assert created["retry_count"] == 0
     assert created["first_action_sequence"] is None
     assert created["health_snapshot"]["state"] == "passed"
@@ -175,6 +177,41 @@ def test_create_run_stores_prompt_once_and_copies_immutable_health(
     assert fetched.json()["health_snapshot"]["state"] == "passed"
     assert fetched.json()["health_decision"]["allowed"] is True
     assert db.get_task_session(session["id"])["profile_id"] == profile["id"]
+
+
+def test_create_run_rejects_incompatible_explicit_profile_harness(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="browser-use"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Profile harness is not compatible with run harness"
+
+
+def test_create_run_allows_default_codex_profile_as_universal_binding(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Default universal", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="browser-use"),
+    )
+
+    assert response.status_code == 201, response.text
 
 
 def test_initial_status_follows_health_decision(client_access: TestClient):

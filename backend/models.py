@@ -1092,6 +1092,8 @@ class TaskRunResponse(BaseModel):
     status: TaskRunStatus
     launch_if_stopped: bool = False
     allowed_origins: list[str] = Field(default_factory=list)
+    viewport_revision: str | None = None
+    launch_evidence: dict[str, object] = Field(default_factory=dict)
     max_steps: int
     timeout_seconds: int
     model_alias: str | None = None
@@ -1129,6 +1131,7 @@ class WorkerClaimResponse(BaseModel):
     agent: AcpxAgent | None = None
     status: TaskRunStatus
     allowed_origins: list[str] = Field(default_factory=list)
+    viewport_revision: str | None = None
     max_steps: int
     timeout_seconds: int
     model_alias: str | None = None
@@ -1206,6 +1209,11 @@ class WorkerCapabilityResponse(BaseModel):
     expires_at: str
     profile_id: str
     run_id: str
+    harness: Harness
+    agent: AcpxAgent | None = None
+    allowed_origins: list[str] = Field(default_factory=list)
+    viewport_revision: str | None = None
+    launch_evidence: dict[str, object] = Field(default_factory=dict)
 
 
 class WorkerFailRequest(BaseModel):

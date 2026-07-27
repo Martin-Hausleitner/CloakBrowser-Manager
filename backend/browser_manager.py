@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import socket
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from cloakbrowser import launch_persistent_context_async
 
@@ -89,6 +92,16 @@ def _validate_proxy(url: str) -> None:
         raise ValueError("Proxy URL missing hostname")
     if not port:
         raise ValueError("Proxy URL missing port")
+
+
+def _fetch_cdp_version(port: int) -> dict[str, Any]:
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{int(port)}/json/version",
+        timeout=0.5,
+    ) as response:
+        payload = response.read(64 * 1024)
+    decoded = json.loads(payload.decode("utf-8"))
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _init_profile_defaults(user_data_dir: Path, search_engine: str | None = None) -> None:
@@ -195,6 +208,7 @@ class RunningProfile:
     display: int
     ws_port: int
     cdp_port: int
+    user_data_dir: str | None = None
 
 
 class BrowserManager:
@@ -329,6 +343,7 @@ class BrowserManager:
                 display=display,
                 ws_port=ws_port,
                 cdp_port=cdp_port,
+                user_data_dir=str(user_data_dir),
             )
 
             # Auto-cleanup if browser crashes or user closes Chrome via VNC
@@ -395,6 +410,66 @@ class BrowserManager:
                 "cdp_url": f"/api/profiles/{profile_id}/cdp",
             }
         return {"status": "stopped", "vnc_ws_port": None, "display": None, "cdp_url": None}
+
+    def validate_running_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+        """Return redacted running-profile evidence or raise for stale/wrong bindings."""
+        profile_id = str(profile.get("id") or "")
+        running = self.running.get(profile_id)
+        if running is None:
+            raise RuntimeError("profile_not_running")
+        if str(getattr(running, "profile_id", profile_id)) != profile_id:
+            raise RuntimeError("profile_binding_mismatch")
+        expected_dir = str(Path(str(profile.get("user_data_dir") or "")).resolve())
+        running_dir = getattr(running, "user_data_dir", None)
+        if running_dir is not None:
+            actual_dir = str(Path(str(running_dir)).resolve())
+            if expected_dir and actual_dir != expected_dir:
+                raise RuntimeError("profile_path_mismatch")
+        cdp_port = int(getattr(running, "cdp_port", 0) or 0)
+        if cdp_port <= 0:
+            raise RuntimeError("cdp_unavailable")
+        return {
+            "profile_id": profile_id,
+            "user_data_dir_digest": hashlib.sha256(
+                expected_dir.encode("utf-8")
+            ).hexdigest(),
+            "display": f":{int(getattr(running, 'display', 0) or 0)}",
+            "vnc_ws_port": int(getattr(running, "ws_port", 0) or 0),
+            "cdp_port": cdp_port,
+        }
+
+    async def wait_for_cdp_ready(
+        self,
+        profile: dict[str, Any],
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Poll the Manager-owned loopback CDP endpoint until Chrome answers."""
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+        last_error: str | None = None
+        while time.monotonic() < deadline:
+            evidence = self.validate_running_profile(profile)
+            port = int(evidence["cdp_port"])
+            try:
+                data = await asyncio.to_thread(_fetch_cdp_version, port)
+            except Exception as exc:  # noqa: BLE001
+                last_error = type(exc).__name__
+                await asyncio.sleep(0.1)
+                continue
+            browser = data.get("Browser") if isinstance(data, dict) else None
+            ws_url = data.get("webSocketDebuggerUrl") if isinstance(data, dict) else None
+            parsed_ws = urlparse(ws_url) if isinstance(ws_url, str) else None
+            if (
+                parsed_ws is None
+                or parsed_ws.scheme not in {"ws", "wss"}
+                or parsed_ws.hostname != "127.0.0.1"
+                or parsed_ws.port != port
+            ):
+                raise RuntimeError("cdp_profile_mismatch")
+            evidence["cdp_ready"] = True
+            evidence["cdp_browser"] = str(browser or "")
+            return evidence
+        raise RuntimeError(last_error or "cdp_not_ready")
 
     async def cleanup_all(self):
         """Stop all running profiles. Called on shutdown."""

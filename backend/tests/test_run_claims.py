@@ -71,6 +71,7 @@ def create_run(
     task: str = "Work",
     harness: str = "browser-use",
     agent: str | None = None,
+    launch_if_stopped: bool = False,
 ) -> dict:
     seed_passed_health(profile_id)
     session = db.create_task_session(profile_id, sandbox_id, "bootstrap")
@@ -82,6 +83,7 @@ def create_run(
             **({"agent": agent} if agent is not None else {}),
             "task": task,
             "profile_id": profile_id,
+            "launch_if_stopped": launch_if_stopped,
             "allowed_origins": ["https://example.com"],
             "max_steps": 20,
             "timeout_seconds": 300,
@@ -492,6 +494,91 @@ def test_claim_response_excludes_secrets(client_access: TestClient):
     assert body["task"]
     assert body["profile_id"]
     assert body["allowed_origins"] == ["https://example.com"]
+    assert body["viewport_revision"]
+
+
+def test_launch_if_stopped_launches_records_evidence_before_capability(
+    client_access: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend import main
+
+    profile = db.create_profile("Launch me", sandbox_id="alpha")
+    run = create_run(
+        client_access,
+        profile_id=profile["id"],
+        launch_if_stopped=True,
+    )
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+
+    async def fake_launch(launched_profile: dict):
+        main.browser_mgr.running[launched_profile["id"]] = object()
+        return object()
+
+    async def fake_wait(ready_profile: dict, *, timeout_seconds: float):
+        assert ready_profile["id"] == profile["id"]
+        assert timeout_seconds == 5.0
+        return {
+            "profile_id": profile["id"],
+            "user_data_dir": "/private/profile/path-must-not-persist",
+            "user_data_dir_digest": "a" * 64,
+            "display": ":100",
+            "vnc_ws_port": 6100,
+            "cdp_port": 5100,
+            "cdp_ready": True,
+        }
+
+    monkeypatch.setattr(main.browser_mgr, "launch", fake_launch)
+    monkeypatch.setattr(main.browser_mgr, "wait_for_cdp_ready", fake_wait)
+
+    capability = client_access.post(
+        f"/internal/task-runs/{run['id']}/capability",
+        headers=worker_headers(),
+    )
+
+    assert capability.status_code == 200, capability.text
+    body = capability.json()
+    assert body["profile_id"] == profile["id"]
+    assert body["harness"] == "browser-use"
+    assert body["allowed_origins"] == ["https://example.com"]
+    assert body["viewport_revision"] == claimed.json()["viewport_revision"]
+    assert body["launch_evidence"]["source"] == "manager"
+    assert body["launch_evidence"]["launched"] is True
+    assert body["launch_evidence"]["cdp_ready"] is True
+    assert body["launch_evidence"]["user_data_dir_digest"] == "a" * 64
+    assert "user_data_dir" not in body["launch_evidence"]
+
+    fetched = client_access.get(
+        f"/api/task-runs/{run['id']}",
+        headers=bootstrap_headers(),
+    ).json()
+    assert fetched["launch_evidence"]["source"] == "manager"
+    assert fetched["launch_evidence"]["cdp_ready"] is True
+
+
+def test_capability_rejects_viewport_revision_drift_without_token(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Resize before run", sandbox_id="alpha")
+    run = create_run(client_access, profile_id=profile["id"])
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+    db.update_profile(profile["id"], screen_width=1366)
+
+    capability = client_access.post(
+        f"/internal/task-runs/{run['id']}/capability",
+        headers=worker_headers(),
+    )
+
+    assert capability.status_code == 404
+    assert "cbm_run_" not in capability.text
 
 
 def test_direct_lease_blocks_claim_eligibility(client_access: TestClient):

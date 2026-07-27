@@ -18,6 +18,7 @@ import shutil
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import starlette.requests
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -63,7 +64,6 @@ if __package__:
         ExtensionTemplatesResponse,
         ExtensionTemplateItem,
         ExtensionInventoryResponse,
-        ExtensionItem,
         ExtensionOpenSessionRequest,
         ExtensionOpenSessionResponse,
         ExtensionProfileSummary,
@@ -160,7 +160,6 @@ else:  # Support `uvicorn main:app` from the backend directory.
         ExtensionTemplatesResponse,
         ExtensionTemplateItem,
         ExtensionInventoryResponse,
-        ExtensionItem,
         ExtensionOpenSessionRequest,
         ExtensionOpenSessionResponse,
         ExtensionProfileSummary,
@@ -1883,6 +1882,56 @@ def _worker_not_found() -> HTTPException:
     return HTTPException(status_code=404, detail="Not found")
 
 
+def _profile_harness_compatible(profile_harness: object, run_harness: object) -> bool:
+    profile_value = str(profile_harness or "codex")
+    run_value = str(run_harness or "")
+    return (
+        profile_value == run_value
+        or profile_value in worker_runtime_mod.UNIVERSAL_PROFILE_HARNESSES
+        or run_value in worker_runtime_mod.UNIVERSAL_PROFILE_HARNESSES
+    )
+
+
+async def _prepare_run_browser_for_capability(worker_id: str, run_id: str) -> None:
+    """Launch/validate Manager-owned CDP before issuing a worker run token."""
+    try:
+        run = worker_runtime_service.require_bound_claim(worker_id, run_id)
+    except worker_runtime_mod.WorkerNotFound:
+        raise
+    profile_id = str(run.get("profile_id") or run.get("profile_id_snapshot") or "")
+    if not profile_id:
+        raise worker_runtime_mod.WorkerNotFound(run_id)
+    profile = db.get_profile(profile_id)
+    if profile is None:
+        raise worker_runtime_mod.WorkerNotFound(run_id)
+
+    # Preserve the legacy unit-test path for claims that did not ask Manager to
+    # launch and have no running browser yet. The launch_if_stopped path and any
+    # already-running profile are strictly checked before token issue.
+    should_probe_cdp = bool(run.get("launch_if_stopped")) or profile_id in browser_mgr.running
+    if not should_probe_cdp:
+        return
+
+    launched = False
+    if profile_id not in browser_mgr.running:
+        try:
+            await browser_mgr.launch(profile)
+            launched = True
+        except RuntimeError as exc:
+            if profile_id not in browser_mgr.running:
+                raise exc
+
+    evidence = await browser_mgr.wait_for_cdp_ready(profile, timeout_seconds=5.0)
+    evidence.update(
+        {
+            "source": "manager",
+            "launched": launched,
+            "validated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    db.record_task_run_launch_evidence(run_id, evidence=evidence)
+
+
 def _require_project_sandbox(
     scope: Scope, sandbox_id: str, permission: access.Permission
 ) -> access.AccessIdentity:
@@ -2994,6 +3043,9 @@ async def create_task_run(session_id: str, body: TaskRunCreate, request: Request
         )
         raise HTTPException(status_code=404, detail="Profile not found")
 
+    if not _profile_harness_compatible(profile.get("harness"), body.harness):
+        raise HTTPException(status_code=422, detail="Profile harness is not compatible with run harness")
+
     if not body.allowed_origins and not _can_operate_task_sandbox(identity, sandbox_id):
         raise HTTPException(
             status_code=403,
@@ -3235,9 +3287,13 @@ async def heartbeat_internal_task_run(run_id: str, request: Request):
 async def issue_internal_task_run_capability(run_id: str, request: Request):
     worker = _require_worker(request)
     try:
+        await _prepare_run_browser_for_capability(worker.id, run_id)
         body = worker_runtime_service.issue_capability(worker.id, run_id)
     except worker_runtime_mod.WorkerNotFound as exc:
         raise _worker_not_found() from exc
+    except RuntimeError as exc:
+        logger.warning("Run capability CDP preparation failed for %s: %s", run_id, exc)
+        raise HTTPException(status_code=409, detail="Not ready") from exc
     except worker_runtime_mod.CapabilityConflict as exc:
         raise HTTPException(status_code=409, detail="Not found") from exc
     except worker_runtime_mod.CapabilityNotReady as exc:

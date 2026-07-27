@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import socket
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from backend import extension_catalog
@@ -137,6 +138,11 @@ def test_auto_launch_failure_redacts_exception_details(monkeypatch, caplog):
 _mgr = BrowserManager()
 
 
+@pytest.fixture()
+def anyio_backend():
+    return "asyncio"
+
+
 def test_build_args_always_includes_base():
     args = _mgr._build_fingerprint_args({})
     assert "--disable-infobars" in args
@@ -225,6 +231,107 @@ def test_launch_args_none_no_effect():
     base_count = len(args)
     args += profile.get("launch_args") or []
     assert len(args) == base_count
+
+
+def test_validate_running_profile_rejects_wrong_user_data_dir(tmp_path: Path):
+    mgr = BrowserManager()
+    profile_dir = tmp_path / "profile"
+    other_dir = tmp_path / "other"
+    profile_dir.mkdir()
+    other_dir.mkdir()
+    profile = {
+        "id": "profile-1",
+        "user_data_dir": str(profile_dir),
+    }
+    mgr.running["profile-1"] = SimpleNamespace(
+        profile_id="profile-1",
+        user_data_dir=str(other_dir),
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+
+    with pytest.raises(RuntimeError, match="profile_path_mismatch"):
+        mgr.validate_running_profile(profile)
+
+
+def test_validate_running_profile_hashes_manager_owned_path(tmp_path: Path):
+    mgr = BrowserManager()
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    profile = {"id": "profile-1", "user_data_dir": str(profile_dir)}
+    mgr.running["profile-1"] = SimpleNamespace(
+        profile_id="profile-1",
+        user_data_dir=str(profile_dir),
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+
+    evidence = mgr.validate_running_profile(profile)
+
+    assert evidence["user_data_dir_digest"]
+    assert str(profile_dir) not in str(evidence)
+
+
+@pytest.mark.anyio
+async def test_wait_for_cdp_ready_rejects_wrong_loopback_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from backend import browser_manager as browser_manager_mod
+
+    mgr = BrowserManager()
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    profile = {
+        "id": "profile-1",
+        "user_data_dir": str(profile_dir),
+    }
+    mgr.running["profile-1"] = SimpleNamespace(
+        profile_id="profile-1",
+        user_data_dir=str(profile_dir),
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+
+    monkeypatch.setattr(
+        browser_manager_mod,
+        "_fetch_cdp_version",
+        lambda _port: {
+            "Browser": "Chrome/test",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:5999/devtools/browser/wrong",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="cdp_profile_mismatch"):
+        await mgr.wait_for_cdp_ready(profile, timeout_seconds=0.2)
+
+
+@pytest.mark.anyio
+async def test_wait_for_cdp_ready_requires_debugger_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from backend import browser_manager as browser_manager_mod
+
+    mgr = BrowserManager()
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    profile = {"id": "profile-1", "user_data_dir": str(profile_dir)}
+    mgr.running["profile-1"] = SimpleNamespace(
+        profile_id="profile-1",
+        user_data_dir=str(profile_dir),
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+    monkeypatch.setattr(
+        browser_manager_mod,
+        "_fetch_cdp_version",
+        lambda _port: {"Browser": "Chrome/test"},
+    )
+
+    with pytest.raises(RuntimeError, match="cdp_profile_mismatch"):
+        await mgr.wait_for_cdp_ready(profile, timeout_seconds=0.2)
 
 
 # ── VNC browser window bounds ─────────────────────────────────────────────────
@@ -385,7 +492,6 @@ def test_init_system_default_does_not_overwrite_existing_preferences(tmp_path: P
 def test_init_idempotent(tmp_path: Path):
     _init_profile_defaults(tmp_path)
     bookmarks_path = tmp_path / "Default" / "Bookmarks"
-    original = bookmarks_path.read_text()
 
     # Write a sentinel to the file
     bookmarks_path.write_text("SENTINEL")

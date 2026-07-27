@@ -17,6 +17,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 from urllib.error import URLError
@@ -47,6 +48,10 @@ MANAGER_BIND_MOUNTS = (
 MANAGER_RESTART_POLICY = "unless-stopped"
 LIVE_PORT = 18115
 CANDIDATE_PORT = 18116
+CANDIDATE_READINESS_TIMEOUT_SECONDS = 180.0
+CANDIDATE_READINESS_POLL_INTERVAL_SECONDS = 2.0
+CANDIDATE_PROBE_TIMEOUT_SECONDS = 10.0
+CANDIDATE_CURL_CONNECT_TIMEOUT_SECONDS = 2.0
 ACPX_NODE_LOCK = "deploy/acpx-runtime/package-lock.json"
 ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
 ACPX_BOOTSTRAP_DIR = "acpx-bootstrap"
@@ -371,6 +376,7 @@ def run(
     input_text: str | None = None,
     check: bool = True,
     cwd: Path | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     require(not isinstance(argv, str), "commands must use argv arrays")
     return subprocess.run(
@@ -381,6 +387,7 @@ def run(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
+        timeout=timeout,
     )
 
 
@@ -966,21 +973,179 @@ def op_candidate_start(args: dict[str, object]) -> dict[str, object]:
     return {"container": container, "port": CANDIDATE_PORT, "container_port": MANAGER_CONTAINER_PORT, "manager_bind_mounts": manager_bind_mount_receipt(), "restart_policy": MANAGER_RESTART_POLICY}
 
 
-def op_candidate_verify(args: dict[str, object]) -> dict[str, object]:
-    validate_commit(args["commit"])
-    health = run(["curl", "-fsS", f"http://127.0.0.1:{CANDIDATE_PORT}/health"], check=False).returncode == 0
-    status = json.loads(run(["curl", "-fsS", f"http://127.0.0.1:{CANDIDATE_PORT}/api/auth/status"]).stdout)
-    migrations = json.loads(run(["curl", "-fsS", f"http://127.0.0.1:{CANDIDATE_PORT}/api/admin/migrations"]).stdout)
-    revision = run(["docker", "inspect", str(args["container"]), "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}"]).stdout.strip()
+def _candidate_readiness_error(
+    *,
+    attempt_count: int,
+    elapsed_seconds: float,
+    deadline_seconds: float,
+    reason: str,
+    detail: str = "",
+) -> HelperError:
+    message = (
+        "candidate readiness failed: "
+        f"attempt_count={attempt_count} "
+        f"elapsed_seconds={elapsed_seconds:.2f} "
+        f"deadline_seconds={deadline_seconds:g} "
+        f"reason={reason}"
+    )
+    if detail:
+        message = f"{message} detail={detail}"
+    return HelperError(message)
+
+
+def _candidate_remaining_seconds(started: float, deadline_seconds: float) -> float:
+    return deadline_seconds - (time.monotonic() - started)
+
+
+def _candidate_probe_timeout(started: float, deadline_seconds: float) -> float:
+    remaining = _candidate_remaining_seconds(started, deadline_seconds)
+    if remaining <= 0:
+        raise TimeoutError("candidate readiness deadline exhausted")
+    return min(CANDIDATE_PROBE_TIMEOUT_SECONDS, remaining)
+
+
+def _format_timeout_seconds(value: float) -> str:
+    return f"{max(0.001, value):.3f}".rstrip("0").rstrip(".")
+
+
+def _candidate_curl_args(path: str, timeout: float) -> list[str]:
+    connect_timeout = min(CANDIDATE_CURL_CONNECT_TIMEOUT_SECONDS, timeout)
+    return [
+        "curl",
+        "-fsS",
+        "--connect-timeout",
+        _format_timeout_seconds(connect_timeout),
+        "--max-time",
+        _format_timeout_seconds(timeout),
+        f"http://127.0.0.1:{CANDIDATE_PORT}{path}",
+    ]
+
+
+def _candidate_curl_json(path: str, timeout: float) -> dict[str, object] | list[object]:
+    result = run(_candidate_curl_args(path, timeout), check=False, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(f"curl_{result.returncode}")
+    return json.loads(result.stdout)
+
+
+def _candidate_authenticated_json(path: str, timeout: float) -> dict[str, object] | list[object]:
+    require(path.startswith("/api/") and "://" not in path, "candidate authenticated probe path is not allowlisted")
+    token = _env_auth_token()
+    request = Request(
+        f"http://127.0.0.1:{CANDIDATE_PORT}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - fixed loopback URL.
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _candidate_readiness_once(commit: str, container: str, started: float, deadline_seconds: float) -> dict[str, object]:
+    health_timeout = _candidate_probe_timeout(started, deadline_seconds)
+    health = run(_candidate_curl_args("/health", health_timeout), check=False, timeout=health_timeout)
+    if health.returncode != 0:
+        raise RuntimeError(f"health_curl_{health.returncode}")
+    status_timeout = _candidate_probe_timeout(started, deadline_seconds)
+    status = _candidate_curl_json("/api/auth/status", status_timeout)
+    require(isinstance(status, dict), "candidate auth status returned non-object JSON")
+    auth_required = bool(status.get("auth_required"))
+    access_control_enabled = bool(status.get("access_control_enabled"))
+    if not auth_required:
+        raise _candidate_readiness_error(
+            attempt_count=1,
+            elapsed_seconds=0.0,
+            deadline_seconds=deadline_seconds,
+            reason="auth_required",
+        )
+    if not access_control_enabled:
+        raise _candidate_readiness_error(
+            attempt_count=1,
+            elapsed_seconds=0.0,
+            deadline_seconds=deadline_seconds,
+            reason="access_control_enabled",
+        )
+    migrations_timeout = _candidate_probe_timeout(started, deadline_seconds)
+    migrations = _candidate_authenticated_json("/api/admin/migrations", migrations_timeout)
+    require(isinstance(migrations, list), "candidate migrations returned non-array JSON")
+    migration_set_exact = sorted(migrations) == sorted(EXPECTED_MIGRATIONS)
+    if not migration_set_exact:
+        raise _candidate_readiness_error(
+            attempt_count=1,
+            elapsed_seconds=0.0,
+            deadline_seconds=deadline_seconds,
+            reason="migration_set_exact",
+        )
+    revision_timeout = _candidate_probe_timeout(started, deadline_seconds)
+    revision = run(
+        ["docker", "inspect", container, "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}"],
+        check=False,
+        timeout=revision_timeout,
+    ).stdout.strip()
+    if revision != commit:
+        raise _candidate_readiness_error(
+            attempt_count=1,
+            elapsed_seconds=0.0,
+            deadline_seconds=deadline_seconds,
+            reason="revision_mismatch",
+        )
     return {
-        "health": health,
-        "auth_required": bool(status.get("auth_required")),
-        "access_control_enabled": bool(status.get("access_control_enabled")),
+        "health": True,
+        "auth_required": auth_required,
+        "access_control_enabled": access_control_enabled,
         "migrations": migrations,
         "revision": revision,
         "expected_migrations": list(EXPECTED_MIGRATIONS),
-        "migration_set_exact": sorted(migrations) == sorted(EXPECTED_MIGRATIONS),
+        "migration_set_exact": migration_set_exact,
     }
+
+
+def op_candidate_verify(args: dict[str, object]) -> dict[str, object]:
+    commit = validate_commit(args["commit"])
+    container = validate_name(args["container"], "candidate container")
+    deadline_seconds = float(CANDIDATE_READINESS_TIMEOUT_SECONDS)
+    interval_seconds = float(CANDIDATE_READINESS_POLL_INTERVAL_SECONDS)
+    require(deadline_seconds > 0, "candidate readiness deadline must be positive")
+    require(interval_seconds > 0, "candidate readiness poll interval must be positive")
+    started = time.monotonic()
+    attempt_count = 0
+    last_reason = "not_started"
+    while True:
+        attempt_count += 1
+        try:
+            payload = _candidate_readiness_once(commit, container, started, deadline_seconds)
+            elapsed = time.monotonic() - started
+            payload.update(
+                {
+                    "attempt_count": attempt_count,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "deadline_seconds": deadline_seconds,
+                    "readiness_reason": "ready",
+                }
+            )
+            return payload
+        except HelperError as exc:
+            if str(exc).startswith("candidate readiness failed:"):
+                elapsed = time.monotonic() - started
+                raise _candidate_readiness_error(
+                    attempt_count=attempt_count,
+                    elapsed_seconds=elapsed,
+                    deadline_seconds=deadline_seconds,
+                    reason=str(exc).split("reason=", 1)[1].split(" ", 1)[0],
+                ) from exc
+            raise
+        except RuntimeError as exc:
+            last_reason = str(exc) or exc.__class__.__name__
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError, TimeoutError, URLError) as exc:
+            last_reason = exc.__class__.__name__
+        elapsed = time.monotonic() - started
+        if elapsed >= deadline_seconds:
+            raise _candidate_readiness_error(
+                attempt_count=attempt_count,
+                elapsed_seconds=elapsed,
+                deadline_seconds=deadline_seconds,
+                reason=last_reason,
+            )
+        time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
 
 
 def op_bootstrap_acpx_install(args: dict[str, object]) -> dict[str, object]:

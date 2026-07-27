@@ -29,6 +29,9 @@ DEFAULT_VOLUME = "cloakbrowser-manager-vcvm-data"
 DEFAULT_MANAGER_CONTAINER = "cloakbrowser-manager-vcvm"
 DEFAULT_CANDIDATE_PORT = 18116
 DEFAULT_LIVE_PORT = 18115
+DEFAULT_SSH_RUN_JSON_TIMEOUT_SECONDS = 120
+CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS = 210
+DEFAULT_SCP_UPLOAD_TIMEOUT_SECONDS = 300
 ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
 ACPX_NODE_LOCK = "deploy/acpx-runtime/package-lock.json"
 ACPX_ABSENCE_COMPONENTS = {"binary", "unit", "key", "venv", "capability"}
@@ -39,13 +42,17 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 BACKUP_RECEIPT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,80}$")
 SECRET_PATTERNS = (
+    re.compile(r'(?i)"(?:helper_source|token|secret|password|passwd|apikey|api_key)"\s*:\s*"[^"]*"'),
     re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s]+@", re.IGNORECASE),
     re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bcbm_(?:agent|worker)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[A-Za-z0-9._-]{16,}\b", re.IGNORECASE),
     re.compile(r"(?i)(?:token|secret|password|passwd|apikey|api_key)=([^&\s]{8,})"),
+    re.compile(r"(?i)helper_source=([^\s]+)"),
 )
+ERROR_MESSAGE_LIMIT = 500
+COMMAND_REPR_RE = re.compile(r"Command \[.*?\](?: returned non-zero exit status \d+\.| failed)?")
 REQUIRED_MIGRATIONS = (
     "agent_workspace_v1",
     "task_runs_v1",
@@ -213,11 +220,25 @@ class SSHRemoteExecutor:
         "print(json.dumps(result,sort_keys=True))"
     )
 
-    def __init__(self, host: str, *, helper_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        host: str,
+        *,
+        helper_path: Path | None = None,
+        run_timeout_seconds: int = DEFAULT_SSH_RUN_JSON_TIMEOUT_SECONDS,
+        upload_timeout_seconds: int = DEFAULT_SCP_UPLOAD_TIMEOUT_SECONDS,
+    ) -> None:
         validate_host(host)
         self.host = host
         self.helper_path = helper_path or Path(__file__).with_name("vcvm_release_remote.py")
         self.helper_source = self.helper_path.read_text(encoding="utf-8")
+        self.run_timeout_seconds = run_timeout_seconds
+        self.upload_timeout_seconds = upload_timeout_seconds
+
+    def run_timeout_for_phase(self, phase: str) -> int:
+        if phase == "candidate.verify":
+            return CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
+        return self.run_timeout_seconds
 
     def run_json(self, request: dict[str, object], *, phase: str, mutation: bool = False) -> dict[str, object]:
         del mutation
@@ -229,6 +250,7 @@ class SSHRemoteExecutor:
             input=payload,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=self.run_timeout_for_phase(phase),
         )
         try:
             payload = json.loads(result.stdout)
@@ -240,7 +262,11 @@ class SSHRemoteExecutor:
 
     def upload(self, local_path: Path, remote_path: str, *, phase: str) -> None:
         del phase
-        subprocess.run(("scp", str(local_path), f"{self.host}:{remote_path}"), check=True)
+        subprocess.run(
+            ("scp", str(local_path), f"{self.host}:{remote_path}"),
+            check=True,
+            timeout=self.upload_timeout_seconds,
+        )
 
 
 def redact_text(value: object) -> str:
@@ -248,6 +274,37 @@ def redact_text(value: object) -> str:
     for pattern in SECRET_PATTERNS:
         text = pattern.sub("<redacted>", text)
     return text
+
+
+def bounded_error_message(message: object) -> str:
+    text = redact_text(message).replace("\n", "\\n")
+    text = COMMAND_REPR_RE.sub("command failed", text)
+    if len(text) > ERROR_MESSAGE_LIMIT:
+        return text[: ERROR_MESSAGE_LIMIT - 3] + "..."
+    return text
+
+
+def command_failure_message(exc: subprocess.CalledProcessError) -> str:
+    details = [f"process exited with code {exc.returncode}"]
+    if exc.stderr:
+        details.append(f"stderr={bounded_error_message(exc.stderr)}")
+    elif exc.stdout:
+        details.append(f"stdout={bounded_error_message(exc.stdout)}")
+    return "; ".join(details)
+
+
+def timeout_failure_message(exc: subprocess.TimeoutExpired) -> str:
+    details = [f"timeout={exc.timeout}"]
+    if exc.stderr:
+        details.append(f"stderr={bounded_error_message(exc.stderr)}")
+    elif exc.stdout:
+        details.append(f"stdout={bounded_error_message(exc.stdout)}")
+    return "; ".join(details)
+
+
+def transaction_error_line(exc: BaseException) -> str:
+    phase = exc.phase if isinstance(exc, TransactionError) else "unknown"
+    return f"vcvm release transaction refused: phase={phase} message={bounded_error_message(exc)}"
 
 
 def reject_secret_text(value: object, label: str) -> None:
@@ -493,8 +550,25 @@ def _remote(executor: RemoteExecutor, phase: str, args: dict[str, object] | None
         return executor.run_json(request, phase=phase, mutation=mutation)
     except TransactionError:
         raise
-    except (subprocess.CalledProcessError, OSError) as exc:
-        raise TransactionError(f"remote phase failed: {redact_text(exc)}", phase=phase) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise TransactionError(f"remote phase timed out: {timeout_failure_message(exc)}", phase=phase) from exc
+    except subprocess.CalledProcessError as exc:
+        raise TransactionError(f"remote phase failed: {command_failure_message(exc)}", phase=phase) from exc
+    except OSError as exc:
+        raise TransactionError(f"remote phase failed: {bounded_error_message(exc)}", phase=phase) from exc
+
+
+def _upload(executor: RemoteExecutor, local_path: Path, remote_path: str, *, phase: str) -> None:
+    try:
+        executor.upload(local_path, remote_path, phase=phase)
+    except TransactionError:
+        raise
+    except subprocess.TimeoutExpired as exc:
+        raise TransactionError(f"upload phase timed out: {timeout_failure_message(exc)}", phase=phase) from exc
+    except subprocess.CalledProcessError as exc:
+        raise TransactionError(f"upload phase failed: {command_failure_message(exc)}", phase=phase) from exc
+    except OSError as exc:
+        raise TransactionError(f"upload phase failed: {bounded_error_message(exc)}", phase=phase) from exc
 
 
 def require_bootstrap_absence(probe: dict[str, object]) -> None:
@@ -605,14 +679,14 @@ def prepare_release_source(
     )
     existing = prepare.get("exists") is True
     if not existing:
-        executor.upload(archive_path, remote_archive_path(config), phase="release.upload_archive")
+        _upload(executor, archive_path, remote_archive_path(config), phase="release.upload_archive")
         manifest_file = tempfile.NamedTemporaryFile("w", prefix="cbm-manifest-", suffix=".json", delete=False, encoding="utf-8")
         manifest_path = Path(manifest_file.name)
         try:
             json.dump(manifest, manifest_file, sort_keys=True)
             manifest_file.write("\n")
             manifest_file.close()
-            executor.upload(manifest_path, remote_manifest_path(config), phase="release.upload_manifest")
+            _upload(executor, manifest_path, remote_manifest_path(config), phase="release.upload_manifest")
         finally:
             manifest_file.close()
             manifest_path.unlink(missing_ok=True)
@@ -915,10 +989,21 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         _remote(executor, "state.commit", state_payload, mutation=True)
         cleanup_candidate(executor, config)
     except TransactionError as exc:
+        cleanup_error: TransactionError | None = None
         if acpx_bootstrap_touched and exc.phase != "bootstrap.acpx_cleanup":
-            acpx_cleanup = cleanup_acpx_bootstrap(executor, config)
-            if acpx_bootstrap:
-                acpx_bootstrap["cleanup"] = acpx_cleanup
+            try:
+                acpx_cleanup = cleanup_acpx_bootstrap(executor, config)
+                if acpx_bootstrap:
+                    acpx_bootstrap["cleanup"] = acpx_cleanup
+            except TransactionError as cleanup_exc:
+                if not (quiesce_started or exc.phase in POST_QUIESCE_PHASES):
+                    raise
+                cleanup_error = cleanup_exc
+                if acpx_bootstrap:
+                    acpx_bootstrap["cleanup_error"] = {
+                        "phase": cleanup_exc.phase,
+                        "message": bounded_error_message(cleanup_exc),
+                    }
         if candidate_touched and exc.phase == "candidate.verify":
             cleanup_candidate(executor, config)
             raise
@@ -930,7 +1015,10 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
             raise
         if quiesce_started or exc.phase in POST_QUIESCE_PHASES:
             restore_old_runtime(executor, reason=exc, capture=capture, final_backup=final_backup or backup_live)
-            raise TransactionError(f"release failed after quiesce and old runtime was restored: {exc}", phase=exc.phase) from exc
+            message = f"release failed after quiesce and old runtime was restored: {exc}"
+            if cleanup_error is not None:
+                message = f"{message}; secondary cleanup phase={cleanup_error.phase} error={bounded_error_message(cleanup_error)}"
+            raise TransactionError(message, phase=exc.phase) from exc
         raise
     finally:
         archive_path.unlink(missing_ok=True)
@@ -1162,7 +1250,7 @@ def main(argv: list[str] | None = None) -> int:
                 SSHRemoteExecutor(args.host),
             )
     except (TransactionError, subprocess.CalledProcessError, OSError) as exc:
-        print(f"vcvm release transaction refused: {redact_text(exc)}", file=sys.stderr)
+        print(transaction_error_line(exc), file=sys.stderr)
         return 75
     sys.stdout.write(json.dumps(payload, sort_keys=True) + "\n")
     return 0

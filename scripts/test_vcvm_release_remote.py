@@ -8,6 +8,7 @@ import json
 import stat
 import subprocess
 import sys
+import time as pytime
 from pathlib import Path
 
 import pytest
@@ -579,6 +580,253 @@ def test_manager_docker_run_paths_publish_canonical_container_port_and_host_gate
     for source, target, mode in remote.MANAGER_BIND_MOUNTS:
         assert all(f"{source}:{target}:{mode}" in call for call in manager_runs)
         assert mode == "ro"
+
+
+def test_candidate_verify_waits_through_transient_curl_56_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    commit = REVISION
+    attempts = {"health": 0}
+    sleeps: list[float] = []
+    ticks = iter([0.0, 0.0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/health":
+            attempts["health"] += 1
+            if attempts["health"] == 1:
+                return subprocess.CompletedProcess(argv, 56, stdout="", stderr="connection reset")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/api/auth/status":
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"auth_required": True, "access_control_enabled": True}), stderr="")
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/api/admin/migrations":
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(list(remote.EXPECTED_MIGRATIONS)), stderr="")
+        if argv[:3] == ["docker", "inspect", "candidate"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=commit + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "time", pytime, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_TIMEOUT_SECONDS", 1.0, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_POLL_INTERVAL_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(remote, "_candidate_authenticated_json", lambda path, timeout: list(remote.EXPECTED_MIGRATIONS))
+    monkeypatch.setattr(remote.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(remote.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    result = remote.op_candidate_verify({"commit": commit, "container": "candidate"})
+
+    assert result["health"] is True
+    assert result["auth_required"] is True
+    assert result["access_control_enabled"] is True
+    assert result["revision"] == commit
+    assert result["migration_set_exact"] is True
+    assert result["attempt_count"] == 2
+    assert result["readiness_reason"] == "ready"
+    assert result["deadline_seconds"] == 1.0
+    assert sleeps == [0.1]
+
+
+def test_candidate_verify_waits_through_malformed_startup_json_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    commit = REVISION
+    auth_attempts = {"count": 0}
+    ticks = iter([0.0, 0.0, 0.0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/health":
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/api/auth/status":
+            auth_attempts["count"] += 1
+            stdout = "{" if auth_attempts["count"] == 1 else json.dumps({"auth_required": True, "access_control_enabled": True})
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/api/admin/migrations":
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(list(remote.EXPECTED_MIGRATIONS)), stderr="")
+        if argv[:3] == ["docker", "inspect", "candidate"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=commit + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "time", pytime, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_TIMEOUT_SECONDS", 1.0, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_POLL_INTERVAL_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(remote, "_candidate_authenticated_json", lambda path, timeout: list(remote.EXPECTED_MIGRATIONS))
+    monkeypatch.setattr(remote.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(remote.time, "sleep", lambda _seconds: None)
+
+    result = remote.op_candidate_verify({"commit": commit, "container": "candidate"})
+
+    assert result["attempt_count"] == 2
+    assert result["readiness_reason"] == "ready"
+
+
+def test_candidate_verify_times_out_with_readiness_attempt_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    commit = REVISION
+    attempts = {"health": 0}
+    sleeps: list[float] = []
+    ticks = iter([0.0, 0.0, 0.2, 0.2, 0.4, 0.4])
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/health":
+            attempts["health"] += 1
+            return subprocess.CompletedProcess(argv, 56, stdout="", stderr="connection reset")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "time", pytime, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_TIMEOUT_SECONDS", 0.25, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_POLL_INTERVAL_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(remote.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(remote.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(remote.HelperError, match=r"attempt_count=2.*deadline_seconds=0\.25.*reason=health_curl_56"):
+        remote.op_candidate_verify({"commit": commit, "container": "candidate"})
+
+    assert attempts["health"] == 2
+    assert sleeps
+    assert all(0 < seconds <= 0.1 for seconds in sleeps)
+
+
+def test_candidate_verify_fails_fast_on_valid_invariant_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    commit = REVISION
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(str(item) for item in argv))
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/health":
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/api/auth/status":
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"auth_required": False, "access_control_enabled": True}), stderr="")
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/api/admin/migrations":
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(list(remote.EXPECTED_MIGRATIONS)), stderr="")
+        if argv[:3] == ["docker", "inspect", "candidate"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=commit + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "time", pytime, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_TIMEOUT_SECONDS", 10.0, raising=False)
+    monkeypatch.setattr(remote, "_candidate_authenticated_json", lambda path, timeout: list(remote.EXPECTED_MIGRATIONS))
+    monkeypatch.setattr(remote.time, "sleep", lambda _seconds: (_ for _ in ()).throw(AssertionError("must not sleep after valid mismatch")))
+
+    with pytest.raises(remote.HelperError, match=r"attempt_count=1.*reason=auth_required"):
+        remote.op_candidate_verify({"commit": commit, "container": "candidate"})
+
+    assert sum(1 for call in calls if call[0] == "curl" and call[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/health") == 1
+
+
+def test_candidate_verify_binds_hung_curl_to_remaining_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    commit = REVISION
+    calls: list[tuple[tuple[str, ...], float | None]] = []
+    ticks = iter([0.0, 0.0, 0.15, 0.15])
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        timeout = kwargs.get("timeout")
+        calls.append((tuple(str(item) for item in argv), float(timeout) if timeout is not None else None))
+        if "curl" in argv and "/health" in argv[-1]:
+            raise subprocess.TimeoutExpired(argv, timeout=timeout)
+        raise AssertionError(f"unexpected command after hung health curl: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "time", pytime, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_TIMEOUT_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_POLL_INTERVAL_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(remote.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(remote.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(remote.HelperError, match=r"attempt_count=1.*deadline_seconds=0\.1.*reason=TimeoutExpired"):
+        remote.op_candidate_verify({"commit": commit, "container": "candidate"})
+
+    assert len(calls) == 1
+    argv, timeout = calls[0]
+    assert "--connect-timeout" in argv
+    assert "--max-time" in argv
+    assert timeout is not None and 0 < timeout <= 0.1
+    max_time = float(argv[argv.index("--max-time") + 1])
+    connect_timeout = float(argv[argv.index("--connect-timeout") + 1])
+    assert 0 < connect_timeout <= max_time <= 0.1
+
+
+def test_candidate_verify_binds_hung_docker_inspect_to_remaining_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    commit = REVISION
+    calls: list[tuple[tuple[str, ...], float | None]] = []
+    ticks = iter([0.0, 0.0, 0.02, 0.04, 0.06, 0.12])
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        timeout = kwargs.get("timeout")
+        calls.append((tuple(str(item) for item in argv), float(timeout) if timeout is not None else None))
+        if "/health" in argv[-1]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if "/api/auth/status" in argv[-1]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"auth_required": True, "access_control_enabled": True}), stderr="")
+        if argv[:3] == ["docker", "inspect", "candidate"]:
+            raise subprocess.TimeoutExpired(argv, timeout=timeout)
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "time", pytime, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_TIMEOUT_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_POLL_INTERVAL_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(remote, "_candidate_authenticated_json", lambda path, timeout=None: list(remote.EXPECTED_MIGRATIONS))
+    monkeypatch.setattr(remote.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(remote.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(remote.HelperError, match=r"attempt_count=1.*deadline_seconds=0\.1.*reason=TimeoutExpired"):
+        remote.op_candidate_verify({"commit": commit, "container": "candidate"})
+
+    docker_call = next((argv, timeout) for argv, timeout in calls if argv[:3] == ("docker", "inspect", "candidate"))
+    assert docker_call[1] is not None and 0 < docker_call[1] <= 0.1
+
+
+@pytest.mark.parametrize(
+    ("status", "migrations", "revision", "expected_reason", "forbidden_probe"),
+    [
+        ({"auth_required": False, "access_control_enabled": True}, AssertionError("migrations must not run"), AssertionError("revision must not run"), "auth_required", "migrations"),
+        ({"auth_required": True, "access_control_enabled": False}, AssertionError("migrations must not run"), AssertionError("revision must not run"), "access_control_enabled", "migrations"),
+        ({"auth_required": True, "access_control_enabled": True}, ["agent_workspace_v1"], AssertionError("revision must not run"), "migration_set_exact", "revision"),
+        ({"auth_required": True, "access_control_enabled": True}, list(remote.EXPECTED_MIGRATIONS), "1" * 40, "revision_mismatch", "none"),
+    ],
+)
+def test_candidate_verify_fails_fast_in_probe_order_before_later_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    status: dict[str, object],
+    migrations: list[str] | AssertionError,
+    revision: str | AssertionError,
+    expected_reason: str,
+    forbidden_probe: str,
+) -> None:
+    commit = REVISION
+    calls: list[str] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if "/health" in argv[-1]:
+            calls.append("health")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if "/api/auth/status" in argv[-1]:
+            calls.append("auth")
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(status), stderr="")
+        if argv[:3] == ["docker", "inspect", "candidate"]:
+            calls.append("revision")
+            if isinstance(revision, AssertionError):
+                raise revision
+            return subprocess.CompletedProcess(argv, 0, stdout=revision + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    def fake_migrations(path: str, timeout: float | None = None) -> list[str]:
+        del path, timeout
+        calls.append("migrations")
+        if isinstance(migrations, AssertionError):
+            raise migrations
+        return migrations
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_TIMEOUT_SECONDS", 10.0, raising=False)
+    monkeypatch.setattr(remote, "_candidate_authenticated_json", fake_migrations)
+
+    with pytest.raises(remote.HelperError, match=rf"attempt_count=1.*reason={expected_reason}"):
+        remote.op_candidate_verify({"commit": commit, "container": "candidate"})
+
+    assert forbidden_probe not in calls
 
 
 def test_verify_proxychecker_probes_docker_bridge_on_host(monkeypatch: pytest.MonkeyPatch) -> None:

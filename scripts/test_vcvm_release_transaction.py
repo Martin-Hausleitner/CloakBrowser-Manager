@@ -104,7 +104,11 @@ class FakeRemoteExecutor:
         self.live_generation = "old"
         self.candidate_removed = False
         self.fail_phase = str(facts.pop("fail_phase", ""))
+        self.fail_phases = set(facts.pop("fail_phases", ()))
         self.fail_with_called_process = bool(facts.pop("fail_with_called_process", False))
+        self.fail_with_os_error = bool(facts.pop("fail_with_os_error", False))
+        self.fail_with_timeout = bool(facts.pop("fail_with_timeout", False))
+        self.fail_stderr = str(facts.pop("fail_stderr", "synthetic ssh failure"))
         self.rollback_verify_fails = bool(facts.pop("rollback_verify_fails", False))
         self.facts = {
             "disk_free_bytes": 9 * 1024**3,
@@ -441,9 +445,13 @@ class FakeRemoteExecutor:
         raise AssertionError(f"unexpected phase {phase}")
 
     def _maybe_fail(self, phase: str) -> None:
-        if phase == self.fail_phase:
+        if phase == self.fail_phase or phase in self.fail_phases:
             if self.fail_with_called_process:
-                raise subprocess.CalledProcessError(255, ["ssh", "vcvm", phase], stderr="synthetic ssh failure")
+                raise subprocess.CalledProcessError(255, ["ssh", "vcvm", phase], stderr=self.fail_stderr)
+            if self.fail_with_os_error:
+                raise OSError(self.fail_stderr)
+            if self.fail_with_timeout:
+                raise subprocess.TimeoutExpired(["ssh", "vcvm", phase, "HELPER_SOURCE"], timeout=123, stderr=self.fail_stderr)
             raise tx.TransactionError(f"synthetic failure at {phase}", phase=phase)
 
 
@@ -657,6 +665,29 @@ def test_bootstrap_called_process_failure_after_quiesce_restores_and_cleans_up(t
     assert "bootstrap.acpx_cleanup" in fake.phases
 
 
+def test_bootstrap_promotion_failure_still_restores_when_cleanup_also_fails(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(
+        fail_phases={"bootstrap.acpx_promote", "bootstrap.acpx_cleanup"},
+        fail_with_called_process=True,
+        fail_stderr=f"cleanup failed token={SECRET_TOKEN}",
+    )
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert exc_info.value.phase == "bootstrap.acpx_promote"
+    message = str(exc_info.value)
+    assert "release failed after quiesce" in message
+    assert "cleanup" in message
+    assert "<redacted>" in message
+    assert SECRET_TOKEN not in message
+    assert "restore.runtime" in fake.phases
+    assert "restore.verify" in fake.phases
+    assert fake.live_generation == "old"
+
+
 def test_bootstrap_acpx_promotion_failure_restores_old_runtime_and_cleans_release_artifacts(tmp_path: Path) -> None:
     repo = fixture_repo(tmp_path)
     add_acpx_locks(repo)
@@ -765,6 +796,152 @@ def test_candidate_stage_failure_removes_only_candidate_and_preserves_live(tmp_p
     assert fake.live_generation == "old"
     assert "quiesce.stop_live" not in fake.phases
     assert fake.mutated_phases[-1] == "candidate.cleanup"
+
+
+def test_candidate_verify_called_process_failure_reports_phase_and_redacts_stderr(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    secret_stderr = f"ssh failed token={SECRET_TOKEN} helper_source=REMOTE_HELPER_SOURCE"
+    fake = FakeRemoteExecutor(
+        fail_phase="candidate.verify",
+        fail_with_called_process=True,
+        fail_stderr=secret_stderr,
+    )
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo), fake)
+
+    assert exc_info.value.phase == "candidate.verify"
+    message = str(exc_info.value)
+    assert "remote phase failed" in message
+    assert "<redacted>" in message
+    assert SECRET_TOKEN not in message
+    assert secret_stderr not in message
+    assert "REMOTE_HELPER_SOURCE" not in message
+    assert "candidate.cleanup" in fake.phases
+
+
+def test_upload_failure_preserves_phase_and_redacts_message(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(
+        fail_phase="release.upload_archive",
+        fail_with_os_error=True,
+        fail_stderr=f"scp failed password={SECRET_TOKEN}",
+    )
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo), fake)
+
+    assert exc_info.value.phase == "release.upload_archive"
+    message = str(exc_info.value)
+    assert "upload phase failed" in message
+    assert "<redacted>" in message
+    assert SECRET_TOKEN not in message
+    assert "release.verify_archive" not in fake.phases
+
+
+def test_remote_timeout_preserves_phase_and_redacts_payload() -> None:
+    fake = FakeRemoteExecutor(
+        fail_phase="candidate.verify",
+        fail_with_timeout=True,
+        fail_stderr=f'{{"helper_source":"REMOTE_HELPER_SOURCE","token":"{SECRET_TOKEN}"}}',
+    )
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx._remote(fake, "candidate.verify", {"commit": FULL_WORKER_COMMIT, "container": "cbm-candidate-release"})
+
+    assert exc_info.value.phase == "candidate.verify"
+    message = str(exc_info.value)
+    assert "remote phase timed out" in message
+    assert "timeout=123" in message
+    assert "<redacted>" in message
+    assert SECRET_TOKEN not in message
+    assert "REMOTE_HELPER_SOURCE" not in message
+    assert "HELPER_SOURCE" not in message
+
+
+def test_upload_timeout_preserves_phase_and_redacts_payload(tmp_path: Path) -> None:
+    class TimeoutUpload:
+        def run_json(self, request: dict[str, object], *, phase: str, mutation: bool = False) -> dict[str, object]:
+            del request, phase, mutation
+            return {}
+
+        def upload(self, local_path: Path, remote_path: str, *, phase: str) -> None:
+            del local_path, remote_path, phase
+            raise subprocess.TimeoutExpired(
+                ["scp", "HELPER_SOURCE"],
+                timeout=45,
+                stderr=f'{{"helper_source":"REMOTE_HELPER_SOURCE","password":"{SECRET_TOKEN}"}}',
+            )
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx._upload(TimeoutUpload(), tmp_path / "source.tar", "/home/coder/cloakbrowser-manager/releases/x/source.tar", phase="release.upload_archive")
+
+    assert exc_info.value.phase == "release.upload_archive"
+    message = str(exc_info.value)
+    assert "upload phase timed out" in message
+    assert "timeout=45" in message
+    assert "<redacted>" in message
+    assert SECRET_TOKEN not in message
+    assert "REMOTE_HELPER_SOURCE" not in message
+    assert "HELPER_SOURCE" not in message
+
+
+def test_bounded_error_message_redacts_json_helper_source_payload() -> None:
+    message = tx.bounded_error_message(
+        f'failure {{"helper_source":"REMOTE_HELPER_SOURCE","token":"{SECRET_TOKEN}"}}'
+    )
+
+    assert "<redacted>" in message
+    assert SECRET_TOKEN not in message
+    assert "REMOTE_HELPER_SOURCE" not in message
+
+
+def test_ssh_executor_uses_explicit_timeouts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    helper = tmp_path / "helper.py"
+    helper.write_text("# helper\n", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, "kwargs": kwargs})
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}\n", stderr="")
+
+    monkeypatch.setattr(tx.subprocess, "run", fake_run)
+    executor = tx.SSHRemoteExecutor("vcvm", helper_path=helper, run_timeout_seconds=12, upload_timeout_seconds=34)
+
+    assert executor.run_json({"operation": "helper.capabilities", "args": {}}, phase="helper.capabilities") == {}
+    executor.upload(tmp_path / "source.tar", "/home/coder/cloakbrowser-manager/releases/x/source.tar", phase="release.upload_archive")
+
+    assert calls[0]["kwargs"]["timeout"] == 12
+    assert calls[1]["kwargs"]["timeout"] == 34
+
+
+def test_candidate_verify_ssh_timeout_exceeds_remote_readiness_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = tmp_path / "helper.py"
+    helper.write_text("# helper\n", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, "kwargs": kwargs})
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}\n", stderr="")
+
+    monkeypatch.setattr(tx.subprocess, "run", fake_run)
+    executor = tx.SSHRemoteExecutor("vcvm", helper_path=helper)
+
+    assert tx.CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS > 180
+    executor.run_json({"operation": "helper.capabilities", "args": {}}, phase="helper.capabilities")
+    executor.run_json(
+        {
+            "operation": "candidate.verify",
+            "args": {"commit": FULL_WORKER_COMMIT, "container": "cbm-candidate-release"},
+        },
+        phase="candidate.verify",
+    )
+
+    assert calls[0]["kwargs"]["timeout"] == tx.DEFAULT_SSH_RUN_JSON_TIMEOUT_SECONDS
+    assert calls[1]["kwargs"]["timeout"] == tx.CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
 
 
 def test_candidate_migrations_must_match_exact_required_set(tmp_path: Path) -> None:
@@ -1229,6 +1406,81 @@ def test_cli_bootstrap_acpx_apply_routes_bootstrap_flag_with_explicit_gates(
     assert config.bootstrap_acpx is True
     assert config.expected_current_worker_commit == FULL_WORKER_COMMIT
     assert config.expected_source_remote == AUTHORIZED_FORK
+
+
+def test_cli_error_output_includes_phase_and_redacted_bounded_message(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fake_run_release(config: tx.ReleaseConfig, executor: object) -> dict[str, object]:
+        del config, executor
+        raise tx.TransactionError(
+            f"remote phase failed: Command ['ssh', 'vcvm', 'python3', '-c', 'HELPER_SOURCE'] failed token={SECRET_TOKEN}",
+            phase="candidate.verify",
+        )
+
+    class FakeSSH:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+    monkeypatch.setattr(tx, "SSHRemoteExecutor", FakeSSH)
+    monkeypatch.setattr(tx, "require_bootstrap_acpx_cli_apply_gates", lambda args: None)
+    monkeypatch.setattr(tx, "run_release", fake_run_release)
+
+    rc = tx.main(
+        [
+            "release",
+            "--release-id",
+            "release-20260727-ac5840b00001",
+            "--expected-source-remote",
+            AUTHORIZED_FORK,
+            "--apply",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 75
+    assert captured.out == ""
+    assert "phase=candidate.verify" in captured.err
+    assert "<redacted>" in captured.err
+    assert SECRET_TOKEN not in captured.err
+    assert "HELPER_SOURCE" not in captured.err
+    assert "python3" not in captured.err
+
+
+def test_cli_timeout_error_output_includes_phase(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fake_run_release(config: tx.ReleaseConfig, executor: object) -> dict[str, object]:
+        del config, executor
+        raise tx.TransactionError("remote phase timed out: timeout=210", phase="candidate.verify")
+
+    class FakeSSH:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+    monkeypatch.setattr(tx, "SSHRemoteExecutor", FakeSSH)
+    monkeypatch.setattr(tx, "require_bootstrap_acpx_cli_apply_gates", lambda args: None)
+    monkeypatch.setattr(tx, "run_release", fake_run_release)
+
+    rc = tx.main(
+        [
+            "release",
+            "--release-id",
+            "release-20260727-ac5840b00001",
+            "--expected-source-remote",
+            AUTHORIZED_FORK,
+            "--apply",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 75
+    assert captured.out == ""
+    assert "phase=candidate.verify" in captured.err
+    assert "remote phase timed out" in captured.err
+    assert "timeout=210" in captured.err
 
 
 def test_actual_release_and_rollback_requests_dispatch_through_remote_helper_schema(

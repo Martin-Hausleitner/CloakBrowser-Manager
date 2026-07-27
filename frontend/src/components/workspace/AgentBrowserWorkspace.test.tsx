@@ -34,15 +34,18 @@ vi.mock("../ProfileViewer", () => ({
   ProfileViewer: ({
     profileId,
     viewportScale,
+    fitMode,
     nativeFullscreenEnabled,
   }: {
     profileId: string;
     viewportScale?: number;
+    fitMode?: string;
     nativeFullscreenEnabled?: boolean;
   }) => (
     <div
       data-testid="mock-profile-viewer"
       data-scale={viewportScale ?? 1}
+      data-fit-mode={fitMode ?? "fit"}
       data-native-fullscreen={nativeFullscreenEnabled === false ? "off" : "on"}
     >
       viewer:{profileId}
@@ -176,6 +179,7 @@ describe("AgentBrowserWorkspace", () => {
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
   it("renders dense left/right layout with profile viewer when running", async () => {
@@ -199,8 +203,94 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
   });
 
-  it("keeps zoom and viewport controls available in app full view", async () => {
+  it("keeps desktop full-view controls behind exactly four compact groups", async () => {
     const onViewportApply = vi.fn().mockResolvedValue(true);
+    const onSelectProfile = vi.fn();
+    render(
+      <AgentBrowserWorkspace
+        profiles={[
+          runningProfile,
+          { ...runningProfile, id: "profile-alt", name: "Alt Live", screen_width: 1440, screen_height: 900 },
+          stoppedProfile,
+        ]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        canManageViewport
+        onViewportApply={onViewportApply}
+        onSelectProfile={onSelectProfile}
+      />,
+    );
+
+    await screen.findByTestId("agent-browser-workspace");
+    expect(screen.queryByTestId("desktop-full-view-toolbar")).toBeNull();
+
+    const agentSession = screen.getByLabelText("Orca agent session");
+    const fullViewButton = screen.getByRole("button", { name: "Enter full view" });
+    fireEvent.click(fullViewButton);
+
+    const fullscreenViewer = screen.getByTestId("agent-browser-viewer-pane");
+    const toolbar = screen.getByTestId("desktop-full-view-toolbar");
+    expect(fullscreenViewer.className).toContain("fixed");
+    expect(fullscreenViewer.getAttribute("role")).toBe("dialog");
+    expect(fullscreenViewer.getAttribute("aria-modal")).toBe("true");
+    expect(agentSession.getAttribute("aria-hidden")).toBe("true");
+    expect(agentSession.hasAttribute("inert")).toBe(true);
+    const fullViewGroups = screen.getAllByTestId("desktop-full-view-group");
+    expect(fullViewGroups.map((node) => node.textContent)).toEqual([
+      "View",
+      "Viewport",
+      "Sessions",
+      "Exit",
+    ]);
+    for (const group of fullViewGroups) {
+      expect(group.className).toContain("min-h-11");
+      expect(group.className).toContain("min-w-11");
+    }
+    expect(toolbar.textContent).not.toContain("Full view");
+    expect(toolbar.textContent).not.toContain("Launch");
+    expect(toolbar.textContent).not.toContain("Stop");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view View controls" }));
+    expect(screen.getByRole("button", { name: "Fit browser view" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Fit browser view to width" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Fit browser view to height" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Increase browser zoom" }));
+    expect(screen.getByTestId("mock-profile-viewer").getAttribute("data-scale")).toBe("1.1");
+    fireEvent.click(screen.getByRole("button", { name: "Fit browser view to width" }));
+    expect(fullscreenViewer.getAttribute("data-full-view-fit")).toBe("width");
+    expect(screen.getByTestId("mock-profile-viewer").getAttribute("data-fit-mode")).toBe("width");
+    expect(screen.getByRole("button", { name: "Fit browser view to width" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Fit browser view to height" }));
+    expect(fullscreenViewer.getAttribute("data-full-view-fit")).toBe("height");
+    expect(screen.getByTestId("mock-profile-viewer").getAttribute("data-fit-mode")).toBe("height");
+    expect(screen.getByRole("button", { name: "Fit browser view to height" }).getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view Viewport controls" }));
+    expect(screen.queryByRole("button", { name: "Increase browser zoom" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Fullscreen viewport width"), { target: { value: "800" } });
+    fireEvent.change(screen.getByLabelText("Fullscreen viewport height"), { target: { value: "600" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply fullscreen viewport" }));
+    await waitFor(() => expect(onViewportApply).toHaveBeenCalledWith(800, 600));
+    expect(screen.getByTestId("agent-browser-viewer-pane").getAttribute("role")).toBe("dialog");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view Sessions controls" }));
+    expect(screen.queryByLabelText("Fullscreen viewport width")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Switch full-view browser session"), {
+      target: { value: "profile-alt" },
+    });
+    expect(onSelectProfile).toHaveBeenCalledWith("profile-alt");
+    expect(screen.getByTestId("agent-browser-viewer-pane").getAttribute("role")).toBe("dialog");
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit full view" }));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Enter full view" })),
+    );
+  });
+
+  it("applies dynamic desktop Phone Fit and preserves full-view view state", async () => {
+    const onViewportApply = vi.fn().mockResolvedValue(true);
+    vi.stubGlobal("visualViewport", { width: 412.4, height: 891.6 });
     render(
       <AgentBrowserWorkspace
         profiles={[runningProfile]}
@@ -214,31 +304,76 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     await screen.findByTestId("agent-browser-workspace");
-    const agentSession = screen.getByLabelText("Orca agent session");
     const fullViewButton = screen.getByRole("button", { name: "Enter full view" });
-    fireEvent.click(screen.getByRole("button", { name: "Enter full view" }));
+    fireEvent.click(fullViewButton);
     const fullscreenViewer = screen.getByTestId("agent-browser-viewer-pane");
-    expect(fullscreenViewer.className).toContain("fixed");
-    expect(fullscreenViewer.classList.contains("flex")).toBe(true);
-    expect(fullscreenViewer.getAttribute("role")).toBe("dialog");
-    expect(fullscreenViewer.getAttribute("aria-modal")).toBe("true");
-    expect(agentSession.getAttribute("aria-hidden")).toBe("true");
-    expect(agentSession.hasAttribute("inert")).toBe(true);
-    expect(screen.getByRole("button", { name: "Exit full view" })).toBeTruthy();
-
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view View controls" }));
     fireEvent.click(screen.getByRole("button", { name: "Increase browser zoom" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fit browser view to width" }));
     expect(screen.getByTestId("mock-profile-viewer").getAttribute("data-scale")).toBe("1.1");
+    expect(fullscreenViewer.getAttribute("data-full-view-fit")).toBe("width");
     expect(screen.getByTestId("mock-profile-viewer").getAttribute("data-native-fullscreen")).toBe(
       "off",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Open viewport controls" }));
-    fireEvent.click(screen.getByRole("button", { name: "Use phone viewport 390 by 844" }));
-    fireEvent.click(screen.getByRole("button", { name: "Apply viewport" }));
-    await waitFor(() => expect(onViewportApply).toHaveBeenCalledWith(390, 844));
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view Viewport controls" }));
+    fireEvent.click(screen.getByRole("button", { name: "Use current phone viewport fit" }));
+    await waitFor(() => expect(onViewportApply).toHaveBeenCalledWith(412, 892));
+    expect(screen.getByTestId("agent-browser-viewer-pane").getAttribute("role")).toBe("dialog");
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit full view" }));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Enter full view" })),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Enter full view" }));
+    expect(screen.getByTestId("mock-profile-viewer").getAttribute("data-scale")).toBe("1.1");
+    expect(screen.getByTestId("agent-browser-viewer-pane").getAttribute("data-full-view-fit")).toBe("width");
+    expect(screen.getByTestId("mock-profile-viewer").getAttribute("data-fit-mode")).toBe("width");
 
     fireEvent.keyDown(window, { key: "Escape" });
-    await waitFor(() => expect(document.activeElement).toBe(fullViewButton));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Enter full view" })),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("moves focus into desktop full view, traps tab order, redirects background focus, and restores on Escape", async () => {
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile, stoppedProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        canManageViewport
+        onViewportApply={vi.fn().mockResolvedValue(true)}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("agent-browser-workspace");
+    const launchButton = screen.getByTestId("orca-launch") as HTMLButtonElement;
+    const opener = screen.getByRole("button", { name: "Enter full view" });
+    fireEvent.click(opener);
+
+    const viewGroup = screen.getByRole("button", { name: "Open desktop full-view View controls" });
+    const exitGroup = screen.getByRole("button", { name: "Exit full view" });
+    await waitFor(() => expect(document.activeElement).toBe(viewGroup));
+
+    exitGroup.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(document.activeElement).toBe(viewGroup);
+
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(exitGroup);
+
+    launchButton.focus();
+    fireEvent.focusIn(launchButton);
+    expect(document.activeElement).toBe(viewGroup);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Enter full view" })),
+    );
   });
 
   it("blocks viewport changes while a Browser Use run is active", async () => {

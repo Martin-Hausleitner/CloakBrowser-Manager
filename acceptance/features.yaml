@@ -47,6 +47,15 @@ features:
     screenshot_state: agent.viewer-fullscreen
     feature_flags: []
     forbidden_feature_flags: []
+  - id: desktop-full-view-phone-fit
+    route: /
+    role: operator
+    required_apis: [/api/profiles/{profile_id}]
+    locator: agent.viewer-fullscreen
+    mobile_locator: mobile.fullscreen-browser
+    screenshot_state: agent.viewer-fullscreen
+    feature_flags: []
+    forbidden_feature_flags: []
   - id: sessions
     route: /
     role: operator

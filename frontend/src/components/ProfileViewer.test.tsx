@@ -456,6 +456,90 @@ describe("ProfileViewer", () => {
     expect(originalAutoscale).toHaveBeenLastCalledWith(292.5, 534.75);
   });
 
+  it("applies fit-width mode through noVNC autoscale dimensions", async () => {
+    const originalResizeObserver = window.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | null = null;
+
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      value: MockResizeObserver,
+    });
+
+    const view = await renderProfileViewer(vi.fn(), { fitMode: "width" });
+    const instance = rfbMock.instances[0]!;
+    instance._display.width = 500;
+    instance._display.height = 1000;
+    vi.spyOn(instance.target, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 1000,
+      height: 600,
+      top: 0,
+      right: 1000,
+      bottom: 600,
+      left: 0,
+      toJSON: () => ({}),
+    });
+
+    act(() => resizeCallback?.([], {} as ResizeObserver));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    const originalAutoscale = (instance._display as any).__cloakOriginalAutoscale;
+    expect(instance.target.getAttribute("data-vnc-fit-mode")).toBe("width");
+    expect(originalAutoscale).toHaveBeenCalledWith(1000, 2000);
+
+    view.unmount();
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      value: originalResizeObserver,
+    });
+  });
+
+  it("applies fit-height mode through noVNC autoscale dimensions while keeping manual zoom", async () => {
+    const view = await renderProfileViewer(vi.fn(), { fitMode: "height", viewportScale: 1.25 });
+    const instance = rfbMock.instances[0]!;
+    instance._display.width = 1000;
+    instance._display.height = 500;
+    const originalAutoscale = (instance._display as any).__cloakOriginalAutoscale;
+
+    act(() => {
+      instance._display.autoscale(600, 1000);
+    });
+
+    expect(instance.target.getAttribute("data-vnc-fit-mode")).toBe("height");
+    expect(originalAutoscale).toHaveBeenCalledWith(2500, 1250);
+
+    view.rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        onDisconnect={view.onDisconnect}
+        fitMode="fit"
+        viewportScale={1.25}
+      />,
+    );
+
+    act(() => {
+      instance._display.autoscale(600, 1000);
+    });
+
+    expect(instance.target.getAttribute("data-vnc-fit-mode")).toBe("fit");
+    expect(originalAutoscale).toHaveBeenLastCalledWith(750, 1250);
+  });
+
   it("pauses clipboard polling while hidden", async () => {
     setVisibilityState("hidden");
     await renderProfileViewer();

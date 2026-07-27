@@ -12,6 +12,7 @@ interface ProfileViewerProps {
   compactControls?: boolean;
   layoutMode?: "inline" | "fullscreen";
   viewportScale?: number;
+  fitMode?: ViewFitMode;
   nativeFullscreenEnabled?: boolean;
   remoteToolsOpen?: boolean;
   remoteToolsPortalId?: string;
@@ -27,13 +28,18 @@ const MIN_VIEWPORT_SCALE = 0.75;
 const MAX_VIEWPORT_SCALE = 1.5;
 const ORIGINAL_AUTOSCALE_KEY = "__cloakOriginalAutoscale";
 const AUTOSCALE_SCALE_REF_KEY = "__cloakAutoscaleScaleRef";
+const AUTOSCALE_FIT_MODE_REF_KEY = "__cloakAutoscaleFitModeRef";
 
 type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
+type ViewFitMode = "fit" | "width" | "height";
 type DisplayAutoscale = (width: number, height: number) => void;
 type ScaledAutoscaleDisplay = {
   autoscale?: DisplayAutoscale;
+  width?: number;
+  height?: number;
   [ORIGINAL_AUTOSCALE_KEY]?: DisplayAutoscale;
   [AUTOSCALE_SCALE_REF_KEY]?: MutableRefObject<number>;
+  [AUTOSCALE_FIT_MODE_REF_KEY]?: MutableRefObject<ViewFitMode>;
 };
 
 function supportsClipboardSync() {
@@ -65,17 +71,43 @@ function clampViewportScale(scale: number) {
   return Math.min(MAX_VIEWPORT_SCALE, Math.max(MIN_VIEWPORT_SCALE, scale));
 }
 
-function installScaledAutoscale(display: ScaledAutoscaleDisplay | undefined, scaleRef: MutableRefObject<number>) {
+function fitAutoscaleBounds(
+  display: ScaledAutoscaleDisplay,
+  width: number,
+  height: number,
+  fitMode: ViewFitMode,
+): { width: number; height: number } {
+  const displayWidth = display.width ?? 0;
+  const displayHeight = display.height ?? 0;
+  if (fitMode === "fit" || displayWidth <= 0 || displayHeight <= 0) {
+    return { width, height };
+  }
+
+  const aspectRatio = displayWidth / displayHeight;
+  if (fitMode === "width") {
+    return { width, height: Math.max(height, width / aspectRatio) };
+  }
+  return { width: Math.max(width, height * aspectRatio), height };
+}
+
+function installScaledAutoscale(
+  display: ScaledAutoscaleDisplay | undefined,
+  scaleRef: MutableRefObject<number>,
+  fitModeRef: MutableRefObject<ViewFitMode>,
+) {
   if (typeof display?.autoscale !== "function") return;
 
   display[AUTOSCALE_SCALE_REF_KEY] = scaleRef;
+  display[AUTOSCALE_FIT_MODE_REF_KEY] = fitModeRef;
   if (display[ORIGINAL_AUTOSCALE_KEY]) return;
 
   const originalAutoscale = display.autoscale;
   display[ORIGINAL_AUTOSCALE_KEY] = originalAutoscale;
   display.autoscale = function scaledAutoscale(width: number, height: number) {
     const scale = clampViewportScale(display[AUTOSCALE_SCALE_REF_KEY]?.current ?? 1);
-    return originalAutoscale.call(this, width * scale, height * scale);
+    const fitMode = display[AUTOSCALE_FIT_MODE_REF_KEY]?.current ?? "fit";
+    const fitted = fitAutoscaleBounds(display, width, height, fitMode);
+    return originalAutoscale.call(this, fitted.width * scale, fitted.height * scale);
   };
 }
 
@@ -85,6 +117,7 @@ function restoreScaledAutoscale(display: ScaledAutoscaleDisplay | undefined) {
   display.autoscale = display[ORIGINAL_AUTOSCALE_KEY];
   delete display[ORIGINAL_AUTOSCALE_KEY];
   delete display[AUTOSCALE_SCALE_REF_KEY];
+  delete display[AUTOSCALE_FIT_MODE_REF_KEY];
 }
 
 export function ProfileViewer({
@@ -95,6 +128,7 @@ export function ProfileViewer({
   compactControls = false,
   layoutMode = "inline",
   viewportScale = 1,
+  fitMode = "fit",
   nativeFullscreenEnabled = true,
   remoteToolsOpen,
   remoteToolsPortalId,
@@ -124,6 +158,8 @@ export function ProfileViewer({
   const effectiveViewportScale = clampViewportScale(viewportScale);
   const viewportScaleRef = useRef(effectiveViewportScale);
   viewportScaleRef.current = effectiveViewportScale;
+  const fitModeRef = useRef(fitMode);
+  fitModeRef.current = fitMode;
   const toolsOpen = remoteToolsOpen ?? localToolsOpen;
   const setToolsOpen = useCallback(
     (next: boolean | ((open: boolean) => boolean)) => {
@@ -283,7 +319,7 @@ export function ProfileViewer({
         });
         rfb = instance;
         rfbRef.current = instance;
-        installScaledAutoscale((instance as any)._display, viewportScaleRef);
+        installScaledAutoscale((instance as any)._display, viewportScaleRef, fitModeRef);
 
         instance.scaleViewport = true;
         instance.resizeSession = false;
@@ -532,7 +568,7 @@ export function ProfileViewer({
       // visible canvas until the next remote framebuffer update arrives.
       rfb.scaleViewport = true;
       const display = rfb._display;
-      installScaledAutoscale(display, viewportScaleRef);
+      installScaledAutoscale(display, viewportScaleRef, fitModeRef);
       const bounds = container.getBoundingClientRect();
       if (
         bounds.width > 0 &&
@@ -566,7 +602,7 @@ export function ProfileViewer({
       observer.disconnect();
       if (refreshTimer !== null) clearTimeout(refreshTimer);
     };
-  }, [effectiveViewportScale, layoutMode, profileId]);
+  }, [effectiveViewportScale, fitMode, layoutMode, profileId]);
 
   const remoteToolButtons = (
     <>
@@ -766,7 +802,8 @@ export function ProfileViewer({
       <div
         ref={containerRef}
         data-vnc-layout={layoutMode}
-        className="flex-1 bg-black overflow-hidden"
+        data-vnc-fit-mode={fitMode}
+        className={`flex-1 bg-black ${fitMode === "fit" ? "overflow-hidden" : "overflow-auto"}`}
         style={{ minHeight: 0 }}
       />
     </div>

@@ -618,8 +618,20 @@ def _acpx_manager_preflights_ready_with_timeout(port: int, *, timeout: float) ->
     payload = _manager_json_on_port(port, "/api/task-harnesses/acpx/preflights", timeout=min(5.0, timeout))
     agents = payload.get("agents", [])
     require(isinstance(agents, list), "ACPX preflight receipt is malformed")
-    malformed_agents = [item for item in agents if not isinstance(item, dict)]
-    seen_agents: list[str] = [str(item.get("agent")) for item in agents if isinstance(item, dict)]
+    sanitized_agents: list[dict[str, object]] = []
+    malformed_agents = [item for item in agents if not isinstance(item, dict) or not isinstance(item.get("agent"), str)]
+    seen_agents: list[str] = []
+    for item in agents:
+        if not isinstance(item, dict) or not isinstance(item.get("agent"), str):
+            continue
+        sanitized = {
+            "agent": item["agent"],
+            "ready": item.get("ready") is True,
+            "state": str(item.get("state") or ""),
+            "reason_code": str(item.get("reason_code") or ""),
+        }
+        sanitized_agents.append(sanitized)
+        seen_agents.append(str(item["agent"]))
     duplicate_agents = sorted({agent for agent in seen_agents if seen_agents.count(agent) > 1})
     unexpected_agents = sorted(set(seen_agents) - set(EXPECTED_ACPX_PREFLIGHT_AGENTS))
     failures: list[dict[str, object]] = []
@@ -629,19 +641,48 @@ def _acpx_manager_preflights_ready_with_timeout(port: int, *, timeout: float) ->
         failures.append({"agent": agent, "ready": False, "state": "duplicate", "reason_code": "duplicate_agent"})
     for agent in unexpected_agents:
         failures.append({"agent": agent, "ready": False, "state": "unexpected", "reason_code": "unexpected_agent"})
-    by_agent = {str(item.get("agent")): item for item in agents if isinstance(item, dict)}
+    by_agent = {str(item["agent"]): item for item in sanitized_agents}
     for agent in EXPECTED_ACPX_PREFLIGHT_AGENTS:
         item = by_agent.get(agent)
         if not isinstance(item, dict):
-            failures.append({"agent": agent, "ready": False, "state": "missing", "reason_code": "not_checked"})
+            failures.append({"agent": agent, "ready": False, "state": "missing", "reason_code": "missing_agent"})
             continue
-        if item.get("ready") is not True or item.get("state") != "ready" or item.get("reason_code") != "ok":
+        is_ready = item.get("ready") is True and item.get("state") == "ready" and item.get("reason_code") == "ok"
+        is_auth_blocked = (
+            item.get("ready") is False and item.get("state") == "failed" and item.get("reason_code") == "auth_required"
+        )
+        if not is_ready and not is_auth_blocked:
             failures.append(item)
+    ready_agents = [
+        str(item["agent"])
+        for item in sanitized_agents
+        if item["agent"] in EXPECTED_ACPX_PREFLIGHT_AGENTS
+        and item.get("ready") is True
+        and item.get("state") == "ready"
+        and item.get("reason_code") == "ok"
+    ]
+    auth_blocked_agents = [
+        str(item["agent"])
+        for item in sanitized_agents
+        if item["agent"] in EXPECTED_ACPX_PREFLIGHT_AGENTS
+        and item.get("ready") is False
+        and item.get("state") == "failed"
+        and item.get("reason_code") == "auth_required"
+    ]
     reason_code = "ok"
     if failures:
         first_failure = failures[0]
         reason_code = str(first_failure.get("reason_code") or first_failure.get("state") or "not_ready")
-    return {"ready": not failures, "agents": agents, "failures": failures, "reason_code": reason_code}
+    elif not ready_agents:
+        reason_code = "no_ready_agent"
+    return {
+        "ready": not failures and bool(ready_agents),
+        "agents": sanitized_agents,
+        "failures": failures,
+        "reason_code": reason_code,
+        "ready_agents": ready_agents,
+        "auth_blocked_agents": auth_blocked_agents,
+    }
 
 
 def _acpx_manager_presence_ready(port: int) -> dict[str, object]:
@@ -1574,6 +1615,8 @@ def op_bootstrap_acpx_verify_candidate(args: dict[str, object]) -> dict[str, obj
                 last_components["manager_preflights"] = {
                     "ready": manager_preflights["ready"] is True,
                     "reason_code": manager_preflights["reason_code"],
+                    "ready_agents": manager_preflights.get("ready_agents", []),
+                    "auth_blocked_agents": manager_preflights.get("auth_blocked_agents", []),
                 }
                 if manager_preflights["ready"] is not True:
                     last_reason = f"manager_preflight_{manager_preflights['reason_code']}"

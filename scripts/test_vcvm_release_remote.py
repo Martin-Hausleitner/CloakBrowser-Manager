@@ -1763,7 +1763,7 @@ def test_bootstrap_candidate_verify_rejects_missing_adapter_preflight(monkeypatc
     monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/local/bin/acpx" if name == "acpx" else None)
     monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
 
-    with pytest.raises(remote.HelperError, match=r"reason=manager_preflight_auth_required"):
+    with pytest.raises(remote.HelperError, match=r"reason=manager_preflight_missing_agent"):
         remote.op_bootstrap_acpx_verify_candidate(
             {
                 "release_id": "release-0000001",
@@ -1788,7 +1788,16 @@ def test_bootstrap_candidate_verify_polls_transient_presence_then_preflight_read
         {"worker_seen_recently": True, "state": "polling"},
     ]
     preflight_payloads = [
-        {"agents": [{"agent": "codex", "ready": False, "state": "failed", "reason_code": "auth_required"}]},
+        {
+            "agents": [
+                {"agent": "codex", "ready": True, "state": "ready", "reason_code": "ok"},
+                *[
+                    {"agent": agent, "ready": False, "state": "failed", "reason_code": "auth_required"}
+                    for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+                    if agent != "codex"
+                ],
+            ]
+        },
         {
             "agents": [
                 {"agent": agent, "ready": True, "state": "ready", "reason_code": "ok"}
@@ -1836,17 +1845,121 @@ def test_bootstrap_candidate_verify_polls_transient_presence_then_preflight_read
 
     assert result["present"] is True
     assert result["adapters_ready"] is True
-    assert result["attempt_count"] == 3
+    assert result["attempt_count"] == 2
     assert result["deadline_seconds"] == 1.0
     assert result["readiness_reason"] == "ready"
     assert result["components"]["presence"]["ready"] is True
     assert result["components"]["manager_preflights"]["ready"] is True
-    assert sleeps == [0.1, 0.1]
+    assert result["components"]["manager_preflights"]["ready_agents"] == ["codex"]
+    assert result["components"]["manager_preflights"]["auth_blocked_agents"] == [
+        "claude",
+        "cursor",
+        "grok-build",
+        "opencode",
+    ]
+    assert sleeps == [0.1]
+
+
+def test_acpx_manager_preflights_accept_one_ready_agent_with_auth_blocked_expected_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents: list[object] = [
+        {"agent": "codex", "ready": True, "state": "ready", "reason_code": "ok"},
+        *[
+            {"agent": agent, "ready": False, "state": "failed", "reason_code": "auth_required"}
+            for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+            if agent != "codex"
+        ],
+    ]
+    monkeypatch.setattr(remote, "_manager_json_on_port", lambda port, path, timeout=None: {"agents": agents}, raising=False)
+
+    result = remote._acpx_manager_preflights_ready(18116)
+
+    assert result["ready"] is True
+    assert result["reason_code"] == "ok"
+    assert result["ready_agents"] == ["codex"]
+    assert result["auth_blocked_agents"] == ["claude", "cursor", "grok-build", "opencode"]
+    assert result["failures"] == []
+
+
+def test_acpx_manager_preflights_reject_all_auth_blocked_agents_with_stable_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents: list[object] = [
+        {"agent": agent, "ready": False, "state": "failed", "reason_code": "auth_required"}
+        for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+    ]
+    monkeypatch.setattr(remote, "_manager_json_on_port", lambda port, path, timeout=None: {"agents": agents}, raising=False)
+
+    result = remote._acpx_manager_preflights_ready(18116)
+
+    assert result["ready"] is False
+    assert result["reason_code"] == "no_ready_agent"
+    assert result["ready_agents"] == []
+    assert result["auth_blocked_agents"] == list(remote.EXPECTED_ACPX_PREFLIGHT_AGENTS)
+    assert result["failures"] == []
+
+
+@pytest.mark.parametrize(
+    "bad_agent,reason_code",
+    [
+        ({"ready": False, "state": "failed", "reason_code": "protocol_error"}, "protocol_error"),
+        ({"ready": False, "state": "stale", "reason_code": "stale"}, "stale"),
+        ({"ready": False, "state": "not_checked", "reason_code": "not_checked"}, "not_checked"),
+        ({"ready": False, "state": "failed", "reason_code": "adapter_unavailable"}, "adapter_unavailable"),
+        ({"ready": True, "state": "ready", "reason_code": "version_mismatch"}, "version_mismatch"),
+    ],
+)
+def test_acpx_manager_preflights_reject_infra_or_stale_expected_agent_states(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_agent: dict[str, object],
+    reason_code: str,
+) -> None:
+    agents: list[object] = [
+        {"agent": agent, "ready": True, "state": "ready", "reason_code": "ok"}
+        for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+    ]
+    agents[1] = {"agent": "claude", **bad_agent}
+    monkeypatch.setattr(remote, "_manager_json_on_port", lambda port, path, timeout=None: {"agents": agents}, raising=False)
+
+    result = remote._acpx_manager_preflights_ready(18116)
+
+    assert result["ready"] is False
+    assert result["reason_code"] == reason_code
+    assert result["ready_agents"] == ["codex", "cursor", "grok-build", "opencode"]
+    assert result["auth_blocked_agents"] == []
+
+
+def test_acpx_manager_preflights_accept_all_ready_agents(monkeypatch: pytest.MonkeyPatch) -> None:
+    agents: list[object] = [
+        {"agent": agent, "ready": True, "state": "ready", "reason_code": "ok"}
+        for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+    ]
+    monkeypatch.setattr(remote, "_manager_json_on_port", lambda port, path, timeout=None: {"agents": agents}, raising=False)
+
+    result = remote._acpx_manager_preflights_ready(18116)
+
+    assert result["ready"] is True
+    assert result["reason_code"] == "ok"
+    assert result["ready_agents"] == list(remote.EXPECTED_ACPX_PREFLIGHT_AGENTS)
+    assert result["auth_blocked_agents"] == []
+    assert result["failures"] == []
 
 
 @pytest.mark.parametrize(
     "agents,reason_code",
     [
+        (
+            [
+                {"agent": "codex", "ready": True, "state": "ready", "reason_code": "ok"},
+                *[
+                    {"agent": agent, "ready": False, "state": "failed", "reason_code": "auth_required"}
+                    for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+                    if agent != "codex"
+                ][:-1],
+            ],
+            "missing_agent",
+        ),
         (
             [
                 *[
@@ -1944,7 +2057,7 @@ def test_bootstrap_candidate_verify_times_out_with_last_component_reason_without
 
     with pytest.raises(
         remote.HelperError,
-        match=r"attempt_count=2 .*deadline_seconds=0\.15 .*reason=manager_preflight_auth_required",
+        match=r"attempt_count=2 .*deadline_seconds=0\.15 .*reason=manager_preflight_missing_agent",
     ) as exc_info:
         remote.op_bootstrap_acpx_verify_candidate(
             {

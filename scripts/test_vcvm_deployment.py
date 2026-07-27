@@ -13,6 +13,9 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "docker-compose.vcvm.yml"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy_vcvm.sh"
+ROLLBACK_SCRIPT = ROOT / "scripts" / "rollback_vcvm_release.sh"
+RELEASE_MANIFEST_SCRIPT = ROOT / "scripts" / "cbm_release_manifest.py"
+RELEASE_CONTRACT = ROOT / "docs" / "contracts" / "vcvm-release-v1.json"
 DOC_FILE = ROOT / "docs" / "VCVM-DEPLOYMENT.md"
 WORKER_DOC_FILE = ROOT / "docs" / "BROWSER_USE_WORKER.md"
 DOCKERIGNORE_FILE = ROOT / ".dockerignore"
@@ -152,14 +155,50 @@ def test_deploy_vcvm_sh_fails_closed_before_remote_writes() -> None:
         "VCVM_MIN_FREE_DISK_GIB" in deploy_text,
         "deploy must make the minimum free-space gate configurable",
     )
+    assert_true("apply=0" in deploy_text, "deploy must be dry-run by default")
+    assert_true("--apply" in deploy_text, "live deploy flag must exist and fail closed")
+    assert_true("cbm_release_manifest.py" in deploy_text, "deploy must generate a release manifest")
+    assert_true("--disk-free-bytes" in deploy_text, "manifest must record measured VCVM free capacity")
     assert_true(
-        'df -Pk "\\$remote_path"' in deploy_text,
-        "deploy must measure target-volume capacity before rsync",
+        deploy_text.index('if [[ "$apply" == "1" ]]') < deploy_text.index("manifest_args=("),
+        "deploy must refuse unavailable apply before manifest generation",
+    )
+    for mutation in ('ssh "$target_host"', "rsync -az", "docker compose", "mkdir -p \"\\$remote_path/releases\""):
+        assert_true(mutation not in deploy_text, f"apply-unavailable deploy must not contain {mutation}")
+    assert_true(
+        "live VCVM release is unavailable" in deploy_text,
+        "deploy --apply must fail closed instead of running a partial release",
     )
     assert_true(
-        "less than ${min_free_disk_gib} GiB free" in deploy_text,
-        "deploy must reject insufficient target-volume capacity before rsync",
+        "source-hash verification" in deploy_text and "worker/runtime skew checks" in deploy_text,
+        "deploy --apply refusal must name missing P0 release gates",
     )
+
+
+def test_release_manifest_and_rollback_files_are_documented() -> None:
+    assert_true(RELEASE_MANIFEST_SCRIPT.exists(), "missing scripts/cbm_release_manifest.py")
+    assert_true(ROLLBACK_SCRIPT.exists(), "missing scripts/rollback_vcvm_release.sh")
+    assert_true(RELEASE_CONTRACT.exists(), "missing docs/contracts/vcvm-release-v1.json")
+    deploy_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    rollback_text = ROLLBACK_SCRIPT.read_text(encoding="utf-8")
+    doc_text = DOC_FILE.read_text(encoding="utf-8")
+    contract = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
+    assert_true(contract["metadata"]["id"] == "vcvm-release-v1", "unexpected release contract id")
+    assert_true("release_min_free_gib" in RELEASE_MANIFEST_SCRIPT.read_text(encoding="utf-8"), "manifest must record release disk gate")
+    assert_true("new_worktree_min_free_gib" in RELEASE_MANIFEST_SCRIPT.read_text(encoding="utf-8"), "manifest must record worktree disk gate")
+    assert_true("SECRET_PATTERNS" in RELEASE_MANIFEST_SCRIPT.read_text(encoding="utf-8"), "manifest must fail closed on secrets")
+    assert_true("apply=0" in rollback_text, "rollback must be dry-run by default")
+    assert_true("release_id_re" in rollback_text, "rollback must validate release ID shape")
+    assert_true("rollback is unavailable" in rollback_text, "rollback --apply must fail closed")
+    for phrase in (
+        "Release manifest dry-run gate",
+        "dry-run by default",
+        "at least 8 GiB",
+        "`--apply` currently fails closed",
+        "contracts/vcvm-release-v1.json",
+    ):
+        assert_true(phrase in doc_text, f"deployment docs missing {phrase}")
+    assert_true("prune" not in deploy_text.lower() or "no SSH, rsync, compose, restart, cleanup, prune" in deploy_text, "deploy must not prune shared-host resources")
 
 
 def test_compose_attaches_optional_worker_env_file_without_interpolation() -> None:
@@ -356,43 +395,25 @@ def main() -> None:
 
     deploy_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     dockerignore_text = DOCKERIGNORE_FILE.read_text(encoding="utf-8")
-    assert_true("ACCESS_CONTROL_ENABLED=1" in deploy_text, "deploy script must force access control")
     assert_true("PROXYCHECKER_URL" in deploy_text, "deploy script must support optional proxychecker configuration")
     assert_true(
         "host.docker.internal" in deploy_text,
         "deploy script must restrict the proxychecker boundary to the Docker host gateway",
     )
-    assert_true("vcvm_orca_preflight.py" in deploy_text, "deploy script must run Orca host preflight")
-    assert_true(
-        "path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use" in deploy_text,
-        "deploy script must pin the Orca-registered vk-repos worktree",
-    )
-    assert_true(
-        "/home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh"
-        in deploy_text,
-        "deploy script must pin the vk-repos wrapper path",
-    )
+    assert_true("cbm_release_manifest.py" in deploy_text, "deploy script must generate manifest dry-runs")
+    assert_true("live VCVM release is unavailable" in deploy_text, "deploy --apply must fail closed")
+    assert_true("rsync -az" not in deploy_text, "deploy must not carry partial rsync release logic")
+    assert_true("docker compose" not in deploy_text, "deploy must not carry partial compose release logic")
+    assert_true('ssh "$target_host"' not in deploy_text, "deploy must not open SSH while apply is unavailable")
     preflight_text = (ROOT / "scripts" / "vcvm_orca_preflight.py").read_text(encoding="utf-8")
     assert_true("worktree show" in preflight_text, "preflight must verify worktree show")
     assert_true("check_agent_key_file" in preflight_text, "preflight must validate agent key file")
     assert_true("--agent-key-file" in preflight_text, "preflight must accept agent key file flag")
     assert_true("0600" in preflight_text or "0o600" in (ROOT / "backend" / "orca_agent_key.py").read_text(encoding="utf-8"), "agent key mode must be exactly 0600")
-    assert_true("--agent-key-file" in deploy_text, "deploy preflight must pass agent key file path")
-    assert_true("CBM_ORCA_BIN=" in deploy_text, "deploy script must write CBM_ORCA_BIN")
-    assert_true("CBM_ORCA_WORKTREE=" in deploy_text, "deploy script must write CBM_ORCA_WORKTREE")
-    assert_true("CBM_ORCA_AGENT_WRAPPER=" in deploy_text, "deploy script must write wrapper path")
-    assert_true("CBM_AGENT_KEY_FILE=" in deploy_text, "deploy script must write key file path only")
     assert_true("CBM_AGENT_KEY=" not in deploy_text, "deploy script must never write inline agent keys")
-    assert_true("tailscale serve --bg --https" in deploy_text, "deploy script must use private HTTPS Serve")
-    assert_true("timeout 30s tailscale serve" in deploy_text, "Tailscale Serve must not hang indefinitely")
-    assert_true("<tailscale-admin-enable-url>" in deploy_text, "Tailscale admin URLs must be scrubbed")
     assert_true("tailscale funnel" not in deploy_text.lower(), "deploy script must not use public funnel")
     assert_true("Refusing unexpected target host" in deploy_text, "deploy script must validate host")
     assert_true("Expected exactly: $DEFAULT_REMOTE_PATH" in deploy_text, "deploy script must validate path")
-    assert_true(".cloakbrowser-manager-vcvm-managed" in deploy_text, "deploy script must use a managed marker")
-    assert_true("--delete" in deploy_text and "--exclude \"$MANAGED_MARKER\"" in deploy_text, "rsync delete must preserve marker")
-    assert_true("(.TCP // {}) | has(\\$port)" in deploy_text, "Serve collision check must inspect TCP map")
-    assert_true("(.Web // {}) | keys" in deploy_text, "Serve collision check must inspect Web map")
 
     for pattern in (
         ".git",
@@ -414,7 +435,6 @@ def main() -> None:
         "*token*",
     ):
         assert_true(pattern in dockerignore_text, f".dockerignore missing {pattern}")
-        assert_true(pattern in deploy_text, f"rsync excludes missing {pattern}")
 
     wrapper = ROOT / "scripts" / "orca_agent_cli.sh"
     preflight = ROOT / "scripts" / "vcvm_orca_preflight.py"
@@ -447,7 +467,6 @@ def main() -> None:
         "check_agent_wrapper" in preflight.read_text(encoding="utf-8"),
         "host preflight must validate host agent wrapper readiness",
     )
-    assert_true("--agent-wrapper" in deploy_text, "deploy preflight must pass host wrapper path")
     assert_true(
         "BROWSER_USE_WORKER.md" in doc_text or WORKER_DOC_FILE.exists(),
         "deployment docs must mention or link Browser-Use worker guidance",

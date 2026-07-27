@@ -114,25 +114,67 @@ Disk policy is fail-closed for VCVM work:
 - `< 12 GiB` free: block creating new worktrees.
 - `< 8 GiB` free: block release/deploy.
 
-## Deploy
+## Release manifest dry-run gate
 
-Create a long bootstrap token in a local secret file with mode `600`. The token
-is sent to the VCVM over SSH and written to
-`/home/coder/cloakbrowser-manager/.env.vcvm` with mode `600`.
+VCVM release operations are dry-run by default. A normal invocation builds a
+local release manifest, checks the clean git commit, branch, artifact hashes,
+migration set and at least 8 GiB measured free capacity, then exits before SSH,
+rsync, compose, restart, cleanup, prune or symlink mutation. A dry-run
+measurement is marked as `local` or `override`; it is not represented as exact
+VCVM capacity:
 
 ```bash
-mkdir -p ~/.config/cloakbrowser
-openssl rand -base64 48 > ~/.config/cloakbrowser/vcvm-auth-token
-chmod 600 ~/.config/cloakbrowser/vcvm-auth-token
-./scripts/deploy_vcvm.sh --auth-token-file ~/.config/cloakbrowser/vcvm-auth-token
+./scripts/deploy_vcvm.sh
 ```
 
-The script syncs the current checkout to the VCVM, builds the Docker image on
-the VCVM, starts the stack and checks:
+The manifest contract is versioned in
+[`contracts/vcvm-release-v1.json`](./contracts/vcvm-release-v1.json). It
+records:
 
-1. `/health` answers locally on the VCVM.
-2. `/api/auth/status` reports required auth.
-3. `/api/auth/status` reports access control enabled.
+- source branch, commit, named source remote and non-credentialed remote URL;
+- release ID, created time, target host, release directory and `current`
+  symlink path;
+- `measurement_source`, `total_bytes`, `used_bytes`, `free_bytes` and
+  `free_gib`;
+- artifact SHA-256 hashes and the detected migration set;
+- a deterministic `artifact_set_sha256` over the selected release artifacts;
+- release policy flags showing that live apply is currently unavailable.
+
+`--apply` currently fails closed. It does not create
+`/home/coder/cloakbrowser-manager`, `releases/`, `current`, env files, compose
+state or any backup/state receipt. Live release remains unavailable until the
+implementation can prove remote source-hash verification, SQLite/profile backup
+receipts, build-before-switch, automatic failure restore, worker/runtime commit
+binding, and required Orca, Browser Use, ACPX, proxychecker, stream and
+Tailscale private-access receipts.
+
+Legacy live flags such as `--auth-token-file` and `--serve-private` are rejected
+while apply is unavailable; they are not accepted as successful dry-run no-ops.
+
+Rollback is also dry-run by default:
+
+```bash
+./scripts/rollback_vcvm_release.sh
+```
+
+`rollback_vcvm_release.sh --apply` also fails closed until rollback can restart
+the previous compose release, verify health/auth, validate DB/profile backup
+compatibility and update state only after success.
+
+## Deploy
+
+Create a dry-run release receipt from a clean checkout with the authorized fork
+remote configured:
+
+```bash
+./scripts/deploy_vcvm.sh \
+  --source-remote fork \
+  --expected-source-remote https://github.com/Martin-Hausleitner/CloakBrowser-Manager.git
+```
+
+There is no live VCVM deploy command in this slice. `--apply` currently fails closed
+with an error that names the missing P0 gates instead of performing a partial
+release.
 
 Optional Browser-Use worker bootstrap uses a separate `.env.worker.vcvm` file
 (only `CBM_WORKER_ID` / `CBM_WORKER_TOKEN`) attached by Compose
@@ -148,38 +190,25 @@ Docker bridge host address, not on a public or Tailnet-wide socket. The Manager
 container reaches that boundary through the explicit `host.docker.internal`
 host-gateway mapping.
 
-Then deploy with the fixed local service URL:
+The manifest dry-run keeps validating the fixed local service URL:
 
 ```bash
 PROXYCHECKER_URL=http://host.docker.internal:18899 \
-  ./scripts/deploy_vcvm.sh --auth-token-file ~/.config/cloakbrowser/vcvm-auth-token
+  ./scripts/deploy_vcvm.sh
 ```
 
 The deploy script defaults to `http://host.docker.internal:18899` when
 `PROXYCHECKER_URL` is unset, rejects credentials/public hosts/arbitrary paths,
-and writes only the validated URL plus the single `host.docker.internal`
-allow-list entry into the mode-600 VCVM env file. Export
+and keeps the validated URL plus the single `host.docker.internal` allow-list
+entry in the dry-run manifest boundary. Export
 `PROXYCHECKER_URL=` (empty) to disable enrichment explicitly; browser
 reachability, fingerprint consistency and conservative BrowserScan
 classification continue independently.
 
 ## Private Tailscale HTTPS
 
-If Tailscale Serve is enabled for the tailnet and a private HTTPS port is free:
-
-```bash
-./scripts/deploy_vcvm.sh --auth-token-file ~/.config/cloakbrowser/vcvm-auth-token --serve-private
-```
-
-Use a different private HTTPS port if `443` is already configured:
-
-```bash
-TAILSCALE_HTTPS_PORT=8443 ./scripts/deploy_vcvm.sh --auth-token-file ~/.config/cloakbrowser/vcvm-auth-token --serve-private
-```
-
-The script refuses to replace an existing Serve entry on the selected HTTPS
-port. It also refuses to publish unless the protected Manager is already running
-with scoped access control.
+Tailscale Serve publication is not performed by this dry-run gate. It is one of
+the required live service receipts before `--apply` can be enabled.
 
 ## Validation
 
@@ -187,9 +216,10 @@ Run the local deployment-surface checks before changing the VCVM:
 
 ```bash
 python3 scripts/test_vcvm_deployment.py
+pytest scripts/test_vcvm_deployment.py scripts/test_cbm_release_manifest.py -q
 ```
 
-Run a remote smoke after deploy:
+After a future live implementation, run a remote smoke after deploy:
 
 ```bash
 ssh vcvm 'curl -fsS http://127.0.0.1:18115/health'

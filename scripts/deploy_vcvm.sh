@@ -12,19 +12,25 @@ MANAGED_MARKER=".cloakbrowser-manager-vcvm-managed"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy_vcvm.sh [--host vcvm] [--remote-path /home/coder/cloakbrowser-manager] [--port 18115] [--auth-token-file PATH] [--serve-private]
+Usage: scripts/deploy_vcvm.sh [--host vcvm] [--remote-path /home/coder/cloakbrowser-manager] [--port 18115] [--source-remote fork] [--expected-source-remote URL] [--apply]
 
-Deploy CloakBrowser Manager to the authorized VCVM Docker host.
+Plan or deploy CloakBrowser Manager to the authorized VCVM Docker host.
 
 Required:
-  AUTH_TOKEN or --auth-token-file PATH. The token is sent over SSH and written
-  to .env.vcvm on the VCVM with mode 600. It is never printed.
+  The default mode is a read-only dry run and never opens SSH, rsyncs, restarts,
+  or mutates the VCVM. --apply currently fails closed until the full remote
+  release, backup, build, verification and rollback contract is implemented.
+  Legacy --auth-token-file and --serve-private inputs are rejected while live
+  apply is unavailable; they are never accepted as successful no-op inputs.
 
 Safety:
   - The Manager binds only to 127.0.0.1 on the VCVM.
   - ACCESS_CONTROL_ENABLED is always forced to 1.
   - Persistent browser data stays in Docker volume cloakbrowser-manager-vcvm-data.
   - Deployment refuses to start with less than 8 GiB free on the VCVM volume.
+  - Release manifests record the exact measured capacity, source commit,
+    branch, artifact hashes and migration set.
+  - No shared-host cleanup, prune, restart or live deploy runs.
   - Optional Tailscale Serve is added only after auth/access checks pass.
   - Host Orca bridge requires /home/coder/orca, /home/coder/.local, and
     /home/coder/.config/orca (read-only mounts). Preflight fails closed if absent.
@@ -38,6 +44,11 @@ remote_path="${VCVM_REMOTE_PATH:-$DEFAULT_REMOTE_PATH}"
 manager_port="${MANAGER_PORT:-$DEFAULT_MANAGER_PORT}"
 auth_token_file="${AUTH_TOKEN_FILE:-}"
 serve_private=0
+apply=0
+source_root=""
+source_remote="${CBM_RELEASE_SOURCE_REMOTE:-fork}"
+expected_source_remote="${CBM_EXPECTED_SOURCE_REMOTE:-https://github.com/Martin-Hausleitner/CloakBrowser-Manager.git}"
+disk_free_bytes="${CBM_RELEASE_FREE_BYTES:-}"
 tailscale_https_port="${TAILSCALE_HTTPS_PORT:-$DEFAULT_TAILSCALE_HTTPS_PORT}"
 proxychecker_url="${PROXYCHECKER_URL-http://host.docker.internal:18899}"
 min_free_disk_gib="${VCVM_MIN_FREE_DISK_GIB:-$DEFAULT_MIN_FREE_DISK_GIB}"
@@ -63,6 +74,26 @@ while [[ $# -gt 0 ]]; do
     --serve-private)
       serve_private=1
       shift
+      ;;
+    --apply)
+      apply=1
+      shift
+      ;;
+    --source-root)
+      source_root="${2:-}"
+      shift 2
+      ;;
+    --source-remote)
+      source_remote="${2:-}"
+      shift 2
+      ;;
+    --expected-source-remote)
+      expected_source_remote="${2:-}"
+      shift 2
+      ;;
+    --disk-free-bytes)
+      disk_free_bytes="${2:-}"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -101,6 +132,13 @@ if [[ ! "$min_free_disk_gib" =~ ^[1-9][0-9]?$ ]] || (( min_free_disk_gib > 64 ))
   exit 64
 fi
 
+for disk_value in "$disk_free_bytes"; do
+  if [[ -n "$disk_value" && ! "$disk_value" =~ ^[0-9]+$ ]]; then
+    echo "Refusing invalid disk byte override value." >&2
+    exit 64
+  fi
+done
+
 if [[ -n "$proxychecker_url" ]]; then
   if [[ ! "$proxychecker_url" =~ ^http://host\.docker\.internal:([0-9]{2,5})$ ]]; then
     echo "Refusing PROXYCHECKER_URL outside the VCVM Docker host gateway." >&2
@@ -113,184 +151,50 @@ if [[ -n "$proxychecker_url" ]]; then
   fi
 fi
 
-for command in ssh rsync; do
-  if ! command -v "$command" >/dev/null 2>&1; then
-    echo "Missing required local command: $command" >&2
-    exit 69
-  fi
-done
-
-if [[ -n "$auth_token_file" ]]; then
-  if [[ ! -r "$auth_token_file" ]]; then
-    echo "Cannot read auth token file." >&2
-    exit 66
-  fi
-  auth_token="$(tr -d '\r\n' < "$auth_token_file")"
-else
-  auth_token="${AUTH_TOKEN:-}"
+if [[ -n "$auth_token_file" || "$serve_private" == "1" ]]; then
+  echo "Refusing legacy live-deploy flags while VCVM apply is unavailable." >&2
+  exit 64
 fi
 
-if [[ ${#auth_token} -lt 24 ]]; then
-  echo "Refusing weak or missing AUTH_TOKEN; use at least 24 characters." >&2
-  exit 77
+if [[ "$apply" == "1" ]]; then
+  echo "Refusing --apply: live VCVM release is unavailable until CBM-022 remote verification is complete." >&2
+  echo "Required missing gates: remote source-hash verification, DB/profile backup receipt, build-before-switch, failure rollback, worker/runtime skew checks, and service receipts." >&2
+  exit 78
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
+if [[ -z "$source_root" ]]; then
+  source_root="$repo_root"
+fi
+source_root="$(cd "$source_root" && pwd)"
 
-if [[ ! -f "$COMPOSE_FILE" || ! -f Dockerfile || ! -d backend || ! -d frontend ]]; then
+if [[ ! -f "$source_root/$COMPOSE_FILE" || ! -f "$source_root/Dockerfile" || ! -d "$source_root/backend" || ! -d "$source_root/frontend" ]]; then
   echo "Refusing to deploy from an incomplete repository checkout." >&2
   exit 72
 fi
 
-ssh "$target_host" "bash -s" <<REMOTE_PREFLIGHT
-set -euo pipefail
-remote_path='$remote_path'
-min_free_disk_kib=$(( $min_free_disk_gib * 1024 * 1024 ))
-marker="\$remote_path/$MANAGED_MARKER"
-mkdir -p "\$remote_path"
-available_disk_kib="\$(df -Pk "\$remote_path" | awk 'NR == 2 { print \$4 }')"
-if [[ ! "\$available_disk_kib" =~ ^[0-9]+$ ]] || (( available_disk_kib < min_free_disk_kib )); then
-  echo "Refusing VCVM deploy: less than ${min_free_disk_gib} GiB free on the target volume." >&2
-  exit 75
+remote_disk_args=()
+
+manifest_args=(
+  "$repo_root/scripts/cbm_release_manifest.py"
+  --source-root "$source_root"
+  --disk-path "$source_root"
+  --host "$target_host"
+  --remote-path "$remote_path"
+  --source-remote "$source_remote"
+  --require-migrations
+)
+if [[ -n "$expected_source_remote" ]]; then
+  manifest_args+=(--expected-source-remote "$expected_source_remote")
 fi
-if [[ -f "\$marker" ]]; then
-  if ! grep -qx 'project=$PROJECT_NAME' "\$marker"; then
-    echo "Refusing remote path with mismatched managed marker." >&2
-    exit 73
-  fi
-else
-  if find "\$remote_path" -mindepth 1 -maxdepth 1 | read -r _; then
-    echo "Refusing to delete or overwrite an unmanaged non-empty remote path: \$remote_path" >&2
-    echo "Expected marker: \$marker" >&2
-    exit 73
-  fi
-  {
-    printf '%s\n' 'managed-by=cloakbrowser-manager-vcvm-deploy'
-    printf '%s\n' 'project=$PROJECT_NAME'
-  } > "\$marker"
+if [[ -n "$disk_free_bytes" ]]; then
+  manifest_args+=(--disk-free-bytes "$disk_free_bytes")
 fi
-REMOTE_PREFLIGHT
-
-rsync -az --delete \
-  --exclude '.git' \
-  --exclude "$MANAGED_MARKER" \
-  --exclude '.env.vcvm' \
-  --exclude '.env' \
-  --exclude '.env.*' \
-  --exclude '*.env' \
-  --exclude '*.token' \
-  --exclude '*token*' \
-  --exclude '.venv/' \
-  --exclude 'backend/.venv/' \
-  --exclude 'node_modules/' \
-  --exclude 'frontend/node_modules/' \
-  --exclude '__pycache__/' \
-  --exclude '*.pyc' \
-  --exclude '.pytest_cache/' \
-  --exclude '.ruff_cache/' \
-  --exclude '.mypy_cache/' \
-  --exclude 'frontend/dist/' \
-  --exclude 'dist/' \
-  --exclude 'backend/.data/' \
-  --exclude 'artifacts/' \
-  --exclude 'frontend/tsconfig.tsbuildinfo' \
-  --exclude 'benchmarks/' \
-  --exclude 'docker-compose.guacamole-benchmark.yml' \
-  --exclude 'scripts/guacamole_benchmark_config.json' \
-  --exclude 'scripts/run_guacamole_benchmark.sh' \
-  ./ "$target_host:$remote_path/"
-
-{
-  printf 'MANAGER_PORT=%s\n' "$manager_port"
-  printf 'ACCESS_CONTROL_ENABLED=1\n'
-  printf 'AUTH_TOKEN=%s\n' "$auth_token"
-  printf 'PROXYCHECKER_URL=%s\n' "$proxychecker_url"
-  printf 'PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal\n'
-  printf 'EXTENSION_CATALOG_DIR=/data/extension-catalog\n'
-  printf 'HOME=/home/coder\n'
-  printf 'CBM_ORCA_BIN=/home/coder/.local/bin/orca-ide\n'
-  # Orca-registered git worktree (deploy copy under cloakbrowser-manager is not registered).
-  printf 'CBM_ORCA_WORKTREE=path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use\n'
-  printf 'CBM_ORCA_AGENT_WRAPPER=/home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh\n'
-  printf 'CBM_BASE_URL=http://127.0.0.1:%s\n' "$manager_port"
-  printf 'CBM_AGENT_KEY_FILE=/home/coder/.config/cloakbrowser/orca-agent-key\n'
-} | ssh "$target_host" "umask 077; cat > '$remote_path/.env.vcvm'"
-
-ssh "$target_host" "bash -s" <<REMOTE_ORCA_PREFLIGHT
-set -euo pipefail
-# Fail closed when host Orca paths/runtime/worktree/agent-key are absent or invalid.
-# Agent key contents are never printed.
-python3 /home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/vcvm_orca_preflight.py \
-  --orca-bin /home/coder/.local/bin/orca-ide \
-  --worktree path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use \
-  --agent-wrapper /home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh \
-  --agent-key-file /home/coder/.config/cloakbrowser/orca-agent-key
-REMOTE_ORCA_PREFLIGHT
-
-ssh "$target_host" "cd '$remote_path' && docker compose --env-file .env.vcvm -p '$PROJECT_NAME' -f '$COMPOSE_FILE' up -d --build --remove-orphans"
-
-# Ensure Comet/harvested extension binaries can land on the data volume.
-ssh "$target_host" "docker exec cloakbrowser-manager-vcvm mkdir -p /data/extension-catalog" >/dev/null 2>&1 || true
-
-ssh "$target_host" "bash -s" <<REMOTE_CHECK
-set -euo pipefail
-target='http://127.0.0.1:$manager_port'
-for i in \$(seq 1 60); do
-  if curl --fail --silent --max-time 5 "\$target/health" >/dev/null; then
-    break
-  fi
-  sleep 2
-  if [[ "\$i" == "60" ]]; then
-    docker compose --env-file '$remote_path/.env.vcvm' -p '$PROJECT_NAME' -f '$remote_path/$COMPOSE_FILE' logs --no-color --tail=160 >&2 || true
-    exit 70
-  fi
-done
-
-status="\$(curl --fail --silent --max-time 10 "\$target/api/auth/status")"
-if ! jq -e '.auth_required == true and .access_control_enabled == true' >/dev/null <<<"\$status"; then
-  echo "VCVM Manager is not protected; stopping before publishing." >&2
-  exit 77
+if [[ ${#remote_disk_args[@]} -gt 0 ]]; then
+  manifest_args+=("${remote_disk_args[@]}")
 fi
-echo "VCVM Manager is healthy and protected at \$target"
-REMOTE_CHECK
+manifest_json="$(python3 "${manifest_args[@]}")"
+release_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["release_id"])' <<<"$manifest_json")"
 
-if [[ "$serve_private" == "1" ]]; then
-  ssh "$target_host" "bash -s" <<REMOTE_SERVE
-set -euo pipefail
-target='http://127.0.0.1:$manager_port'
-https_port='$tailscale_https_port'
-
-for command in curl jq tailscale timeout; do
-  if ! command -v "\$command" >/dev/null 2>&1; then
-    echo "Missing required VCVM command for private HTTPS: \$command" >&2
-    exit 69
-  fi
-done
-
-status="\$(curl --fail --silent --max-time 10 "\$target/api/auth/status")"
-if ! jq -e '.auth_required == true and .access_control_enabled == true' >/dev/null <<<"\$status"; then
-  echo "Refusing private HTTPS because auth/access is not enforced." >&2
-  exit 77
-fi
-
-existing="\$(tailscale serve status --json 2>/dev/null || printf '{}')"
-if jq -e --arg port "\$https_port" '
-  ((.TCP // {}) | has(\$port)) or
-  (((.Web // {}) | keys) | any(endswith(":" + \$port)))
-' >/dev/null <<<"\$existing"; then
-  echo "Refusing to replace existing Tailscale Serve HTTPS port \$https_port." >&2
-  exit 73
-fi
-
-if ! serve_output="\$(timeout 30s tailscale serve --bg --https="\$https_port" "\$target" 2>&1)"; then
-  printf '%s\n' "\$serve_output" | sed -E 's#https://login\.tailscale\.com/[^[:space:]]+#<tailscale-admin-enable-url>#g' >&2
-  echo "Tailscale Serve private HTTPS was not configured." >&2
-  exit 78
-fi
-printf '%s\n' "\$serve_output" | sed -E 's#https://login\.tailscale\.com/[^[:space:]]+#<tailscale-admin-enable-url>#g'
-tailscale serve status
-REMOTE_SERVE
-fi
-
-echo "Deployment complete. Open the VCVM-local Manager through SSH or private Tailscale Serve."
+echo "DRY RUN: VCVM release manifest passed for $release_id."
+echo "DRY RUN: no SSH, rsync, compose, restart, cleanup, prune, or symlink mutation was performed."

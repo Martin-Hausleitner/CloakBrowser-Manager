@@ -1194,16 +1194,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command")
     release = subparsers.add_parser("release")
     rollback = subparsers.add_parser("rollback")
-    for item in (parser, release):
-        item.add_argument("--source-root", type=Path, default=Path.cwd())
-        item.add_argument("--host", default=DEFAULT_HOST)
-        item.add_argument("--remote-path", default=DEFAULT_REMOTE_PATH)
-        item.add_argument("--release-id", default=f"release-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}")
-        item.add_argument("--source-remote", default="fork")
-        item.add_argument("--expected-source-remote", required=False, default="")
-        item.add_argument("--expected-current-worker-commit", required=False)
-        item.add_argument("--bootstrap-acpx", action="store_true")
-        item.add_argument("--apply", action="store_true")
+    release_defaults: dict[str, object] = {
+        "source_root": Path.cwd(),
+        "host": DEFAULT_HOST,
+        "remote_path": DEFAULT_REMOTE_PATH,
+        "release_id": f"release-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}",
+        "source_remote": "fork",
+        "expected_source_remote": "",
+        "expected_current_worker_commit": None,
+        "bootstrap_acpx": False,
+        "apply": False,
+    }
+    for item, defaults in ((parser, release_defaults), (release, {})):
+        item.add_argument("--source-root", type=Path, default=defaults.get("source_root", argparse.SUPPRESS))
+        item.add_argument("--host", default=defaults.get("host", argparse.SUPPRESS))
+        item.add_argument("--remote-path", default=defaults.get("remote_path", argparse.SUPPRESS))
+        item.add_argument("--release-id", default=defaults.get("release_id", argparse.SUPPRESS))
+        item.add_argument("--source-remote", default=defaults.get("source_remote", argparse.SUPPRESS))
+        item.add_argument(
+            "--expected-source-remote",
+            required=False,
+            default=defaults.get("expected_source_remote", argparse.SUPPRESS),
+        )
+        item.add_argument(
+            "--expected-current-worker-commit",
+            required=False,
+            default=defaults.get("expected_current_worker_commit", argparse.SUPPRESS),
+        )
+        item.add_argument(
+            "--bootstrap-acpx",
+            action="store_true",
+            default=defaults.get("bootstrap_acpx", argparse.SUPPRESS),
+        )
+        item.add_argument("--apply", action="store_true", default=defaults.get("apply", argparse.SUPPRESS))
     rollback.add_argument("--source-root", type=Path, default=Path.cwd())
     rollback.add_argument("--host", default=DEFAULT_HOST)
     rollback.add_argument("--remote-path", default=DEFAULT_REMOTE_PATH)

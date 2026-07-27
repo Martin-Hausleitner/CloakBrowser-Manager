@@ -1309,6 +1309,52 @@ def test_cli_dry_run_is_default_and_apply_is_required_for_execution(tmp_path: Pa
     assert result.stderr == ""
 
 
+def test_release_parser_preserves_global_options_before_release_subcommand(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+
+    args = tx.parse_args(
+        [
+            "--source-root",
+            str(repo),
+            "--expected-source-remote",
+            AUTHORIZED_FORK,
+            "--expected-current-worker-commit",
+            FULL_WORKER_COMMIT,
+            "--apply",
+            "release",
+        ]
+    )
+
+    assert args.command == "release"
+    assert args.source_root == repo
+    assert args.expected_source_remote == AUTHORIZED_FORK
+    assert args.expected_current_worker_commit == FULL_WORKER_COMMIT
+    assert args.apply is True
+
+
+def test_release_parser_accepts_options_after_release_subcommand(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+
+    args = tx.parse_args(
+        [
+            "release",
+            "--source-root",
+            str(repo),
+            "--expected-source-remote",
+            AUTHORIZED_FORK,
+            "--expected-current-worker-commit",
+            FULL_WORKER_COMMIT,
+            "--apply",
+        ]
+    )
+
+    assert args.command == "release"
+    assert args.source_root == repo
+    assert args.expected_source_remote == AUTHORIZED_FORK
+    assert args.expected_current_worker_commit == FULL_WORKER_COMMIT
+    assert args.apply is True
+
+
 def test_cli_bootstrap_acpx_dry_run_reports_required_exact_gates_without_ssh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

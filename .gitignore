@@ -32,3 +32,4 @@ publish-docker.sh
 .beads
 debug
 backend/.data/
+.cbm/state/

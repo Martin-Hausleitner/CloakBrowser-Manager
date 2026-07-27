@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloakbrowser-manager.local/contracts/project-state-v1.json",
+  "title": "ProjectStateV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "repo",
+    "branch",
+    "worktree",
+    "mode",
+    "owner",
+    "active_ticket",
+    "completed_receipts",
+    "unmerged_files",
+    "next_safe_step",
+    "forbidden_actions",
+    "stop_condition"
+  ],
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Repository remote or identifier with credentials redacted."
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worktree": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["hot_reload", "staging", "vcvm_release"]
+    },
+    "owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "active_ticket": {
+      "type": "string",
+      "minLength": 1
+    },
+    "completed_receipts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unmerged_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "next_safe_step": {
+      "type": "string",
+      "minLength": 1
+    },
+    "forbidden_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "stop_condition": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

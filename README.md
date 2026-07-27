@@ -203,6 +203,23 @@ uvicorn main:app --reload --port 8080
 
 By default, Docker stores profile data in `/data`. For local development, if `/data` is not writable, the backend falls back to `backend/.data`. You can override this with `CLOAKBROWSER_MANAGER_DATA_DIR=/path/to/data`.
 
+### Agent Project State Receipt
+
+Agents can publish a strict `ProjectStateV1` handoff receipt without exposing secrets:
+
+```bash
+python3 scripts/cbm_agent_ctl.py project-state \
+  --mode hot_reload \
+  --owner agent-codex \
+  --active-ticket CBM-001 \
+  --completed-receipt "targeted tests passed" \
+  --next-safe-step "Review the generated receipt" \
+  --forbidden-action "Do not commit or push" \
+  --stop-condition "Receipt is present at .cbm/state/project-state-v1.json"
+```
+
+The command prints JSON only to stdout and atomically writes `.cbm/state/project-state-v1.json`. The contract is documented in [docs/contracts/project-state-v1.json](docs/contracts/project-state-v1.json); unknown or missing fields are rejected, modes are limited to `hot_reload`, `staging`, and `vcvm_release`, and token/cookie/auth/password fragments plus credentialed URLs are redacted or rejected before output.
+
 ### Frontend
 
 ```bash

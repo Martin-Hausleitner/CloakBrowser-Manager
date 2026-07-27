@@ -31,6 +31,7 @@ def test_cli_help_lists_control_plane_commands():
     assert "profiles" in text
     assert "open-links" in text
     assert "open-session" in text
+    assert "project-state" in text
     assert "tasks" in text
     assert "runs" in text
 
@@ -218,3 +219,60 @@ def test_cli_open_links_field_extraction(monkeypatch: pytest.MonkeyPatch, capsys
     )
     args.func(args)
     assert capsys.readouterr().out.strip().endswith("fullscreen=1")
+
+
+def test_cli_project_state_prints_json_and_writes_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        mod,
+        "_git_output",
+        lambda args, cwd=None: {
+            ("remote",): "fork\norigin",
+            ("config", "--get", "remote.fork.url"): "https://token@github.com/acme/repo.git",
+            ("branch", "--show-current"): "feature/project-state",
+            ("rev-parse", "--show-toplevel"): str(tmp_path),
+            ("status", "--porcelain=v1", "--untracked-files=all"): (
+                " M backend/main.py\n?? docs/new.md\nR  old.md -> new.md\n"
+            ),
+        }[tuple(args)],
+    )
+
+    args = mod.build_parser().parse_args(
+        [
+            "project-state",
+            "--mode",
+            "hot_reload",
+            "--owner",
+            "agent-codex",
+            "--active-ticket",
+            "CBM-001",
+            "--completed-receipt",
+            "tests: red",
+            "--next-safe-step",
+            "Implement project_state.py",
+            "--forbidden-action",
+            "Do not commit or push",
+            "--stop-condition",
+            "Receipt is written and tested",
+        ]
+    )
+
+    args.func(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["repo"] == "https://[REDACTED]@github.com/acme/repo.git"
+    assert payload["branch"] == "feature/project-state"
+    assert payload["worktree"] == str(tmp_path)
+    assert payload["completed_receipts"] == ["tests: red"]
+    assert payload["unmerged_files"] == ["backend/main.py", "docs/new.md", "new.md"]
+    written = json.loads((tmp_path / ".cbm/state/project-state-v1.json").read_text(encoding="utf-8"))
+    assert written == payload

@@ -31,11 +31,24 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from backend.project_state import (
+    PROJECT_STATE_MODES,
+    atomic_write_project_state,
+    build_project_state,
+    default_project_state_path,
+)
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -121,6 +134,41 @@ def _print(payload: Any, as_json: bool) -> None:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _git_output(args: list[str], cwd: Path | None = None) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", *args],
+            cwd=str(cwd) if cwd else None,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit(f"Unable to read git state: git {' '.join(args)}") from exc
+
+
+def _preferred_repo_remote(worktree: Path) -> str:
+    remotes = set(_git_output(["remote"], cwd=worktree).splitlines())
+    remote = "fork" if "fork" in remotes else "origin"
+    return _git_output(["config", "--get", f"remote.{remote}.url"], cwd=worktree)
+
+
+def _current_unmerged_files(worktree: Path) -> list[str]:
+    raw = _git_output(
+        ["status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=worktree,
+    )
+    paths: list[str] = []
+    for line in raw.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        if path and path not in paths:
+            paths.append(path)
+    return paths
 
 
 def cmd_health(_: argparse.Namespace) -> None:
@@ -295,6 +343,25 @@ def cmd_runs_outputs(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_project_state(args: argparse.Namespace) -> None:
+    worktree = Path(_git_output(["rev-parse", "--show-toplevel"])).resolve()
+    state = build_project_state(
+        repo=_preferred_repo_remote(worktree),
+        branch=_git_output(["branch", "--show-current"], cwd=worktree),
+        worktree=str(worktree),
+        mode=args.mode,
+        owner=args.owner,
+        active_ticket=args.active_ticket,
+        completed_receipts=list(args.completed_receipt or []),
+        unmerged_files=_current_unmerged_files(worktree),
+        next_safe_step=args.next_safe_step,
+        forbidden_actions=list(args.forbidden_action or []),
+        stop_condition=args.stop_condition,
+    )
+    atomic_write_project_state(default_project_state_path(worktree), state)
+    _print(state, True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="Always print JSON")
@@ -314,6 +381,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_catalog = sub.add_parser("catalog", help="Extension/agent catalog")
     p_catalog.set_defaults(func=cmd_catalog)
+
+    p_project_state = sub.add_parser(
+        "project-state",
+        help="Emit and atomically persist a strict ProjectStateV1 handoff receipt",
+    )
+    p_project_state.add_argument("--mode", choices=PROJECT_STATE_MODES, required=True)
+    p_project_state.add_argument("--owner", required=True)
+    p_project_state.add_argument("--active-ticket", required=True)
+    p_project_state.add_argument(
+        "--completed-receipt",
+        action="append",
+        default=[],
+        help="Completed receipt or evidence line; repeat for more than one",
+    )
+    p_project_state.add_argument("--next-safe-step", required=True)
+    p_project_state.add_argument(
+        "--forbidden-action",
+        action="append",
+        default=[],
+        help="Forbidden action for the next operator; repeat for more than one",
+    )
+    p_project_state.add_argument("--stop-condition", required=True)
+    p_project_state.set_defaults(func=cmd_project_state)
 
     profiles = sub.add_parser("profiles", help="Profile control plane")
     psub = profiles.add_subparsers(dest="profiles_command", required=True)

@@ -30,6 +30,7 @@ DEFAULT_MANAGER_CONTAINER = "cloakbrowser-manager-vcvm"
 DEFAULT_CANDIDATE_PORT = 18116
 DEFAULT_LIVE_PORT = 18115
 DEFAULT_SSH_RUN_JSON_TIMEOUT_SECONDS = 120
+BUILD_IMAGE_RUN_JSON_TIMEOUT_SECONDS = 300
 CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS = 210
 DEFAULT_SCP_UPLOAD_TIMEOUT_SECONDS = 300
 ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
@@ -237,6 +238,8 @@ class SSHRemoteExecutor:
         self.upload_timeout_seconds = upload_timeout_seconds
 
     def run_timeout_for_phase(self, phase: str) -> int:
+        if phase == "build.image":
+            return BUILD_IMAGE_RUN_JSON_TIMEOUT_SECONDS
         if phase in {"candidate.verify", "bootstrap.acpx_verify_candidate"}:
             return CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
         return self.run_timeout_seconds

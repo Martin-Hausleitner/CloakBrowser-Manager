@@ -942,7 +942,7 @@ def test_ssh_executor_uses_explicit_timeouts(monkeypatch: pytest.MonkeyPatch, tm
     assert calls[1]["kwargs"]["timeout"] == 34
 
 
-def test_candidate_verify_ssh_timeout_exceeds_remote_readiness_deadline(
+def test_ssh_executor_uses_phase_specific_run_json_timeouts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -957,8 +957,18 @@ def test_candidate_verify_ssh_timeout_exceeds_remote_readiness_deadline(
     monkeypatch.setattr(tx.subprocess, "run", fake_run)
     executor = tx.SSHRemoteExecutor("vcvm", helper_path=helper)
 
+    assert tx.DEFAULT_SSH_RUN_JSON_TIMEOUT_SECONDS == 120
+    assert tx.BUILD_IMAGE_RUN_JSON_TIMEOUT_SECONDS == 300
     assert tx.CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS > 180
     executor.run_json({"operation": "helper.capabilities", "args": {}}, phase="helper.capabilities")
+    executor.run_json(
+        {
+            "operation": "build.image",
+            "args": {"release_id": "release-0000001", "commit": FULL_WORKER_COMMIT},
+        },
+        phase="build.image",
+        mutation=True,
+    )
     executor.run_json(
         {
             "operation": "candidate.verify",
@@ -980,8 +990,31 @@ def test_candidate_verify_ssh_timeout_exceeds_remote_readiness_deadline(
     )
 
     assert calls[0]["kwargs"]["timeout"] == tx.DEFAULT_SSH_RUN_JSON_TIMEOUT_SECONDS
-    assert calls[1]["kwargs"]["timeout"] == tx.CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
+    assert calls[1]["kwargs"]["timeout"] == tx.BUILD_IMAGE_RUN_JSON_TIMEOUT_SECONDS
     assert calls[2]["kwargs"]["timeout"] == tx.CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
+    assert calls[3]["kwargs"]["timeout"] == tx.CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
+
+
+def test_build_image_timeout_fails_before_candidate_and_does_not_claim_restore(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(
+        fail_phase="build.image",
+        fail_with_timeout=True,
+        fail_stderr=f'{{"helper_source":"REMOTE_HELPER_SOURCE","token":"{SECRET_TOKEN}"}}',
+    )
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo), fake)
+
+    assert exc_info.value.phase == "build.image"
+    message = str(exc_info.value)
+    assert "remote phase timed out" in message
+    assert "release failed after quiesce" not in message
+    assert "old runtime was restored" not in message
+    assert "candidate.clone" not in fake.phases
+    assert "candidate.cleanup" not in fake.phases
+    assert "quiesce.stop_workers" not in fake.phases
+    assert "restore.runtime" not in fake.phases
 
 
 def test_candidate_migrations_must_match_exact_required_set(tmp_path: Path) -> None:

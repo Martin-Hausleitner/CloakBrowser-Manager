@@ -1,9 +1,12 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 UNIT = ROOT / "deploy" / "systemd" / "cloakbrowser-acpx-worker.service.template"
 REQUIREMENTS = ROOT / "scripts" / "requirements-acpx-worker.txt"
+REQUIREMENTS_IN = ROOT / "scripts" / "requirements-acpx-worker.in"
+REQUIREMENTS_LOCK = ROOT / "scripts" / "requirements-acpx-worker.linux-x86_64.py312.txt"
+ACPX_PACKAGE = ROOT / "deploy" / "acpx-runtime" / "package.json"
+ACPX_LOCK = ROOT / "deploy" / "acpx-runtime" / "package-lock.json"
 
 
 def test_acpx_worker_unit_is_private_restartable_and_explicitly_configured():
@@ -27,11 +30,31 @@ def test_acpx_worker_unit_is_private_restartable_and_explicitly_configured():
     assert "--token-file @TOKEN_FILE@" in text
 
 
-def test_acpx_worker_dependencies_pin_mcp_major_and_playwright_major():
+def test_acpx_worker_legacy_requirements_are_marked_non_production():
+    text = REQUIREMENTS.read_text(encoding="utf-8")
+    assert "LEGACY NON-PRODUCTION" in text
+    assert "uv pip sync" not in text
+
+
+def test_acpx_worker_runtime_lock_files_are_production_contract():
     lines = {
         line.strip()
-        for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines()
+        for line in REQUIREMENTS_IN.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.startswith("#")
     }
-    assert "mcp>=1.27,<2" in lines
-    assert "playwright>=1.52,<2" in lines
+    assert lines == {"mcp==1.28.1", "playwright==1.61.0"}
+    lock = REQUIREMENTS_LOCK.read_text(encoding="utf-8")
+    assert "mcp==1.28.1" in lock
+    assert "playwright==1.61.0" in lock
+    assert "--hash=sha256:" in lock
+
+    package = ACPX_PACKAGE.read_text(encoding="utf-8")
+    assert '"private": true' in package
+    assert '"acpx": "0.12.1"' in package
+    assert '"@agentclientprotocol/sdk": "1.2.1"' in package
+    assert '"node": ">=22.13.0"' in package
+
+    lock_json = ACPX_LOCK.read_text(encoding="utf-8")
+    assert '"lockfileVersion": 3' in lock_json
+    assert "sha512-MoV932yPJUcjkX2L9u5TeFncvrxVD+jNTd3ES/tslaiT78S/7CwtgintmX9bonPbSgOB9vinvN+1OCHTQq4HJg==" in lock_json
+    assert "sha512-jwYUdOQR7tc+Zfch53VL4JJyUNK/46q03uUTYb+PjECsmnNl94XFXOfYLJ8RBpMNidXd1rpOAVgb0vqD98xImA==" in lock_json

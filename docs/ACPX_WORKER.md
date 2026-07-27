@@ -4,7 +4,8 @@ Host-side ACPX worker provisioning is local, explicit, idempotent, and
 secret-safe. The provisioner validates the ACPX runtime and local files, then
 writes only the supplied worker key path and systemd unit path.
 
-Pinned ACPX runtime: `0.12.1`.
+Pinned ACPX runtime: `0.12.1`. Production installs use the checked-in host
+runtime locks only.
 
 ## Layout
 
@@ -12,10 +13,47 @@ Pinned ACPX runtime: `0.12.1`.
 | --- | --- |
 | `scripts/acpx_worker.py` | Worker process |
 | `scripts/acpx_runner.py` | ACPX command and event adapter |
+| `scripts/acpx_runtime_lock.py` | Read-only runtime lock verifier |
 | `scripts/provision_acpx_worker.py` | Local secret-safe provisioner |
-| `scripts/requirements-acpx-worker.txt` | Worker Python dependencies |
+| `deploy/acpx-runtime/package.json` | Private pinned ACPX npm runtime |
+| `deploy/acpx-runtime/package-lock.json` | npm lockfileVersion 3 runtime lock |
+| `scripts/requirements-acpx-worker.in` | Exact Python runtime inputs |
+| `scripts/requirements-acpx-worker.linux-x86_64.py312.txt` | Production Python lock with hashes |
+| `scripts/requirements-acpx-worker.txt` | Legacy non-production compatibility list |
 | `deploy/systemd/cloakbrowser-acpx-worker.service.template` | Unit template |
 | `docs/ACPX_WORKER.md` | This guide |
+
+## Locked Runtime Install
+
+Build the host ACPX runtime from the checked-in npm lock:
+
+```bash
+cd /home/coder/vk-repos/CloakBrowser-Manager-browser-use/deploy/acpx-runtime
+npm ci --omit=dev --ignore-scripts --audit=false --fund=false
+```
+
+Build the worker virtualenv from the checked-in Linux x86_64 CPython 3.12 lock:
+
+```bash
+uv venv --python 3.12 /home/coder/.venvs/acpx-worker
+uv pip sync \
+  --python /home/coder/.venvs/acpx-worker/bin/python \
+  /home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/requirements-acpx-worker.linux-x86_64.py312.txt
+```
+
+Before provisioning, verify the locks and installed runtime:
+
+```bash
+python3 /home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/acpx_runtime_lock.py \
+  --repo /home/coder/vk-repos/CloakBrowser-Manager-browser-use \
+  --installed-root /home/coder/vk-repos/CloakBrowser-Manager-browser-use/deploy/acpx-runtime \
+  --venv /home/coder/.venvs/acpx-worker
+```
+
+The verifier is read-only. It does not install packages, run `systemctl`, SSH,
+or mutate npm/uv state. It emits a secret-safe JSON receipt and requires the
+ACPX executable path to be exactly
+`deploy/acpx-runtime/node_modules/acpx/dist/cli.js` under the repo.
 
 ## Required Inputs
 
@@ -24,12 +62,13 @@ All paths must be absolute and supplied on the CLI:
 - `--repo`: repo worktree containing `.git` and `scripts/acpx_worker.py`
 - `--manager-url`: loopback Manager origin, for example `http://127.0.0.1:18115`
 - `--worker-key-file`: local token file, created mode `0600` if absent
-- `--venv`: worker virtualenv with `bin/python`
+- `--venv`: worker virtualenv with Python 3.12 and exact locked packages
 - `--unit-output`: local rendered systemd user unit path
 - `--permission-policy`: private mode-`0600` ACPX permission policy JSON
 - `--mcp-config`: private mode-`0600` ACPX MCP config JSON
 - `--capability-dir`: private mode-`0700` run capability directory
-- `--acpx`: executable path whose `--version` output is exactly `0.12.1`
+- `--acpx`: checked-in runtime executable path whose `--version` output is
+  exactly `0.12.1`
 
 The provisioner refuses symlink targets for security-sensitive paths.
 
@@ -49,7 +88,7 @@ python3 /home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/provision_
   --permission-policy /home/coder/.config/cloakbrowser/acpx-permission-policy.json \
   --mcp-config /home/coder/.config/cloakbrowser/acpx-mcp.json \
   --capability-dir /home/coder/.local/state/cloakbrowser/acpx-capabilities \
-  --acpx /home/coder/.local/bin/acpx \
+  --acpx /home/coder/vk-repos/CloakBrowser-Manager-browser-use/deploy/acpx-runtime/node_modules/acpx/dist/cli.js \
   --worker-id acpx-worker
 ```
 
@@ -69,8 +108,8 @@ The rendered unit runs:
 - a bounded `PATH` containing `~/.local/bin`, `/usr/local/bin`, `/usr/bin`, and `/bin`
 
 The JSON receipt never includes the worker token. The provisioner does not run
-`systemctl`, SSH, `pip`, `npm`, or mutate the VCVM deployment. Apply any receipt
-to the VCVM only through a separately reviewed deployment step.
+`systemctl`, SSH, `pip`, `npm`, `uv`, or mutate the VCVM deployment. Apply any
+receipt to the VCVM only through a separately reviewed deployment step.
 
 ## Safe Checks
 

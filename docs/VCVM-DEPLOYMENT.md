@@ -179,11 +179,15 @@ worker auth disabled until that file is provisioned. See
 [BROWSER_USE_WORKER.md](./BROWSER_USE_WORKER.md). `deploy_vcvm.sh` does not
 manage the worker env file.
 
-Optional ACPX worker bootstrap is local-only in this slice: validate and render
-a secret-safe receipt with `scripts/provision_acpx_worker.py`, then apply it to
-VCVM through a separately reviewed deployment step. The provisioner creates only
-the explicit local key/unit paths and does not run `systemctl`, SSH, `pip`, or
-`npm`. See [ACPX_WORKER.md](./ACPX_WORKER.md).
+Optional ACPX worker bootstrap is local-only in this slice: install the pinned
+host runtime with
+`npm ci --omit=dev --ignore-scripts --audit=false --fund=false` from
+`deploy/acpx-runtime`, sync the worker venv with
+`uv pip sync scripts/requirements-acpx-worker.linux-x86_64.py312.txt`, verify
+both with `scripts/acpx_runtime_lock.py`, then validate and render a secret-safe
+receipt with `scripts/provision_acpx_worker.py`. The provisioner creates only
+the explicit local key/unit paths and does not run `systemctl`, SSH, `pip`,
+`uv`, or `npm`. See [ACPX_WORKER.md](./ACPX_WORKER.md).
 
 ### Optional VCVM-local proxychecker
 

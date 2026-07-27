@@ -310,6 +310,39 @@ def test_worker_preflight_retries_one_transient_failure_per_agent_before_reporti
     assert {reason for _agent, _ready, reason in manager.preflights} == {"ok"}
 
 
+def test_worker_preflight_transient_retry_uses_distinct_deterministic_session_name(
+    tmp_path: Path,
+):
+    manager = FakeManager()
+
+    class RecordingRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.session_names_by_agent = {}
+
+        async def preflight_agent(self, *, agent, session_name, **_kwargs):
+            names = self.session_names_by_agent.setdefault(agent, [])
+            names.append(session_name)
+            if len(names) % 2 == 1:
+                return {"ready": False, "reason_code": "adapter_unavailable"}
+            return {"ready": True, "reason_code": "ok"}
+
+    runtime = RecordingRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    asyncio.run(worker.refresh_preflights())
+    asyncio.run(worker.refresh_preflights())
+
+    for session_names in runtime.session_names_by_agent.values():
+        assert len(session_names) == 4
+        assert session_names[0:2] == session_names[2:4]
+        assert session_names[0] != session_names[1]
+        assert all(
+            re.fullmatch(r"cbm-[a-f0-9]{32}", session_name)
+            for session_name in session_names
+        )
+
+
 def test_worker_preflight_does_not_retry_auth_required_or_ready_results(tmp_path: Path):
     manager = FakeManager()
 

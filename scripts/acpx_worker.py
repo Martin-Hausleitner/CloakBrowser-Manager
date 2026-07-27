@@ -570,9 +570,10 @@ class AcpxWorker:
         )
         if ready or reason_code not in PREFLIGHT_TRANSIENT_RETRY_REASON_CODES:
             return ready, reason_code
+        retry_session_name = derive_session_name(f"retry:{session_name}")
         return await self._preflight_agent_once(
             agent=agent,
-            session_name=session_name,
+            session_name=retry_session_name,
             environment=environment,
             mcp_config=mcp_config,
         )

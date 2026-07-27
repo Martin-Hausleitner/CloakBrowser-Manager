@@ -1,6 +1,11 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+Product acceptance is tracked in the CBM GitHub issues linked from
+`docs/superpowers/plans/2026-07-27-universal-agent-browser-control-plane-masterplan.md`.
+Use **bd** (beads) as the local execution mirror. Run `bd onboard` to get started.
+
+Read `VISION.md`, `ARCHITECTURE.md`, `TESTING.md`, `SECURITY.md`, and
+`GOVERNANCE.md` before release-significant work.
 
 ## Quick Reference
 
@@ -25,8 +30,8 @@ bd sync               # Sync with git
    ```bash
    git pull --rebase
    bd sync
-   git push
-   git status  # MUST show "up to date with origin"
+   git push fork HEAD:feature/browser-use-agent-workspace
+   git status  # MUST show the intended fork branch is up to date
    ```
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
@@ -34,7 +39,8 @@ bd sync               # Sync with git
 
 **CRITICAL RULES:**
 - Work is NOT complete until `git push` succeeds
+- Push only to `https://github.com/Martin-Hausleitner/CloakBrowser-Manager.git`
+- Treat `CloakHQ/CloakBrowser-Manager` as read-only; never push or merge there
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
-

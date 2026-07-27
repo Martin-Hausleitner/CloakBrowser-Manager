@@ -916,6 +916,25 @@ def test_bootstrap_cleanup_failure_fails_closed_before_state_commit_and_restores
     assert fake.live_generation == "old"
 
 
+def test_state_commit_failure_after_successful_bootstrap_cleanup_does_not_cleanup_bootstrap_twice(
+    tmp_path: Path,
+) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(fail_phase="state.commit")
+
+    with pytest.raises(tx.TransactionError, match="release failed after quiesce") as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert exc_info.value.phase == "state.commit"
+    assert fake.phases.count("bootstrap.acpx_cleanup") == 1
+    assert "restore.runtime" in fake.phases
+    assert "restore.verify" in fake.phases
+    assert "candidate.cleanup" in fake.phases
+    assert fake.phases.index("restore.verify") < fake.phases.index("candidate.cleanup")
+    assert fake.live_generation == "old"
+
+
 @pytest.mark.parametrize(
     ("facts", "message"),
     [

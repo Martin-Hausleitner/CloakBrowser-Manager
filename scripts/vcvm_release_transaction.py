@@ -1072,7 +1072,7 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
     except TransactionError as exc:
         post_quiesce_cleanup_errors: list[TransactionError] = []
         pre_quiesce_cleanup_errors: list[TransactionError] = []
-        if acpx_bootstrap_touched and exc.phase != "bootstrap.acpx_cleanup":
+        if acpx_bootstrap_touched and exc.phase != "bootstrap.acpx_cleanup" and not acpx_cleanup:
             try:
                 acpx_cleanup = cleanup_acpx_bootstrap(executor, config)
                 if acpx_bootstrap:

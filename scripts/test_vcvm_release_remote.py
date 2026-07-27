@@ -1524,6 +1524,111 @@ def test_state_commit_rejects_secret_and_writes_mode_0600(monkeypatch: pytest.Mo
     assert stat.S_IMODE(paths["state"].stat().st_mode) == 0o600
 
 
+def test_state_commit_allows_empty_previous_release_only_for_consistent_first_managed_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    payload = json.loads(tx.PHASE_REQUEST_EXAMPLES["state.commit"][-1])
+    payload["previous_release"] = ""
+    payload["capture"]["state"] = {}
+    payload["capture"]["current_pointer"] = ""
+    payload["previous_runtime"]["pointer"] = ""
+
+    result = remote.op_state_commit(payload)
+
+    assert result["previous_release"] == ""
+    assert json.loads(paths["state"].read_text(encoding="utf-8"))["previous_release"] == ""
+    assert stat.S_IMODE(paths["state"].stat().st_mode) == 0o600
+    assert paths["current"].resolve() == release_source
+
+
+@pytest.mark.parametrize(
+    ("capture_state", "current_pointer", "previous_pointer"),
+    [
+        ({"current_release": "release-previous-1"}, "", ""),
+        ({"previous_release": "release-previous-1"}, "", ""),
+        ({}, "/home/coder/cloakbrowser-manager/releases/release-previous-1/source", ""),
+        ({}, "", "release-previous-1"),
+    ],
+)
+def test_state_commit_rejects_empty_previous_release_with_prior_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capture_state: dict[str, object],
+    current_pointer: str,
+    previous_pointer: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    payload = json.loads(tx.PHASE_REQUEST_EXAMPLES["state.commit"][-1])
+    payload["previous_release"] = ""
+    payload["capture"]["state"] = capture_state
+    payload["capture"]["current_pointer"] = current_pointer
+    payload["previous_runtime"]["pointer"] = previous_pointer
+
+    with pytest.raises(remote.HelperError, match="previous release"):
+        remote.op_state_commit(payload)
+
+    assert not paths["state"].exists()
+    assert not paths["current"].exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capture", []),
+        ("capture.state", []),
+        ("previous_runtime", []),
+    ],
+)
+def test_state_commit_rejects_empty_previous_release_with_malformed_first_release_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    payload = json.loads(tx.PHASE_REQUEST_EXAMPLES["state.commit"][-1])
+    payload["previous_release"] = ""
+    payload["capture"]["state"] = {}
+    payload["capture"]["current_pointer"] = ""
+    payload["previous_runtime"]["pointer"] = ""
+    if field == "capture":
+        payload["capture"] = value
+    elif field == "capture.state":
+        payload["capture"]["state"] = value
+    elif field == "previous_runtime":
+        payload["previous_runtime"] = value
+
+    with pytest.raises(remote.HelperError, match="first release"):
+        remote.op_state_commit(payload)
+
+    assert not paths["state"].exists()
+    assert not paths["current"].exists()
+
+
+def test_state_commit_still_strictly_validates_non_empty_previous_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    payload = json.loads(tx.PHASE_REQUEST_EXAMPLES["state.commit"][-1])
+    payload["previous_release"] = "not safe"
+
+    with pytest.raises(remote.HelperError, match="unsafe release id"):
+        remote.op_state_commit(payload)
+
+    assert not paths["state"].exists()
+
+
 def test_state_commit_rejects_symlink_temp_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     paths = patch_remote_paths(monkeypatch, tmp_path)
     release_source = paths["releases"] / "release-0000001" / "source"

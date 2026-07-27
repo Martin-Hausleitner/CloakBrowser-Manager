@@ -2638,7 +2638,20 @@ def op_rollback_start_previous(args: dict[str, object]) -> dict[str, object]:
 def op_state_commit(args: dict[str, object]) -> dict[str, object]:
     release_id = validate_release_id(args["release_id"])
     require(args.get("current_release") == release_id, "current release mismatch")
-    validate_release_id(args["previous_release"])
+    previous_release = str(args["previous_release"])
+    if previous_release:
+        validate_release_id(previous_release)
+    else:
+        capture = args.get("capture")
+        require(isinstance(capture, dict), "first release capture must be an object")
+        capture_state = capture.get("state")
+        require(isinstance(capture_state, dict), "first release capture state must be an object")
+        previous_runtime = args.get("previous_runtime")
+        require(isinstance(previous_runtime, dict), "first release previous runtime must be an object")
+        require(
+            not capture_state and not capture.get("current_pointer") and not previous_runtime.get("pointer"),
+            "empty previous release requires no prior release state",
+        )
     payload = dict(args)
     reject_secret_text(json.dumps(payload, sort_keys=True), "state payload")
     _write_json_mode_0600(STATE_FILE, payload)

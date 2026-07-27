@@ -52,7 +52,9 @@ CANDIDATE_READINESS_TIMEOUT_SECONDS = 180.0
 CANDIDATE_READINESS_POLL_INTERVAL_SECONDS = 2.0
 CANDIDATE_PROBE_TIMEOUT_SECONDS = 10.0
 CANDIDATE_CURL_CONNECT_TIMEOUT_SECONDS = 2.0
-ACPX_PROMOTED_READINESS_TIMEOUT_SECONDS = 90.0
+ACPX_PROMOTED_READINESS_TIMEOUT_SECONDS = CANDIDATE_READINESS_TIMEOUT_SECONDS
+RESTORE_MANAGER_VERIFY_TIMEOUT_SECONDS = 90.0
+RESTORE_MANAGER_VERIFY_POLL_INTERVAL_SECONDS = CANDIDATE_READINESS_POLL_INTERVAL_SECONDS
 ACPX_CANDIDATE_PREFLIGHT_INTERVAL_SECONDS = 30
 ACPX_PRODUCTION_PREFLIGHT_INTERVAL_SECONDS = 240
 ACPX_NODE_LOCK = "deploy/acpx-runtime/package-lock.json"
@@ -516,8 +518,8 @@ def op_preflight_manager(args: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _running_manager_image_id() -> str:
-    container = json.loads(run(["docker", "inspect", MANAGER_CONTAINER]).stdout)[0]
+def _running_manager_image_id(*, timeout: float | None = None) -> str:
+    container = json.loads(run(["docker", "inspect", MANAGER_CONTAINER], timeout=timeout).stdout)[0]
     return validate_immutable_image(container.get("Image"), "running Manager image id")
 
 
@@ -1326,6 +1328,13 @@ def _candidate_probe_timeout(started: float, deadline_seconds: float) -> float:
     return min(CANDIDATE_PROBE_TIMEOUT_SECONDS, remaining)
 
 
+def _restore_manager_probe_timeout(started: float, deadline_seconds: float) -> float:
+    remaining = deadline_seconds - (time.monotonic() - started)
+    if remaining <= 0:
+        raise TimeoutError("restore Manager verification deadline exhausted")
+    return min(CANDIDATE_PROBE_TIMEOUT_SECONDS, remaining)
+
+
 def _format_timeout_seconds(value: float) -> str:
     return f"{max(0.001, value):.3f}".rstrip("0").rstrip(".")
 
@@ -1820,7 +1829,10 @@ def _promoted_acpx_readiness(
 ) -> dict[str, object]:
     deadline_seconds = float(ACPX_PROMOTED_READINESS_TIMEOUT_SECONDS)
     interval_seconds = float(CANDIDATE_READINESS_POLL_INTERVAL_SECONDS)
-    require(deadline_seconds > 0 and deadline_seconds <= 90, "ACPX promoted readiness deadline must be 90s or less")
+    require(
+        deadline_seconds > 0 and deadline_seconds <= CANDIDATE_READINESS_TIMEOUT_SECONDS,
+        "ACPX promoted readiness deadline must not exceed candidate readiness deadline",
+    )
     require(interval_seconds > 0, "ACPX promoted readiness poll interval must be positive")
     started = time.monotonic()
     attempt_count = 0
@@ -2274,7 +2286,7 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
     }
 
 
-def op_verify_manager(args: dict[str, object]) -> dict[str, object]:
+def _verify_manager_once(args: dict[str, object], *, timeout: float | Callable[[], float] | None = None) -> dict[str, object]:
     revision_available = args.get("revision_available") is not False
     expected_image_id = validate_immutable_image(args.get("image_id"), "expected Manager image id")
     if revision_available:
@@ -2282,12 +2294,25 @@ def op_verify_manager(args: dict[str, object]) -> dict[str, object]:
     else:
         commit = ""
         require(args.get("commit") in {"", None}, "Manager commit must be empty when revision is unavailable")
-    health = run(["curl", "-fsS", f"http://127.0.0.1:{LIVE_PORT}/health"], check=False).returncode == 0
-    auth = json.loads(run(["curl", "-fsS", f"http://127.0.0.1:{LIVE_PORT}/api/auth/status"]).stdout)
-    image_id = _running_manager_image_id()
+
+    def command_timeout() -> float | None:
+        return timeout() if callable(timeout) else timeout
+
+    health_result = run(["curl", "-fsS", f"http://127.0.0.1:{LIVE_PORT}/health"], check=False, timeout=command_timeout())
+    health = health_result.returncode == 0
+    auth_result = run(["curl", "-fsS", f"http://127.0.0.1:{LIVE_PORT}/api/auth/status"], check=False, timeout=command_timeout())
+    if auth_result.returncode != 0:
+        raise HelperError(f"auth_curl_{auth_result.returncode}")
+    auth = json.loads(auth_result.stdout)
+    require(isinstance(auth, dict), "Manager auth status returned non-object JSON")
+    image_id = _running_manager_image_id(timeout=command_timeout())
     require(image_id == expected_image_id, "running Manager image id mismatch")
     if revision_available:
-        revision = run(["docker", "inspect", MANAGER_CONTAINER, "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}"], check=False).stdout.strip()
+        revision = run(
+            ["docker", "inspect", MANAGER_CONTAINER, "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}"],
+            check=False,
+            timeout=command_timeout(),
+        ).stdout.strip()
         require(revision == commit, "running Manager revision mismatch")
     else:
         revision = ""
@@ -2301,6 +2326,83 @@ def op_verify_manager(args: dict[str, object]) -> dict[str, object]:
         "revision_matches": revision == commit,
     }
     return payload
+
+
+def op_verify_manager(args: dict[str, object]) -> dict[str, object]:
+    return _verify_manager_once(args)
+
+
+def _restore_manager_verify_error(
+    *,
+    attempt_count: int,
+    elapsed_seconds: float,
+    deadline_seconds: float,
+    reason: str,
+) -> HelperError:
+    return HelperError(
+        "restore Manager verification failed: "
+        f"attempt_count={attempt_count} "
+        f"elapsed_seconds={elapsed_seconds:.2f} "
+        f"deadline_seconds={deadline_seconds:g} "
+        f"reason={_safe_reason_code(reason)}"
+    )
+
+
+def _restore_manager_verify_until_ready(capture: dict[str, object]) -> dict[str, object]:
+    deadline_seconds = float(RESTORE_MANAGER_VERIFY_TIMEOUT_SECONDS)
+    interval_seconds = float(RESTORE_MANAGER_VERIFY_POLL_INTERVAL_SECONDS)
+    require(deadline_seconds > 0, "restore Manager verification deadline must be positive")
+    require(interval_seconds > 0, "restore Manager verification poll interval must be positive")
+    verify_args = {
+        "commit": capture.get("previous_revision", ""),
+        "revision_available": capture.get("previous_revision_available") is not False,
+        "image_id": capture["old_image_id"],
+    }
+    started = time.monotonic()
+    attempt_count = 0
+    last_reason = "not_started"
+    while True:
+        elapsed = time.monotonic() - started
+        if attempt_count > 0 and elapsed >= deadline_seconds:
+            raise _restore_manager_verify_error(
+                attempt_count=attempt_count,
+                elapsed_seconds=elapsed,
+                deadline_seconds=deadline_seconds,
+                reason=last_reason,
+            )
+        attempt_count += 1
+        try:
+            manager = _verify_manager_once(
+                verify_args,
+                timeout=lambda: _restore_manager_probe_timeout(started, deadline_seconds),
+            )
+            if manager["health"] is not True:
+                last_reason = "health_not_ready"
+            elif manager["auth"] is not True:
+                last_reason = "auth_not_ready"
+            else:
+                manager.update(
+                    {
+                        "attempt_count": attempt_count,
+                        "elapsed_seconds": round(time.monotonic() - started, 2),
+                        "deadline_seconds": deadline_seconds,
+                        "readiness_reason": "ready",
+                    }
+                )
+                return manager
+        except (HelperError, RuntimeError) as exc:
+            last_reason = str(exc) or exc.__class__.__name__
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError, TimeoutError) as exc:
+            last_reason = exc.__class__.__name__
+        elapsed = time.monotonic() - started
+        if elapsed >= deadline_seconds:
+            raise _restore_manager_verify_error(
+                attempt_count=attempt_count,
+                elapsed_seconds=elapsed,
+                deadline_seconds=deadline_seconds,
+                reason=last_reason,
+            )
+        time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
 
 
 def op_verify_browser_use(args: dict[str, object]) -> dict[str, object]:
@@ -2436,13 +2538,7 @@ def op_restore_verify(args: dict[str, object]) -> dict[str, object]:
     capture = validate_restore_capture(dict(args["capture"]))
     backup = dict(args["backup"])
     _validate_backup(backup)
-    manager = op_verify_manager(
-        {
-            "commit": capture.get("previous_revision", ""),
-            "revision_available": capture.get("previous_revision_available") is not False,
-            "image_id": capture["old_image_id"],
-        }
-    )
+    manager = _restore_manager_verify_until_ready(capture)
     browser = op_preflight_browser_use({})
     if capture.get("acpx_was_absent") is True:
         acpx = {"unit_sha256": "0" * 64, "active_state": "absent"}

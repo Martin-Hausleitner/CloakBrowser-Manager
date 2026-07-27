@@ -425,6 +425,160 @@ def test_restore_verify_dispatch_returns_exact_restored_old_image_identity(
     assert result["old_image_digest"] == capture["old_image_digest"] == IMAGE_DIGEST
 
 
+def test_restore_verify_polls_transient_manager_failure_before_worker_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    capture = valid_capture(paths)
+    backup = write_backup(paths)
+    clock = {"now": 0.0}
+    sleeps: list[float] = []
+    auth_attempts = {"count": 0}
+    worker_calls: list[str] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs.get("timeout") is None or 0 < float(kwargs["timeout"]) <= 90.0
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/health"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/api/auth/status"]:
+            auth_attempts["count"] += 1
+            if auth_attempts["count"] == 1:
+                return subprocess.CompletedProcess(argv, 56, stdout="", stderr="transient browser runtime")
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"auth_required": True}), stderr="")
+        if argv == ["docker", "inspect", remote.MANAGER_CONTAINER]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([{"Image": IMAGE_ID}]), stderr="")
+        if argv[:3] == ["docker", "inspect", remote.MANAGER_CONTAINER] and "--format" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=("1" * 40) + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(remote.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(remote.time, "sleep", fake_sleep)
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(
+        remote,
+        "op_preflight_browser_use",
+        lambda _args: worker_calls.append("browser") or {"unit_sha256": "1" * 64, "active_state": "active"},
+    )
+    monkeypatch.setattr(
+        remote,
+        "op_preflight_acpx",
+        lambda _args: worker_calls.append("acpx") or {"unit_sha256": "2" * 64, "active_state": "inactive"},
+    )
+
+    result = remote.op_restore_verify({"capture": capture, "backup": backup})
+
+    assert result["health"] is True
+    assert result["auth"] is True
+    assert auth_attempts["count"] == 2
+    assert sleeps == [2.0]
+    assert worker_calls == ["browser", "acpx"]
+
+
+def test_restore_verify_timeout_is_bounded_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    capture = valid_capture(paths)
+    backup = write_backup(paths)
+    clock = {"now": 0.0}
+    secret = "cbm_worker_" + ("1" * 64)
+    worker_calls: list[str] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs.get("timeout") is None or 0 < float(kwargs["timeout"]) <= 0.15
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/health"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/api/auth/status"]:
+            return subprocess.CompletedProcess(argv, 56, stdout="", stderr=f"token={secret}")
+        if argv == ["docker", "inspect", remote.MANAGER_CONTAINER]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([{"Image": IMAGE_ID}]), stderr="")
+        if argv[:3] == ["docker", "inspect", remote.MANAGER_CONTAINER] and "--format" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=("1" * 40) + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "RESTORE_MANAGER_VERIFY_TIMEOUT_SECONDS", 0.15, raising=False)
+    monkeypatch.setattr(remote, "RESTORE_MANAGER_VERIFY_POLL_INTERVAL_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(remote.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(remote.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "op_preflight_browser_use", lambda _args: worker_calls.append("browser") or {})
+    monkeypatch.setattr(remote, "op_preflight_acpx", lambda _args: worker_calls.append("acpx") or {})
+
+    with pytest.raises(
+        remote.HelperError,
+        match=r"restore Manager verification failed: attempt_count=2 .*deadline_seconds=0\.15 .*reason=auth_curl_56",
+    ) as exc_info:
+        remote.op_restore_verify({"capture": capture, "backup": backup})
+
+    message = str(exc_info.value)
+    assert secret not in message
+    assert "token" not in message
+    assert "browser runtime" not in message
+    assert worker_calls == []
+
+
+def test_restore_verify_recomputes_remaining_timeout_between_manager_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    capture = valid_capture(paths)
+    backup = write_backup(paths)
+    clock = {"now": 0.0}
+    worker_calls: list[str] = []
+    calls: list[tuple[str, float]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        timeout = kwargs.get("timeout")
+        assert timeout is not None
+        timeout_seconds = float(timeout)
+        command = " ".join(str(item) for item in argv)
+        calls.append((command, timeout_seconds))
+        if argv == ["docker", "inspect", remote.MANAGER_CONTAINER]:
+            assert timeout_seconds <= 0.07
+        if argv[:3] == ["docker", "inspect", remote.MANAGER_CONTAINER] and "--format" in argv:
+            raise AssertionError("revision probe must not start after global restore Manager deadline")
+
+        delay = 0.12
+        if timeout_seconds < delay:
+            clock["now"] += timeout_seconds
+            raise subprocess.TimeoutExpired(argv, timeout=timeout_seconds)
+        clock["now"] += delay
+
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/health"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/api/auth/status"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"auth_required": True}), stderr="")
+        if argv == ["docker", "inspect", remote.MANAGER_CONTAINER]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([{"Image": IMAGE_ID}]), stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "RESTORE_MANAGER_VERIFY_TIMEOUT_SECONDS", 0.3, raising=False)
+    monkeypatch.setattr(remote, "RESTORE_MANAGER_VERIFY_POLL_INTERVAL_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(remote.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(remote.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "op_preflight_browser_use", lambda _args: worker_calls.append("browser") or {})
+    monkeypatch.setattr(remote, "op_preflight_acpx", lambda _args: worker_calls.append("acpx") or {})
+
+    with pytest.raises(
+        remote.HelperError,
+        match=r"restore Manager verification failed: attempt_count=1 .*deadline_seconds=0\.3 .*reason=TimeoutExpired",
+    ):
+        remote.op_restore_verify({"capture": capture, "backup": backup})
+
+    assert [timeout for _command, timeout in calls] == pytest.approx([0.3, 0.18, 0.06])
+    assert len(calls) == 3
+    assert clock["now"] == pytest.approx(0.3)
+    assert worker_calls == []
+
+
 def test_rollback_previous_skips_label_compare_only_when_previous_revision_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3355,6 +3509,86 @@ def test_bootstrap_promote_polls_live_readiness_until_bound_presence_and_preflig
     assert secret not in receipt_json
     assert "token" not in receipt_json
     assert "unknown" not in receipt_json
+
+
+def test_bootstrap_promote_default_readiness_allows_candidate_scale_first_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    candidate = prepare_complete_bootstrap_candidate(paths)
+    candidate["unit"].write_text(
+        candidate["unit"].read_text(encoding="utf-8").rstrip("\n") + " --preflight-interval 30\n",
+        encoding="utf-8",
+    )
+    clock = {"now": 0.0}
+    sleeps: list[float] = []
+    preflight_attempts = {"count": 0}
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs.get("timeout") is None or 0 < float(kwargs["timeout"]) <= 180.0
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"WorkingDirectory={candidate['source']}\nActiveState=active\nFragmentPath=/unit\n",
+                stderr="",
+            )
+        if argv[:4] == ["systemctl", "--user", "is-active", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        if argv[:3] == ["systemctl", "--user", "daemon-reload"] or argv[:4] == ["systemctl", "--user", "restart", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    def fake_manager_json(port: int, path: str, *, timeout: float | None = None) -> dict[str, object]:
+        assert port == 18115
+        assert timeout is not None and 0 < timeout <= 5.0
+        if path.endswith("/presence"):
+            return {"worker_seen_recently": True, "state": "polling"}
+        if path.endswith("/preflights"):
+            preflight_attempts["count"] += 1
+            ready = clock["now"] >= 124.0
+            return {
+                "agents": [
+                    {
+                        "agent": agent,
+                        "ready": ready,
+                        "state": "ready" if ready else "starting",
+                        "reason_code": "ok" if ready else "pending_first_preflight",
+                    }
+                    for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+                ]
+            }
+        raise AssertionError(path)
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(remote.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(remote.time, "sleep", fake_sleep)
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
+
+    result = remote.op_bootstrap_acpx_promote(
+        {
+            "release_id": "release-0000001",
+            "worker_id": "acpx-candidate-release-0000001",
+            "manager_port": 18115,
+            "release_source": str(candidate["source"]),
+            "acpx_executable": str(candidate["release"] / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+        }
+    )
+
+    assert result["preflights"] is True
+    assert result["readiness_reason"] == "ready"
+    assert result["deadline_seconds"] == 180.0
+    assert result["elapsed_seconds"] == 124.0
+    assert preflight_attempts["count"] > 45
+    assert sleeps and set(sleeps) == {2.0}
+    assert [agent["agent"] for agent in result["agent_preflights"]] == list(remote.EXPECTED_ACPX_PREFLIGHT_AGENTS)
 
 
 def test_bootstrap_promote_times_out_with_sanitized_live_readiness_reason_without_payload(

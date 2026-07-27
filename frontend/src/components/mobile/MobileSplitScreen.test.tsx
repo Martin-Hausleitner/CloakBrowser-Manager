@@ -857,6 +857,29 @@ describe("MobileSplitScreen", () => {
     await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(390, 844));
   });
 
+  it("keeps the full device height for inline Phone fit while the keyboard shrinks visual viewport", async () => {
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    vi.stubGlobal("visualViewport", {
+      width: 390,
+      height: 420,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+
+    try {
+      const { props } = runningSplit();
+      openBrowserTools();
+      fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+      fireEvent.click(screen.getByText("Phone fit"));
+
+      await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(390, 844));
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      fireEvent(window, new Event("resize"));
+    }
+  });
+
   it("shows live viewport restart state and prevents duplicate apply submissions", async () => {
     const apply = deferred<boolean>();
     const onViewportApply = vi.fn().mockReturnValue(apply.promise);
@@ -961,6 +984,29 @@ describe("MobileSplitScreen", () => {
     fireEvent.click(within(screen.getByLabelText("Fullscreen viewport controls")).getByText("Phone fit"));
 
     await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(412, 892));
+  });
+
+  it("keeps the full device height for fullscreen Phone fit while the keyboard is open", async () => {
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    vi.stubGlobal("visualViewport", {
+      width: 390,
+      height: 420,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+
+    try {
+      const { props } = runningSplit();
+      fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
+      fireEvent.click(screen.getByLabelText("Edit fullscreen browser viewport"));
+      fireEvent.click(within(screen.getByLabelText("Fullscreen viewport controls")).getByText("Phone fit"));
+
+      await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(390, 844));
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      fireEvent(window, new Event("resize"));
+    }
   });
 
   it("does not offer fullscreen when no browser is live", () => {

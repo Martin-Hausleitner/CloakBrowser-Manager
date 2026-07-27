@@ -744,7 +744,10 @@ export function MobileSplitScreen({
       height: Math.round(
         Math.max(
           minimumPhoneFitHeight,
-          visualViewport?.height ?? window.innerHeight ?? presets[0].height,
+          visualViewport?.height ?? 0,
+          window.innerHeight ?? 0,
+          keyboardBaselineHeightRef.current,
+          presets[0].height,
         ),
       ),
     };

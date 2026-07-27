@@ -213,14 +213,68 @@ class SSHRemoteExecutor:
     command strings locally; SSH receives argv tokens directly.
     """
 
-    BOOTSTRAP = (
-        "import json,sys;"
-        "payload=json.load(sys.stdin);"
-        "ns={'__name__':'vcvm_release_remote_streamed'};"
-        "exec(payload['helper_source'],ns);"
-        "result=ns['handle_request'](payload['request']);"
-        "print(json.dumps(result,sort_keys=True))"
-    )
+    BOOTSTRAP = r"""
+import json
+import re
+import sys
+
+REFUSAL_LIMIT = 500
+REFUSAL_PREFIX = "vcvm release remote refused: "
+SECRET_PATTERNS = (
+    re.compile(r'(?i)"(?:helper_source|token|secret|password|passwd|apikey|api_key)"\s*:\s*"[^"]*"'),
+    re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s]+@", re.IGNORECASE),
+    re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\bcbm_(?:agent|worker)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._-]{16,}\b", re.IGNORECASE),
+    re.compile(r"(?i)(?:token|secret|password|passwd|apikey|api_key)=([^&\s]{8,})"),
+    re.compile(r"(?i)helper_source=([^\s]+)"),
+)
+
+
+def redact_text(value):
+    text = str(value)
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub("<redacted>", text)
+    return text
+
+
+def refusal_reason(value):
+    text = redact_text(value).replace("\n", "\\n")
+    if len(text) > REFUSAL_LIMIT:
+        return text[: REFUSAL_LIMIT - 3] + "..."
+    return text
+
+
+def refuse(reason):
+    print(f"{REFUSAL_PREFIX}{refusal_reason(reason)}", file=sys.stderr)
+    return 75
+
+
+try:
+    payload = json.load(sys.stdin)
+    if not isinstance(payload, dict):
+        raise ValueError("streamed payload must be an object")
+    helper_source = payload.get("helper_source")
+    if not isinstance(helper_source, str):
+        raise ValueError("streamed helper source must be a string")
+    request = payload.get("request")
+    if not isinstance(request, dict):
+        raise ValueError("streamed request must be an object")
+except (json.JSONDecodeError, TypeError, ValueError) as exc:
+    raise SystemExit(refuse(exc))
+
+ns = {"__name__": "vcvm_release_remote_streamed"}
+try:
+    exec(helper_source, ns)
+    streamed_main = ns.get("streamed_main")
+    if not callable(streamed_main):
+        raise RuntimeError("streamed helper is missing request entrypoint")
+except Exception:
+    raise SystemExit(refuse("streamed helper setup failed"))
+
+raise SystemExit(streamed_main(payload))
+"""
 
     def __init__(
         self,

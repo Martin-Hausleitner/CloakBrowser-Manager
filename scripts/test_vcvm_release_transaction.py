@@ -1067,6 +1067,58 @@ def test_ssh_executor_uses_phase_specific_run_json_timeouts(
     assert calls[3]["kwargs"]["timeout"] == tx.CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
 
 
+def test_ssh_executor_bootstrap_translates_helper_error_without_traceback_or_payload_leakage() -> None:
+    helper_source = REMOTE_SCRIPT.read_text(encoding="utf-8")
+    request = {"operation": f"unknown-{SECRET_TOKEN}", "args": {}}
+    result = subprocess.run(
+        (sys.executable, "-c", tx.SSHRemoteExecutor.BOOTSTRAP),
+        input=json.dumps({"helper_source": helper_source, "request": request}),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 75
+    assert result.stdout == ""
+    assert result.stderr.startswith("vcvm release remote refused: unknown remote operation: unknown-")
+    assert "<redacted>" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert "helper_source" not in result.stderr
+    assert "HELPER_VERSION" not in result.stderr
+    assert SECRET_TOKEN not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "stdin",
+    [
+        "{",
+        "[]",
+        json.dumps({"request": {"operation": "helper.capabilities", "args": {}}}),
+        json.dumps({"helper_source": 123, "request": {"operation": "helper.capabilities", "args": {}}}),
+        json.dumps({"helper_source": "raise AssertionError('must not execute helper_source')"}),
+        json.dumps({"helper_source": "raise AssertionError('must not execute helper_source')", "request": []}),
+    ],
+)
+def test_ssh_executor_bootstrap_refuses_invalid_envelope_before_exec_without_traceback(stdin: str) -> None:
+    result = subprocess.run(
+        (sys.executable, "-c", tx.SSHRemoteExecutor.BOOTSTRAP),
+        input=stdin,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 75
+    assert result.stdout == ""
+    assert result.stderr.startswith("vcvm release remote refused: ")
+    assert "Traceback" not in result.stderr
+    assert "payload['helper_source']" not in result.stderr
+    assert "must not execute helper_source" not in result.stderr
+    assert "helper_source" not in result.stderr
+
+
 def test_build_image_timeout_fails_before_candidate_and_does_not_claim_restore(tmp_path: Path) -> None:
     repo = fixture_repo(tmp_path)
     fake = FakeRemoteExecutor(

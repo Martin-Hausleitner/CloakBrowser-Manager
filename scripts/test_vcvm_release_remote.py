@@ -115,6 +115,29 @@ def test_remote_helper_dispatch_rejects_unknown_operation() -> None:
     assert "unknown remote operation" in result.stderr
 
 
+def test_remote_main_bounds_and_redacts_oversized_refusal() -> None:
+    secret_token = "cbm_agent_" + ("a1" * 24)
+    request = {"operation": f"unknown-{secret_token}-{'x' * 2000}", "args": {}}
+    result = subprocess.run(
+        [sys.executable, str(REMOTE_SCRIPT)],
+        input=json.dumps(request),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    prefix = "vcvm release remote refused: "
+    assert result.returncode == 75
+    assert result.stdout == ""
+    assert result.stderr.startswith(prefix)
+    assert len(result.stderr) <= len(prefix) + remote.REMOTE_REFUSAL_MESSAGE_LIMIT + 1
+    assert "<redacted>" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert "helper_source" not in result.stderr
+    assert secret_token not in result.stderr
+
+
 def test_remote_helper_capabilities_are_checked_in_and_versioned() -> None:
     payload = remote.handle_request({"operation": "helper.capabilities", "args": {}})
     assert payload["helper_version"] == remote.HELPER_VERSION
@@ -1789,6 +1812,7 @@ def test_bootstrap_candidate_verify_polls_transient_presence_then_preflight_read
     paths = patch_remote_paths(monkeypatch, tmp_path)
     acpx_executable = write_release_acpx_target(paths)
     sleeps: list[float] = []
+    version_calls: list[list[str]] = []
     clock = {"now": 0.0}
     presence_payloads = [
         {"worker_seen_recently": False, "state": "starting"},
@@ -1819,6 +1843,7 @@ def test_bootstrap_candidate_verify_polls_transient_presence_then_preflight_read
         if argv[:4] == ["systemctl", "--user", "is-active", "acpx-candidate-release-0000001.service"]:
             return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
         if argv[-1:] == ["--version"]:
+            version_calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
         raise AssertionError(argv)
 
@@ -1865,7 +1890,64 @@ def test_bootstrap_candidate_verify_polls_transient_presence_then_preflight_read
         "grok-build",
         "opencode",
     ]
+    assert version_calls == [[str(acpx_executable), "--version"]]
     assert sleeps == [0.1]
+
+
+def test_bootstrap_candidate_verify_does_not_cache_failed_adapter_probe_before_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    acpx_executable = write_release_acpx_target(paths)
+    clock = {"now": 0.0}
+    version_calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        timeout = kwargs.get("timeout")
+        assert timeout is not None
+        if argv[-1:] == ["--version"]:
+            version_calls.append(argv)
+            if len(version_calls) == 1:
+                raise subprocess.TimeoutExpired(argv, timeout=timeout)
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        if argv[:4] == ["systemctl", "--user", "is-active", "acpx-candidate-release-0000001.service"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        raise AssertionError(argv)
+
+    def fake_manager_json(port: int, path: str, *, timeout: float | None = None) -> dict[str, object]:
+        assert port == 18116
+        assert timeout is not None
+        if path.endswith("/presence"):
+            return {"worker_seen_recently": True, "state": "polling"}
+        if path.endswith("/preflights"):
+            return {
+                "agents": [
+                    {"agent": agent, "ready": True, "state": "ready", "reason_code": "ok"}
+                    for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_TIMEOUT_SECONDS", 0.3, raising=False)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_POLL_INTERVAL_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(remote.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(remote.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
+
+    result = remote.op_bootstrap_acpx_verify_candidate(
+        {
+            "release_id": "release-0000001",
+            "worker_id": "acpx-candidate-release-0000001",
+            "manager_port": 18116,
+            "acpx_executable": str(acpx_executable),
+        }
+    )
+
+    assert result["readiness_reason"] == "ready"
+    assert result["attempt_count"] == 2
+    assert version_calls == [[str(acpx_executable), "--version"], [str(acpx_executable), "--version"]]
 
 
 def test_acpx_manager_preflights_accept_one_ready_agent_with_auth_blocked_expected_agents(

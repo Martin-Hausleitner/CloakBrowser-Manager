@@ -137,17 +137,29 @@ OPERATION_SCHEMAS: dict[str, set[str]] = {
     "state.commit": {"release_id", "current_release", "previous_release", "image", "final_backup", "capture", "previous_runtime"},
 }
 SECRET_PATTERNS = (
+    re.compile(r'(?i)"(?:helper_source|token|secret|password|passwd|apikey|api_key)"\s*:\s*"[^"]*"'),
     re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s]+@", re.IGNORECASE),
     re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bcbm_(?:agent|worker)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[A-Za-z0-9._-]{16,}\b", re.IGNORECASE),
     re.compile(r"(?i)(?:token|secret|password|passwd|apikey|api_key)=([^&\s]{8,})"),
+    re.compile(r"(?i)helper_source=([^\s]+)"),
 )
+REMOTE_REFUSAL_MESSAGE_LIMIT = 500
 
 
 class HelperError(RuntimeError):
     pass
+
+
+REMOTE_REFUSAL_EXCEPTIONS = (
+    HelperError,
+    OSError,
+    subprocess.SubprocessError,
+    TimeoutError,
+    json.JSONDecodeError,
+)
 
 
 def redact_text(value: object) -> str:
@@ -155,6 +167,18 @@ def redact_text(value: object) -> str:
     for pattern in SECRET_PATTERNS:
         text = pattern.sub("<redacted>", text)
     return text
+
+
+def bounded_refusal_reason(value: object) -> str:
+    text = redact_text(value).replace("\n", "\\n")
+    if len(text) > REMOTE_REFUSAL_MESSAGE_LIMIT:
+        return text[: REMOTE_REFUSAL_MESSAGE_LIMIT - 3] + "..."
+    return text
+
+
+def refuse_remote_request(reason: object) -> int:
+    print(f"vcvm release remote refused: {bounded_refusal_reason(reason)}", file=sys.stderr)
+    return 75
 
 
 def reject_secret_text(value: object, label: str) -> None:
@@ -1529,6 +1553,7 @@ def op_bootstrap_acpx_verify_candidate(args: dict[str, object]) -> dict[str, obj
     last_components: dict[str, object] = {}
     last_presence: dict[str, object] = {}
     last_agent_preflights: list[object] = []
+    cached_adapter: dict[str, object] | None = None
     while True:
         elapsed = time.monotonic() - started
         if attempt_count > 0 and elapsed >= deadline_seconds:
@@ -1539,23 +1564,28 @@ def op_bootstrap_acpx_verify_candidate(args: dict[str, object]) -> dict[str, obj
                 reason=last_reason,
             )
         attempt_count += 1
-        try:
-            adapter = _acpx_adapter_probe_at(
-                acpx_executable,
-                timeout=_acpx_probe_timeout(started, deadline_seconds),
-            )
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, TimeoutError) as exc:
-            last_reason = f"adapter_{exc.__class__.__name__}"
-            elapsed = time.monotonic() - started
-            if elapsed >= deadline_seconds:
-                raise _acpx_candidate_readiness_error(
-                    attempt_count=attempt_count,
-                    elapsed_seconds=elapsed,
-                    deadline_seconds=deadline_seconds,
-                    reason=last_reason,
-                ) from exc
-            time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
-            continue
+        if cached_adapter is None:
+            try:
+                adapter = _acpx_adapter_probe_at(
+                    acpx_executable,
+                    timeout=_acpx_probe_timeout(started, deadline_seconds),
+                )
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, TimeoutError) as exc:
+                last_reason = f"adapter_{exc.__class__.__name__}"
+                elapsed = time.monotonic() - started
+                if elapsed >= deadline_seconds:
+                    raise _acpx_candidate_readiness_error(
+                        attempt_count=attempt_count,
+                        elapsed_seconds=elapsed,
+                        deadline_seconds=deadline_seconds,
+                        reason=last_reason,
+                    ) from exc
+                time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
+                continue
+            if adapter["ready"] is True:
+                cached_adapter = adapter
+        else:
+            adapter = cached_adapter
         if adapter["ready"] is not True:
             last_reason = f"adapter_{adapter.get('reason_code', 'adapter_unavailable')}"
             if adapter.get("reason_code") in {"adapter_unavailable", "version_mismatch"}:
@@ -2284,12 +2314,28 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         request = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        return refuse_remote_request(exc)
+    return write_response_or_refusal(request, pretty=args.pretty)
+
+
+def write_response_or_refusal(request: object, *, pretty: bool = False) -> int:
+    try:
+        require(isinstance(request, dict), "remote request must be an object")
         payload = handle_request(request)
-    except (HelperError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-        print(f"vcvm release remote refused: {redact_text(exc)}", file=sys.stderr)
-        return 75
-    sys.stdout.write(json.dumps(payload, indent=2 if args.pretty else None, sort_keys=True) + "\n")
+    except REMOTE_REFUSAL_EXCEPTIONS as exc:
+        return refuse_remote_request(exc)
+    sys.stdout.write(json.dumps(payload, indent=2 if pretty else None, sort_keys=True) + "\n")
     return 0
+
+
+def streamed_main(payload: object) -> int:
+    try:
+        require(isinstance(payload, dict), "streamed payload must be an object")
+        request = payload.get("request")
+    except REMOTE_REFUSAL_EXCEPTIONS as exc:
+        return refuse_remote_request(exc)
+    return write_response_or_refusal(request)
 
 
 if __name__ == "__main__":

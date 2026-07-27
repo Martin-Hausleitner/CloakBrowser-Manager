@@ -49,6 +49,21 @@ Status date: **26 July 2026**. This section describes the active development bra
 
 > **ACPX/ACP checkpoint:** the branch now contains a pinned ACPX `0.12.1` host worker, explicit per-run agent selection for Codex/Claude/Cursor/Grok Build/OpenCode, and a run-scoped `cbm-mcp` server built on the official MCP Python SDK. The compact desktop workspace exposes ACPX as a managed runner and reveals the ACP agent selector only while ACPX is selected; mobile preserves the saved ACPX preference without adding another panel. Authenticated filtered claim polls now provide a redacted process-presence signal (`polling`, `stale`, `unavailable`), and the UI fails closed when no ACPX worker is polling. Presence deliberately does not claim provider authentication or adapter readiness; the UI says that the adapter is checked when the run starts. Local contract/runtime and UI tests cover claims, heartbeats, typed outputs, cancellation, strict origin-scoped browser tools, private capability files, raw ACP errors, subprocess cleanup and the exact UI-to-Manager payload. This is not yet called live: VCVM provisioning, provider authentication, an agent-specific adapter preflight and a real managed-browser MCP run remain required.
 
+### Vision and current plan
+
+This fork uses a reusable project contract so product intent, agent behavior,
+architecture, current work, tests, security, and release evidence stay connected:
+
+- [Universal vision](VISION.md) and [vision lifecycle](VISION_LIFECYCLE.md)
+- [CloakBrowser project vision](VISION_PROJECTS.md) and [agent/harness vision](VISION_AGENT.md)
+- [Architecture](ARCHITECTURE.md), [testing](TESTING.md), [security](SECURITY.md), and [governance](GOVERNANCE.md)
+- [Current universal agent browser control-plane plan](docs/superpowers/plans/2026-07-27-universal-agent-browser-control-plane-masterplan.md)
+- [Reusable project vision template](docs/templates/PROJECT-VISION-TEMPLATE.md)
+
+Future Martin-owned projects can reuse the same lifecycle while replacing all
+CloakBrowser-specific assumptions, repositories, systems of record, evidence,
+and release gates.
+
 
 ### Repository boundaries
 

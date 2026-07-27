@@ -15,6 +15,8 @@ Contributions should move one scoped product claim from plan to verified evidenc
 
 1. Identify the active CBM GitHub issue and its matching local `bd` execution item.
 2. Read the relevant vision, architecture, security, and testing sections.
+   For release-significant work, also read [VISION_LIFECYCLE.md](VISION_LIFECYCLE.md)
+   and confirm that the linked active plan and current-truth status still apply.
 3. Check current worktree status and preserve unrelated edits.
 4. Define the smallest file ownership surface.
 5. Choose the verification command before changing files.
@@ -37,6 +39,8 @@ Docs changes should:
 - distinguish planned, implemented, locally tested, live-proven, historical, blocked, and known gaps;
 - cite external inspiration or official references when they shaped structure;
 - pass markdown link, placeholder, secret, and whitespace checks.
+- update the active-plan pointer or current-truth block when the authoritative
+  plan, evidence posture, deployment revision, or stop condition changes.
 
 ## Verification Expectations
 
@@ -67,7 +71,6 @@ is a read-only comparison source.
 ## Known Gaps
 
 - This docs slice does not add CI enforcement for root docs.
-- README discoverability is deferred because this task forbids README edits.
 - Project-state handoff automation is planned under CBM-001.
 
 ## Inspirations

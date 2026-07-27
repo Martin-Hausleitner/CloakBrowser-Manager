@@ -6,6 +6,7 @@
 | Owner | Martin Hausleitner |
 | Review cadence | Recheck on every release gate and whenever governance precedence changes |
 | Applies to | CloakBrowser Manager now; future Martin-owned control-plane projects by template |
+| Lifecycle contract | [VISION_LIFECYCLE.md](VISION_LIFECYCLE.md) |
 
 ## Purpose
 
@@ -32,16 +33,41 @@ vision -> architecture -> implementation plan -> ticket -> tests -> evidence -> 
 
 For this repository, the current implementation plan is [docs/superpowers/plans/2026-07-27-universal-agent-browser-control-plane-masterplan.md](docs/superpowers/plans/2026-07-27-universal-agent-browser-control-plane-masterplan.md). The ticket layer is the CBM-001 through CBM-024 issue set linked from that plan.
 
+## Reuse in Every Future Project
+
+Every future project should begin with the same small vision pack, adapted to its
+own product rather than copied blindly:
+
+1. `VISION.md` explains the durable product outcome and principles.
+2. `VISION_SOVEREIGN.md` defines ownership, portability, shutdown, and data exit.
+3. `VISION_PROJECTS.md` applies the vision to the current repository and names
+   what the product owns, integrates, and deliberately does not own.
+4. `VISION_AGENT.md` defines how agents, harnesses, tools, and humans share the
+   system without bypassing identity, leases, approvals, or evidence.
+5. `VISION_LIFECYCLE.md` keeps the vision connected to current reality, the
+   active plan, tickets, decisions, tests, evidence, and release status.
+6. `ARCHITECTURE.md`, `TESTING.md`, `SECURITY.md`, `GOVERNANCE.md`,
+   `CONTRIBUTING.md`, and `CODE_OF_CONDUCT.md` turn the vision into boundaries
+   and working rules.
+
+The reusable starting point is
+[docs/templates/PROJECT-VISION-TEMPLATE.md](docs/templates/PROJECT-VISION-TEMPLATE.md).
+A project may use different technologies or repositories, but it may not omit
+the current-plan and current-evidence links while still claiming that the vision
+is operational.
+
 ## Documentation Map
 
 - [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) defines ownership, export, secrets, and local-first expectations.
 - [VISION_PROJECTS.md](VISION_PROJECTS.md) applies this vision to CloakBrowser Manager.
 - [VISION_AGENT.md](VISION_AGENT.md) defines the harness-neutral agent contract.
+- [VISION_LIFECYCLE.md](VISION_LIFECYCLE.md) defines how the vision stays tied to current work and evidence.
 - [ARCHITECTURE.md](ARCHITECTURE.md) defines boundaries and systems of record.
 - [TESTING.md](TESTING.md) defines proof gates and evidence rules.
 - [SECURITY.md](SECURITY.md) defines secret, passkey, proxy, browser, and logging safety.
 - [GOVERNANCE.md](GOVERNANCE.md) defines precedence and decision flow.
 - [CONTRIBUTING.md](CONTRIBUTING.md) defines the contribution workflow.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) defines human-agent collaboration conduct.
 - [docs/templates/PROJECT-VISION-TEMPLATE.md](docs/templates/PROJECT-VISION-TEMPLATE.md) is the reusable starting point for future projects.
 
 ## Known Gaps

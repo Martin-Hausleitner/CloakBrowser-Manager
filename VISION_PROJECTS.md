@@ -65,7 +65,6 @@ VISION_PROJECTS.md
 ## Known Gaps
 
 - The docs contract is new and must be kept aligned with the ticket plan as CBM-001 through CBM-024 land.
-- README links are not changed in this slice; discoverability depends on future allowed README edits.
 - Some historical test counts in README are useful context but must not replace fresh release evidence.
 
 ## Inspirations

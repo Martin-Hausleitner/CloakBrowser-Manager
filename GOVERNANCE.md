@@ -17,7 +17,7 @@ When instructions conflict, use this order:
 
 1. User or owner instruction for the current task.
 2. Repository safety rules and AGENTS.md.
-3. This governance contract and the root vision/security/testing docs.
+3. This governance contract and the root vision/lifecycle/security/testing docs.
 4. Active implementation plan: [docs/superpowers/plans/2026-07-27-universal-agent-browser-control-plane-masterplan.md](docs/superpowers/plans/2026-07-27-universal-agent-browser-control-plane-masterplan.md).
 5. Current CBM ticket or issue acceptance criteria.
 6. Existing code patterns and tests.
@@ -59,6 +59,11 @@ vision -> architecture -> plan -> ticket -> implementation -> tests -> evidence 
 
 If any link is missing, label the status honestly and keep the gap visible.
 
+Every project must also keep one active-plan pointer and a fresh current-truth
+block as defined in [VISION_LIFECYCLE.md](VISION_LIFECYCLE.md). Replacing a plan
+requires marking the previous plan complete or superseded and updating the
+project-specific vision, ticket set, and next stop condition.
+
 ## Known Gaps
 
 - GitHub issues are the product ticket layer; the `bd` execution mirror still needs automated drift checking.
@@ -67,4 +72,8 @@ If any link is missing, label the status honestly and keep the gap visible.
 
 ## Inspirations
 
-Inspired structurally by [Block Buzz GOVERNANCE.md](https://github.com/block/buzz/blob/main/GOVERNANCE.md), adapted to CloakBrowser Manager's owner-led fork, CBM ticket plan, and agent/browser release gates.
+The official [Block Buzz GOVERNANCE.md](https://github.com/block/buzz/blob/main/GOVERNANCE.md)
+links to Block's broader open-source governance rather than defining Buzz-specific
+runtime policy. This repository keeps its own owner-led fork, CBM ticket, and
+agent/browser release contract while using the Buzz documentation family only as
+structural inspiration.

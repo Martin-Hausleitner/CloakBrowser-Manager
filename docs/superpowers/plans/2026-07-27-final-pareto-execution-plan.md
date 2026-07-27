@@ -79,8 +79,8 @@ This deliberately rejects the tempting order of installing a workflow platform, 
 | CBM-022 | [#24](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/24) | Transaction reviewed, apply disabled | Spec and quality/security reviews approve the transaction engine; live apply still waits for exact VCVM preflight and a reviewed wrapper-enable change. |
 | CBM-023 | [#25](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/25) | Architecture only | Defer runtime implementation until single-node SLOs are met. |
 | CBM-024 | [#26](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/26) | Planned | Final real screenshots/report only after live acceptance. |
-| CBM-025 | TBD | Planned | Global ticket-intake schema, cold-start replay proof and integration-baseline ownership. |
-| CBM-026 | TBD | Planned | Active-lane operator-change routing metadata and capability-aware login surface. |
+| CBM-025 | [#28](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/28) | Planned | Global ticket-intake schema, cold-start replay proof and integration-baseline ownership. |
+| CBM-026 | [#29](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/29) | Planned | Active-lane operator-change routing metadata and capability-aware login surface. |
 
 ## 5. Transcript problem-to-ticket map
 

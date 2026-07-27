@@ -32,6 +32,7 @@ def test_cli_help_lists_control_plane_commands():
     assert "open-links" in text
     assert "open-session" in text
     assert "project-state" in text
+    assert "worktree-audit" in text
     assert "tasks" in text
     assert "runs" in text
 
@@ -276,3 +277,58 @@ def test_cli_project_state_prints_json_and_writes_receipt(
     assert payload["unmerged_files"] == ["backend/main.py", "docs/new.md", "new.md"]
     written = json.loads((tmp_path / ".cbm/state/project-state-v1.json").read_text(encoding="utf-8"))
     assert written == payload
+
+
+def test_cli_worktree_audit_prints_json_receipt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: dict = {}
+
+    def fake_audit_repository(config):
+        captured["root"] = config.root
+        captured["target_ref"] = config.target_ref
+        captured["retention_days"] = config.retention_days
+        captured["warn_free_gib"] = config.warn_free_gib
+        captured["block_worktree_free_gib"] = config.block_worktree_free_gib
+        captured["block_release_free_gib"] = config.block_release_free_gib
+        return {
+            "schema": "cbm.worktree_audit.v1",
+            "disk": {"status": "ok"},
+            "worktrees": [],
+        }
+
+    monkeypatch.setattr(mod, "audit_repository", fake_audit_repository)
+    args = mod.build_parser().parse_args(
+        [
+            "worktree-audit",
+            "--root",
+            str(tmp_path),
+            "--target-ref",
+            "origin/dev",
+            "--retention-days",
+            "14",
+            "--warn-free-gib",
+            "20",
+            "--block-worktree-free-gib",
+            "12",
+            "--block-release-free-gib",
+            "8",
+        ]
+    )
+    args.func(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == "cbm.worktree_audit.v1"
+    assert captured == {
+        "root": tmp_path,
+        "target_ref": "origin/dev",
+        "retention_days": 14,
+        "warn_free_gib": 20.0,
+        "block_worktree_free_gib": 12.0,
+        "block_release_free_gib": 8.0,
+    }

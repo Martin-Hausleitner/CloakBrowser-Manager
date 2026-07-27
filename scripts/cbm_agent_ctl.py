@@ -23,6 +23,7 @@ Examples:
   scripts/cbm_agent_ctl.py tasks run <session_id> --profile-id <id> --task "Read title" --allowed-origin https://example.com
   scripts/cbm_agent_ctl.py runs get <run_id>
   scripts/cbm_agent_ctl.py runs cancel <run_id>
+  scripts/cbm_agent_ctl.py worktree-audit --root /path/to/repo
   scripts/cbm_agent_ctl.py health
 """
 
@@ -49,6 +50,7 @@ from backend.project_state import (
     build_project_state,
     default_project_state_path,
 )
+from scripts.cbm_worktree_audit import AuditConfig, audit_repository
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -362,6 +364,21 @@ def cmd_project_state(args: argparse.Namespace) -> None:
     _print(state, True)
 
 
+def cmd_worktree_audit(args: argparse.Namespace) -> None:
+    payload = audit_repository(
+        AuditConfig(
+            root=Path(args.root),
+            target_ref=args.target_ref,
+            retention_days=args.retention_days,
+            oversized_gib=args.oversized_gib,
+            warn_free_gib=args.warn_free_gib,
+            block_worktree_free_gib=args.block_worktree_free_gib,
+            block_release_free_gib=args.block_release_free_gib,
+        )
+    )
+    _print(payload, True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="Always print JSON")
@@ -404,6 +421,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_project_state.add_argument("--stop-condition", required=True)
     p_project_state.set_defaults(func=cmd_project_state)
+
+    p_worktree_audit = sub.add_parser(
+        "worktree-audit",
+        help="Emit a read-only JSON receipt for git worktree cleanup safety",
+    )
+    p_worktree_audit.add_argument("--root", default=".", help="Any path inside the git repository")
+    p_worktree_audit.add_argument(
+        "--target-ref",
+        help="Merge target; defaults to origin/main, main, origin/master, master",
+    )
+    p_worktree_audit.add_argument("--retention-days", type=int, default=7)
+    p_worktree_audit.add_argument("--oversized-gib", type=float, default=32.0)
+    p_worktree_audit.add_argument("--warn-free-gib", type=float, default=16.0)
+    p_worktree_audit.add_argument("--block-worktree-free-gib", type=float, default=12.0)
+    p_worktree_audit.add_argument("--block-release-free-gib", type=float, default=8.0)
+    p_worktree_audit.set_defaults(func=cmd_worktree_audit)
 
     profiles = sub.add_parser("profiles", help="Profile control plane")
     psub = profiles.add_subparsers(dest="profiles_command", required=True)

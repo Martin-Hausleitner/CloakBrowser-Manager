@@ -91,6 +91,29 @@ The current acceptance deployment uses custom loopback port `18116` to avoid a
 legacy preview on `18115`; the documented default remains `18115`. Use the same
 port consistently for deploy, smoke checks and an SSH tunnel.
 
+## Worktree audit receipts
+
+Agent cleanup must start with a read-only worktree receipt, never with removal.
+Run the audit from any checkout path:
+
+```bash
+python3 scripts/cbm_worktree_audit.py --root /home/coder/vk-repos/CloakBrowser-Manager-browser-use
+python3 scripts/cbm_agent_ctl.py worktree-audit --root /home/coder/vk-repos/CloakBrowser-Manager-browser-use
+```
+
+The receipt is JSON only and includes secret-safe display paths, path hashes,
+branch, commit, changed modules, stale activity, size, upstream/merge state,
+overlap markers and cleanup candidacy. A worktree is a cleanup candidate only
+when it is clean, already merged into the target ref, past the retention window,
+not known to have unpushed commits, and not oversized. The audit never deletes
+files or runs cleanup.
+
+Disk policy is fail-closed for VCVM work:
+
+- `< 16 GiB` free: warn.
+- `< 12 GiB` free: block creating new worktrees.
+- `< 8 GiB` free: block release/deploy.
+
 ## Deploy
 
 Create a long bootstrap token in a local secret file with mode `600`. The token

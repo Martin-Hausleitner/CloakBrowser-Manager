@@ -1,8 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { applyProfileViewport, toggleProfilePin } from "./App";
 import { ProfileForm } from "./components/ProfileForm";
-import type { Profile } from "./lib/api";
+import type { Profile, TaskOutput, TaskRun } from "./lib/api";
+import { rememberBrowserUseRun } from "./lib/managedTaskRunStorage";
+import { codexComputerUseProvider } from "./lib/taskHarness";
 import { UI_STATE, expectUiState } from "./lib/uiFlowRegistry";
 
 const apiMock = vi.hoisted(() => ({
@@ -11,6 +13,8 @@ const apiMock = vi.hoisted(() => ({
   setOnUnauthorized: vi.fn(),
   getOrcaCapabilities: vi.fn(),
   listProxies: vi.fn(),
+  getTaskRun: vi.fn(),
+  listTaskRunOutputs: vi.fn(),
 }));
 
 const useProfilesMock = vi.hoisted(() => vi.fn());
@@ -25,6 +29,8 @@ vi.mock("./lib/api", async () => {
       logout: apiMock.logout,
       getOrcaCapabilities: apiMock.getOrcaCapabilities,
       listProxies: apiMock.listProxies,
+      getTaskRun: apiMock.getTaskRun,
+      listTaskRunOutputs: apiMock.listTaskRunOutputs,
     },
     setOnUnauthorized: apiMock.setOnUnauthorized,
   };
@@ -95,6 +101,51 @@ const runningProfile: Profile = {
   vnc_ws_port: 5901,
 };
 
+const taskRun = (overrides: Partial<TaskRun>): TaskRun => ({
+  id: "run-1",
+  task_session_id: "session-1",
+  task_message_id: "message-1",
+  profile_id: runningProfile.id,
+  profile_id_snapshot: runningProfile.id,
+  sandbox_id: runningProfile.sandbox_id,
+  harness: "browser-use",
+  agent: null,
+  status: "succeeded",
+  launch_if_stopped: false,
+  allowed_origins: ["https://example.test"],
+  max_steps: 20,
+  timeout_seconds: 360,
+  model_alias: null,
+  deadline_at: "2026-07-26T00:10:00Z",
+  health_snapshot: {},
+  health_decision: {},
+  health_override: null,
+  retry_count: 0,
+  first_action_sequence: 1,
+  first_action_at: "2026-07-26T00:00:01Z",
+  cancelled_at: null,
+  error_code: null,
+  error_message: null,
+  created_by_kind: "user",
+  created_by_id: "user-1",
+  created_at: "2026-07-26T00:00:00Z",
+  updated_at: "2026-07-26T00:00:05Z",
+  ...overrides,
+});
+
+const taskOutput = (overrides: Partial<TaskOutput>): TaskOutput => ({
+  id: "output-1",
+  run_id: "run-1",
+  sequence: 1,
+  idempotency_key: "output-1",
+  kind: "status",
+  summary: "Working",
+  payload: {},
+  created_at: "2026-07-26T00:00:00Z",
+  artifact_expired: false,
+  ...overrides,
+});
+
 beforeEach(() => {
   apiMock.authStatus.mockResolvedValue({
     auth_required: false,
@@ -119,6 +170,8 @@ beforeEach(() => {
     notes: [],
   });
   apiMock.listProxies.mockResolvedValue([]);
+  apiMock.getTaskRun.mockRejectedValue(new Error("unexpected getTaskRun call"));
+  apiMock.listTaskRunOutputs.mockRejectedValue(new Error("unexpected listTaskRunOutputs call"));
   useProfilesMock.mockReset();
   Object.defineProperty(window, "matchMedia", {
     writable: true,
@@ -136,7 +189,119 @@ beforeEach(() => {
   window.sessionStorage.clear();
 });
 
+afterEach(() => {
+  delete window.cloakBrowserHarness;
+});
+
 describe("App Browser Use home handoff", () => {
+  it("restores remembered mobile Browser Use outputs through the parent wiring", async () => {
+    const browserUseRunningProfile: Profile = {
+      ...runningProfile,
+      id: "profile-browser-use",
+      name: "Browser Use Live",
+      harness: "browser-use",
+      cdp_url: "ws://example",
+    };
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockImplementation(() => ({
+        matches: true,
+        media: "",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    window.cloakBrowserHarness = {
+      capabilities: {
+        chat: true,
+        streaming: true,
+        clipboard: true,
+        browser_actions: ["copy", "paste", "screenshot", "fullscreen"],
+        metadata: { provider: codexComputerUseProvider },
+      },
+      send: vi.fn(),
+      listConversations: vi.fn().mockResolvedValue([
+        {
+          id: "conversation-1",
+          profile_id: browserUseRunningProfile.id,
+          sandbox_id: browserUseRunningProfile.sandbox_id,
+          title: "Remembered run",
+          status: "active",
+          created_at: "2026-07-26T00:00:00Z",
+          updated_at: "2026-07-26T00:00:00Z",
+        },
+      ]),
+      listMessages: vi.fn().mockResolvedValue([
+        {
+          id: "message-1",
+          role: "user",
+          content: "Previous mobile task",
+          created_at: "2026-07-26T00:00:00Z",
+        },
+      ]),
+    };
+    rememberBrowserUseRun(browserUseRunningProfile.id, "run-mobile-1");
+    apiMock.getTaskRun.mockResolvedValue(taskRun({
+      id: "run-mobile-1",
+      profile_id: browserUseRunningProfile.id,
+      profile_id_snapshot: browserUseRunningProfile.id,
+      harness: "browser-use",
+    }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([
+      taskOutput({
+        id: "action-1",
+        run_id: "run-mobile-1",
+        sequence: 1,
+        kind: "action",
+        summary: "Opened checkout",
+        payload: { name: "navigate", url: "https://example.test/checkout" },
+      }),
+      taskOutput({
+        id: "shot-1",
+        run_id: "run-mobile-1",
+        sequence: 2,
+        kind: "screenshot",
+        summary: "Checkout screenshot",
+      }),
+      taskOutput({
+        id: "summary-1",
+        run_id: "run-mobile-1",
+        sequence: 3,
+        kind: "summary",
+        summary: "Task complete",
+        payload: { text: "Checkout is ready for review." },
+      }),
+    ]);
+    useProfilesMock.mockReturnValue({
+      profiles: [browserUseRunningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    const outputRegion = await screen.findByRole("region", { name: "Managed task output" });
+    expect((await screen.findByTestId("mock-profile-viewer")).textContent).toContain("viewer:profile-browser-use");
+    expect(apiMock.getTaskRun).toHaveBeenCalledWith("run-mobile-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(apiMock.listTaskRunOutputs).toHaveBeenCalledWith("run-mobile-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(within(outputRegion).getByRole("list", { name: /agent output/i })).toBeTruthy();
+    expect(within(outputRegion).getByText("navigate")).toBeTruthy();
+    expect(within(outputRegion).getByRole("img", { name: "Checkout screenshot" }).getAttribute("src")).toBe(
+      "/api/task-outputs/shot-1/screenshot",
+    );
+    expect(within(outputRegion).getByText("Checkout is ready for review.")).toBeTruthy();
+  });
+
   it("carries the home task into the selected running Agent Browser workspace once when opening it", async () => {
     const browserUseRunningProfile: Profile = {
       ...runningProfile,

@@ -13,6 +13,12 @@ import {
   type TaskRun,
 } from "../../lib/api";
 import { UI_STATE, uiStateAttr } from "../../lib/uiFlowRegistry";
+import {
+  ACTIVE_TASK_RUN_STATES,
+  forgetBrowserUseRun,
+  readRememberedBrowserUseRun,
+  rememberBrowserUseRun,
+} from "../../lib/managedTaskRunStorage";
 import { ProfileViewer } from "../ProfileViewer";
 import { AgentOutputTimeline } from "./AgentOutputTimeline";
 
@@ -28,37 +34,6 @@ const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
   { value: "grok-build", label: "Grok Build" },
   { value: "opencode", label: "OpenCode" },
 ];
-const ACTIVE_RUN_STATES = new Set(["queued", "health_check", "blocked_health", "running"]);
-const BROWSER_USE_RUN_STORAGE_PREFIX = "cloakbrowser.browser-use.last-run:";
-
-function browserUseRunStorageKey(profileId: string): string {
-  return `${BROWSER_USE_RUN_STORAGE_PREFIX}${profileId}`;
-}
-
-function readRememberedBrowserUseRun(profileId: string): string | null {
-  try {
-    return window.sessionStorage.getItem(browserUseRunStorageKey(profileId));
-  } catch {
-    return null;
-  }
-}
-
-function rememberBrowserUseRun(profileId: string, runId: string): void {
-  try {
-    window.sessionStorage.setItem(browserUseRunStorageKey(profileId), runId);
-  } catch {
-    // The run remains usable in memory when storage is disabled or full.
-  }
-}
-
-function forgetBrowserUseRun(profileId: string): void {
-  try {
-    window.sessionStorage.removeItem(browserUseRunStorageKey(profileId));
-  } catch {
-    // Ignore unavailable storage; there is no local state left to recover.
-  }
-}
-
 function preferredAgent(profile: Profile | null): AgentMode {
   if (profile?.harness === "browser-use") return "browser-use";
   if (profile?.harness === "acpx") return "acpx";
@@ -193,7 +168,7 @@ export function AgentBrowserWorkspace({
   const acpxMode = agent === "acpx";
   const selectedAcpxPreflight = acpxPreflights.find((item) => item.agent === acpxAgent);
   const managedRunMode = browserUseMode || acpxMode;
-  const managedRunActive = Boolean(taskRun && ACTIVE_RUN_STATES.has(taskRun.status));
+  const managedRunActive = Boolean(taskRun && ACTIVE_TASK_RUN_STATES.has(taskRun.status));
   const orcaSessionActive = session?.status === "running" || session?.status === "starting";
   const sessionActive = managedRunMode ? managedRunActive : orcaSessionActive;
   const originList = useMemo(() => allowedOrigins(prompt), [prompt]);
@@ -223,7 +198,7 @@ export function AgentBrowserWorkspace({
     (managedRunMode ? canAutomate : canInteract) &&
     !busy &&
     (managedRunMode
-      ? taskRun && ACTIVE_RUN_STATES.has(taskRun.status)
+      ? taskRun && ACTIVE_TASK_RUN_STATES.has(taskRun.status)
       : session && session.status !== "closed"),
   );
 
@@ -356,7 +331,7 @@ export function AgentBrowserWorkspace({
         ]);
         setTaskRun(nextRun);
         setTaskOutputs(nextOutputs);
-        if (!ACTIVE_RUN_STATES.has(nextRun.status)) stopRunPolling();
+        if (!ACTIVE_TASK_RUN_STATES.has(nextRun.status)) stopRunPolling();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to read managed browser run");
       }
@@ -366,7 +341,7 @@ export function AgentBrowserWorkspace({
 
   useEffect(() => {
     stopRunPolling();
-    if (!managedRunMode || !taskRun || !ACTIVE_RUN_STATES.has(taskRun.status)) return;
+    if (!managedRunMode || !taskRun || !ACTIVE_TASK_RUN_STATES.has(taskRun.status)) return;
     runPollRef.current = window.setInterval(() => {
       void refreshBrowserUseRun(taskRun.id);
     }, 1500);

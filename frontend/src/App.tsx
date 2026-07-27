@@ -9,8 +9,14 @@ import {
   type Profile,
   type ProfileCreateData,
   type ProfileHarness,
+  type TaskOutput,
 } from "./lib/api";
 import { hasAccessPermission } from "./lib/accessPermissions";
+import {
+  ACTIVE_TASK_RUN_STATES,
+  forgetBrowserUseRun,
+  readRememberedBrowserUseRun,
+} from "./lib/managedTaskRunStorage";
 import { UI_STATE, type UIStateId } from "./lib/uiFlowRegistry";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
@@ -184,6 +190,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const [mobileBrowserZoom, setMobileBrowserZoom] = useState(100);
   const [mobileRemoteToolsOpen, setMobileRemoteToolsOpen] = useState(false);
   const [mobileConnectionStatus, setMobileConnectionStatus] = useState<MobileConnectionStatus>("connecting");
+  const [mobileTaskOutputs, setMobileTaskOutputs] = useState<TaskOutput[]>([]);
   const [projectId, setProjectId] = useState<string>("default");
   const [harness, setHarness] = useState<ProfileHarness>("browser-use");
   const [taskDraft, setTaskDraft] = useState("");
@@ -217,6 +224,61 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     setSelectedId(nextProfile.id);
     setView("view");
   }, [isMobile, loading, profiles, selectedId]);
+
+  useEffect(() => {
+    setMobileTaskOutputs([]);
+
+    if (!isMobile || !selected) return;
+
+    const rememberedRunId = readRememberedBrowserUseRun(selected.id);
+    if (!rememberedRunId) return;
+
+    const controller = new AbortController();
+    let cancelled = false;
+    let pollTimer: number | null = null;
+
+    const stopPolling = () => {
+      if (pollTimer != null) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    };
+
+    const refreshRememberedRun = async () => {
+      try {
+        const [run, outputs] = await Promise.all([
+          api.getTaskRun(rememberedRunId, { signal: controller.signal }),
+          api.listTaskRunOutputs(rememberedRunId, { signal: controller.signal }),
+        ]);
+        if (cancelled) return;
+        if (run.profile_id_snapshot !== selected.id) {
+          forgetBrowserUseRun(selected.id);
+          setMobileTaskOutputs([]);
+          stopPolling();
+          return;
+        }
+        setMobileTaskOutputs(outputs);
+        if (!ACTIVE_TASK_RUN_STATES.has(run.status)) {
+          stopPolling();
+        }
+      } catch (err) {
+        if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
+        console.warn("[mobile-task-output] remembered run restore failed:", err);
+        forgetBrowserUseRun(selected.id);
+        setMobileTaskOutputs([]);
+        stopPolling();
+      }
+    };
+
+    void refreshRememberedRun();
+    pollTimer = window.setInterval(() => void refreshRememberedRun(), 1500);
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      stopPolling();
+    };
+  }, [isMobile, selected?.id, selected?.screen_height, selected?.screen_width]);
 
   // Deep-link from the Cloak Profile Sync extension (?profile=<id>).
   useEffect(() => {
@@ -424,6 +486,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           identityName={identity?.display_name ?? null}
           browserView={browserView}
           browserZoom={mobileBrowserZoom}
+          taskOutputs={mobileTaskOutputs}
           browserConnectionStatus={selected?.status === "running" ? mobileConnectionStatus : null}
           remoteToolsOpen={mobileRemoteToolsOpen}
           onRemoteToolsOpenChange={setMobileRemoteToolsOpen}

@@ -197,6 +197,24 @@ engine first probes for genuine absence only: missing ACPX binary, systemd
 unit, key, venv or capability directory. Existing but stale, misconfigured,
 bad-auth or wrong-version ACPX state remains blocking.
 
+Direct first-rollout ACPX bootstrap must use the reviewed transaction engine
+path, not the public wrapper:
+
+```bash
+python3 scripts/vcvm_release_transaction.py release \
+  --source-root . \
+  --source-remote fork \
+  --expected-source-remote https://github.com/Martin-Hausleitner/CloakBrowser-Manager.git \
+  --expected-current-worker-commit <full-40-hex-current-browser-use-worker-commit> \
+  --bootstrap-acpx \
+  --apply
+```
+
+Omitting `--apply` keeps this command in dry-run mode and does not connect over
+SSH. Live bootstrap also requires the exact current Browser-Use worker commit
+and exact authorized source remote before the transaction constructs an SSH
+executor.
+
 When that absence gate passes, the transaction stages release-specific ACPX
 npm/Python runtimes from the checked-in locks, provisions a temporary
 candidate-bound worker against Manager `127.0.0.1:18116`, and verifies worker
@@ -205,6 +223,22 @@ After the normal Manager switch, the worker is promoted to
 `127.0.0.1:18115` and verified with the release runtime. Any failure cleans up
 only release-specific temporary ACPX artifacts; failures after quiesce also
 restore the captured old Manager/runtime/unit state before returning failure.
+
+For the first ACPX rollout only, `--bootstrap-acpx --apply` also accepts the
+legacy live Manager image if it has an immutable image id/digest but no OCI
+revision label. The transaction records `previous_revision_available=false`
+in the capture and `revision_available=false` in `previous_runtime`; the
+revision stays empty and is never synthesized from another value. Normal
+release mode still requires the Manager revision label before any remote
+mutation. Rollback of an unlabeled previous runtime verifies exact immutable
+image id and digest, and skips only revision-label equality.
+
+Manager verification requests always include the expected immutable image id,
+the expected commit, and whether that revision label is available. The helper
+response must match the image id exactly; revision equality is required only
+when `revision_available=true`. Orca verification is also structured: the
+helper must report `ok=true`, `runtime_state=ready`, and `graph_state=ready`
+before the transaction can continue.
 
 ### Optional VCVM-local proxychecker
 

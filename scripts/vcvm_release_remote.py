@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import re
-import secrets
 import shutil
 import stat
 import subprocess
@@ -32,6 +31,20 @@ STATE_FILE = REMOTE_PATH / ".vcvm-release-state.json"
 MANAGED_MARKER = ".cloakbrowser-manager-vcvm-managed"
 MANAGER_CONTAINER = "cloakbrowser-manager-vcvm"
 MANAGER_VOLUME = "cloakbrowser-manager-vcvm-data"
+BROWSER_USE_UNIT = "cloakbrowser-browser-use-worker.service"
+BROWSER_USE_TOKEN_PATH = Path("/home/coder/.config/cloakbrowser/browser-use-worker-key")
+ACPX_UNIT = "cloakbrowser-acpx.service"
+MANAGER_CONTAINER_PORT = 8080
+MANAGER_HOST_GATEWAY = "host.docker.internal:host-gateway"
+PROXYCHECKER_HOST_HEALTH_URL = "http://172.17.0.1:18899/health"
+MANAGED_LAYOUT_DIRS = ("releases", "backups", "receipts")
+MANAGED_LAYOUT_MODE = 0o700
+MANAGER_BIND_MOUNTS = (
+    (Path("/home/coder/orca"), Path("/home/coder/orca"), "ro"),
+    (Path("/home/coder/.local"), Path("/home/coder/.local"), "ro"),
+    (Path("/home/coder/.config/orca"), Path("/home/coder/.config/orca"), "ro"),
+)
+MANAGER_RESTART_POLICY = "unless-stopped"
 LIVE_PORT = 18115
 CANDIDATE_PORT = 18116
 ACPX_NODE_LOCK = "deploy/acpx-runtime/package-lock.json"
@@ -98,7 +111,7 @@ OPERATION_SCHEMAS: dict[str, set[str]] = {
     "quiesce.stop_live": set(),
     "live.start": {"image_ref", "volume", "port"},
     "workers.rebind": {"release_id", "commit", "capture"},
-    "verify.manager": {"commit"},
+    "verify.manager": {"commit", "revision_available", "image_id"},
     "verify.browser_use": {"commit", "release_source"},
     "verify.acpx": {"release_source", "expected_absent"},
     "verify.proxychecker": set(),
@@ -190,6 +203,81 @@ def expected_unit_path(unit: str) -> Path:
     return Path.home() / ".config" / "systemd" / "user" / unit
 
 
+def manager_bind_mount_receipt() -> list[dict[str, str]]:
+    return [
+        {"source": str(source), "target": str(target), "mode": mode}
+        for source, target, mode in MANAGER_BIND_MOUNTS
+    ]
+
+
+def _validate_managed_dir(path: Path, label: str) -> None:
+    require(path == REMOTE_PATH / label, f"managed layout path is not allowlisted: {label}")
+    require(path.exists(), f"managed layout directory is missing: {label}")
+    require(path.is_dir(), f"managed layout path is not a directory: {label}")
+    require(not path.is_symlink(), f"managed layout directory is a symlink: {label}")
+    stat_result = path.stat()
+    require(stat_result.st_uid == os.getuid(), f"managed layout owner mismatch: {label}")
+    require(stat.S_IMODE(stat_result.st_mode) == MANAGED_LAYOUT_MODE, f"managed layout mode mismatch: {label}")
+
+
+def _managed_layout_status() -> dict[str, object]:
+    require(REMOTE_PATH.exists() and REMOTE_PATH.is_dir(), "managed root is missing")
+    require(not REMOTE_PATH.is_symlink(), "managed root is a symlink")
+    require(REMOTE_PATH.stat().st_uid == os.getuid(), "managed root owner mismatch")
+    paths = {name: REMOTE_PATH / name for name in MANAGED_LAYOUT_DIRS}
+    existing = [name for name, path in paths.items() if path.exists() or path.is_symlink()]
+    if not existing:
+        return {"ok": True, "bootstrap_required": True, "layout_dirs": list(MANAGED_LAYOUT_DIRS)}
+    require(set(existing) == set(MANAGED_LAYOUT_DIRS), "managed layout must be complete or exactly absent")
+    for name, path in paths.items():
+        _validate_managed_dir(path, name)
+    return {"ok": True, "bootstrap_required": False, "layout_dirs": list(MANAGED_LAYOUT_DIRS)}
+
+
+def _ensure_managed_layout() -> None:
+    status = _managed_layout_status()
+    if status["bootstrap_required"] is True:
+        for name in MANAGED_LAYOUT_DIRS:
+            path = REMOTE_PATH / name
+            require(path == REMOTE_PATH / name, f"managed layout path is not allowlisted: {name}")
+            require(not path.exists() and not path.is_symlink(), f"managed layout path must be absent before bootstrap: {name}")
+            path.mkdir(mode=MANAGED_LAYOUT_MODE)
+    _managed_layout_status()
+
+
+def _validate_manager_bind_sources() -> None:
+    for source, target, mode in MANAGER_BIND_MOUNTS:
+        require(source == target, f"Manager bind target must match source: {target}")
+        require(mode == "ro", f"Manager bind mount must be read-only: {source}")
+        require(source.exists() and source.is_dir(), f"Manager bind source is missing: {source}")
+        require(not source.is_symlink(), f"Manager bind source is a symlink: {source}")
+        require(source.stat().st_uid == os.getuid(), f"Manager bind source owner mismatch: {source}")
+
+
+def _manager_docker_run_args(*, container: str, host_port: int, volume: str, image_ref: str) -> list[str]:
+    validate_name(volume, "Manager volume")
+    _validate_manager_bind_sources()
+    argv = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        container,
+        "--restart",
+        MANAGER_RESTART_POLICY,
+        "--add-host",
+        MANAGER_HOST_GATEWAY,
+        "-p",
+        f"127.0.0.1:{host_port}:{MANAGER_CONTAINER_PORT}",
+        "-v",
+        f"{volume}:/data",
+    ]
+    for source, target, mode in MANAGER_BIND_MOUNTS:
+        argv.extend(["-v", f"{source}:{target}:{mode}"])
+    argv.extend(["--env-file", str(REMOTE_PATH / ".env.vcvm"), image_ref])
+    return argv
+
+
 def _write_json_mode_0600(path: Path, payload: dict[str, object]) -> None:
     _write_text_mode_0600_atomic(path, json.dumps(payload, sort_keys=True) + "\n")
 
@@ -237,19 +325,25 @@ def validate_restore_capture(capture: dict[str, object]) -> dict[str, object]:
     digest = validate_sha256(capture.get("old_image_digest"))
     image_id = validate_immutable_image(capture.get("old_image_id"), "old image id")
     require(image_id == f"sha256:{digest}", "old image id mismatch")
-    validate_commit(capture.get("previous_revision"))
+    previous_revision_available = capture.get("previous_revision_available") is not False
+    if previous_revision_available:
+        validate_commit(capture.get("previous_revision"))
+    else:
+        require(capture.get("previous_revision") in {"", None}, "unavailable previous revision must be empty")
+    require(capture.get("manager_restart_policy", MANAGER_RESTART_POLICY) == MANAGER_RESTART_POLICY, "captured restart policy mismatch")
+    require(capture.get("manager_bind_mounts", manager_bind_mount_receipt()) == manager_bind_mount_receipt(), "captured Manager bind mounts mismatch")
     validate_current_pointer(capture.get("current_pointer"))
     expected_paths = {
-        "browser_use_unit_path": expected_unit_path("cloakbrowser-browser-use.service"),
-        "acpx_unit_path": expected_unit_path("cloakbrowser-acpx.service"),
+        "browser_use_unit_path": expected_unit_path(BROWSER_USE_UNIT),
+        "acpx_unit_path": expected_unit_path(ACPX_UNIT),
     }
     for key, expected in expected_paths.items():
         actual = Path(str(capture.get(key, "")))
         require(actual == expected, f"captured unit path is not allowlisted: {key}")
         require(not actual.parent.is_symlink(), f"captured unit path parent is a symlink: {key}")
     for key, unit in (
-        ("browser_use_dropin_path", "cloakbrowser-browser-use.service"),
-        ("acpx_dropin_path", "cloakbrowser-acpx.service"),
+        ("browser_use_dropin_path", BROWSER_USE_UNIT),
+        ("acpx_dropin_path", ACPX_UNIT),
     ):
         require(key in capture, f"captured drop-in path is missing: {key}")
         actual = Path(str(capture[key]))
@@ -335,21 +429,36 @@ def op_preflight_env(args: dict[str, object]) -> dict[str, object]:
 
 def op_preflight_manager(args: dict[str, object]) -> dict[str, object]:
     del args
+    _validate_manager_bind_sources()
     container = json.loads(run(["docker", "inspect", MANAGER_CONTAINER]).stdout)[0]
     image_ref = str(container["Config"]["Image"])
     image_id = str(container["Image"])
     revision = run(["docker", "image", "inspect", image_id, "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}"], check=False).stdout.strip()
-    require(COMMIT_RE.fullmatch(revision) is not None, "running Manager image revision label is missing")
+    revision_available = bool(revision)
+    if revision_available:
+        require(COMMIT_RE.fullmatch(revision) is not None, "running Manager image revision label is malformed")
     mounts = container.get("Mounts", [])
     volumes = [item.get("Name") for item in mounts if item.get("Type") == "volume"]
+    host_config = container.get("HostConfig", {})
+    restart_policy = dict(host_config.get("RestartPolicy", {})).get("Name", "")
+    network_mode = str(host_config.get("NetworkMode", ""))
     return {
         "container": container["Name"].lstrip("/"),
         "image": image_ref,
         "image_id": image_id,
         "image_digest": image_id.removeprefix("sha256:"),
         "revision": revision,
+        "revision_available": revision_available,
         "volume": MANAGER_VOLUME if MANAGER_VOLUME in volumes else "",
+        "manager_bind_mounts": manager_bind_mount_receipt(),
+        "restart_policy": restart_policy,
+        "network_mode": network_mode,
     }
+
+
+def _running_manager_image_id() -> str:
+    container = json.loads(run(["docker", "inspect", MANAGER_CONTAINER]).stdout)[0]
+    return validate_immutable_image(container.get("Image"), "running Manager image id")
 
 
 def _unit_state(name: str) -> dict[str, object]:
@@ -413,7 +522,7 @@ def _manager_json(path: str) -> dict[str, object]:
 
 def _manager_json_on_port(port: int, path: str) -> dict[str, object]:
     require(port in {LIVE_PORT, CANDIDATE_PORT}, "Manager probe port is not allowlisted")
-    require(path.startswith("/api/") and "://" not in path, "Manager probe path is not allowlisted")
+    require((path.startswith("/api/") or path == "/openapi.json") and "://" not in path, "Manager probe path is not allowlisted")
     token = _env_auth_token()
     request = Request(
         f"http://127.0.0.1:{port}{path}",
@@ -513,8 +622,8 @@ def _remove_acpx_bootstrap_artifacts(capture: dict[str, object]) -> None:
             require(target == release / child, "ACPX cleanup target is not allowlisted")
             _remove_tree_if_present(target, f"ACPX release artifact {child}")
     for path in (
-        expected_unit_path("cloakbrowser-acpx.service"),
-        release_dropin("cloakbrowser-acpx.service"),
+        expected_unit_path(ACPX_UNIT),
+        release_dropin(ACPX_UNIT),
         REMOTE_PATH / ".env.acpx.vcvm",
     ):
         require(not path.is_symlink(), f"ACPX restore target must not be a symlink: {path}")
@@ -526,17 +635,45 @@ def _token_mode(path: Path) -> str:
     return f"{stat.S_IMODE(path.stat().st_mode):o}"
 
 
+def _read_canonical_worker_key() -> str:
+    path = BROWSER_USE_TOKEN_PATH
+    require(path == BROWSER_USE_TOKEN_PATH, "worker key path is not allowlisted")
+    require(path.exists() and path.is_file(), "canonical worker key is missing")
+    require(not path.is_symlink(), "canonical worker key is a symlink")
+    require(stat.S_IMODE(path.stat().st_mode) == 0o600, "canonical worker key mode mismatch")
+    token = path.read_text(encoding="utf-8").strip()
+    require(re.fullmatch(r"cbm_worker_[A-Za-z0-9_-]{32,}", token) is not None, "canonical worker key is invalid")
+    return token
+
+
+def _browser_use_worktree_commit(working_directory: str) -> str:
+    path = Path(working_directory)
+    require(path.is_absolute(), "Browser-Use WorkingDirectory must be absolute")
+    try:
+        path.relative_to("/home/coder")
+    except ValueError as exc:
+        raise HelperError("Browser-Use WorkingDirectory must stay under /home/coder") from exc
+    require(not path.is_symlink(), "Browser-Use WorkingDirectory must not be a symlink")
+    inside = run(["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"], check=False).stdout.strip()
+    require(inside == "true", "Browser-Use WorkingDirectory is not a git worktree")
+    commit = run(["git", "-C", str(path), "rev-parse", "HEAD"], check=False).stdout.strip()
+    require(COMMIT_RE.fullmatch(commit) is not None, "Browser-Use WorkingDirectory commit is missing")
+    return commit
+
+
 def op_preflight_browser_use(args: dict[str, object]) -> dict[str, object]:
-    unit = str(args.get("unit", "cloakbrowser-browser-use.service"))
-    token_path = Path(str(args.get("token_path", REMOTE_PATH / ".env.worker.vcvm")))
+    del args
+    unit = BROWSER_USE_UNIT
+    token_path = BROWSER_USE_TOKEN_PATH
     state = _unit_state(unit)
-    commit = run(["git", "-C", str(REMOTE_PATH), "rev-parse", "--short=12", "HEAD"], check=False).stdout.strip()
+    show = _unit_show(unit)
+    commit = _browser_use_worktree_commit(show.get("WorkingDirectory", ""))
     state.update({"active": state["active_state"] == "active", "token_mode": _token_mode(token_path), "commit": commit})
     return state
 
 
 def op_preflight_acpx(args: dict[str, object]) -> dict[str, object]:
-    unit = str(args.get("unit", "cloakbrowser-acpx.service"))
+    unit = str(args.get("unit", ACPX_UNIT))
     token_path = Path(str(args.get("token_path", REMOTE_PATH / ".env.acpx.vcvm")))
     venv = Path(str(args.get("venv", REMOTE_PATH / ".venv-acpx")))
     state = _unit_state(unit)
@@ -562,8 +699,8 @@ def _capture_acpx_state() -> dict[str, object]:
         probe = _probe_acpx_state()
         if probe.get("state") != "absent":
             raise
-        unit = expected_unit_path("cloakbrowser-acpx.service")
-        dropin = release_dropin("cloakbrowser-acpx.service")
+        unit = expected_unit_path(ACPX_UNIT)
+        dropin = release_dropin(ACPX_UNIT)
         return {
             "unit_path": str(unit),
             "unit_sha256": "0" * 64,
@@ -579,7 +716,7 @@ def _capture_acpx_state() -> dict[str, object]:
 
 def op_preflight_receipts(args: dict[str, object]) -> dict[str, object]:
     del args
-    return {"ok": (REMOTE_PATH / "receipts").exists()}
+    return _managed_layout_status()
 
 
 def op_preflight_tailscale(args: dict[str, object]) -> dict[str, object]:
@@ -632,7 +769,7 @@ def _local_acpx_binary() -> Path:
 
 
 def _probe_acpx_state() -> dict[str, object]:
-    unit = expected_unit_path("cloakbrowser-acpx.service")
+    unit = expected_unit_path(ACPX_UNIT)
     key = REMOTE_PATH / ".env.acpx.vcvm"
     venv_path = REMOTE_PATH / ".venv-acpx"
     capability = REMOTE_PATH / "acpx-capabilities"
@@ -674,6 +811,7 @@ def op_release_prepare(args: dict[str, object]) -> dict[str, object]:
     release_id = validate_release_id(args["release_id"])
     expected_commit = validate_commit(args["commit"])
     expected_archive = validate_sha256(args["archive_sha256"])
+    _ensure_managed_layout()
     path = release_dir(release_id)
     if path.exists():
         manifest = json_file(path / "manifest.json")
@@ -681,7 +819,11 @@ def op_release_prepare(args: dict[str, object]) -> dict[str, object]:
         require(manifest.get("source", {}).get("commit") == expected_commit, "existing release commit mismatch")
         require(manifest.get("source", {}).get("archive_sha256") == expected_archive, "existing release archive mismatch")
         return {"exists": True, "release_id": release_id}
-    path.mkdir(parents=False, mode=0o755)
+    path.mkdir(parents=False, mode=MANAGED_LAYOUT_MODE)
+    _validate_managed_dir(RELEASES_PATH, "releases")
+    require(path.exists() and path.is_dir() and not path.is_symlink(), "release directory was not created safely")
+    require(path.stat().st_uid == os.getuid(), "release directory owner mismatch")
+    require(stat.S_IMODE(path.stat().st_mode) == MANAGED_LAYOUT_MODE, "release directory mode mismatch")
     return {"exists": False, "release_id": release_id}
 
 
@@ -820,8 +962,8 @@ def op_candidate_start(args: dict[str, object]) -> dict[str, object]:
     run(["docker", "image", "inspect", image_ref])
     volume = validate_name(args["volume"], "candidate volume")
     container = f"cloakbrowser-manager-candidate-{release_id}"
-    run(["docker", "run", "-d", "--name", container, "-p", f"127.0.0.1:{CANDIDATE_PORT}:8000", "-v", f"{volume}:/data", "--env-file", str(REMOTE_PATH / ".env.vcvm"), image_ref])
-    return {"container": container, "port": CANDIDATE_PORT}
+    run(_manager_docker_run_args(container=container, host_port=CANDIDATE_PORT, volume=volume, image_ref=image_ref))
+    return {"container": container, "port": CANDIDATE_PORT, "container_port": MANAGER_CONTAINER_PORT, "manager_bind_mounts": manager_bind_mount_receipt(), "restart_policy": MANAGER_RESTART_POLICY}
 
 
 def op_candidate_verify(args: dict[str, object]) -> dict[str, object]:
@@ -893,8 +1035,7 @@ def op_bootstrap_acpx_provision_candidate(args: dict[str, object]) -> dict[str, 
     capability = _require_bootstrap_path(release_id, root / "capability", "ACPX candidate capability")
     capability.mkdir(parents=True, mode=0o700, exist_ok=True)
     key.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    if not key.exists():
-        _write_text_mode_0600_atomic(key, "cbm_worker_" + secrets.token_hex(32) + "\n")
+    _write_text_mode_0600_atomic(key, _read_canonical_worker_key() + "\n")
     manager_url = f"http://127.0.0.1:{CANDIDATE_PORT}"
     content = (
         "[Unit]\nDescription=CloakBrowser candidate ACPX worker\n"
@@ -912,6 +1053,8 @@ def op_bootstrap_acpx_provision_candidate(args: dict[str, object]) -> dict[str, 
         "unit": _path_ref(unit),
         "capability": _path_ref(capability),
         "venv": runtime.get("venv", _path_ref(root / "venv")),
+        "credential_reused": True,
+        "credential_source": "browser_use_worker_key",
     }
 
 
@@ -978,7 +1121,7 @@ def op_bootstrap_acpx_promote(args: dict[str, object]) -> dict[str, object]:
     require(not durable_key.is_symlink(), "ACPX key target must not be a symlink")
     shutil.copyfile(bootstrap / "candidate.worker.key", durable_key)
     durable_key.chmod(0o600)
-    permanent = expected_unit_path("cloakbrowser-acpx.service")
+    permanent = expected_unit_path(ACPX_UNIT)
     content = (
         candidate_unit.read_text(encoding="utf-8")
         .replace(str(bootstrap / "venv"), str(durable_venv))
@@ -990,8 +1133,8 @@ def op_bootstrap_acpx_promote(args: dict[str, object]) -> dict[str, object]:
     require(ACPX_BOOTSTRAP_DIR not in content, "promoted ACPX unit still references temporary bootstrap paths")
     _write_text_mode_0600_atomic(permanent, content)
     run(["systemctl", "--user", "daemon-reload"])
-    run(["systemctl", "--user", "restart", "cloakbrowser-acpx.service"])
-    active = run(["systemctl", "--user", "is-active", "cloakbrowser-acpx.service"], check=False).stdout.strip()
+    run(["systemctl", "--user", "restart", ACPX_UNIT])
+    active = run(["systemctl", "--user", "is-active", ACPX_UNIT], check=False).stdout.strip()
     return {
         "worker_id": worker_id,
         "manager_url": f"http://127.0.0.1:{LIVE_PORT}",
@@ -1034,9 +1177,13 @@ def op_capture_state(args: dict[str, object]) -> dict[str, object]:
     return {
         "source_revision": commit,
         "previous_revision": manager["revision"],
+        "previous_revision_available": manager["revision_available"],
         "old_image_digest": manager["image_digest"],
         "old_image_id": manager["image_id"],
         "container_config_receipt": hashlib.sha256(json.dumps(manager, sort_keys=True).encode()).hexdigest(),
+        "manager_bind_mounts": manager["manager_bind_mounts"],
+        "manager_restart_policy": manager["restart_policy"] or MANAGER_RESTART_POLICY,
+        "manager_network_mode": manager["network_mode"] or "bridge",
         "current_pointer": current_target,
         "state": pointer_state,
         "browser_use_unit_sha256": browser["unit_sha256"],
@@ -1061,7 +1208,7 @@ def op_capture_state(args: dict[str, object]) -> dict[str, object]:
 
 def op_quiesce_stop_workers(args: dict[str, object]) -> dict[str, object]:
     del args
-    for unit in ("cloakbrowser-browser-use.service", "cloakbrowser-acpx.service"):
+    for unit in (BROWSER_USE_UNIT, ACPX_UNIT):
         run(["systemctl", "--user", "stop", unit], check=False)
     return {"stopped": True}
 
@@ -1076,8 +1223,8 @@ def op_live_start(args: dict[str, object]) -> dict[str, object]:
     image_ref = validate_immutable_image(args["image_ref"], "live image ref")
     run(["docker", "image", "inspect", image_ref])
     run(["docker", "rm", "-f", MANAGER_CONTAINER], check=False)
-    run(["docker", "run", "-d", "--name", MANAGER_CONTAINER, "-p", f"127.0.0.1:{LIVE_PORT}:8000", "-v", f"{MANAGER_VOLUME}:/data", "--env-file", str(REMOTE_PATH / ".env.vcvm"), image_ref])
-    return {"container": MANAGER_CONTAINER, "port": LIVE_PORT}
+    run(_manager_docker_run_args(container=MANAGER_CONTAINER, host_port=LIVE_PORT, volume=MANAGER_VOLUME, image_ref=image_ref))
+    return {"container": MANAGER_CONTAINER, "port": LIVE_PORT, "container_port": MANAGER_CONTAINER_PORT, "manager_bind_mounts": manager_bind_mount_receipt(), "restart_policy": MANAGER_RESTART_POLICY}
 
 
 def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
@@ -1088,7 +1235,7 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
     require(marker.read_text(encoding="utf-8").strip() == commit, "release commit marker mismatch")
     capture = dict(args["capture"])
     dropins: dict[str, dict[str, object]] = {}
-    for unit in ("cloakbrowser-browser-use.service", "cloakbrowser-acpx.service"):
+    for unit in (BROWSER_USE_UNIT, ACPX_UNIT):
         validate_name(unit, "unit")
         unit_state = _unit_state(unit)
         require("ExecStart" in unit_state["content"], f"unexpected unit shape: {unit}")
@@ -1101,7 +1248,7 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
         _write_text_mode_0600_atomic(dropin, content)
         digest = file_sha256(dropin)
         run(["systemctl", "--user", "daemon-reload"])
-        intended_state = str(capture.get("browser_use_active_state" if "browser-use" in unit else "acpx_active_state", "active"))
+        intended_state = str(capture.get("browser_use_active_state" if unit == BROWSER_USE_UNIT else "acpx_active_state", "active"))
         if intended_state == "active":
             run(["systemctl", "--user", "restart", unit])
         else:
@@ -1131,20 +1278,38 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
 
 
 def op_verify_manager(args: dict[str, object]) -> dict[str, object]:
-    commit = args.get("commit")
+    revision_available = args.get("revision_available") is not False
+    expected_image_id = validate_immutable_image(args.get("image_id"), "expected Manager image id")
+    if revision_available:
+        commit = validate_commit(args.get("commit"))
+    else:
+        commit = ""
+        require(args.get("commit") in {"", None}, "Manager commit must be empty when revision is unavailable")
     health = run(["curl", "-fsS", f"http://127.0.0.1:{LIVE_PORT}/health"], check=False).returncode == 0
     auth = json.loads(run(["curl", "-fsS", f"http://127.0.0.1:{LIVE_PORT}/api/auth/status"]).stdout)
-    revision = run(["docker", "inspect", MANAGER_CONTAINER, "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}"], check=False).stdout.strip()
-    payload = {"health": health, "auth": bool(auth.get("auth_required")), "revision": revision}
-    if commit is not None:
-        payload["revision_matches"] = revision == validate_commit(commit)
+    image_id = _running_manager_image_id()
+    require(image_id == expected_image_id, "running Manager image id mismatch")
+    if revision_available:
+        revision = run(["docker", "inspect", MANAGER_CONTAINER, "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}"], check=False).stdout.strip()
+        require(revision == commit, "running Manager revision mismatch")
+    else:
+        revision = ""
+    payload = {
+        "health": health,
+        "auth": bool(auth.get("auth_required")),
+        "image_id": image_id,
+        "image_digest": image_id.removeprefix("sha256:"),
+        "revision": revision,
+        "revision_available": revision_available,
+        "revision_matches": revision == commit,
+    }
     return payload
 
 
 def op_verify_browser_use(args: dict[str, object]) -> dict[str, object]:
     state = op_preflight_browser_use(args)
     release_source = str(args["release_source"])
-    show = _unit_show("cloakbrowser-browser-use.service")
+    show = _unit_show(BROWSER_USE_UNIT)
     state["bound"] = bool(release_source) and show.get("WorkingDirectory") == release_source
     state["working_directory"] = show.get("WorkingDirectory", "")
     state["fragment_path"] = show.get("FragmentPath", "")
@@ -1159,7 +1324,7 @@ def op_verify_acpx(args: dict[str, object]) -> dict[str, object]:
         return {"absent": True, "missing": sorted(missing), "reason_code": probe.get("reason_code")}
     state = op_preflight_acpx(args)
     release_source = str(args["release_source"])
-    show = _unit_show("cloakbrowser-acpx.service")
+    show = _unit_show(ACPX_UNIT)
     manager_preflights = _acpx_manager_preflights_ready()
     state["bound"] = bool(release_source) and show.get("WorkingDirectory") == release_source
     state["preflights"] = state["adapters_ready"] is True and manager_preflights["ready"] is True
@@ -1171,17 +1336,47 @@ def op_verify_acpx(args: dict[str, object]) -> dict[str, object]:
 
 def op_verify_proxychecker(args: dict[str, object]) -> dict[str, object]:
     del args
-    return {"ok": run(["curl", "-fsS", "http://host.docker.internal:18899/health"], check=False).returncode == 0}
+    return {"ok": run(["curl", "-fsS", PROXYCHECKER_HOST_HEALTH_URL], check=False).returncode == 0}
 
 
 def op_verify_stream(args: dict[str, object]) -> dict[str, object]:
     del args
-    return {"ok": run(["curl", "-fsS", f"http://127.0.0.1:{LIVE_PORT}/api/stream/status"], check=False).returncode == 0}
+    spec = _manager_json("/openapi.json")
+    paths = spec.get("paths")
+    require(isinstance(paths, dict), "Manager OpenAPI paths are missing")
+    required = {
+        "/api/profiles/{profile_id}/live-metrics",
+        "/api/profiles/{profile_id}/cdp",
+        "/api/profiles/{profile_id}/open-links",
+    }
+    present = set(str(path) for path in paths)
+    missing = sorted(required - present)
+    require(not missing, f"Manager stream route missing: {', '.join(missing)}")
+    return {"ok": True, "routes_present": sorted(required)}
 
 
 def op_verify_orca(args: dict[str, object]) -> dict[str, object]:
     del args
-    return {"status": run(["orca", "status"], check=False).stdout.strip()}
+    output = run(["orca", "status", "--json"], check=False).stdout
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise HelperError("Orca status JSON is malformed") from exc
+    require(isinstance(payload, dict), "Orca status JSON is malformed")
+    result = payload.get("result")
+    require(payload.get("ok") is True and isinstance(result, dict), "Orca status is not ok")
+    runtime = result.get("runtime")
+    graph = result.get("graph")
+    require(isinstance(runtime, dict) and isinstance(graph, dict), "Orca status is incomplete")
+    require(runtime.get("reachable") is True, "Orca runtime is unreachable")
+    require(runtime.get("state") == "ready", "Orca runtime is not ready")
+    require(graph.get("state") == "ready", "Orca graph is not ready")
+    return {
+        "ok": True,
+        "runtime_reachable": True,
+        "runtime_state": str(runtime["state"]),
+        "graph_state": str(graph["state"]),
+    }
 
 
 def op_verify_tailscale(args: dict[str, object]) -> dict[str, object]:
@@ -1215,41 +1410,54 @@ def op_restore_runtime(args: dict[str, object]) -> dict[str, object]:
             "/data",
         ]
     )
-    _restore_release_dropin("cloakbrowser-browser-use.service", capture, "browser_use")
+    _restore_release_dropin(BROWSER_USE_UNIT, capture, "browser_use")
     if capture.get("acpx_was_absent") is True:
         _remove_acpx_bootstrap_artifacts(capture)
     else:
-        _restore_release_dropin("cloakbrowser-acpx.service", capture, "acpx")
+        _restore_release_dropin(ACPX_UNIT, capture, "acpx")
     run(["systemctl", "--user", "daemon-reload"])
-    _restore_unit_state("cloakbrowser-browser-use.service", str(capture.get("browser_use_active_state", "inactive")))
+    _restore_unit_state(BROWSER_USE_UNIT, str(capture.get("browser_use_active_state", "inactive")))
     if capture.get("acpx_was_absent") is True:
-        run(["systemctl", "--user", "stop", "cloakbrowser-acpx.service"], check=False)
+        run(["systemctl", "--user", "stop", ACPX_UNIT], check=False)
     else:
-        _restore_unit_state("cloakbrowser-acpx.service", str(capture.get("acpx_active_state", "inactive")))
-    run(["docker", "run", "-d", "--name", MANAGER_CONTAINER, "-p", f"127.0.0.1:{LIVE_PORT}:8000", "-v", f"{MANAGER_VOLUME}:/data", "--env-file", str(REMOTE_PATH / ".env.vcvm"), old_image])
+        _restore_unit_state(ACPX_UNIT, str(capture.get("acpx_active_state", "inactive")))
+    run(_manager_docker_run_args(container=MANAGER_CONTAINER, host_port=LIVE_PORT, volume=MANAGER_VOLUME, image_ref=old_image))
     if capture.get("current_pointer"):
         CURRENT_LINK.unlink(missing_ok=True)
         CURRENT_LINK.symlink_to(str(capture["current_pointer"]))
     _write_json_mode_0600(STATE_FILE, dict(capture.get("state", {})))
-    return {"restored": True, "backup_receipt_id": backup["receipt_id"], "old_image_digest": capture["old_image_digest"]}
+    return {
+        "restored": True,
+        "backup_receipt_id": backup["receipt_id"],
+        "old_image_digest": capture["old_image_digest"],
+        "manager_bind_mounts": manager_bind_mount_receipt(),
+        "restart_policy": MANAGER_RESTART_POLICY,
+    }
 
 
 def op_restore_verify(args: dict[str, object]) -> dict[str, object]:
-    capture = dict(args["capture"])
+    capture = validate_restore_capture(dict(args["capture"]))
     backup = dict(args["backup"])
     _validate_backup(backup)
-    manager = op_verify_manager({})
+    manager = op_verify_manager(
+        {
+            "commit": capture.get("previous_revision", ""),
+            "revision_available": capture.get("previous_revision_available") is not False,
+            "image_id": capture["old_image_id"],
+        }
+    )
     browser = op_preflight_browser_use({})
     if capture.get("acpx_was_absent") is True:
         acpx = {"unit_sha256": "0" * 64, "active_state": "absent"}
     else:
         acpx = op_preflight_acpx({})
-    browser_dropin = release_dropin("cloakbrowser-browser-use.service")
-    acpx_dropin = release_dropin("cloakbrowser-acpx.service")
+    browser_dropin = release_dropin(BROWSER_USE_UNIT)
+    acpx_dropin = release_dropin(ACPX_UNIT)
     return {
         "health": manager["health"],
         "auth": manager["auth"],
         "backup_receipt_id": backup["receipt_id"],
+        "old_image_id": manager["image_id"],
         "old_image_digest": capture.get("old_image_digest"),
         "pointer": str(CURRENT_LINK.resolve()) if CURRENT_LINK.exists() else "",
         "browser_use_unit_sha256": browser["unit_sha256"],
@@ -1277,13 +1485,31 @@ def op_rollback_verify_backup(args: dict[str, object]) -> dict[str, object]:
 def op_rollback_verify_previous(args: dict[str, object]) -> dict[str, object]:
     previous_runtime = dict(args["previous_runtime"])
     image_ref = validate_immutable_image(previous_runtime.get("image_ref"), "previous image ref")
+    image_id = validate_immutable_image(previous_runtime.get("image_id"), "previous image id")
     expected_digest = validate_sha256(previous_runtime.get("image_digest"))
-    expected_revision = validate_commit(previous_runtime.get("revision"))
+    revision_available = previous_runtime.get("revision_available") is not False
+    if revision_available:
+        expected_revision = validate_commit(previous_runtime.get("revision"))
+    else:
+        expected_revision = ""
+        require(previous_runtime.get("revision") in {"", None}, "unavailable previous revision must be empty")
     require(image_ref == f"sha256:{expected_digest}", "previous image digest mismatch")
+    require(image_id == image_ref, "previous image id mismatch")
     run(["docker", "image", "inspect", image_ref])
-    revision = run(["docker", "image", "inspect", image_ref, "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}"]).stdout.strip()
-    require(revision == expected_revision, "previous image revision mismatch")
-    return {"image_ref": image_ref, "image_digest": expected_digest, "revision": revision}
+    if revision_available:
+        revision = run(["docker", "image", "inspect", image_ref, "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}"]).stdout.strip()
+        require(revision == expected_revision, "previous image revision mismatch")
+    else:
+        revision = ""
+    return {
+        "image_ref": image_ref,
+        "image_id": image_id,
+        "image_digest": expected_digest,
+        "revision": revision,
+        "revision_available": revision_available,
+        "manager_bind_mounts": manager_bind_mount_receipt(),
+        "restart_policy": MANAGER_RESTART_POLICY,
+    }
 
 
 def op_rollback_start_previous(args: dict[str, object]) -> dict[str, object]:
@@ -1291,7 +1517,7 @@ def op_rollback_start_previous(args: dict[str, object]) -> dict[str, object]:
     verified = op_rollback_verify_previous({"previous_runtime": previous_runtime})
     image_ref = str(verified["image_ref"])
     run(["docker", "rm", "-f", MANAGER_CONTAINER], check=False)
-    run(["docker", "run", "-d", "--name", MANAGER_CONTAINER, "-p", f"127.0.0.1:{LIVE_PORT}:8000", "-v", f"{MANAGER_VOLUME}:/data", "--env-file", str(REMOTE_PATH / ".env.vcvm"), image_ref])
+    run(_manager_docker_run_args(container=MANAGER_CONTAINER, host_port=LIVE_PORT, volume=MANAGER_VOLUME, image_ref=image_ref))
     return {"container": MANAGER_CONTAINER, **verified}
 
 

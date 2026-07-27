@@ -69,6 +69,7 @@ _BACKUP = {
 _CAPTURE = {
     "source_revision": _COMMIT,
     "previous_revision": "1" * 40,
+    "previous_revision_available": True,
     "old_image_digest": "d" * 64,
     "old_image_id": "sha256:" + ("d" * 64),
     "container_config_receipt": "3" * 64,
@@ -87,6 +88,7 @@ _IMAGE = {
     "image_id": "sha256:" + _SHA,
     "image_digest": _SHA,
     "revision": _COMMIT,
+    "revision_available": True,
 }
 PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "helper.capabilities": ("cbm-release", "helper-capabilities", "{}"),
@@ -122,7 +124,7 @@ PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "quiesce.stop_live": ("cbm-release", "stop-live", "{}"),
     "live.start": ("cbm-release", "start-live", json.dumps({"image_ref": "sha256:" + _SHA, "volume": DEFAULT_VOLUME, "port": DEFAULT_LIVE_PORT})),
     "workers.rebind": ("cbm-release", "rebind-workers", json.dumps({"release_id": "release-0000001", "commit": _COMMIT, "capture": _CAPTURE})),
-    "verify.manager": ("cbm-release", "verify-manager", json.dumps({"commit": _COMMIT})),
+    "verify.manager": ("cbm-release", "verify-manager", json.dumps({"commit": _COMMIT, "revision_available": True, "image_id": "sha256:" + _SHA})),
     "verify.browser_use": ("cbm-release", "verify-browser-use", json.dumps({"commit": _COMMIT, "release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source"})),
     "verify.acpx": ("cbm-release", "verify-acpx", json.dumps({"release_source": "/home/coder/cloakbrowser-manager/releases/release-0000001/source", "expected_absent": False})),
     "verify.proxychecker": ("cbm-release", "verify-proxychecker", "{}"),
@@ -135,7 +137,7 @@ PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "rollback.verify_backup": ("cbm-release", "verify-backup", json.dumps({"backup": _BACKUP})),
     "rollback.verify_previous": ("cbm-release", "verify-previous", json.dumps({"previous_runtime": _IMAGE})),
     "rollback.start_previous": ("cbm-release", "start-previous", json.dumps({"previous_runtime": _IMAGE})),
-    "state.commit": ("cbm-release", "commit-state", json.dumps({"release_id": "release-0000001", "current_release": "release-0000001", "previous_release": "release-previous-1", "image": _IMAGE, "final_backup": _BACKUP, "capture": _CAPTURE, "previous_runtime": {"image_digest": "d" * 64, "pointer": "release-previous-1"}})),
+    "state.commit": ("cbm-release", "commit-state", json.dumps({"release_id": "release-0000001", "current_release": "release-0000001", "previous_release": "release-previous-1", "image": _IMAGE, "final_backup": _BACKUP, "capture": _CAPTURE, "previous_runtime": {"image_ref": "sha256:" + ("d" * 64), "image_id": "sha256:" + ("d" * 64), "image_digest": "d" * 64, "revision": "1" * 40, "revision_available": True, "pointer": "release-previous-1"}})),
 }
 POST_QUIESCE_PHASES = {
     "quiesce.stop_workers",
@@ -281,6 +283,13 @@ def validate_sha256(value: object, label: str = "sha256") -> str:
     return digest
 
 
+def validate_image_id(value: object, label: str = "image id") -> str:
+    image_id = str(value)
+    require(image_id.startswith("sha256:"), f"invalid {label}", phase="remote.validate")
+    validate_sha256(image_id.removeprefix("sha256:"), label)
+    return image_id
+
+
 def validate_commit(value: object) -> str:
     commit = str(value)
     require(COMMIT_RE.fullmatch(commit) is not None, "invalid commit", phase="remote.validate")
@@ -324,13 +333,42 @@ def validate_image_result(value: object, commit: str, *, phase: str) -> dict[str
     return image
 
 
+def validate_immutable_image_identity(value: dict[str, object], *, phase: str, prefix: str = "image") -> None:
+    digest = validate_sha256(value.get(f"{prefix}_digest"), f"{prefix} digest")
+    image_id = validate_image_id(value.get(f"{prefix}_id"), f"{prefix} id")
+    require(image_id == f"sha256:{digest}", f"{prefix} id must match digest", phase=phase)
+
+
+def normalize_revision_available(value: object) -> bool:
+    return value is not False
+
+
+def validate_optional_revision(
+    revision: object,
+    *,
+    revision_available: bool,
+    phase: str,
+    label: str,
+) -> str:
+    if revision_available:
+        return validate_commit(revision)
+    require(str(revision or "") == "", f"{label} must be empty when revision is unavailable", phase=phase)
+    return ""
+
+
 def validate_previous_runtime(value: object, *, phase: str) -> dict[str, object]:
     require(isinstance(value, dict), "previous runtime must be an object", phase=phase)
     runtime = dict(value)
-    digest = validate_sha256(runtime.get("image_digest"), "previous image digest")
-    require(str(runtime.get("image_ref", "")) == f"sha256:{digest}", "previous image ref must use immutable image id", phase=phase)
-    require(str(runtime.get("image_id", "")) == f"sha256:{digest}", "previous image id mismatch", phase=phase)
-    validate_commit(runtime.get("revision"))
+    validate_immutable_image_identity(runtime, phase=phase)
+    require(str(runtime.get("image_ref", "")) == runtime["image_id"], "previous image ref must use immutable image id", phase=phase)
+    revision_available = normalize_revision_available(runtime.get("revision_available", True))
+    runtime["revision_available"] = revision_available
+    runtime["revision"] = validate_optional_revision(
+        runtime.get("revision"),
+        revision_available=revision_available,
+        phase=phase,
+        label="previous runtime revision",
+    )
     return runtime
 
 
@@ -511,6 +549,15 @@ def run_preflight(config: ReleaseConfig, executor: RemoteExecutor, source: dict[
     require(manager.get("container") == DEFAULT_MANAGER_CONTAINER, "unexpected Manager container", phase="preflight.manager")
     require(manager.get("volume") == DEFAULT_VOLUME, "unexpected Manager data volume", phase="preflight.manager")
     validate_sha256(manager.get("image_digest"), "Manager image digest")
+    manager_revision_available = normalize_revision_available(manager.get("revision_available", True))
+    if not config.bootstrap_acpx:
+        require(manager_revision_available, "Manager revision label is required for normal release", phase="preflight.manager")
+    validate_optional_revision(
+        manager.get("revision"),
+        revision_available=manager_revision_available,
+        phase="preflight.manager",
+        label="Manager revision label",
+    )
 
     browser_use = _remote(executor, "preflight.browser_use")
     require(browser_use.get("active") is True, "Browser Use unit is not active", phase="preflight.browser_use")
@@ -701,6 +748,7 @@ def restore_old_runtime(
         restored.get("health") is not True
         or restored.get("auth") is not True
         or restored.get("backup_receipt_id") != final_backup.get("receipt_id")
+        or restored.get("old_image_id") != capture.get("old_image_id")
         or restored.get("old_image_digest") != capture.get("old_image_digest")
         or restored.get("browser_use_unit_sha256") != capture.get("browser_use_unit_sha256")
         or restored.get("browser_use_active_state") != capture.get("browser_use_active_state")
@@ -711,6 +759,7 @@ def restore_old_runtime(
 
 
 def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, object]:
+    require(config.apply is True, "release transaction requires --apply", phase="local.validate")
     validate_host_path(config.host, config.remote_path)
     validate_release_id(config.release_id)
     source = source_metadata(config.source_root.resolve(), config.source_remote, config.expected_source_remote)
@@ -780,8 +829,22 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         capture = _remote(executor, "capture.state", {"commit": str(source["commit"])})
         if config.bootstrap_acpx:
             capture["acpx_bootstrap_release_id"] = config.release_id
-        validate_commit(capture.get("previous_revision"))
+        previous_revision_available = normalize_revision_available(capture.get("previous_revision_available", True))
+        if not config.bootstrap_acpx:
+            require(previous_revision_available, "previous Manager revision label is required for normal release", phase="capture.state")
+        capture["previous_revision_available"] = previous_revision_available
+        previous_revision = validate_optional_revision(
+            capture.get("previous_revision"),
+            revision_available=previous_revision_available,
+            phase="capture.state",
+            label="previous Manager revision",
+        )
+        capture["previous_revision"] = previous_revision
         validate_sha256(capture.get("old_image_digest"), "old image digest")
+        validate_immutable_image_identity(
+            {"image_id": capture.get("old_image_id"), "image_digest": capture.get("old_image_digest")},
+            phase="capture.state",
+        )
         validate_sha256(capture.get("container_config_receipt"), "container config receipt")
         validate_sha256(capture.get("browser_use_unit_sha256"), "Browser Use unit hash")
         validate_sha256(capture.get("acpx_unit_sha256"), "ACPX unit hash")
@@ -827,7 +890,7 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
                 phase="bootstrap.acpx_promote",
             )
             acpx_bootstrap["promotion"] = {"port": DEFAULT_LIVE_PORT, **promoted}
-        verify_runtime(executor, str(source["commit"]), release_source)
+        verify_runtime(executor, str(source["commit"]), release_source, expected_image_id=str(image["image_ref"]))
         if acpx_bootstrap_touched:
             acpx_cleanup = cleanup_acpx_bootstrap(executor, config)
             acpx_bootstrap["cleanup"] = acpx_cleanup
@@ -843,7 +906,8 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
                 "image_ref": capture.get("old_image_id"),
                 "image_id": capture.get("old_image_id"),
                 "image_digest": capture.get("old_image_digest"),
-                "revision": capture.get("previous_revision"),
+                "revision": previous_revision,
+                "revision_available": previous_revision_available,
                 "pointer": capture.get("current_pointer"),
             },
         }
@@ -900,11 +964,34 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
     return receipt
 
 
-def verify_runtime(executor: RemoteExecutor, commit: str, release_source: str, *, expected_acpx_absent: bool = False) -> None:
-    validate_commit(commit)
+def verify_runtime(
+    executor: RemoteExecutor,
+    commit: str,
+    release_source: str,
+    *,
+    expected_image_id: str,
+    expected_acpx_absent: bool = False,
+    expected_revision_available: bool = True,
+) -> None:
+    expected_image_id = validate_image_id(expected_image_id, "Manager image id")
+    if expected_revision_available:
+        validate_commit(commit)
+    else:
+        require(commit == "", "runtime commit must be empty when revision is unavailable", phase="verify.runtime")
     require(bool(release_source), "runtime release source is required", phase="verify.runtime")
-    manager = _remote(executor, "verify.manager", {"commit": commit})
-    manager_ok = manager.get("health") is True and manager.get("auth") is True and manager.get("revision") == commit
+    manager = _remote(
+        executor,
+        "verify.manager",
+        {"commit": commit, "revision_available": expected_revision_available, "image_id": expected_image_id},
+    )
+    manager_ok = (
+        manager.get("health") is True
+        and manager.get("auth") is True
+        and manager.get("image_id") == expected_image_id
+        and normalize_revision_available(manager.get("revision_available", expected_revision_available)) == expected_revision_available
+    )
+    if expected_revision_available:
+        manager_ok = manager_ok and manager.get("revision") == commit
     require(manager_ok, "Manager verification failed", phase="verify.manager")
     browser_use = _remote(executor, "verify.browser_use", {"commit": commit, "release_source": release_source})
     require(browser_use.get("active") is True and browser_use.get("bound") is True, "Browser Use verification failed", phase="verify.browser_use")
@@ -918,7 +1005,15 @@ def verify_runtime(executor: RemoteExecutor, commit: str, release_source: str, *
     stream = _remote(executor, "verify.stream")
     require(stream.get("ok") is True, "stream verification failed", phase="verify.stream")
     orca = _remote(executor, "verify.orca")
-    require(orca.get("status") == "ready", "Orca verification failed", phase="verify.orca")
+    orca_status = orca.get("status")
+    require(
+        orca.get("ok") is True
+        and orca.get("runtime_state") == "ready"
+        and orca.get("graph_state") == "ready"
+        and orca_status in {None, "", "ready"},
+        "Orca verification failed",
+        phase="verify.orca",
+    )
     tailscale = _remote(executor, "verify.tailscale")
     require(tailscale.get("ok") is True, "Tailscale verification failed", phase="verify.tailscale")
 
@@ -933,10 +1028,16 @@ def run_rollback(config: RollbackConfig, executor: RemoteExecutor) -> dict[str, 
     backup = _remote(executor, "rollback.verify_backup", {"backup": backup_receipt})
     require(backup.get("compatible") is True, "rollback backup receipt is not compatible", phase="rollback.verify_backup")
     previous = _remote(executor, "rollback.verify_previous", {"previous_runtime": previous_runtime})
-    require(
+    previous_revision_available = bool(previous_runtime["revision_available"])
+    previous_ok = (
         previous.get("image_ref") == previous_runtime["image_ref"]
+        and previous.get("image_id") == previous_runtime["image_id"]
         and previous.get("image_digest") == previous_runtime["image_digest"]
-        and previous.get("revision") == previous_runtime["revision"],
+        and previous.get("revision") == previous_runtime["revision"]
+        and normalize_revision_available(previous.get("revision_available", previous_revision_available)) == previous_revision_available
+    )
+    require(
+        previous_ok,
         "previous runtime image verification failed",
         phase="rollback.verify_previous",
     )
@@ -950,7 +1051,9 @@ def run_rollback(config: RollbackConfig, executor: RemoteExecutor) -> dict[str, 
             executor,
             str(previous_runtime["revision"]),
             f"{config.remote_path}/releases/{config.target_release}/source",
+            expected_image_id=str(previous_runtime["image_id"]),
             expected_acpx_absent=dict(capture).get("acpx_was_absent") is True,
+            expected_revision_available=previous_revision_available,
         )
         state_payload = {
             "release_id": config.target_release,
@@ -972,13 +1075,29 @@ def dry_run_receipt(args: argparse.Namespace) -> dict[str, object]:
     validate_host_path(args.host, args.remote_path)
     validate_release_id(args.release_id)
     source = source_metadata(args.source_root.resolve(), args.source_remote, args.expected_source_remote)
-    return {
+    receipt = {
         "status": "dry_run",
         "would_mutate": False,
         "release_id": args.release_id,
         "source": {"commit": source["commit"], "branch": source["branch"], "remote_name": source["remote_name"]},
         "target": {"host": args.host, "remote_path": args.remote_path},
     }
+    if args.bootstrap_acpx:
+        receipt["bootstrap_acpx"] = {
+            "requested": True,
+            "requires_apply": True,
+            "required_expected_current_worker_commit": "full 40-hex commit",
+            "required_expected_source_remote": args.expected_source_remote,
+        }
+    return receipt
+
+
+def require_bootstrap_acpx_cli_apply_gates(args: argparse.Namespace) -> None:
+    if not args.bootstrap_acpx:
+        return
+    require(bool(args.expected_source_remote), "--bootstrap-acpx --apply requires explicit --expected-source-remote", phase="local.validate")
+    validate_expected_worker_commit(args.expected_current_worker_commit)
+    source_metadata(args.source_root.resolve(), args.source_remote, args.expected_source_remote)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -994,6 +1113,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         item.add_argument("--source-remote", default="fork")
         item.add_argument("--expected-source-remote", required=False, default="")
         item.add_argument("--expected-current-worker-commit", required=False)
+        item.add_argument("--bootstrap-acpx", action="store_true")
         item.add_argument("--apply", action="store_true")
     rollback.add_argument("--source-root", type=Path, default=Path.cwd())
     rollback.add_argument("--host", default=DEFAULT_HOST)
@@ -1026,6 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
         elif not args.apply:
             payload = dry_run_receipt(args)
         else:
+            require_bootstrap_acpx_cli_apply_gates(args)
             payload = run_release(
                 ReleaseConfig(
                     source_root=args.source_root,
@@ -1036,6 +1157,7 @@ def main(argv: list[str] | None = None) -> int:
                     remote_path=args.remote_path,
                     apply=True,
                     expected_current_worker_commit=args.expected_current_worker_commit,
+                    bootstrap_acpx=args.bootstrap_acpx,
                 ),
                 SSHRemoteExecutor(args.host),
             )

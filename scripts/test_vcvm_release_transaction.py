@@ -116,7 +116,9 @@ class FakeRemoteExecutor:
             "manager_container": "cloakbrowser-manager-vcvm",
             "manager_image": "cloakbrowser-manager:old",
             "manager_image_digest": "d" * 64,
+            "manager_image_id": "sha256:" + ("d" * 64),
             "manager_image_revision": "1" * 40,
+            "manager_revision_available": True,
             "manager_volume": "cloakbrowser-manager-vcvm-data",
             "browser_use_active": True,
             "browser_use_token_mode": "600",
@@ -159,10 +161,18 @@ class FakeRemoteExecutor:
             "acpx_preflights": True,
             "proxychecker": True,
             "stream": True,
+            "orca_ok": True,
             "orca_status": "ready",
+            "orca_runtime_state": "ready",
+            "orca_graph_state": "ready",
             "state_previous_release": "release-previous-0001",
             "state_backup_receipt": "backup-final-old",
             "state_previous_runtime_revision": "0" * 40,
+            "state_previous_runtime_revision_available": True,
+            "rollback_verify_previous_image_ref": None,
+            "rollback_verify_previous_image_id": None,
+            "rollback_verify_previous_image_digest": None,
+            "rollback_verify_previous_revision": None,
             "backup_compatible": True,
         }
         self.facts.update(facts)
@@ -199,8 +209,10 @@ class FakeRemoteExecutor:
             return {
                 "container": self.facts["manager_container"],
                 "image": self.facts["manager_image"],
+                "image_id": self.facts["manager_image_id"],
                 "image_digest": self.facts["manager_image_digest"],
                 "revision": self.facts["manager_image_revision"],
+                "revision_available": self.facts["manager_revision_available"],
                 "volume": self.facts["manager_volume"],
             }
         if phase == "preflight.browser_use":
@@ -293,8 +305,9 @@ class FakeRemoteExecutor:
             payload = {
                 "source_revision": args["commit"],
                 "previous_revision": self.facts["manager_image_revision"],
+                "previous_revision_available": self.facts["manager_revision_available"],
                 "old_image_digest": self.facts["manager_image_digest"],
-                "old_image_id": f"sha256:{self.facts['manager_image_digest']}",
+                "old_image_id": self.facts["manager_image_id"],
                 "container_config_receipt": "3" * 64,
                 "current_pointer": "release-old",
                 "state": {"current_release": "release-old"},
@@ -334,7 +347,13 @@ class FakeRemoteExecutor:
             assert str(args["acpx_executable"]).endswith("/acpx-runtime/node_modules/.bin/acpx")
             return {"worker_id": args["worker_id"], "manager_url": "http://127.0.0.1:18115", "active": self.facts["acpx_promoted_ready"], "adapters_ready": self.facts["acpx_promoted_ready"]}
         if phase == "verify.manager":
-            return {"health": self.facts["live_health"], "auth": self.facts["live_auth"], "revision": args.get("commit")}
+            return {
+                "health": self.facts["live_health"],
+                "auth": self.facts["live_auth"],
+                "image_id": args.get("image_id"),
+                "revision": args.get("commit"),
+                "revision_available": args.get("revision_available"),
+            }
         if phase == "verify.browser_use":
             return {"active": True, "bound": self.facts["browser_use_bound"]}
         if phase == "verify.acpx":
@@ -346,7 +365,12 @@ class FakeRemoteExecutor:
         if phase == "verify.stream":
             return {"ok": self.facts["stream"]}
         if phase == "verify.orca":
-            return {"status": self.facts["orca_status"]}
+            return {
+                "ok": self.facts["orca_ok"],
+                "status": self.facts["orca_status"],
+                "runtime_state": self.facts["orca_runtime_state"],
+                "graph_state": self.facts["orca_graph_state"],
+            }
         if phase == "verify.tailscale":
             return {"ok": self.facts["tailscale_route"]}
         if phase == "state.commit":
@@ -367,6 +391,7 @@ class FakeRemoteExecutor:
                 "health": not self.rollback_verify_fails,
                 "auth": not self.rollback_verify_fails,
                 "backup_receipt_id": restore_payload["backup"]["receipt_id"],
+                "old_image_id": self.facts["manager_image_id"],
                 "old_image_digest": self.facts["manager_image_digest"],
                 "pointer": "release-old",
                 "browser_use_unit_sha256": self.facts["browser_use_unit_sha256"],
@@ -391,16 +416,24 @@ class FakeRemoteExecutor:
                 },
                 "image": {"image_ref": "sha256:" + ("e" * 64), "image_id": "sha256:" + ("e" * 64), "image_digest": "e" * 64, "revision": "0" * 40},
                 "capture": capture,
-                "previous_runtime": {"image_ref": "sha256:" + ("d" * 64), "image_id": "sha256:" + ("d" * 64), "image_digest": "d" * 64, "revision": self.facts["state_previous_runtime_revision"]},
+                "previous_runtime": {
+                    "image_ref": "sha256:" + ("d" * 64),
+                    "image_id": "sha256:" + ("d" * 64),
+                    "image_digest": "d" * 64,
+                    "revision": self.facts["state_previous_runtime_revision"],
+                    "revision_available": self.facts["state_previous_runtime_revision_available"],
+                },
             }
         if phase == "rollback.verify_backup":
             return {"compatible": self.facts["backup_compatible"]}
         if phase == "rollback.verify_previous":
             previous_runtime = args["previous_runtime"]
             return {
-                "image_ref": previous_runtime["image_ref"],
-                "image_digest": previous_runtime["image_digest"],
-                "revision": previous_runtime["revision"],
+                "image_ref": self.facts["rollback_verify_previous_image_ref"] or previous_runtime["image_ref"],
+                "image_id": self.facts["rollback_verify_previous_image_id"] or previous_runtime["image_id"],
+                "image_digest": self.facts["rollback_verify_previous_image_digest"] or previous_runtime["image_digest"],
+                "revision": self.facts["rollback_verify_previous_revision"] or previous_runtime["revision"],
+                "revision_available": previous_runtime["revision_available"],
             }
         if phase == "rollback.start_previous":
             self.live_generation = "old"
@@ -412,6 +445,20 @@ class FakeRemoteExecutor:
             if self.fail_with_called_process:
                 raise subprocess.CalledProcessError(255, ["ssh", "vcvm", phase], stderr="synthetic ssh failure")
             raise tx.TransactionError(f"synthetic failure at {phase}", phase=phase)
+
+
+def test_verify_manager_remote_request_requires_structured_identity_args() -> None:
+    image_id = "sha256:" + ("d" * 64)
+
+    request = tx.remote_request(
+        "verify.manager",
+        {"commit": FULL_WORKER_COMMIT, "revision_available": True, "image_id": image_id},
+    )
+
+    assert request == {
+        "operation": "verify.manager",
+        "args": {"commit": FULL_WORKER_COMMIT, "revision_available": True, "image_id": image_id},
+    }
 
 
 def test_successful_release_runs_exact_order_and_emits_secret_safe_receipt(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -506,6 +553,24 @@ def test_bootstrap_acpx_success_installs_candidate_worker_before_quiesce_and_pro
     assert bootstrap["preflight_completed_at"]
     assert bootstrap["cleanup"]["removed"] == "release-acpx-only"
     assert "cbm_worker_" not in json.dumps(receipt)
+
+
+def test_bootstrap_acpx_accepts_unlabeled_legacy_manager_without_inventing_revision(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(manager_image_revision="", manager_revision_available=False)
+
+    receipt = tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    assert receipt["status"] == "success"
+    state_commit = next(call for call in fake.calls if call["phase"] == "state.commit")
+    payload = json.loads(str(state_commit["argv"][0]))["args"]
+    assert payload["capture"]["previous_revision"] == ""
+    assert payload["capture"]["previous_revision_available"] is False
+    assert payload["previous_runtime"]["revision"] == ""
+    assert payload["previous_runtime"]["revision_available"] is False
+    assert payload["previous_runtime"]["image_id"] == "sha256:" + ("d" * 64)
+    assert payload["previous_runtime"]["image_digest"] == "d" * 64
 
 
 @pytest.mark.parametrize(
@@ -637,6 +702,7 @@ def test_bootstrap_cleanup_failure_fails_closed_before_state_commit_and_restores
         ({"tailscale_route": False}, "Tailscale"),
         ({"helper_version": "old-helper"}, "helper capability"),
         ({"browser_use_commit": "different"}, "worker commit skew"),
+        ({"manager_image_revision": "", "manager_revision_available": False}, "Manager revision label"),
     ],
 )
 def test_preflight_failures_stop_before_any_remote_mutation(
@@ -667,6 +733,17 @@ def test_expected_worker_commit_mismatch_is_exact_not_prefix(tmp_path: Path) -> 
     with pytest.raises(tx.TransactionError, match="worker commit skew"):
         tx.run_release(release_config(repo, expected_current_worker_commit="50a9e43" + ("1" * 33)), fake)
     assert fake.mutated_phases == []
+
+
+def test_bootstrap_acpx_release_config_requires_apply_before_local_work(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor()
+
+    with pytest.raises(tx.TransactionError, match="requires --apply"):
+        tx.run_release(release_config(repo, apply=False, bootstrap_acpx=True), fake)
+
+    assert fake.calls == []
+    assert fake.uploads == []
 
 
 def test_archive_hash_mismatch_fails_before_extraction(tmp_path: Path) -> None:
@@ -760,6 +837,7 @@ def test_release_state_records_old_runtime_revision_distinct_from_new_commit(tmp
     payload = json.loads(str(state_commit["argv"][0]))["args"]
     assert payload["capture"]["previous_revision"] == old_revision
     assert payload["previous_runtime"]["revision"] == old_revision
+    assert payload["previous_runtime"]["revision_available"] is True
     assert payload["previous_runtime"]["revision"] != payload["image"]["revision"]
 
 
@@ -768,6 +846,16 @@ def test_secret_bearing_capture_state_refuses_before_state_commit(tmp_path: Path
     fake = FakeRemoteExecutor(capture_extra={"browser_use_dropin_content": f"TOKEN={SECRET_TOKEN}\n"})
     with pytest.raises(tx.TransactionError, match="state payload contains secret"):
         tx.run_release(release_config(repo), fake)
+    assert "state.commit" not in fake.phases
+
+
+def test_verify_orca_requires_structured_ready_response(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(orca_ok=False, orca_runtime_state="starting")
+
+    with pytest.raises(tx.TransactionError, match="Orca verification failed"):
+        tx.run_release(release_config(repo), fake)
+
     assert "state.commit" not in fake.phases
 
 
@@ -832,8 +920,86 @@ def test_rollback_verifies_and_starts_recorded_old_revision(tmp_path: Path) -> N
 
     verify_request = next(json.loads(str(call["argv"][0])) for call in fake.calls if call["phase"] == "rollback.verify_previous")
     start_request = next(json.loads(str(call["argv"][0])) for call in fake.calls if call["phase"] == "rollback.start_previous")
+    manager_request = next(json.loads(str(call["argv"][0])) for call in fake.calls if call["phase"] == "verify.manager")
     assert verify_request["args"]["previous_runtime"]["revision"] == old_revision
     assert start_request["args"]["previous_runtime"]["revision"] == old_revision
+    assert manager_request["args"] == {
+        "commit": old_revision,
+        "revision_available": True,
+        "image_id": "sha256:" + ("d" * 64),
+    }
+
+
+def test_rollback_unlabeled_previous_runtime_compares_immutable_image_identity(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(state_previous_runtime_revision="", state_previous_runtime_revision_available=False)
+
+    receipt = tx.run_rollback(
+        tx.RollbackConfig(
+            source_root=repo,
+            host="vcvm",
+            remote_path="/home/coder/cloakbrowser-manager",
+            target_release="release-previous-0001",
+            apply=True,
+        ),
+        fake,
+    )
+
+    assert receipt["status"] == "rolled_back"
+    verify_request = next(json.loads(str(call["argv"][0])) for call in fake.calls if call["phase"] == "rollback.verify_previous")
+    previous_runtime = verify_request["args"]["previous_runtime"]
+    assert previous_runtime["revision"] == ""
+    assert previous_runtime["revision_available"] is False
+    assert previous_runtime["image_id"] == "sha256:" + ("d" * 64)
+    assert previous_runtime["image_digest"] == "d" * 64
+    manager_request = next(json.loads(str(call["argv"][0])) for call in fake.calls if call["phase"] == "verify.manager")
+    assert manager_request["args"] == {
+        "commit": "",
+        "revision_available": False,
+        "image_id": "sha256:" + ("d" * 64),
+    }
+
+
+def test_rollback_unlabeled_previous_runtime_rejects_image_digest_mismatch(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(
+        state_previous_runtime_revision="",
+        state_previous_runtime_revision_available=False,
+        rollback_verify_previous_image_digest="f" * 64,
+    )
+
+    with pytest.raises(tx.TransactionError, match="previous runtime image verification failed"):
+        tx.run_rollback(
+            tx.RollbackConfig(
+                source_root=repo,
+                host="vcvm",
+                remote_path="/home/coder/cloakbrowser-manager",
+                target_release="release-previous-0001",
+                apply=True,
+            ),
+            fake,
+        )
+
+    assert "quiesce.stop_workers" not in fake.phases
+
+
+def test_rollback_previous_runtime_rejects_image_ref_mismatch(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(rollback_verify_previous_image_ref="sha256:" + ("f" * 64))
+
+    with pytest.raises(tx.TransactionError, match="previous runtime image verification failed"):
+        tx.run_rollback(
+            tx.RollbackConfig(
+                source_root=repo,
+                host="vcvm",
+                remote_path="/home/coder/cloakbrowser-manager",
+                target_release="release-previous-0001",
+                apply=True,
+            ),
+            fake,
+        )
+
+    assert "quiesce.stop_workers" not in fake.phases
 
 
 def test_rollback_runtime_verification_honors_captured_acpx_absence(tmp_path: Path) -> None:
@@ -892,6 +1058,177 @@ def test_cli_dry_run_is_default_and_apply_is_required_for_execution(tmp_path: Pa
     assert payload["status"] == "dry_run"
     assert payload["would_mutate"] is False
     assert result.stderr == ""
+
+
+def test_cli_bootstrap_acpx_dry_run_reports_required_exact_gates_without_ssh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = fixture_repo(tmp_path)
+
+    class ForbiddenSSH:
+        def __init__(self, host: str) -> None:
+            raise AssertionError(f"unexpected SSH construction for {host}")
+
+    monkeypatch.setattr(tx, "SSHRemoteExecutor", ForbiddenSSH)
+
+    rc = tx.main(
+        [
+            "release",
+            "--source-root",
+            str(repo),
+            "--release-id",
+            "release-20260727-ac5840b00001",
+            "--source-remote",
+            "fork",
+            "--expected-source-remote",
+            AUTHORIZED_FORK,
+            "--bootstrap-acpx",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload["status"] == "dry_run"
+    assert payload["would_mutate"] is False
+    assert payload["bootstrap_acpx"] == {
+        "requested": True,
+        "requires_apply": True,
+        "required_expected_current_worker_commit": "full 40-hex commit",
+        "required_expected_source_remote": AUTHORIZED_FORK,
+    }
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--expected-source-remote", AUTHORIZED_FORK],
+        ["--expected-current-worker-commit", FULL_WORKER_COMMIT],
+        ["--expected-source-remote", "", "--expected-current-worker-commit", FULL_WORKER_COMMIT],
+        ["--expected-source-remote", AUTHORIZED_FORK, "--expected-current-worker-commit", "50a9e43"],
+    ],
+)
+def test_cli_bootstrap_acpx_apply_requires_explicit_exact_gates_before_ssh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    repo = fixture_repo(tmp_path)
+
+    class ForbiddenSSH:
+        def __init__(self, host: str) -> None:
+            raise AssertionError(f"unexpected SSH construction for {host}")
+
+    monkeypatch.setattr(tx, "SSHRemoteExecutor", ForbiddenSSH)
+
+    rc = tx.main(
+        [
+            "release",
+            "--source-root",
+            str(repo),
+            "--release-id",
+            "release-20260727-ac5840b00001",
+            "--bootstrap-acpx",
+            "--apply",
+            *argv,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 75
+    assert captured.out == ""
+    assert "vcvm release transaction refused:" in captured.err
+
+
+def test_cli_bootstrap_acpx_apply_checks_exact_source_remote_before_ssh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = fixture_repo(tmp_path)
+
+    class ForbiddenSSH:
+        def __init__(self, host: str) -> None:
+            raise AssertionError(f"unexpected SSH construction for {host}")
+
+    monkeypatch.setattr(tx, "SSHRemoteExecutor", ForbiddenSSH)
+
+    rc = tx.main(
+        [
+            "release",
+            "--source-root",
+            str(repo),
+            "--release-id",
+            "release-20260727-ac5840b00001",
+            "--source-remote",
+            "fork",
+            "--expected-source-remote",
+            UPSTREAM,
+            "--expected-current-worker-commit",
+            FULL_WORKER_COMMIT,
+            "--bootstrap-acpx",
+            "--apply",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 75
+    assert captured.out == ""
+    assert "source remote does not match expected fork remote" in captured.err
+
+
+def test_cli_bootstrap_acpx_apply_routes_bootstrap_flag_with_explicit_gates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = fixture_repo(tmp_path)
+    captured_configs: list[tx.ReleaseConfig] = []
+
+    class FakeSSH:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+    def fake_run_release(config: tx.ReleaseConfig, executor: object) -> dict[str, object]:
+        captured_configs.append(config)
+        assert isinstance(executor, FakeSSH)
+        return {"status": "success", "bootstrap": config.bootstrap_acpx}
+
+    monkeypatch.setattr(tx, "SSHRemoteExecutor", FakeSSH)
+    monkeypatch.setattr(tx, "run_release", fake_run_release)
+
+    rc = tx.main(
+        [
+            "release",
+            "--source-root",
+            str(repo),
+            "--release-id",
+            "release-20260727-ac5840b00001",
+            "--source-remote",
+            "fork",
+            "--expected-source-remote",
+            AUTHORIZED_FORK,
+            "--expected-current-worker-commit",
+            FULL_WORKER_COMMIT,
+            "--bootstrap-acpx",
+            "--apply",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert json.loads(captured.out) == {"bootstrap": True, "status": "success"}
+    assert captured.err == ""
+    assert len(captured_configs) == 1
+    config = captured_configs[0]
+    assert config.apply is True
+    assert config.bootstrap_acpx is True
+    assert config.expected_current_worker_commit == FULL_WORKER_COMMIT
+    assert config.expected_source_remote == AUTHORIZED_FORK
 
 
 def test_actual_release_and_rollback_requests_dispatch_through_remote_helper_schema(

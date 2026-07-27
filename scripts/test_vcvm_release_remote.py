@@ -29,6 +29,12 @@ tx = importlib.util.module_from_spec(TX_SPEC)
 sys.modules[TX_SPEC.name] = tx
 TX_SPEC.loader.exec_module(tx)
 
+BROWSER_USE_UNIT = "cloakbrowser-browser-use-worker.service"
+BROWSER_USE_TOKEN_PATH = "/home/coder/.config/cloakbrowser/browser-use-worker-key"
+IMAGE_ID = "sha256:" + ("d" * 64)
+IMAGE_DIGEST = "d" * 64
+REVISION = "0" * 40
+
 
 def patch_remote_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
     home = tmp_path / "home" / "coder"
@@ -36,8 +42,10 @@ def patch_remote_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[
     releases = root / "releases"
     state = root / ".vcvm-release-state.json"
     current = root / "current"
-    for path in (root / "backups", releases, home / ".config" / "systemd" / "user"):
+    for path in (root / "backups", releases, root / "receipts", home / ".config" / "systemd" / "user"):
         path.mkdir(parents=True, exist_ok=True)
+    for path in (root / "backups", releases, root / "receipts"):
+        path.chmod(0o700)
     monkeypatch.setattr(remote, "REMOTE_PATH", root)
     monkeypatch.setattr(remote, "RELEASES_PATH", releases)
     monkeypatch.setattr(remote, "STATE_FILE", state)
@@ -61,7 +69,7 @@ def write_backup(paths: dict[str, Path], receipt_id: str = "backup-final-old") -
 
 def valid_capture(paths: dict[str, Path]) -> dict[str, object]:
     user_units = paths["home"] / ".config" / "systemd" / "user"
-    browser_unit = user_units / "cloakbrowser-browser-use.service"
+    browser_unit = user_units / BROWSER_USE_UNIT
     acpx_unit = user_units / "cloakbrowser-acpx.service"
     browser_unit.write_text("[Service]\nExecStart=browser\n", encoding="utf-8")
     acpx_unit.write_text("[Service]\nExecStart=acpx\n", encoding="utf-8")
@@ -70,6 +78,7 @@ def valid_capture(paths: dict[str, Path]) -> dict[str, object]:
     return {
         "source_revision": "0" * 40,
         "previous_revision": "1" * 40,
+        "previous_revision_available": True,
         "old_image_digest": "d" * 64,
         "old_image_id": "sha256:" + ("d" * 64),
         "container_config_receipt": "3" * 64,
@@ -78,7 +87,7 @@ def valid_capture(paths: dict[str, Path]) -> dict[str, object]:
         "browser_use_unit_sha256": "1" * 64,
         "browser_use_unit_path": str(browser_unit),
         "browser_use_active_state": "active",
-        "browser_use_dropin_path": str(remote.release_dropin("cloakbrowser-browser-use.service")),
+        "browser_use_dropin_path": str(remote.release_dropin(BROWSER_USE_UNIT)),
         "browser_use_dropin_exists": False,
         "browser_use_dropin_content": "",
         "acpx_unit_sha256": "2" * 64,
@@ -113,18 +122,581 @@ def test_remote_helper_capabilities_are_checked_in_and_versioned() -> None:
     assert "docker.system.prune" not in payload["operations"]
 
 
+def test_preflight_browser_use_uses_canonical_worker_unit_token_and_working_directory_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(argv))
+        if argv[:4] == ["systemctl", "--user", "show", BROWSER_USE_UNIT]:
+            if "--value" in argv:
+                return subprocess.CompletedProcess(argv, 0, stdout="/home/coder/.config/systemd/user/cloakbrowser-browser-use-worker.service\n", stderr="")
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    "WorkingDirectory=/home/coder/vk-repos/CloakBrowser-Manager-browser-use\n"
+                    "ActiveState=active\n"
+                    "FragmentPath=/home/coder/.config/systemd/user/cloakbrowser-browser-use-worker.service\n"
+                ),
+                stderr="",
+            )
+        if argv[:4] == ["systemctl", "--user", "is-active", BROWSER_USE_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        if argv == ["git", "-C", "/home/coder/vk-repos/CloakBrowser-Manager-browser-use", "rev-parse", "--is-inside-work-tree"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="true\n", stderr="")
+        if argv == ["git", "-C", "/home/coder/vk-repos/CloakBrowser-Manager-browser-use", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=REVISION + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_token_mode", lambda path: f"mode:{path}")
+
+    result = remote.op_preflight_browser_use(
+        {
+            "unit": "cloakbrowser-browser-use.service",
+            "token_path": "/home/coder/cloakbrowser-manager/.env.worker.vcvm",
+        }
+    )
+
+    assert result["unit"] == BROWSER_USE_UNIT
+    assert result["unit_path"] == "/home/coder/.config/systemd/user/cloakbrowser-browser-use-worker.service"
+    assert result["token_mode"] == f"mode:{BROWSER_USE_TOKEN_PATH}"
+    assert result["commit"] == REVISION
+    assert ("git", "-C", "/home/coder/cloakbrowser-manager", "rev-parse", "HEAD") not in calls
+    assert ("git", "-C", "/home/coder/vk-repos/CloakBrowser-Manager-browser-use", "rev-parse", "--short=12", "HEAD") not in calls
+
+
+def test_preflight_receipts_accepts_absent_first_rollout_layout_without_creating_unrelated_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    for name in ("releases", "backups", "receipts"):
+        (paths["root"] / name).rmdir()
+    unrelated = paths["root"] / "unrelated"
+
+    result = remote.op_preflight_receipts({})
+
+    assert result["ok"] is True
+    assert result["bootstrap_required"] is True
+    assert not unrelated.exists()
+
+
+def test_release_prepare_bootstraps_exact_managed_layout_with_restrictive_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    for name in ("releases", "backups", "receipts"):
+        (paths["root"] / name).rmdir()
+    unrelated = paths["root"] / "unrelated"
+
+    result = remote.op_release_prepare(
+        {
+            "release_id": "release-0000001",
+            "commit": "0" * 40,
+            "archive_sha256": "a" * 64,
+        }
+    )
+
+    assert result == {"exists": False, "release_id": "release-0000001"}
+    for name in ("releases", "backups", "receipts"):
+        path = paths["root"] / name
+        assert path.is_dir()
+        assert not path.is_symlink()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
+        assert path.stat().st_uid == remote.os.getuid()
+    assert (paths["releases"] / "release-0000001").is_dir()
+    assert not unrelated.exists()
+
+
+@pytest.mark.parametrize("name", ["releases", "backups", "receipts"])
+def test_preflight_receipts_rejects_symlink_or_insecure_managed_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    target = tmp_path / "outside"
+    target.mkdir()
+    managed = paths["root"] / name
+    if name == "receipts":
+        managed.rmdir()
+        managed.symlink_to(target)
+        expected = "symlink"
+    else:
+        managed.chmod(0o755)
+        expected = "mode"
+
+    with pytest.raises(remote.HelperError, match=expected):
+        remote.op_preflight_receipts({})
+
+
+def test_preflight_manager_reports_unlabeled_image_truthfully(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv == ["docker", "inspect", remote.MANAGER_CONTAINER]:
+            payload = [
+                {
+                    "Config": {"Image": "cloakbrowser-manager:latest"},
+                        "Image": IMAGE_ID,
+                    "Mounts": [{"Type": "volume", "Name": remote.MANAGER_VOLUME}],
+                    "Name": "/" + remote.MANAGER_CONTAINER,
+                }
+            ]
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_validate_manager_bind_sources", lambda: None)
+
+    result = remote.op_preflight_manager({})
+
+    assert result["image_id"] == IMAGE_ID
+    assert result["image_digest"] == IMAGE_DIGEST
+    assert result["revision"] == ""
+    assert result["revision_available"] is False
+
+
+def test_verify_manager_dispatch_requires_exact_labeled_image_and_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/health"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/api/auth/status"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"auth_required": True}), stderr="")
+        if argv == ["docker", "inspect", remote.MANAGER_CONTAINER]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([{"Image": IMAGE_ID}]), stderr="")
+        if argv[:3] == ["docker", "inspect", remote.MANAGER_CONTAINER] and "--format" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=REVISION + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    result = remote.handle_request(
+        {
+            "operation": "verify.manager",
+            "args": {"commit": REVISION, "revision_available": True, "image_id": IMAGE_ID},
+        }
+    )
+
+    assert result["health"] is True
+    assert result["auth"] is True
+    assert result["image_id"] == IMAGE_ID
+    assert result["revision"] == REVISION
+    assert result["revision_available"] is True
+    assert result["revision_matches"] is True
+
+
+def test_verify_manager_dispatch_allows_unlabeled_empty_commit_only_when_declared_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(str(item) for item in argv))
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/health"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/api/auth/status"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"auth_required": True}), stderr="")
+        if argv == ["docker", "inspect", remote.MANAGER_CONTAINER]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([{"Image": IMAGE_ID}]), stderr="")
+        if argv[:3] == ["docker", "inspect", remote.MANAGER_CONTAINER] and "--format" in argv:
+            raise AssertionError("label must not be inspected when revision is unavailable")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    result = remote.handle_request(
+        {
+            "operation": "verify.manager",
+            "args": {"commit": "", "revision_available": False, "image_id": IMAGE_ID},
+        }
+    )
+
+    assert result["image_id"] == IMAGE_ID
+    assert result["revision"] == ""
+    assert result["revision_available"] is False
+    assert result["revision_matches"] is True
+    assert not any("--format" in call for call in calls)
+
+
+def test_verify_manager_dispatch_rejects_unlabeled_empty_commit_when_declared_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout=json.dumps([{"Image": IMAGE_ID}]), stderr=""))
+
+    with pytest.raises(remote.HelperError, match="commit"):
+        remote.handle_request(
+            {
+                "operation": "verify.manager",
+                "args": {"commit": "", "revision_available": True, "image_id": IMAGE_ID},
+            }
+        )
+
+
+def test_capture_and_restore_allow_unlabeled_previous_manager_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    capture = valid_capture(paths)
+    capture["previous_revision"] = ""
+    capture["previous_revision_available"] = False
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(str(item) for item in argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_validate_manager_bind_sources", lambda: None)
+
+    remote.op_restore_runtime({"capture": capture, "backup": write_backup(paths)})
+
+    manager_start = next(call for call in calls if call[:4] == ("docker", "run", "-d", "--name") and call[4] == remote.MANAGER_CONTAINER)
+    assert manager_start[-1] == "sha256:" + ("d" * 64)
+
+
+def test_restore_verify_dispatch_returns_exact_restored_old_image_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    capture = valid_capture(paths)
+    backup = write_backup(paths)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/health"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:3] == ["curl", "-fsS", f"http://127.0.0.1:{remote.LIVE_PORT}/api/auth/status"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"auth_required": True}), stderr="")
+        if argv == ["docker", "inspect", remote.MANAGER_CONTAINER]:
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([{"Image": IMAGE_ID}]), stderr="")
+        if argv[:3] == ["docker", "inspect", remote.MANAGER_CONTAINER] and "--format" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=("1" * 40) + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "op_preflight_browser_use", lambda _args: {"unit_sha256": "1" * 64, "active_state": "active"})
+    monkeypatch.setattr(remote, "op_preflight_acpx", lambda _args: {"unit_sha256": "2" * 64, "active_state": "inactive"})
+
+    result = remote.handle_request({"operation": "restore.verify", "args": {"capture": capture, "backup": backup}})
+
+    assert result["health"] is True
+    assert result["auth"] is True
+    assert result["old_image_id"] == capture["old_image_id"] == IMAGE_ID
+    assert result["old_image_digest"] == capture["old_image_digest"] == IMAGE_DIGEST
+
+
+def test_rollback_previous_skips_label_compare_only_when_previous_revision_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(str(item) for item in argv))
+        if argv[:3] == ["docker", "image", "inspect"] and "--format" in argv:
+            raise AssertionError("revision label must not be inspected when unavailable")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    image_ref = IMAGE_ID
+
+    result = remote.op_rollback_verify_previous(
+        {
+            "previous_runtime": {
+                "image_ref": image_ref,
+                "image_id": image_ref,
+                "image_digest": IMAGE_DIGEST,
+                "revision": "",
+                "revision_available": False,
+            }
+        }
+    )
+
+    assert result["image_ref"] == image_ref
+    assert result["image_id"] == image_ref
+    assert result["image_digest"] == IMAGE_DIGEST
+    assert result["revision"] == ""
+    assert result["revision_available"] is False
+
+
+def test_rollback_previous_keeps_strict_revision_check_for_labeled_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[:3] == ["docker", "image", "inspect"] and "--format" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=("1" * 40) + "\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    with pytest.raises(remote.HelperError, match="revision mismatch"):
+        remote.op_rollback_verify_previous(
+            {
+                "previous_runtime": {
+                    "image_ref": IMAGE_ID,
+                    "image_id": IMAGE_ID,
+                    "image_digest": IMAGE_DIGEST,
+                    "revision": REVISION,
+                    "revision_available": True,
+                }
+            }
+        )
+
+
+def test_rollback_verify_previous_dispatch_shape_for_labeled_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[:3] == ["docker", "image", "inspect"] and "--format" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=REVISION + "\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    result = remote.handle_request(
+        {
+            "operation": "rollback.verify_previous",
+            "args": {
+                "previous_runtime": {
+                    "image_ref": IMAGE_ID,
+                    "image_id": IMAGE_ID,
+                    "image_digest": IMAGE_DIGEST,
+                    "revision": REVISION,
+                    "revision_available": True,
+                }
+            },
+        }
+    )
+
+    assert result["image_ref"] == IMAGE_ID
+    assert result["image_id"] == IMAGE_ID
+    assert result["image_digest"] == IMAGE_DIGEST
+    assert result["revision"] == REVISION
+    assert result["revision_available"] is True
+
+
+def test_rollback_verify_previous_dispatch_shape_for_unlabeled_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[:3] == ["docker", "image", "inspect"] and "--format" in argv:
+            raise AssertionError("revision label must not be inspected when unavailable")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    result = remote.handle_request(
+        {
+            "operation": "rollback.verify_previous",
+            "args": {
+                "previous_runtime": {
+                    "image_ref": IMAGE_ID,
+                    "image_id": IMAGE_ID,
+                    "image_digest": IMAGE_DIGEST,
+                    "revision": "",
+                    "revision_available": False,
+                }
+            },
+        }
+    )
+
+    assert result["image_ref"] == IMAGE_ID
+    assert result["image_id"] == IMAGE_ID
+    assert result["image_digest"] == IMAGE_DIGEST
+    assert result["revision"] == ""
+    assert result["revision_available"] is False
+
+
+def test_manager_bind_sources_are_exact_allowlisted_read_only_dirs() -> None:
+    assert remote.MANAGER_BIND_MOUNTS == (
+        (Path("/home/coder/orca"), Path("/home/coder/orca"), "ro"),
+        (Path("/home/coder/.local"), Path("/home/coder/.local"), "ro"),
+        (Path("/home/coder/.config/orca"), Path("/home/coder/.config/orca"), "ro"),
+    )
+
+
+def test_manager_bind_source_validation_rejects_symlink_or_missing_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.symlink_to(source)
+    monkeypatch.setattr(remote, "MANAGER_BIND_MOUNTS", ((target, target, "ro"),))
+
+    with pytest.raises(remote.HelperError, match="symlink"):
+        remote._validate_manager_bind_sources()
+
+
+def test_manager_docker_run_paths_publish_canonical_container_port_and_host_gateway(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(str(item) for item in argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="0" * 40, stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_validate_manager_bind_sources", lambda: None)
+    image_ref = "sha256:" + ("d" * 64)
+    remote.op_candidate_start({"release_id": "release-0000001", "image_ref": image_ref, "volume": "candidate-volume"})
+    remote.op_live_start({"image_ref": image_ref, "volume": remote.MANAGER_VOLUME, "port": 18115})
+    remote.op_restore_runtime({"capture": valid_capture(paths), "backup": write_backup(paths)})
+    remote.op_rollback_start_previous(
+        {
+            "previous_runtime": {
+                "image_ref": image_ref,
+                "image_id": image_ref,
+                "image_digest": "d" * 64,
+                "revision": "0" * 40,
+                "revision_available": True,
+            }
+        }
+    )
+
+    published_ports = [item for call in calls for item in call if item.startswith("127.0.0.1:")]
+    assert "127.0.0.1:18116:8080" in published_ports
+    assert published_ports.count("127.0.0.1:18115:8080") == 3
+    assert all(not item.endswith(":8000") for item in published_ports)
+    manager_runs = [call for call in calls if call[:3] == ("docker", "run", "-d")]
+    assert len(manager_runs) == 4
+    assert all("--add-host" in call for call in manager_runs)
+    assert all("host.docker.internal:host-gateway" in call for call in manager_runs)
+    assert all("--restart" in call for call in manager_runs)
+    assert all("unless-stopped" in call for call in manager_runs)
+    assert all(not item.startswith("0.0.0.0:") for item in published_ports)
+    for source, target, mode in remote.MANAGER_BIND_MOUNTS:
+        assert all(f"{source}:{target}:{mode}" in call for call in manager_runs)
+        assert mode == "ro"
+
+
+def test_verify_proxychecker_probes_docker_bridge_on_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(str(item) for item in argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    assert remote.op_verify_proxychecker({}) == {"ok": True}
+    assert calls == [("curl", "-fsS", "http://172.17.0.1:18899/health")]
+
+
+def test_verify_stream_uses_openapi_routes_without_profile_or_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager_paths: list[str] = []
+
+    def fake_manager_json(path: str) -> dict[str, object]:
+        manager_paths.append(path)
+        return {
+            "paths": {
+                "/api/profiles/{profile_id}/live-metrics": {"get": {}},
+                "/api/profiles/{profile_id}/cdp": {"get": {}},
+                "/api/profiles/{profile_id}/open-links": {"get": {}},
+            }
+        }
+
+    monkeypatch.setattr(remote, "_manager_json", fake_manager_json)
+
+    result = remote.op_verify_stream({})
+
+    assert result["ok"] is True
+    assert result["routes_present"] == [
+        "/api/profiles/{profile_id}/cdp",
+        "/api/profiles/{profile_id}/live-metrics",
+        "/api/profiles/{profile_id}/open-links",
+    ]
+    assert manager_paths == ["/openapi.json"]
+
+
+def test_verify_stream_fails_closed_when_openapi_route_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(remote, "_manager_json", lambda _path: {"paths": {"/api/profiles/{profile_id}/open-links": {"get": {}}}})
+
+    with pytest.raises(remote.HelperError, match="route"):
+        remote.op_verify_stream({})
+
+
+def test_verify_orca_requires_structured_ready_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(tuple(str(item) for item in argv))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "result": {
+                        "runtime": {"reachable": True, "state": "ready"},
+                        "graph": {"state": "ready"},
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    result = remote.op_verify_orca({})
+
+    assert result["ok"] is True
+    assert result["runtime_reachable"] is True
+    assert result["runtime_state"] == "ready"
+    assert result["graph_state"] == "ready"
+    assert calls == [("orca", "status", "--json")]
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "ready\n",
+        json.dumps({"ok": False, "result": {"runtime": {"reachable": True, "state": "ready"}, "graph": {"state": "ready"}}}),
+        json.dumps({"ok": True, "result": {"runtime": {"reachable": False, "state": "ready"}, "graph": {"state": "ready"}}}),
+        json.dumps({"ok": True, "result": {"runtime": {"reachable": True, "state": "starting"}, "graph": {"state": "ready"}}}),
+        json.dumps({"ok": True, "result": {"runtime": {"reachable": True, "state": "ready"}, "graph": {"state": "building"}}}),
+    ],
+)
+def test_verify_orca_fails_closed_for_malformed_or_unready_status(
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+) -> None:
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=""))
+
+    with pytest.raises(remote.HelperError, match="Orca"):
+        remote.op_verify_orca({})
+
+
 def test_remote_helper_uses_argv_arrays_for_local_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, ...]] = []
 
     def fake_run(argv: tuple[str, ...] | list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert not isinstance(argv, str)
         calls.append(tuple(str(item) for item in argv))
-        return subprocess.CompletedProcess(argv, 0, stdout="ready\n", stderr="")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps({"ok": True, "result": {"runtime": {"reachable": True, "state": "ready"}, "graph": {"state": "ready"}}}),
+            stderr="",
+        )
 
     monkeypatch.setattr(remote.subprocess, "run", fake_run)
     payload = remote.handle_request({"operation": "verify.orca", "args": {}})
-    assert payload == {"status": "ready"}
-    assert calls == [("orca", "status")]
+    assert payload["ok"] is True
+    assert calls == [("orca", "status", "--json")]
 
 
 def test_ssh_executor_streams_checked_in_helper_over_json_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,6 +790,7 @@ def test_restore_runtime_restarts_old_image_after_volume_restore(monkeypatch: py
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_validate_manager_bind_sources", lambda: None)
     remote.op_restore_runtime({"capture": valid_capture(paths), "backup": write_backup(paths)})
 
     docker_calls = [call for call in calls if call and call[0] == "docker"]
@@ -317,7 +890,7 @@ def test_state_commit_rejects_symlink_temp_file(monkeypatch: pytest.MonkeyPatch,
 
 def test_restore_dropin_rejects_symlink_temp_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     paths = patch_remote_paths(monkeypatch, tmp_path)
-    dropin = remote.release_dropin("cloakbrowser-browser-use.service")
+    dropin = remote.release_dropin(BROWSER_USE_UNIT)
     dropin.parent.mkdir(parents=True, exist_ok=True)
     target = tmp_path / "outside-dropin-target"
     target.write_text("do-not-touch", encoding="utf-8")
@@ -327,7 +900,7 @@ def test_restore_dropin_rejects_symlink_temp_file(monkeypatch: pytest.MonkeyPatc
     capture["browser_use_dropin_content"] = "[Service]\nWorkingDirectory=/safe\n"
 
     with pytest.raises(remote.HelperError, match="temporary"):
-        remote._restore_release_dropin("cloakbrowser-browser-use.service", capture, "browser_use")
+        remote._restore_release_dropin(BROWSER_USE_UNIT, capture, "browser_use")
 
     assert target.read_text(encoding="utf-8") == "do-not-touch"
 
@@ -448,20 +1021,99 @@ def test_bootstrap_candidate_verify_rejects_non_release_acpx_executable(monkeypa
         )
 
 
+def test_bootstrap_acpx_provision_reuses_existing_canonical_worker_key_without_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    source_key = paths["home"] / ".config" / "cloakbrowser" / "browser-use-worker-key"
+    source_key.parent.mkdir(parents=True)
+    token = "cbm_worker_" + ("ab" * 32)
+    source_key.write_text(token + "\n", encoding="utf-8")
+    source_key.chmod(0o600)
+    monkeypatch.setattr(remote, "BROWSER_USE_TOKEN_PATH", source_key)
+
+    result = remote.op_bootstrap_acpx_provision_candidate(
+        {
+            "release_id": "release-0000001",
+            "commit": "0" * 40,
+            "manager_port": 18116,
+            "runtime": {},
+        }
+    )
+
+    root = remote.acpx_bootstrap_dir("release-0000001")
+    candidate_key = root / "candidate.worker.key"
+    unit = root / "acpx-candidate-release-0000001.service"
+    assert candidate_key.read_text(encoding="utf-8") == token + "\n"
+    assert stat.S_IMODE(candidate_key.stat().st_mode) == 0o600
+    serialized = json.dumps(result, sort_keys=True) + unit.read_text(encoding="utf-8")
+    assert token not in serialized
+    assert result["credential_reused"] is True
+    assert result["credential_source"] == "browser_use_worker_key"
+
+
+@pytest.mark.parametrize(
+    ("content", "mode"),
+    [
+        (None, 0o600),
+        ("not-a-worker-token\n", 0o600),
+        ("cbm_worker_" + ("cd" * 32) + "\n", 0o644),
+    ],
+)
+def test_bootstrap_acpx_provision_rejects_missing_invalid_or_insecure_source_key_before_unit_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    content: str | None,
+    mode: int,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    source_key = paths["home"] / ".config" / "cloakbrowser" / "browser-use-worker-key"
+    source_key.parent.mkdir(parents=True)
+    if content is not None:
+        source_key.write_text(content, encoding="utf-8")
+        source_key.chmod(mode)
+    monkeypatch.setattr(remote, "BROWSER_USE_TOKEN_PATH", source_key)
+
+    with pytest.raises(remote.HelperError, match="worker key"):
+        remote.op_bootstrap_acpx_provision_candidate(
+            {
+                "release_id": "release-0000001",
+                "commit": "0" * 40,
+                "manager_port": 18116,
+                "runtime": {},
+            }
+        )
+
+    assert not (remote.acpx_bootstrap_dir("release-0000001") / "acpx-candidate-release-0000001.service").exists()
+
+
 def test_capture_state_records_prior_acpx_absence_without_strict_preflight(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def fail_strict_acpx(args: dict[str, object]) -> dict[str, object]:
         del args
         raise remote.HelperError("ACPX unit is missing")
 
-    monkeypatch.setattr(remote, "op_preflight_manager", lambda _args: {"revision": "1" * 40, "image_digest": "d" * 64, "image_id": "sha256:" + ("d" * 64)})
+    monkeypatch.setattr(
+        remote,
+        "op_preflight_manager",
+        lambda _args: {
+            "revision": "1" * 40,
+            "revision_available": True,
+            "image_digest": "d" * 64,
+            "image_id": "sha256:" + ("d" * 64),
+            "manager_bind_mounts": remote.manager_bind_mount_receipt(),
+            "restart_policy": remote.MANAGER_RESTART_POLICY,
+            "network_mode": "bridge",
+        },
+    )
     monkeypatch.setattr(
         remote,
         "op_preflight_browser_use",
         lambda _args: {
             "unit_sha256": "1" * 64,
-            "unit_path": str(remote.expected_unit_path("cloakbrowser-browser-use.service")),
+            "unit_path": str(remote.expected_unit_path(BROWSER_USE_UNIT)),
             "active_state": "active",
-            "dropin_path": str(remote.release_dropin("cloakbrowser-browser-use.service")),
+            "dropin_path": str(remote.release_dropin(BROWSER_USE_UNIT)),
             "dropin_exists": False,
             "dropin_content": "",
             "dropin_sha256": "",
@@ -567,6 +1219,7 @@ def test_restore_runtime_removes_promoted_acpx_artifacts_when_old_state_was_abse
     unrelated.write_text("keep\n", encoding="utf-8")
 
     monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+    monkeypatch.setattr(remote, "_validate_manager_bind_sources", lambda: None)
     remote.op_restore_runtime({"capture": capture, "backup": write_backup(paths)})
 
     assert not acpx_unit.exists()

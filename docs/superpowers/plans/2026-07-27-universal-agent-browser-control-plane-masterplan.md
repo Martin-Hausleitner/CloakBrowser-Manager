@@ -140,6 +140,23 @@ No transcript recommendation is a production decision until its ticket passes.
 
 Only tickets with disjoint file ownership run concurrently. Integration and full-suite gates remain leader-owned.
 
+### GitHub ticket index
+
+| Plan ticket | GitHub issue | Plan ticket | GitHub issue |
+|---|---:|---|---:|
+| CBM-001 | [#3](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/3) | CBM-013 | [#15](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/15) |
+| CBM-002 | [#4](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/4) | CBM-014 | [#16](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/16) |
+| CBM-003 | [#5](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/5) | CBM-015 | [#17](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/17) |
+| CBM-004 | [#6](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/6) | CBM-016 | [#18](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/18) |
+| CBM-005 | [#7](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/7) | CBM-017 | [#19](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/19) |
+| CBM-006 | [#8](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/8) | CBM-018 | [#20](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/20) |
+| CBM-007 | [#9](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/9) | CBM-019 | [#21](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/21) |
+| CBM-008 | [#10](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/10) | CBM-020 | [#22](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/22) |
+| CBM-009 | [#11](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/11) | CBM-021 | [#23](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/23) |
+| CBM-010 | [#12](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/12) | CBM-022 | [#24](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/24) |
+| CBM-011 | [#13](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/13) | CBM-023 | [#25](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/25) |
+| CBM-012 | [#14](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/14) | CBM-024 | [#26](https://github.com/Martin-Hausleitner/CloakBrowser-Manager/issues/26) |
+
 ---
 
 ## CBM-001 — Canonical project-state and handoff receipt

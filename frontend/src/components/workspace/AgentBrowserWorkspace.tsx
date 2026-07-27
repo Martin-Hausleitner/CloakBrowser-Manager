@@ -8,6 +8,7 @@ import {
   type OrcaSession,
   type Profile,
   type TaskOutput,
+  type TaskHarnessAgentPreflight,
   type TaskHarnessPresence,
   type TaskRun,
 } from "../../lib/api";
@@ -82,6 +83,21 @@ function healthReasonLabel(reason: string): string {
   return words ? `${words.charAt(0).toUpperCase()}${words.slice(1)}` : reason;
 }
 
+function acpxPreflightLabel(preflight: TaskHarnessAgentPreflight | undefined): string {
+  if (!preflight) return "ACP adapter has not been checked";
+  const labels: Record<string, string> = {
+    auth_required: "Sign in to this ACP agent on the worker",
+    adapter_unavailable: "ACP adapter is not installed on the worker",
+    version_mismatch: "ACPX worker version does not match",
+    mcp_unavailable: "CloakBrowser MCP is unavailable to this ACP agent",
+    protocol_error: "ACP adapter check failed",
+    internal_error: "ACP adapter check failed",
+    not_checked: "ACP adapter has not been checked",
+    stale: "ACP adapter check is stale",
+  };
+  return labels[preflight.reason_code] ?? "ACP adapter is unavailable";
+}
+
 export interface AgentBrowserWorkspaceProps {
   profiles: Profile[];
   selectedProfile: Profile | null;
@@ -132,6 +148,7 @@ export function AgentBrowserWorkspace({
   const [taskSessionId, setTaskSessionId] = useState<string | null>(null);
   const [taskRun, setTaskRun] = useState<TaskRun | null>(null);
   const [acpxPresence, setAcpxPresence] = useState<TaskHarnessPresence | null>(null);
+  const [acpxPreflights, setAcpxPreflights] = useState<TaskHarnessAgentPreflight[]>([]);
   const [taskOutputs, setTaskOutputs] = useState<TaskOutput[]>([]);
   const [transcript, setTranscript] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -147,6 +164,8 @@ export function AgentBrowserWorkspace({
   const runPollRef = useRef<number | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const appliedInitialPromptDraftIdRef = useRef<string | null>(null);
+  const viewerFullscreenButtonRef = useRef<HTMLButtonElement | null>(null);
+  const restoreViewerFullscreenFocusRef = useRef(false);
 
   const runningProfiles = useMemo(
     () => profiles.filter((profile) => profile.status === "running"),
@@ -156,6 +175,7 @@ export function AgentBrowserWorkspace({
   const unavailable = caps != null && !caps.available;
   const browserUseMode = agent === "browser-use";
   const acpxMode = agent === "acpx";
+  const selectedAcpxPreflight = acpxPreflights.find((item) => item.agent === acpxAgent);
   const managedRunMode = browserUseMode || acpxMode;
   const managedRunActive = Boolean(taskRun && ACTIVE_RUN_STATES.has(taskRun.status));
   const orcaSessionActive = session?.status === "running" || session?.status === "starting";
@@ -177,7 +197,9 @@ export function AgentBrowserWorkspace({
     selectedProfile?.status === "running" &&
     hasModePermissions &&
     (managedRunMode ? Boolean(prompt.trim()) && originList.length > 0 : !unavailable) &&
-    (!acpxMode || acpxPresence?.worker_seen_recently === true) &&
+    (!acpxMode || (
+      acpxPresence?.worker_seen_recently === true && selectedAcpxPreflight?.ready === true
+    )) &&
     !sessionActive &&
     !busy;
   const canSend = Boolean(!managedRunMode && sessionActive && canInteract && prompt.trim() && !busy);
@@ -223,16 +245,21 @@ export function AgentBrowserWorkspace({
   useEffect(() => {
     if (!acpxMode) {
       setAcpxPresence(null);
+      setAcpxPreflights([]);
       return;
     }
     const controller = new AbortController();
     let cancelled = false;
     const refresh = async () => {
       try {
-        const presence = await api.getTaskHarnessPresence("acpx", {
-          signal: controller.signal,
-        });
-        if (!cancelled) setAcpxPresence(presence);
+        const [presence, preflights] = await Promise.all([
+          api.getTaskHarnessPresence("acpx", { signal: controller.signal }),
+          api.getTaskHarnessPreflights("acpx", { signal: controller.signal }),
+        ]);
+        if (!cancelled) {
+          setAcpxPresence(presence);
+          setAcpxPreflights(preflights.agents);
+        }
       } catch (err) {
         if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
         setAcpxPresence({
@@ -242,6 +269,7 @@ export function AgentBrowserWorkspace({
           last_seen_at: null,
           reason: "ACPX worker readiness could not be verified",
         });
+        setAcpxPreflights([]);
       }
     };
     void refresh();
@@ -400,7 +428,14 @@ export function AgentBrowserWorkspace({
   }, [selectedProfile?.id, selectedProfile?.screen_height, selectedProfile?.screen_width]);
 
   useEffect(() => {
-    if (!viewerFullscreen) return;
+    if (!viewerFullscreen) {
+      if (restoreViewerFullscreenFocusRef.current) {
+        viewerFullscreenButtonRef.current?.focus();
+        restoreViewerFullscreenFocusRef.current = false;
+      }
+      return;
+    }
+    restoreViewerFullscreenFocusRef.current = true;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const exitOnEscape = (event: KeyboardEvent) => {
@@ -581,6 +616,8 @@ export function AgentBrowserWorkspace({
       <section
         className="flex min-w-0 w-[42%] max-w-[36rem] flex-col border-r border-[#2a2a2a]"
         aria-label="Orca agent session"
+        aria-hidden={viewerFullscreen || undefined}
+        inert={viewerFullscreen || undefined}
       >
         <header className="flex items-center gap-2 border-b border-[#2a2a2a] bg-[#141414] px-3 py-2">
           <TerminalSquare className="h-3.5 w-3.5 text-[#8b8b8b]" />
@@ -594,7 +631,9 @@ export function AgentBrowserWorkspace({
                   ? `Managed worker · ${taskRun.id}`
                   : acpxMode
                     ? acpxPresence?.worker_seen_recently
-                      ? `Managed run · ${acpxAgent} · worker polling · adapter checked at run`
+                      ? selectedAcpxPreflight?.ready
+                        ? `Managed run · ${acpxAgent} · ACP ready`
+                        : `Managed run · ${acpxAgent} · ${selectedAcpxPreflight?.state ?? "checking"}`
                       : acpxPresence
                         ? `Managed run · ${acpxAgent} · ${acpxPresence.state}`
                         : `Managed run · ${acpxAgent} · checking worker`
@@ -740,6 +779,15 @@ export function AgentBrowserWorkspace({
           </div>
         ) : null}
 
+        {acpxMode && acpxPresence?.worker_seen_recently && !selectedAcpxPreflight?.ready ? (
+          <div
+            className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1.5 text-[11px] text-amber-200"
+            data-testid="acpx-agent-unavailable"
+          >
+            {acpxPreflightLabel(selectedAcpxPreflight)}
+          </div>
+        ) : null}
+
         {managedRunMode && taskRun?.status === "blocked_health" ? (
           <div
             className="border-b border-amber-800/50 bg-amber-950/35 px-3 py-2 text-[11px] text-amber-100"
@@ -861,6 +909,8 @@ export function AgentBrowserWorkspace({
           viewerFullscreen ? "fixed inset-0 z-[80]" : "min-w-0 flex-1"
         } flex-col bg-[#090909]`}
         aria-label="Live CloakBrowser profile"
+        role={viewerFullscreen ? "dialog" : undefined}
+        aria-modal={viewerFullscreen || undefined}
         data-testid="agent-browser-viewer-pane"
       >
         <header className="relative flex min-h-10 flex-wrap items-center gap-2 border-b border-[#2a2a2a] bg-[#141414] px-3 py-1.5">
@@ -909,6 +959,7 @@ export function AgentBrowserWorkspace({
               </button>
             ) : null}
             <button
+              ref={viewerFullscreenButtonRef}
               type="button"
               className="min-h-8 rounded border border-[#333] px-2 text-[#bbb] hover:bg-[#222]"
               onClick={() => setViewerFullscreen((open) => !open)}

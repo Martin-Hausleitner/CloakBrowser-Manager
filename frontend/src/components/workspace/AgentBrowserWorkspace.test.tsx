@@ -6,6 +6,7 @@ import { AgentBrowserWorkspace } from "./AgentBrowserWorkspace";
 const apiMock = vi.hoisted(() => ({
   getOrcaCapabilities: vi.fn(),
   getTaskHarnessPresence: vi.fn(),
+  getTaskHarnessPreflights: vi.fn(),
   startOrcaSession: vi.fn(),
   readOrcaSessionOutput: vi.fn(),
   sendOrcaSessionInput: vi.fn(),
@@ -140,6 +141,7 @@ describe("AgentBrowserWorkspace", () => {
     window.sessionStorage.clear();
     apiMock.getOrcaCapabilities.mockReset();
     apiMock.getTaskHarnessPresence.mockReset();
+    apiMock.getTaskHarnessPreflights.mockReset();
     apiMock.startOrcaSession.mockReset();
     apiMock.readOrcaSessionOutput.mockReset();
     apiMock.sendOrcaSessionInput.mockReset();
@@ -158,6 +160,16 @@ describe("AgentBrowserWorkspace", () => {
       state: "polling",
       last_seen_at: "2026-07-27T00:00:00Z",
       reason: null,
+    });
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({
+      harness: "acpx",
+      agents: ["codex", "claude", "cursor", "grok-build", "opencode"].map((agent) => ({
+        agent,
+        ready: true,
+        state: "ready",
+        reason_code: "ok",
+        checked_at: "2026-07-27T00:00:00Z",
+      })),
     });
   });
 
@@ -197,9 +209,16 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     await screen.findByTestId("agent-browser-workspace");
+    const agentSession = screen.getByLabelText("Orca agent session");
+    const fullViewButton = screen.getByRole("button", { name: "Enter full view" });
     fireEvent.click(screen.getByRole("button", { name: "Enter full view" }));
-    expect(screen.getByTestId("agent-browser-viewer-pane").className).toContain("fixed");
-    expect(screen.getByTestId("agent-browser-viewer-pane").classList.contains("flex")).toBe(true);
+    const fullscreenViewer = screen.getByTestId("agent-browser-viewer-pane");
+    expect(fullscreenViewer.className).toContain("fixed");
+    expect(fullscreenViewer.classList.contains("flex")).toBe(true);
+    expect(fullscreenViewer.getAttribute("role")).toBe("dialog");
+    expect(fullscreenViewer.getAttribute("aria-modal")).toBe("true");
+    expect(agentSession.getAttribute("aria-hidden")).toBe("true");
+    expect(agentSession.hasAttribute("inert")).toBe(true);
     expect(screen.getByRole("button", { name: "Exit full view" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Increase browser zoom" }));
@@ -214,7 +233,7 @@ describe("AgentBrowserWorkspace", () => {
     await waitFor(() => expect(onViewportApply).toHaveBeenCalledWith(390, 844));
 
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.getByRole("button", { name: "Enter full view" })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(fullViewButton));
   });
 
   it("blocks viewport changes while a Browser Use run is active", async () => {
@@ -657,6 +676,36 @@ describe("AgentBrowserWorkspace", () => {
     });
     expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(true);
     expect(await screen.findByText("The last authenticated ACPX worker check-in is stale")).toBeTruthy();
+  });
+
+  it("keeps ACPX launch disabled when the selected ACP adapter needs authentication", async () => {
+    const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({
+      harness: "acpx",
+      agents: [{
+        agent: "cursor",
+        ready: false,
+        state: "failed",
+        reason_code: "auth_required",
+        checked_at: "2026-07-27T00:00:00Z",
+      }],
+    });
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[acpxProfile]}
+        selectedProfile={acpxProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(await screen.findByTestId("orca-prompt"), {
+      target: { value: "Inspect https://example.com" },
+    });
+    expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(true);
+    expect(await screen.findByText("Sign in to this ACP agent on the worker")).toBeTruthy();
   });
 
   it("restores the last Browser Use run after the live workspace remounts", async () => {

@@ -17,6 +17,7 @@ include pytest.
 | `scripts/browser_use_worker.py` | Worker process (claim / run / heartbeat) |
 | `scripts/cursor_chat_model.py` | Argv-only Cursor chat adapter for Browser Use |
 | `scripts/provision_browser_use_worker.py` | Idempotent secret-safe provisioner |
+| `scripts/vcvm_browser_use_acceptance.py` | Offline-first VCVM acceptance verifier |
 | `deploy/systemd/cloakbrowser-browser-use-worker.service.template` | Unit template |
 | `docs/BROWSER_USE_WORKER.md` | This guide |
 
@@ -271,6 +272,18 @@ Successful run `ae877b32-95e1-45e3-b2fd-18855496c1e8`:
 ![Browser Use worker output restored after reopening the live workspace](assets/browser-use-worker-ui-2026-07-26.png)
 
 ## E2E acceptance checklist
+
+For release evidence, run the replay-safe verifier against a redacted evidence
+bundle before treating a live run as accepted:
+
+```bash
+python3 scripts/vcvm_browser_use_acceptance.py \
+  --evidence docs/evidence/browser-use-vcvm-acceptance-2026-07-27.json
+```
+
+`--live` performs read-only SSH inventory only; it does not deploy, restart,
+prune, or create Browser-Use runs. Health overrides are reported as degraded,
+never as a passing acceptance result.
 
 - [ ] Dedicated venv created with `uv`; `browser-use==0.13.6` importable; pytest
       not installed in that venv.

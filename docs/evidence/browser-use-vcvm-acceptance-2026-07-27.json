@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-27T01:45:30Z",
+  "expected": {
+    "manager_commit": "8f8fd1e",
+    "worker_commit": "8f8fd1e",
+    "browser_use_version": "0.13.6",
+    "migrations": [
+      "agent_workspace_v1",
+      "task_runs_v1",
+      "worker_runtime_v1",
+      "task_runs_acpx_v1",
+      "worker_harness_presence_v1",
+      "worker_harness_preflights_v1",
+      "task_run_binding_v1"
+    ],
+    "typed_output_kinds": [
+      "action",
+      "observation",
+      "observation",
+      "screenshot",
+      "summary"
+    ]
+  },
+  "live": {
+    "vcvm": {
+      "host": "vcvm",
+      "free_disk_kib": 130335172,
+      "free_disk_note": "Approximately 124 GiB free; prior low-disk release blocker is resolved."
+    },
+    "checkout": {
+      "branch": "feature/browser-use-agent-workspace",
+      "commit": "50a9e43",
+      "source": "/home/coder/vk-repos/CloakBrowser-Manager-browser-use"
+    },
+    "manager": {
+      "commit": "",
+      "commit_source": "unavailable: no OCI revision label or explicit runtime manifest captured in this lane",
+      "health_ok": true,
+      "container": {
+        "name": "cloakbrowser-manager-vcvm",
+        "status": "Up 11 hours (healthy)"
+      },
+      "migrations": []
+    },
+    "worker": {
+      "commit": "50a9e43",
+      "commit_source": "systemd WorkingDirectory checkout",
+      "working_directory": "/home/coder/vk-repos/CloakBrowser-Manager-browser-use",
+      "branch": "feature/browser-use-agent-workspace",
+      "active": true,
+      "n_restarts": 0,
+      "worker_id": "browser-use-worker-vcvm",
+      "unit_exec": "/home/coder/.local/share/cloakbrowser-worker/prod-venv/bin/python -m scripts.browser_use_worker --manager-url http://127.0.0.1:18115 --worker-id browser-use-worker-vcvm --token-file /home/coder/.config/cloakbrowser/browser-use-worker-key",
+      "browser_use_version": ""
+    }
+  },
+  "run": {},
+  "notes": [
+    "Read-only SSH inventory only; no deploy, restart, prune, cleanup, or new Browser-Use run was performed.",
+    "The live Manager runtime commit is unavailable because no OCI revision label or explicit runtime manifest was captured; the separate checkout and worker WorkingDirectory are at 50a9e43, not PR head 8f8fd1e.",
+    "Run-level proofs are intentionally absent rather than inferred from older live evidence."
+  ]
+}

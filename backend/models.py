@@ -41,6 +41,206 @@ Harness = Literal[
 AcpxAgent = Literal["codex", "claude", "cursor", "grok-build", "opencode"]
 ProfileHealthState = Literal["pending", "running", "passed", "warning", "failed", "unavailable"]
 ProfileHealthSourceState = Literal["missing", "measured", "derived", "unavailable", "skipped"]
+CONTROL_PLANE_API_VERSION = "cloakbrowser.io/v1"
+
+CONTROL_PLANE_RESOURCE_KINDS = (
+    "profiles",
+    "projects",
+    "tasks",
+    "runs",
+    "outputs",
+    "sessions",
+    "views",
+    "proxies",
+    "extensions",
+    "accounts",
+    "secret-references",
+    "approvals",
+    "operations",
+    "boxes",
+    "runtimes",
+    "local-mac",
+    "vcvm",
+    "orca-web",
+)
+
+CONTROL_PLANE_FORBIDDEN_OPERATIONS = (
+    "raw CDP socket or unrestricted DevTools domain access",
+    "vault reveal, password reveal, cookie export, TOTP seed export, or provider token output",
+    "raw proxy credentials or proxy URLs with userinfo",
+    "free-form Chromium launch flags or manager-owned runtime flags",
+    "arbitrary shell execution inside boxes or runtimes",
+)
+
+
+def control_plane_resource_schema() -> dict[str, object]:
+    """Versioned resource envelope contract shared by REST, CLI, MCP, and skills."""
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://cloakbrowser.io/contracts/control-plane-resource-v1.json",
+        "api_version": CONTROL_PLANE_API_VERSION,
+        "kind": "ContractSchema",
+        "metadata": {
+            "id": "control-plane-resource-v1",
+            "resource_version": 1,
+        },
+        "spec": {
+            "resources": list(CONTROL_PLANE_RESOURCE_KINDS),
+            "mutation_contract": {
+                "client_headers_supported": ["Idempotency-Key", "If-Match"],
+                "server_enforcement": {
+                    "idempotency_key": False,
+                    "if_match": False,
+                    "notes": "Legacy v1 routes accept client headers but do not enforce global idempotency or If-Match yet.",
+                },
+            },
+            "forbidden": list(CONTROL_PLANE_FORBIDDEN_OPERATIONS),
+            "envelope": {
+                "type": "object",
+                "required": ["api_version", "kind", "metadata", "spec", "status", "links"],
+                "properties": {
+                    "api_version": {"const": CONTROL_PLANE_API_VERSION},
+                    "kind": {"type": "string"},
+                    "metadata": {
+                        "type": "object",
+                        "required": ["id", "resource_version"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "resource_version": {"type": "integer", "minimum": 1},
+                            "request_id": {"type": "string"},
+                            "created_at": {"type": "string"},
+                            "updated_at": {"type": "string"},
+                        },
+                        "additionalProperties": True,
+                    },
+                    "spec": {"type": "object"},
+                    "status": {"type": "object"},
+                    "links": {"type": "array", "items": {"type": "object"}},
+                },
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _channel(rest: bool, cli: bool, mcp: bool, skill: bool) -> dict[str, bool]:
+    return {"rest": rest, "cli": cli, "mcp": mcp, "skill": skill}
+
+
+def control_plane_capabilities_payload(*, local_mac_available: bool = False) -> dict[str, object]:
+    """Truthful capability discovery; unavailable targets never silently fall back."""
+    unavailable = _channel(False, False, False, False)
+    resources = {
+        "profiles": {
+            "available": _channel(True, True, False, True),
+            "rest_operations": ["list", "get", "create", "update", "delete", "launch", "stop", "status", "health", "open-links"],
+            "cli_operations": ["list", "get", "create", "update", "delete", "launch", "stop", "status", "health", "extensions", "open-links"],
+            "mcp_operations": [],
+            "skill_operations": ["list", "get", "create", "update", "launch", "stop", "open-links"],
+            "mcp_note": "discovery_schema_only",
+        },
+        "projects": {
+            "available": _channel(True, False, False, False),
+            "rest_operations": ["list", "get", "create", "update"],
+            "cli_operations": [],
+            "mcp_operations": [],
+            "skill_operations": [],
+            "mcp_note": "discovery_schema_only",
+        },
+        "tasks": {
+            "available": _channel(True, True, False, True),
+            "rest_operations": ["list", "get", "create", "update", "messages", "events", "run"],
+            "cli_operations": ["create", "run"],
+            "mcp_operations": [],
+            "skill_operations": ["create", "run"],
+            "mcp_note": "discovery_schema_only",
+        },
+        "runs": {
+            "available": _channel(True, True, False, True),
+            "rest_operations": ["get", "cancel", "retry-health", "override-health", "outputs"],
+            "cli_operations": ["get", "cancel", "outputs"],
+            "mcp_operations": [],
+            "skill_operations": ["get", "cancel", "outputs"],
+            "mcp_note": "discovery_schema_only",
+        },
+        "outputs": {
+            "available": _channel(True, True, False, True),
+            "rest_operations": ["list"],
+            "cli_operations": ["runs outputs"],
+            "mcp_operations": [],
+            "skill_operations": ["runs outputs"],
+            "mcp_note": "discovery_schema_only",
+        },
+        "sessions": {
+            "available": _channel(True, True, False, True),
+            "rest_operations": ["extension-open"],
+            "cli_operations": ["open-session"],
+            "mcp_operations": [],
+            "skill_operations": ["open-session"],
+            "mcp_note": "discovery_schema_only",
+        },
+        "views": {
+            "available": _channel(True, True, False, True),
+            "rest_operations": ["open-links", "vnc", "cdp-live-observer"],
+            "cli_operations": ["profiles open-links"],
+            "mcp_operations": [],
+            "skill_operations": ["profiles open-links"],
+            "modes": ["vnc", "cdp-live-observer"],
+            "mcp_note": "discovery_schema_only",
+        },
+        "proxies": {
+            "available": _channel(True, False, False, False),
+            "rest_operations": ["list", "ingest", "check", "create-profile"],
+            "cli_operations": [],
+            "mcp_operations": [],
+            "skill_operations": [],
+            "secrets": "reference-only",
+            "mcp_note": "discovery_schema_only",
+        },
+        "extensions": {
+            "available": _channel(True, False, False, False),
+            "rest_operations": ["catalog", "defaults", "templates", "inventory", "open-session"],
+            "cli_operations": [],
+            "mcp_operations": [],
+            "skill_operations": [],
+            "mcp_note": "discovery_schema_only",
+        },
+        "accounts": {"available": unavailable, "reason_code": "metadata_model_pending"},
+        "secret-references": {"available": unavailable, "reason_code": "secret_broker_not_implemented"},
+        "approvals": {"available": unavailable, "reason_code": "approval_queue_pending"},
+        "operations": {"available": unavailable, "reason_code": "operation_store_pending"},
+        "boxes": {"available": unavailable, "reason_code": "box_resource_not_implemented"},
+        "runtimes": {"available": unavailable, "reason_code": "runtime_resource_not_implemented"},
+        "vcvm": {"available": unavailable, "reason_code": "vcvm_capability_resource_not_implemented"},
+        "local-mac": {
+            "available": unavailable,
+            "reason_code": "local_mac_resource_not_implemented",
+            "detected": bool(local_mac_available),
+        },
+        "orca-web": {"available": unavailable, "reason_code": "capability_unavailable"},
+    }
+    return {
+        "api_version": CONTROL_PLANE_API_VERSION,
+        "kind": "CapabilitySet",
+        "metadata": {"id": "manager-capabilities", "resource_version": 1},
+        "resources": resources,
+        "mcp_contract": {
+            "available": True,
+            "tools": [
+                "browser_inspect",
+                "browser_navigate",
+                "browser_click",
+                "browser_fill",
+                "browser_read_text",
+                "control_plane_capabilities",
+                "control_plane_resource_schema",
+                "orca_web_capabilities",
+            ],
+            "manager_resource_tools": False,
+            "note": "MCP parity is discovery/schema plus run-scoped browser tools; no general Manager resource MCP tools are implemented.",
+        },
+        "forbidden": list(CONTROL_PLANE_FORBIDDEN_OPERATIONS),
+    }
 
 
 def _validate_folder_path(value: str) -> str:

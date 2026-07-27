@@ -95,6 +95,143 @@ def test_tasks_run_builds_browser_use_request(monkeypatch: pytest.MonkeyPatch):
     assert captured["body"]["allowed_origins"] == ["https://example.com"]
 
 
+def test_mutating_commands_emit_idempotency_and_version_headers(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, query=None, idempotency_key=None, if_version=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        captured["idempotency_key"] = idempotency_key
+        captured["if_version"] = if_version
+        return {"api_version": "cloakbrowser.io/v1", "kind": "Profile", "metadata": {"id": "p1"}}
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(
+        [
+            "--idempotency-key",
+            "idem-1",
+            "--if-version",
+            "7",
+            "profiles",
+            "update",
+            "profile-1",
+            "--name",
+            "renamed",
+        ]
+    )
+    args.func(args)
+    assert captured["method"] == "PUT"
+    assert captured["path"] == "/api/profiles/profile-1"
+    assert captured["idempotency_key"] == "idem-1"
+    assert captured["if_version"] == 7
+
+
+def test_resource_envelope_redacts_sensitive_fields_and_carries_version_metadata():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    payload = mod.resource_envelope(
+        "Proxy",
+        {
+            "id": "proxy-1",
+            "redacted": "http://[redacted]@proxy.example:8080",
+            "proxy_url": "http://user:pass@proxy.example:8080",
+            "updated_at": "2026-07-26T12:05:00Z",
+            "row_version": 3,
+        },
+        request_id="req-1",
+    )
+    assert payload["api_version"] == "cloakbrowser.io/v1"
+    assert payload["kind"] == "Proxy"
+    assert payload["metadata"]["id"] == "proxy-1"
+    assert payload["metadata"]["resource_version"] == 3
+    assert payload["metadata"]["request_id"] == "req-1"
+    assert "proxy_url" not in payload["spec"]
+    assert "user:pass" not in json.dumps(payload)
+
+
+def test_resource_envelope_recursively_strips_sensitive_fields():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    payload = mod.resource_envelope(
+        "Run",
+        {
+            "id": "run-1",
+            "nested": {
+                "safe": "ok",
+                "endpoint": "http://user:pass@proxy.example:8080",
+                "message": "Bearer cbm_agent_secret",
+                "token": "cbm_run_secret",
+                "items": [
+                    {"url": "https://example.com", "password": "secret"},
+                    {"proxy_url": "http://user:pass@proxy.example:8080"},
+                ],
+            },
+            "status": {"state": "queued", "authorization": "Bearer secret"},
+            "links": [{"rel": "self", "cdp_ws_url": "ws://secret"}],
+        },
+    )
+    encoded = json.dumps(payload)
+    assert "cbm_run_secret" not in encoded
+    assert "user:pass" not in encoded
+    assert "cbm_agent_secret" not in encoded
+    assert "password" not in encoded
+    assert "proxy_url" not in encoded
+    assert "authorization" not in encoded
+    assert "cdp_ws_url" not in encoded
+    assert payload["spec"]["nested"]["safe"] == "ok"
+    assert payload["status"] == {"state": "queued"}
+    assert payload["links"] == [{"rel": "self"}]
+
+
+def test_capabilities_report_unavailable_targets_without_fallback(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    captured: list[tuple[str, str]] = []
+
+    def fake_request(method, path, *, body=None, query=None, idempotency_key=None, if_version=None):
+        captured.append((method, path))
+        if path == "/api/v2/capabilities":
+            return {
+                "api_version": "cloakbrowser.io/v1",
+                "kind": "CapabilitySet",
+                "resources": [
+                    {"id": "local-mac", "kind": "Box", "available": False, "reason_code": "unavailable"},
+                    {"id": "orca-web", "kind": "OrcaWeb", "available": False, "reason_code": "not_configured"},
+                ],
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(["api", "capabilities"])
+    args.func(args)
+    assert captured == [("GET", "/api/v2/capabilities")]
+
+
 def test_runs_cancel_posts_cancel(monkeypatch: pytest.MonkeyPatch):
     import importlib.util
 

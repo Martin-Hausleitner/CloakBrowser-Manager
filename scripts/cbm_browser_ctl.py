@@ -33,7 +33,6 @@ import argparse
 import json
 import os
 import re
-import sys
 import threading
 import time
 import urllib.error
@@ -255,7 +254,7 @@ def _request(
             redact_error_message(f"HTTP {exc.code} {method} {path}"),
             exit_code=1,
         ) from None
-    except urllib.error.URLError as exc:
+    except urllib.error.URLError:
         raise BrowserCtlError(
             "transport_error",
             redact_error_message(f"Request failed for {_base_url()}{path}"),

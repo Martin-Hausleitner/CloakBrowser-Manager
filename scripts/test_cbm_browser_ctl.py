@@ -353,7 +353,8 @@ def test_page_targeting_defaults_to_last_and_supports_index_and_url(monkeypatch:
         raise AssertionError(path)
 
     monkeypatch.setattr(mod, "_request", fake_request)
-    connect = lambda *a, **k: FakeBrowser()
+    def connect(*a, **k):
+        return FakeBrowser()
 
     with mod.leased_page("profile-pages", connect_over_cdp=connect) as session:
         assert session.page.url.endswith("/three")

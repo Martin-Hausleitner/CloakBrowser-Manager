@@ -192,4 +192,36 @@ def test_server_factory_registers_only_bounded_tools(tmp_path: Path, monkeypatch
         "browser_click",
         "browser_fill",
         "browser_read_text",
+        "control_plane_capabilities",
+        "control_plane_resource_schema",
+        "orca_web_capabilities",
     ]
+
+
+def test_mcp_resource_tools_return_bounded_envelopes_without_secret_paths(tmp_path: Path):
+    ctl = CbmMcpController(make_run_context(tmp_path))
+
+    capabilities = ctl.control_plane_capabilities()
+    assert capabilities["api_version"] == "cloakbrowser.io/v1"
+    assert capabilities["kind"] == "CapabilitySet"
+    assert capabilities["resources"]["profiles"]["available"]["rest"] is True
+    assert capabilities["resources"]["profiles"]["available"]["mcp"] is False
+    assert capabilities["resources"]["secret-references"]["available"]["mcp"] is False
+    assert capabilities["resources"]["orca-web"]["available"]["mcp"] is False
+    assert capabilities["mcp_contract"]["manager_resource_tools"] is False
+    assert "fallback" not in json.dumps(capabilities).lower()
+
+    schema = ctl.control_plane_resource_schema()
+    assert schema["api_version"] == "cloakbrowser.io/v1"
+    assert schema["kind"] == "ContractSchema"
+    assert "raw_cdp" not in json.dumps(schema).lower()
+    assert "credential_reveal" not in json.dumps(schema).lower()
+
+    orca = ctl.orca_web_capabilities()
+    assert orca["resources"]["orca-web"]["available"] == {
+        "rest": False,
+        "cli": False,
+        "mcp": False,
+        "skill": False,
+    }
+    assert orca["resources"]["orca-web"]["reason_code"] == "capability_unavailable"

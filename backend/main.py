@@ -47,6 +47,8 @@ if __package__:
         AutomationLeaseAcquireResponse,
         AutomationLeaseHeartbeatResponse,
         ClipboardRequest,
+        control_plane_capabilities_payload,
+        control_plane_resource_schema,
         AccessAgentCreate,
         AccessAgentCreatedResponse,
         AccessAgentResponse,
@@ -143,6 +145,8 @@ else:  # Support `uvicorn main:app` from the backend directory.
         AutomationLeaseAcquireResponse,
         AutomationLeaseHeartbeatResponse,
         ClipboardRequest,
+        control_plane_capabilities_payload,
+        control_plane_resource_schema,
         AccessAgentCreate,
         AccessAgentCreatedResponse,
         AccessAgentResponse,
@@ -2266,6 +2270,25 @@ def _access_agent_response(agent: dict[str, object]) -> AccessAgentResponse:
         created_at=str(agent["created_at"]),
         grants=agent.get("grants", []),
     )
+
+
+@app.get("/api/v2/capabilities")
+async def get_control_plane_capabilities(request: Request):
+    """Versioned capability discovery for CLI/MCP/agent clients."""
+    _require_identity(request.scope)
+    local_mac_available = os.environ.get("CBM_LOCAL_MAC_AVAILABLE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    return control_plane_capabilities_payload(local_mac_available=local_mac_available)
+
+
+@app.get("/api/v2/schemas/control-plane-resource-v1")
+async def get_control_plane_resource_schema(request: Request):
+    """Canonical resource-envelope contract; contains no secrets or raw endpoints."""
+    _require_identity(request.scope)
+    return control_plane_resource_schema()
 
 
 def _normalize_access_grants(grants: list[object]) -> list[dict[str, object]]:

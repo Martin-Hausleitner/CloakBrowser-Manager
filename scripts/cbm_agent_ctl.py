@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -44,13 +45,179 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from backend.project_state import (
+from backend.project_state import (  # noqa: E402
     PROJECT_STATE_MODES,
     atomic_write_project_state,
     build_project_state,
     default_project_state_path,
 )
-from scripts.cbm_worktree_audit import AuditConfig, audit_repository
+from backend.models import (  # noqa: E402
+    CONTROL_PLANE_API_VERSION,
+)
+from scripts.cbm_worktree_audit import AuditConfig, audit_repository  # noqa: E402
+
+_SENSITIVE_RESOURCE_FIELDS = {
+    "proxy_url",
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "authorization",
+    "cookie",
+    "totp_seed",
+    "provider_locator",
+    "cdp_url",
+    "cdp_ws_url",
+    "cdp_http_url",
+    "debugger_url",
+}
+_RESOURCE_URL_RE = re.compile(r"\b(?:https?|wss?|socks5?|socks5h)://[^\s<>)\"']+")
+_RESOURCE_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_RESOURCE_TOKEN_RE = re.compile(r"\bcbm_(?:worker|run|agent|lease)_[A-Za-z0-9_-]+\b")
+_RESOURCE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(token|password|passwd|secret|api[_-]?key|authorization)"
+    r"(\s*[:=]\s*)[^\s,;&]+"
+)
+_SECRET_QUERY_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "key",
+    "password",
+    "refresh_token",
+    "secret",
+    "token",
+}
+
+
+def _is_sensitive_resource_key(key: object) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return any(
+        normalized == field
+        or normalized.startswith(f"{field}_")
+        or normalized.endswith(f"_{field}")
+        for field in _SENSITIVE_RESOURCE_FIELDS
+    )
+
+
+def _redact_resource_text(value: str) -> str:
+    def redact_url(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        try:
+            parsed = urllib.parse.urlsplit(raw)
+            netloc = parsed.netloc
+            if "@" in netloc:
+                netloc = f"[REDACTED]@{netloc.rsplit('@', 1)[1]}"
+            query = [
+                (key, "[REDACTED]" if key.lower() in _SECRET_QUERY_KEYS else item)
+                for key, item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            ]
+            return urllib.parse.urlunsplit(
+                (parsed.scheme, netloc, parsed.path, urllib.parse.urlencode(query), parsed.fragment)
+            )
+        except ValueError:
+            return "[REDACTED_URL]"
+
+    redacted = _RESOURCE_URL_RE.sub(redact_url, value)
+    redacted = _RESOURCE_BEARER_RE.sub("Bearer [REDACTED]", redacted)
+    redacted = _RESOURCE_TOKEN_RE.sub("[REDACTED]", redacted)
+    return _RESOURCE_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        redacted,
+    )
+
+
+def _strip_sensitive(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_sensitive(item)
+            for key, item in value.items()
+            if not _is_sensitive_resource_key(key)
+        }
+    if isinstance(value, list):
+        return [_strip_sensitive(item) for item in value]
+    if isinstance(value, str):
+        return _redact_resource_text(value)
+    return value
+
+
+def _resource_id(payload: dict[str, Any]) -> str:
+    for key in ("id", "profile_id", "session_id", "run_id", "proxy_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return "unknown"
+
+
+def _resource_version(payload: dict[str, Any]) -> int:
+    for key in ("resource_version", "row_version", "version"):
+        value = payload.get(key)
+        if isinstance(value, int) and value >= 1:
+            return value
+    return 1
+
+
+def _resource_spec(payload: dict[str, Any]) -> dict[str, Any]:
+    return _strip_sensitive({
+        key: value
+        for key, value in payload.items()
+        if not _is_sensitive_resource_key(key)
+        and key
+        not in {
+            "id",
+            "profile_id",
+            "session_id",
+            "run_id",
+            "created_at",
+            "updated_at",
+            "resource_version",
+            "row_version",
+            "links",
+            "status",
+        }
+    })
+
+
+def resource_envelope(
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    """Build the versioned public resource envelope without secret-like fields."""
+    metadata: dict[str, Any] = {
+        "id": _resource_id(payload),
+        "resource_version": _resource_version(payload),
+    }
+    if request_id:
+        metadata["request_id"] = request_id
+    if isinstance(payload.get("created_at"), str):
+        metadata["created_at"] = payload["created_at"]
+    if isinstance(payload.get("updated_at"), str):
+        metadata["updated_at"] = payload["updated_at"]
+    return {
+        "api_version": CONTROL_PLANE_API_VERSION,
+        "kind": kind,
+        "metadata": metadata,
+        "spec": _resource_spec(payload),
+        "status": _strip_sensitive(payload.get("status", {}))
+        if isinstance(payload.get("status"), dict)
+        else {},
+        "links": _strip_sensitive(payload.get("links", []))
+        if isinstance(payload.get("links"), list)
+        else [],
+    }
+
+
+def _request_options(args: argparse.Namespace) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    if getattr(args, "idempotency_key", None):
+        options["idempotency_key"] = args.idempotency_key
+    if getattr(args, "if_version", None) is not None:
+        options["if_version"] = args.if_version
+    return options
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -100,6 +267,8 @@ def _request(
     *,
     body: dict[str, Any] | None = None,
     query: dict[str, str] | None = None,
+    idempotency_key: str | None = None,
+    if_version: int | None = None,
 ) -> Any:
     url = f"{_base_url()}{path}"
     if query:
@@ -109,6 +278,10 @@ def _request(
         "Accept": "application/json",
         **_auth_header(),
     }
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    if if_version is not None:
+        headers["If-Match"] = str(if_version)
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -195,6 +368,25 @@ def cmd_catalog(args: argparse.Namespace) -> None:
     _print(_request("GET", "/api/extension/catalog"), args.json)
 
 
+def cmd_api_version(args: argparse.Namespace) -> None:
+    _print(
+        {
+            "api_version": CONTROL_PLANE_API_VERSION,
+            "kind": "ApiVersion",
+            "metadata": {"id": "cloakbrowser-manager-api", "resource_version": 1},
+        },
+        True,
+    )
+
+
+def cmd_api_capabilities(args: argparse.Namespace) -> None:
+    _print(_request("GET", "/api/v2/capabilities"), True)
+
+
+def cmd_api_schema(args: argparse.Namespace) -> None:
+    _print(_request("GET", "/api/v2/schemas/control-plane-resource-v1"), True)
+
+
 def cmd_profiles_list(args: argparse.Namespace) -> None:
     _print(_request("GET", "/api/profiles"), args.json)
 
@@ -223,7 +415,7 @@ def cmd_profiles_create(args: argparse.Namespace) -> None:
         body["platform"] = args.platform
     if args.extension_ids is not None:
         body["extension_ids"] = list(args.extension_ids)
-    _print(_request("POST", "/api/profiles", body=body), args.json)
+    _print(_request("POST", "/api/profiles", body=body, **_request_options(args)), args.json)
 
 
 def cmd_profiles_update(args: argparse.Namespace) -> None:
@@ -250,19 +442,22 @@ def cmd_profiles_update(args: argparse.Namespace) -> None:
         body["extension_ids"] = list(args.extension_ids)
     if not body:
         raise SystemExit("No update fields provided")
-    _print(_request("PUT", f"/api/profiles/{args.profile_id}", body=body), args.json)
+    _print(
+        _request("PUT", f"/api/profiles/{args.profile_id}", body=body, **_request_options(args)),
+        args.json,
+    )
 
 
 def cmd_profiles_delete(args: argparse.Namespace) -> None:
-    _print(_request("DELETE", f"/api/profiles/{args.profile_id}"), args.json)
+    _print(_request("DELETE", f"/api/profiles/{args.profile_id}", **_request_options(args)), args.json)
 
 
 def cmd_profiles_launch(args: argparse.Namespace) -> None:
-    _print(_request("POST", f"/api/profiles/{args.profile_id}/launch"), args.json)
+    _print(_request("POST", f"/api/profiles/{args.profile_id}/launch", **_request_options(args)), args.json)
 
 
 def cmd_profiles_stop(args: argparse.Namespace) -> None:
-    _print(_request("POST", f"/api/profiles/{args.profile_id}/stop"), args.json)
+    _print(_request("POST", f"/api/profiles/{args.profile_id}/stop", **_request_options(args)), args.json)
 
 
 def cmd_profiles_status(args: argparse.Namespace) -> None:
@@ -271,7 +466,14 @@ def cmd_profiles_status(args: argparse.Namespace) -> None:
 
 def cmd_profiles_health(args: argparse.Namespace) -> None:
     if args.run:
-        _print(_request("POST", f"/api/profiles/{args.profile_id}/health/run"), args.json)
+        _print(
+            _request(
+                "POST",
+                f"/api/profiles/{args.profile_id}/health/run",
+                **_request_options(args),
+            ),
+            args.json,
+        )
         return
     _print(_request("GET", f"/api/profiles/{args.profile_id}/health"), args.json)
 
@@ -299,14 +501,14 @@ def cmd_open_session(args: argparse.Namespace) -> None:
         "prefer": args.prefer,
         "mode": args.mode,
     }
-    _print(_request("POST", "/api/extension/sessions/open", body=body), args.json)
+    _print(_request("POST", "/api/extension/sessions/open", body=body, **_request_options(args)), args.json)
 
 
 def cmd_tasks_create(args: argparse.Namespace) -> None:
     body: dict[str, Any] = {"profile_id": args.profile_id}
     if args.title:
         body["title"] = args.title
-    _print(_request("POST", "/api/task-sessions", body=body), args.json)
+    _print(_request("POST", "/api/task-sessions", body=body, **_request_options(args)), args.json)
 
 
 def cmd_tasks_run(args: argparse.Namespace) -> None:
@@ -322,7 +524,12 @@ def cmd_tasks_run(args: argparse.Namespace) -> None:
     if args.model_alias:
         body["model_alias"] = args.model_alias
     _print(
-        _request("POST", f"/api/task-sessions/{args.session_id}/runs", body=body),
+        _request(
+            "POST",
+            f"/api/task-sessions/{args.session_id}/runs",
+            body=body,
+            **_request_options(args),
+        ),
         args.json,
     )
 
@@ -332,7 +539,7 @@ def cmd_runs_get(args: argparse.Namespace) -> None:
 
 
 def cmd_runs_cancel(args: argparse.Namespace) -> None:
-    _print(_request("POST", f"/api/task-runs/{args.run_id}/cancel"), args.json)
+    _print(_request("POST", f"/api/task-runs/{args.run_id}/cancel", **_request_options(args)), args.json)
 
 
 def cmd_runs_outputs(args: argparse.Namespace) -> None:
@@ -382,6 +589,15 @@ def cmd_worktree_audit(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="Always print JSON")
+    parser.add_argument(
+        "--idempotency-key",
+        help="Client retry-correlation header; global server enforcement is pending",
+    )
+    parser.add_argument(
+        "--if-version",
+        type=int,
+        help="Client If-Match header; global server enforcement is pending",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_health = sub.add_parser("health", help="Unauthenticated liveness")
@@ -398,6 +614,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_catalog = sub.add_parser("catalog", help="Extension/agent catalog")
     p_catalog.set_defaults(func=cmd_catalog)
+
+    api = sub.add_parser("api", help="Versioned control-plane contract")
+    apisub = api.add_subparsers(dest="api_command", required=True)
+
+    av = apisub.add_parser("version", help="Print the control-plane API version")
+    av.set_defaults(func=cmd_api_version)
+
+    ac = apisub.add_parser("capabilities", help="Discover Manager-reported resources")
+    ac.set_defaults(func=cmd_api_capabilities)
+
+    asc = apisub.add_parser("schema", help="Fetch the resource-envelope schema")
+    asc.set_defaults(func=cmd_api_schema)
 
     p_project_state = sub.add_parser(
         "project-state",

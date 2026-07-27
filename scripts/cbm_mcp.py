@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from backend.origin_policy import is_top_level_origin_allowed
+from backend.models import control_plane_capabilities_payload, control_plane_resource_schema
 from scripts.cbm_browser_ctl import (
     MAX_TEXT_CHARS,
     BrowserCtlError,
@@ -205,6 +206,24 @@ class CbmMcpController:
                 "url": _safe_page_url(page),
             }
 
+    def control_plane_capabilities(self) -> dict[str, Any]:
+        """Expose bounded resource semantics; unavailable targets are explicit."""
+        return control_plane_capabilities_payload(local_mac_available=False)
+
+    def control_plane_resource_schema(self) -> dict[str, Any]:
+        """Expose the shared versioned resource envelope schema."""
+        return control_plane_resource_schema()
+
+    def orca_web_capabilities(self) -> dict[str, Any]:
+        """Report Orca-Web availability without falling back to browser tools."""
+        payload = control_plane_capabilities_payload(local_mac_available=False)
+        return {
+            "api_version": payload["api_version"],
+            "kind": "CapabilitySet",
+            "metadata": {"id": "orca-web-capabilities", "resource_version": 1},
+            "resources": {"orca-web": payload["resources"]["orca-web"]},
+        }
+
 
 def _import_fastmcp():
     try:
@@ -253,6 +272,21 @@ def build_server(controller: CbmMcpController | None = None):
     def browser_read_text(selector: str | None = None) -> dict[str, Any]:
         """Read bounded visible text, never raw HTML or DOM snapshots."""
         return ctl.read_text(selector)
+
+    @server.tool()
+    def control_plane_capabilities() -> dict[str, Any]:
+        """Discover bounded Manager resource classes and unavailable capabilities."""
+        return ctl.control_plane_capabilities()
+
+    @server.tool()
+    def control_plane_resource_schema() -> dict[str, Any]:
+        """Return the versioned CloakBrowser resource envelope contract."""
+        return ctl.control_plane_resource_schema()
+
+    @server.tool()
+    def orca_web_capabilities() -> dict[str, Any]:
+        """Return Orca-Web capability status without silent fallback."""
+        return ctl.orca_web_capabilities()
 
     return server
 

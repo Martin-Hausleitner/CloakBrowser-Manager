@@ -56,6 +56,7 @@ ACPX_NODE_LOCK = "deploy/acpx-runtime/package-lock.json"
 ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
 ACPX_BOOTSTRAP_DIR = "acpx-bootstrap"
 ACPX_DIRECT_CLI = Path("node_modules/acpx/dist/cli.js")
+ACPX_SYSTEMD_PATH = "/home/coder/.local/bin:/usr/local/bin:/usr/bin:/bin"
 ACPX_ABSENCE_COMPONENTS = ("binary", "unit", "key", "venv", "capability")
 EXPECTED_ACPX_PREFLIGHT_AGENTS = ("codex", "claude", "cursor", "grok-build", "opencode")
 RELEASE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{11,80}$")
@@ -1433,6 +1434,7 @@ def op_bootstrap_acpx_provision_candidate(args: dict[str, object]) -> dict[str, 
     content = (
         "[Unit]\nDescription=CloakBrowser candidate ACPX worker\n"
         "[Service]\n"
+        f"Environment=PATH={ACPX_SYSTEMD_PATH}\n"
         f"WorkingDirectory={release_source}\n"
         f"ExecStart={root / 'venv' / 'bin' / 'python'} -m scripts.acpx_worker --manager-url {manager_url} "
         f"--token-file {key} --worker-id {acpx_candidate_worker_id(release_id)} "

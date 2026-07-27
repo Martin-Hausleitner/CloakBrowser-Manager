@@ -35,6 +35,7 @@ BROWSER_USE_TOKEN_PATH = "/home/coder/.config/cloakbrowser/browser-use-worker-ke
 IMAGE_ID = "sha256:" + ("d" * 64)
 IMAGE_DIGEST = "d" * 64
 REVISION = "0" * 40
+EXPECTED_ACPX_SYSTEMD_PATH = "/home/coder/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 
 def patch_remote_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
@@ -1249,6 +1250,10 @@ def tree_snapshot(path: Path) -> dict[str, str]:
     return snapshot
 
 
+def systemd_environment_lines(unit_text: str) -> list[str]:
+    return [line for line in unit_text.splitlines() if line.startswith("Environment=")]
+
+
 def install_release_id_symlink(paths: dict[str, Path], release_id: str = "release-0000001") -> tuple[Path, dict[str, str]]:
     sibling = paths["releases"] / "release-sibling-0001"
     sibling.mkdir()
@@ -2458,6 +2463,40 @@ def test_bootstrap_acpx_provision_reuses_existing_canonical_worker_key_without_l
     assert result["credential_source"] == "browser_use_worker_key"
 
 
+def test_bootstrap_acpx_provision_writes_only_safe_allowlisted_path_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    source_key = paths["home"] / ".config" / "cloakbrowser" / "browser-use-worker-key"
+    source_key.parent.mkdir(parents=True)
+    source_key.write_text("cbm_worker_" + ("ab" * 32) + "\n", encoding="utf-8")
+    source_key.chmod(0o600)
+    monkeypatch.setattr(remote, "BROWSER_USE_TOKEN_PATH", source_key)
+    monkeypatch.setenv("PATH", "/tmp/unsafe:/usr/bin")
+    monkeypatch.setenv("GH_TOKEN", "ghp_" + ("a" * 40))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + ("b" * 40))
+
+    remote.op_bootstrap_acpx_provision_candidate(
+        {
+            "release_id": "release-0000001",
+            "commit": "0" * 40,
+            "manager_port": 18116,
+            "runtime": {},
+        }
+    )
+
+    unit_text = (remote.acpx_bootstrap_dir("release-0000001") / "acpx-candidate-release-0000001.service").read_text(encoding="utf-8")
+    assert systemd_environment_lines(unit_text) == [f"Environment=PATH={EXPECTED_ACPX_SYSTEMD_PATH}"]
+    assert "/tmp/unsafe" not in unit_text
+    assert "GH_TOKEN" not in unit_text
+    assert "OPENAI_API_KEY" not in unit_text
+    assert "ghp_" not in unit_text
+    assert "sk-" not in unit_text
+
+
 def test_bootstrap_acpx_provision_requires_existing_release_source_worktree_before_unit_write(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2651,6 +2690,60 @@ def test_bootstrap_promote_rehomes_runtime_before_cleanup_keeps_permanent_unit_v
     assert (paths["releases"] / "release-0000001" / "acpx-runtime").exists()
     assert version_checks == [str(paths["releases"] / "release-0000001" / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js")]
     assert not root.exists()
+
+
+def test_bootstrap_promote_preserves_candidate_allowlisted_path_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    source_key = paths["home"] / ".config" / "cloakbrowser" / "browser-use-worker-key"
+    source_key.parent.mkdir(parents=True)
+    source_key.write_text("cbm_worker_" + ("ab" * 32) + "\n", encoding="utf-8")
+    source_key.chmod(0o600)
+    monkeypatch.setattr(remote, "BROWSER_USE_TOKEN_PATH", source_key)
+
+    remote.op_bootstrap_acpx_provision_candidate(
+        {
+            "release_id": "release-0000001",
+            "commit": "0" * 40,
+            "manager_port": 18116,
+            "runtime": {},
+        }
+    )
+    root = remote.acpx_bootstrap_dir("release-0000001")
+    for relative in ("venv/bin/python", "node-runtime/node_modules/acpx/dist/cli.js"):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+        target.chmod(0o700)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    result = remote.op_bootstrap_acpx_promote(
+        {
+            "release_id": "release-0000001",
+            "worker_id": "acpx-candidate-release-0000001",
+            "manager_port": 18115,
+            "release_source": str(release_source),
+            "acpx_executable": str(paths["releases"] / "release-0000001" / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js"),
+        }
+    )
+
+    assert result["active"] is True
+    permanent_unit = paths["home"] / ".config" / "systemd" / "user" / "cloakbrowser-acpx.service"
+    unit_text = permanent_unit.read_text(encoding="utf-8")
+    assert systemd_environment_lines(unit_text) == [f"Environment=PATH={EXPECTED_ACPX_SYSTEMD_PATH}"]
+    assert "/tmp" not in unit_text
+    assert "GH_TOKEN" not in unit_text
+    assert "OPENAI_API_KEY" not in unit_text
 
 
 @pytest.mark.parametrize("source_kind", ["missing", "symlink", "foreign"])

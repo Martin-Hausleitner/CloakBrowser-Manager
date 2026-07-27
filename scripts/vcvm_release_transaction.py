@@ -237,7 +237,7 @@ class SSHRemoteExecutor:
         self.upload_timeout_seconds = upload_timeout_seconds
 
     def run_timeout_for_phase(self, phase: str) -> int:
-        if phase == "candidate.verify":
+        if phase in {"candidate.verify", "bootstrap.acpx_verify_candidate"}:
             return CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
         return self.run_timeout_seconds
 

@@ -109,6 +109,7 @@ class FakeRemoteExecutor:
         self.fail_with_os_error = bool(facts.pop("fail_with_os_error", False))
         self.fail_with_timeout = bool(facts.pop("fail_with_timeout", False))
         self.fail_stderr = str(facts.pop("fail_stderr", "synthetic ssh failure"))
+        self.fail_message = str(facts.pop("fail_message", ""))
         self.rollback_verify_fails = bool(facts.pop("rollback_verify_fails", False))
         self.facts = {
             "disk_free_bytes": 9 * 1024**3,
@@ -453,7 +454,7 @@ class FakeRemoteExecutor:
                 raise OSError(self.fail_stderr)
             if self.fail_with_timeout:
                 raise subprocess.TimeoutExpired(["ssh", "vcvm", phase, "HELPER_SOURCE"], timeout=123, stderr=self.fail_stderr)
-            raise tx.TransactionError(f"synthetic failure at {phase}", phase=phase)
+            raise tx.TransactionError(self.fail_message or f"synthetic failure at {phase}", phase=phase)
 
 
 def test_verify_manager_remote_request_requires_structured_identity_args() -> None:
@@ -638,6 +639,31 @@ def test_bootstrap_acpx_candidate_stage_failure_cleans_up_and_preserves_live(tmp
     assert "bootstrap.acpx_cleanup" in fake.phases
     assert fake.live_generation == "old"
     assert "quiesce.stop_live" not in fake.phases
+
+
+def test_bootstrap_acpx_readiness_failure_surfaces_safe_reason_and_cleans_up_before_quiesce(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    add_acpx_locks(repo)
+    fake = FakeRemoteExecutor(
+        fail_phase="bootstrap.acpx_verify_candidate",
+        fail_message=(
+            "ACPX candidate readiness failed: attempt_count=3 elapsed_seconds=180.00 "
+            "deadline_seconds=180 reason=manager_preflight_auth_required"
+        ),
+    )
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo, bootstrap_acpx=True), fake)
+
+    message = str(exc_info.value)
+    assert exc_info.value.phase == "bootstrap.acpx_verify_candidate"
+    assert "manager_preflight_auth_required" in message
+    assert "attempt_count=3" in message
+    assert "bootstrap.acpx_cleanup" in fake.phases
+    assert "candidate.cleanup" in fake.phases
+    assert "quiesce.stop_workers" not in fake.phases
+    assert "quiesce.stop_live" not in fake.phases
+    assert "cbm_worker_" not in message
 
 
 def test_bootstrap_called_process_failure_before_quiesce_is_wrapped_and_cleans_up(tmp_path: Path) -> None:
@@ -940,9 +966,22 @@ def test_candidate_verify_ssh_timeout_exceeds_remote_readiness_deadline(
         },
         phase="candidate.verify",
     )
+    executor.run_json(
+        {
+            "operation": "bootstrap.acpx_verify_candidate",
+            "args": {
+                "release_id": "release-0000001",
+                "worker_id": "acpx-candidate-release-0000001",
+                "manager_port": tx.DEFAULT_CANDIDATE_PORT,
+                "acpx_executable": "/home/coder/cloakbrowser-manager/releases/release-0000001/acpx-bootstrap/node-runtime/node_modules/acpx/dist/cli.js",
+            },
+        },
+        phase="bootstrap.acpx_verify_candidate",
+    )
 
     assert calls[0]["kwargs"]["timeout"] == tx.DEFAULT_SSH_RUN_JSON_TIMEOUT_SECONDS
     assert calls[1]["kwargs"]["timeout"] == tx.CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
+    assert calls[2]["kwargs"]["timeout"] == tx.CANDIDATE_VERIFY_RUN_JSON_TIMEOUT_SECONDS
 
 
 def test_candidate_migrations_must_match_exact_required_set(tmp_path: Path) -> None:

@@ -57,6 +57,7 @@ ACPX_PYTHON_LOCK = "scripts/requirements-acpx-worker.linux-x86_64.py312.txt"
 ACPX_BOOTSTRAP_DIR = "acpx-bootstrap"
 ACPX_DIRECT_CLI = Path("node_modules/acpx/dist/cli.js")
 ACPX_ABSENCE_COMPONENTS = ("binary", "unit", "key", "venv", "capability")
+EXPECTED_ACPX_PREFLIGHT_AGENTS = ("codex", "claude", "cursor", "grok-build", "opencode")
 RELEASE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{11,80}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -550,9 +551,10 @@ def _manager_json(path: str) -> dict[str, object]:
     return _manager_json_on_port(LIVE_PORT, path)
 
 
-def _manager_json_on_port(port: int, path: str) -> dict[str, object]:
+def _manager_json_on_port(port: int, path: str, *, timeout: float = 5.0) -> dict[str, object]:
     require(port in {LIVE_PORT, CANDIDATE_PORT}, "Manager probe port is not allowlisted")
     require((path.startswith("/api/") or path == "/openapi.json") and "://" not in path, "Manager probe path is not allowlisted")
+    require(timeout > 0, "Manager probe timeout must be positive")
     token = _env_auth_token()
     request = Request(
         f"http://127.0.0.1:{port}{path}",
@@ -560,7 +562,7 @@ def _manager_json_on_port(port: int, path: str) -> dict[str, object]:
         method="GET",
     )
     try:
-        with urlopen(request, timeout=5) as response:  # noqa: S310 - fixed loopback URL.
+        with urlopen(request, timeout=min(5.0, timeout)) as response:  # noqa: S310 - fixed loopback URL.
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise HelperError("Manager authenticated probe failed") from exc
@@ -575,10 +577,10 @@ def _acpx_adapter_probe() -> dict[str, object]:
     return _acpx_adapter_probe_at(Path(executable))
 
 
-def _acpx_adapter_probe_at(executable: Path) -> dict[str, object]:
+def _acpx_adapter_probe_at(executable: Path, *, timeout: float | None = None) -> dict[str, object]:
     if not executable.exists() or executable.is_symlink() or not executable.is_file():
         return {"ready": False, "reason_code": "adapter_unavailable"}
-    version = run([str(executable), "--version"], check=False)
+    version = run([str(executable), "--version"], check=False, timeout=timeout)
     output = f"{version.stdout}\n{version.stderr}"
     if version.returncode != 0:
         return {"ready": False, "reason_code": "adapter_unavailable"}
@@ -609,24 +611,55 @@ def _validate_acpx_executable_path(release_id: str, value: object, *, kind: str)
 
 
 def _acpx_manager_preflights_ready(port: int = LIVE_PORT) -> dict[str, object]:
-    payload = _manager_json_on_port(port, "/api/task-harnesses/acpx/preflights")
+    return _acpx_manager_preflights_ready_with_timeout(port, timeout=5.0)
+
+
+def _acpx_manager_preflights_ready_with_timeout(port: int, *, timeout: float) -> dict[str, object]:
+    payload = _manager_json_on_port(port, "/api/task-harnesses/acpx/preflights", timeout=min(5.0, timeout))
     agents = payload.get("agents", [])
-    require(isinstance(agents, list) and agents, "ACPX preflight receipt is empty")
-    failures = [
-        item
-        for item in agents
-        if not isinstance(item, dict)
-        or item.get("ready") is not True
-        or item.get("state") != "ready"
-        or item.get("reason_code") != "ok"
-    ]
-    return {"ready": not failures, "agents": agents}
+    require(isinstance(agents, list), "ACPX preflight receipt is malformed")
+    malformed_agents = [item for item in agents if not isinstance(item, dict)]
+    seen_agents: list[str] = [str(item.get("agent")) for item in agents if isinstance(item, dict)]
+    duplicate_agents = sorted({agent for agent in seen_agents if seen_agents.count(agent) > 1})
+    unexpected_agents = sorted(set(seen_agents) - set(EXPECTED_ACPX_PREFLIGHT_AGENTS))
+    failures: list[dict[str, object]] = []
+    if malformed_agents:
+        failures.append({"agent": "malformed", "ready": False, "state": "malformed", "reason_code": "malformed_agent"})
+    for agent in duplicate_agents:
+        failures.append({"agent": agent, "ready": False, "state": "duplicate", "reason_code": "duplicate_agent"})
+    for agent in unexpected_agents:
+        failures.append({"agent": agent, "ready": False, "state": "unexpected", "reason_code": "unexpected_agent"})
+    by_agent = {str(item.get("agent")): item for item in agents if isinstance(item, dict)}
+    for agent in EXPECTED_ACPX_PREFLIGHT_AGENTS:
+        item = by_agent.get(agent)
+        if not isinstance(item, dict):
+            failures.append({"agent": agent, "ready": False, "state": "missing", "reason_code": "not_checked"})
+            continue
+        if item.get("ready") is not True or item.get("state") != "ready" or item.get("reason_code") != "ok":
+            failures.append(item)
+    reason_code = "ok"
+    if failures:
+        first_failure = failures[0]
+        reason_code = str(first_failure.get("reason_code") or first_failure.get("state") or "not_ready")
+    return {"ready": not failures, "agents": agents, "failures": failures, "reason_code": reason_code}
 
 
 def _acpx_manager_presence_ready(port: int) -> dict[str, object]:
-    payload = _manager_json_on_port(port, "/api/task-harnesses/acpx/presence")
+    return _acpx_manager_presence_ready_with_timeout(port, timeout=5.0)
+
+
+def _acpx_manager_presence_ready_with_timeout(port: int, *, timeout: float) -> dict[str, object]:
+    payload = _manager_json_on_port(port, "/api/task-harnesses/acpx/presence", timeout=min(5.0, timeout))
+    ready = payload.get("worker_seen_recently") is True and payload.get("state") == "polling"
+    if ready:
+        reason_code = "ok"
+    elif payload.get("worker_seen_recently") is not True:
+        reason_code = "worker_not_seen"
+    else:
+        reason_code = f"state_{_safe_reason_code(payload.get('state'))}"
     return {
-        "ready": payload.get("worker_seen_recently") is True and payload.get("state") == "polling",
+        "ready": ready,
+        "reason_code": reason_code,
         "presence": payload,
     }
 
@@ -1117,6 +1150,34 @@ def _candidate_readiness_error(
     return HelperError(message)
 
 
+def _safe_reason_code(value: object) -> str:
+    reason = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "unknown")).strip("_")
+    return reason[:80] or "unknown"
+
+
+def _acpx_candidate_readiness_error(
+    *,
+    attempt_count: int,
+    elapsed_seconds: float,
+    deadline_seconds: float,
+    reason: str,
+) -> HelperError:
+    return HelperError(
+        "ACPX candidate readiness failed: "
+        f"attempt_count={attempt_count} "
+        f"elapsed_seconds={elapsed_seconds:.2f} "
+        f"deadline_seconds={deadline_seconds:g} "
+        f"reason={_safe_reason_code(reason)}"
+    )
+
+
+def _acpx_probe_timeout(started: float, deadline_seconds: float, *, max_seconds: float = CANDIDATE_PROBE_TIMEOUT_SECONDS) -> float:
+    remaining = deadline_seconds - (time.monotonic() - started)
+    if remaining <= 0:
+        raise TimeoutError("ACPX candidate readiness deadline exhausted")
+    return min(max_seconds, remaining)
+
+
 def _candidate_remaining_seconds(started: float, deadline_seconds: float) -> float:
     return deadline_seconds - (time.monotonic() - started)
 
@@ -1378,18 +1439,206 @@ def op_bootstrap_acpx_verify_candidate(args: dict[str, object]) -> dict[str, obj
     require(worker_id == acpx_candidate_worker_id(release_id), "unexpected ACPX worker id")
     require(int(args["manager_port"]) == CANDIDATE_PORT, "candidate ACPX readiness must target candidate Manager port")
     acpx_executable = _validate_acpx_executable_path(release_id, args["acpx_executable"], kind="candidate")
-    active = run(["systemctl", "--user", "is-active", f"{worker_id}.service"], check=False).stdout.strip()
-    presence = _acpx_manager_presence_ready(CANDIDATE_PORT)
-    manager_preflights = _acpx_manager_preflights_ready(CANDIDATE_PORT)
-    adapter = _acpx_adapter_probe_at(acpx_executable)
-    return {
-        "worker_id": worker_id,
-        "present": active == "active" and presence["ready"] is True,
-        "adapters_ready": adapter["ready"] is True and manager_preflights["ready"] is True,
-        "presence": presence["presence"],
-        "agent_preflights": manager_preflights["agents"],
-        "acpx_executable": _path_ref(acpx_executable),
-    }
+    deadline_seconds = float(CANDIDATE_READINESS_TIMEOUT_SECONDS)
+    interval_seconds = float(CANDIDATE_READINESS_POLL_INTERVAL_SECONDS)
+    require(deadline_seconds > 0, "ACPX candidate readiness deadline must be positive")
+    require(interval_seconds > 0, "ACPX candidate readiness poll interval must be positive")
+    started = time.monotonic()
+    attempt_count = 0
+    last_reason = "not_started"
+    last_components: dict[str, object] = {}
+    last_presence: dict[str, object] = {}
+    last_agent_preflights: list[object] = []
+    while True:
+        elapsed = time.monotonic() - started
+        if attempt_count > 0 and elapsed >= deadline_seconds:
+            raise _acpx_candidate_readiness_error(
+                attempt_count=attempt_count,
+                elapsed_seconds=elapsed,
+                deadline_seconds=deadline_seconds,
+                reason=last_reason,
+            )
+        attempt_count += 1
+        try:
+            adapter = _acpx_adapter_probe_at(
+                acpx_executable,
+                timeout=_acpx_probe_timeout(started, deadline_seconds),
+            )
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, TimeoutError) as exc:
+            last_reason = f"adapter_{exc.__class__.__name__}"
+            elapsed = time.monotonic() - started
+            if elapsed >= deadline_seconds:
+                raise _acpx_candidate_readiness_error(
+                    attempt_count=attempt_count,
+                    elapsed_seconds=elapsed,
+                    deadline_seconds=deadline_seconds,
+                    reason=last_reason,
+                ) from exc
+            time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
+            continue
+        if adapter["ready"] is not True:
+            last_reason = f"adapter_{adapter.get('reason_code', 'adapter_unavailable')}"
+            if adapter.get("reason_code") in {"adapter_unavailable", "version_mismatch"}:
+                raise _acpx_candidate_readiness_error(
+                    attempt_count=attempt_count,
+                    elapsed_seconds=time.monotonic() - started,
+                    deadline_seconds=deadline_seconds,
+                    reason=str(adapter.get("reason_code", "adapter_unavailable")),
+                )
+            elapsed = time.monotonic() - started
+            if elapsed >= deadline_seconds:
+                raise _acpx_candidate_readiness_error(
+                    attempt_count=attempt_count,
+                    elapsed_seconds=elapsed,
+                    deadline_seconds=deadline_seconds,
+                    reason=last_reason,
+                )
+            time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
+            continue
+        try:
+            active = run(
+                ["systemctl", "--user", "is-active", f"{worker_id}.service"],
+                check=False,
+                timeout=_acpx_probe_timeout(started, deadline_seconds),
+            ).stdout.strip()
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, TimeoutError) as exc:
+            last_reason = f"systemctl_{exc.__class__.__name__}"
+            elapsed = time.monotonic() - started
+            if elapsed >= deadline_seconds:
+                raise _acpx_candidate_readiness_error(
+                    attempt_count=attempt_count,
+                    elapsed_seconds=elapsed,
+                    deadline_seconds=deadline_seconds,
+                    reason=last_reason,
+                ) from exc
+            time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
+            continue
+        unit_ready = active == "active"
+        last_components = {
+            "unit": {"ready": unit_ready, "active_state": _safe_reason_code(active)},
+            "adapter": {"ready": True, "reason_code": adapter["reason_code"]},
+        }
+        if active in {"failed", "inactive"}:
+            raise _acpx_candidate_readiness_error(
+                attempt_count=attempt_count,
+                elapsed_seconds=time.monotonic() - started,
+                deadline_seconds=deadline_seconds,
+                reason=f"unit_{active}",
+            )
+        if not unit_ready:
+            last_reason = f"unit_{_safe_reason_code(active)}"
+        else:
+            try:
+                presence = _acpx_manager_presence_ready_with_timeout(
+                    CANDIDATE_PORT,
+                    timeout=_acpx_probe_timeout(started, deadline_seconds, max_seconds=5.0),
+                )
+            except (HelperError, OSError, TimeoutError, URLError, json.JSONDecodeError) as exc:
+                last_reason = f"manager_{exc.__class__.__name__}"
+                elapsed = time.monotonic() - started
+                if elapsed >= deadline_seconds:
+                    raise _acpx_candidate_readiness_error(
+                        attempt_count=attempt_count,
+                        elapsed_seconds=elapsed,
+                        deadline_seconds=deadline_seconds,
+                        reason=last_reason,
+                    ) from exc
+                time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
+                continue
+            last_presence = dict(presence["presence"]) if isinstance(presence.get("presence"), dict) else {}
+            last_components["presence"] = {
+                "ready": presence["ready"] is True,
+                "reason_code": presence["reason_code"],
+            }
+            if presence["ready"] is not True:
+                last_reason = f"presence_{presence['reason_code']}"
+            else:
+                try:
+                    manager_preflights = _acpx_manager_preflights_ready_with_timeout(
+                        CANDIDATE_PORT,
+                        timeout=_acpx_probe_timeout(started, deadline_seconds, max_seconds=5.0),
+                    )
+                except (HelperError, OSError, TimeoutError, URLError, json.JSONDecodeError) as exc:
+                    last_reason = f"manager_{exc.__class__.__name__}"
+                    elapsed = time.monotonic() - started
+                    if elapsed >= deadline_seconds:
+                        raise _acpx_candidate_readiness_error(
+                            attempt_count=attempt_count,
+                            elapsed_seconds=elapsed,
+                            deadline_seconds=deadline_seconds,
+                            reason=last_reason,
+                        ) from exc
+                    time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
+                    continue
+                last_agent_preflights = list(manager_preflights["agents"]) if isinstance(manager_preflights.get("agents"), list) else []
+                last_components["manager_preflights"] = {
+                    "ready": manager_preflights["ready"] is True,
+                    "reason_code": manager_preflights["reason_code"],
+                }
+                if manager_preflights["ready"] is not True:
+                    last_reason = f"manager_preflight_{manager_preflights['reason_code']}"
+                else:
+                    try:
+                        final_active = run(
+                            ["systemctl", "--user", "is-active", f"{worker_id}.service"],
+                            check=False,
+                            timeout=_acpx_probe_timeout(started, deadline_seconds),
+                        ).stdout.strip()
+                    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, TimeoutError) as exc:
+                        last_reason = f"systemctl_{exc.__class__.__name__}"
+                        elapsed = time.monotonic() - started
+                        if elapsed >= deadline_seconds:
+                            raise _acpx_candidate_readiness_error(
+                                attempt_count=attempt_count,
+                                elapsed_seconds=elapsed,
+                                deadline_seconds=deadline_seconds,
+                                reason=last_reason,
+                            ) from exc
+                        time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
+                        continue
+                    last_components["unit"] = {"ready": final_active == "active", "active_state": _safe_reason_code(final_active)}
+                    if final_active in {"failed", "inactive"}:
+                        raise _acpx_candidate_readiness_error(
+                            attempt_count=attempt_count,
+                            elapsed_seconds=time.monotonic() - started,
+                            deadline_seconds=deadline_seconds,
+                            reason=f"unit_{final_active}",
+                        )
+                    if final_active != "active":
+                        last_reason = f"unit_{_safe_reason_code(final_active)}"
+                        elapsed = time.monotonic() - started
+                        if elapsed >= deadline_seconds:
+                            raise _acpx_candidate_readiness_error(
+                                attempt_count=attempt_count,
+                                elapsed_seconds=elapsed,
+                                deadline_seconds=deadline_seconds,
+                                reason=last_reason,
+                            )
+                        time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
+                        continue
+                    elapsed = time.monotonic() - started
+                    return {
+                        "worker_id": worker_id,
+                        "present": True,
+                        "adapters_ready": True,
+                        "presence": last_presence,
+                        "agent_preflights": last_agent_preflights,
+                        "components": last_components,
+                        "attempt_count": attempt_count,
+                        "elapsed_seconds": round(elapsed, 2),
+                        "deadline_seconds": deadline_seconds,
+                        "readiness_reason": "ready",
+                        "acpx_executable": _path_ref(acpx_executable),
+                    }
+        elapsed = time.monotonic() - started
+        if elapsed >= deadline_seconds:
+            raise _acpx_candidate_readiness_error(
+                attempt_count=attempt_count,
+                elapsed_seconds=elapsed,
+                deadline_seconds=deadline_seconds,
+                reason=last_reason,
+            )
+        time.sleep(min(interval_seconds, max(0.0, deadline_seconds - elapsed)))
 
 
 def op_bootstrap_acpx_promote(args: dict[str, object]) -> dict[str, object]:

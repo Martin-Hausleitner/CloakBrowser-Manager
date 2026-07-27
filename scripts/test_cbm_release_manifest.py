@@ -128,6 +128,7 @@ def test_manifest_schema_exactness_hashes_fork_source_and_measurement_source(tmp
     schema = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
     manifest_schema = schema["spec"]["manifest"]
     assert "artifact_set_sha256" in manifest_schema["required"]
+    assert "archive_sha256" in manifest_schema["properties"]["source"]["required"]
     for object_name in ("source", "target", "disk", "policy"):
         object_schema = manifest_schema["properties"][object_name]
         assert sorted(object_schema["required"]) == sorted(object_schema["properties"])
@@ -145,9 +146,12 @@ def test_manifest_schema_exactness_hashes_fork_source_and_measurement_source(tmp
     assert payload["release_id"].endswith(payload["source"]["commit"][:12])
     assert payload["source"]["remote_name"] == "fork"
     assert payload["source"]["remote"] == AUTHORIZED_FORK
+    assert len(payload["source"]["archive_sha256"]) == 64
     assert payload["disk"]["measurement_source"] == "override"
     assert payload["disk"]["free_bytes"] == 9 * 1024**3
     assert len(payload["artifact_set_sha256"]) == 64
+    assert payload["policy"]["apply_available"] is False
+    assert "transaction_engine_re_review" in payload["policy"]["missing_apply_gates"]
     assert payload["migrations"] == [
         {
             "source": "backend/migrations/001_init.sql",
@@ -302,7 +306,7 @@ def test_source_tree_hash_changes_on_artifact_mismatch(tmp_path: Path) -> None:
     assert first != second
 
 
-def test_deploy_apply_is_unavailable_and_does_not_mutate_fake_remote(tmp_path: Path) -> None:
+def test_deploy_apply_remains_unavailable_during_transaction_engine_re_review(tmp_path: Path) -> None:
     repo = fixture_repo(tmp_path)
     env, log = env_with_fake_bin(tmp_path)
     result = run(
@@ -315,34 +319,36 @@ def test_deploy_apply_is_unavailable_and_does_not_mutate_fake_remote(tmp_path: P
         AUTHORIZED_FORK,
         "--disk-free-bytes",
         str(9 * 1024**3),
+        "--expected-current-worker-commit",
+        "50a9e43",
         "--apply",
         cwd=repo,
         env=env,
         check=False,
     )
     assert result.returncode == 78
-    assert "live VCVM release is unavailable" in result.stderr
-    assert "source-hash verification" in result.stderr
-    assert "worker/runtime skew checks" in result.stderr
+    assert "transaction engine re-review is complete" in result.stderr
     assert not log.exists()
 
     dirty_parent = tmp_path / "dirty"
     dirty_parent.mkdir()
     dirty_repo = fixture_repo(dirty_parent)
     (dirty_repo / "backend" / "app.py").write_text("print('dirty')\n", encoding="utf-8")
+    dirty_env, dirty_log = env_with_fake_bin(dirty_parent)
     dirty_result = run(
         str(DEPLOY_SCRIPT),
         "--source-root",
         str(dirty_repo),
+        "--expected-current-worker-commit",
+        "50a9e43",
         "--apply",
         cwd=dirty_repo,
-        env=env,
+        env=dirty_env,
         check=False,
     )
     assert dirty_result.returncode == 78
-    assert "live VCVM release is unavailable" in dirty_result.stderr
-    assert "clean git checkout" not in dirty_result.stderr
-    assert not log.exists()
+    assert "transaction engine re-review is complete" in dirty_result.stderr
+    assert not dirty_log.exists()
 
 
 def test_removed_live_flags_are_rejected_not_accepted_as_noops(tmp_path: Path) -> None:
@@ -402,7 +408,7 @@ def test_deploy_dry_run_has_no_mutation_and_records_override_not_vcvm_exact(tmp_
     assert before == after
 
 
-def test_rollback_apply_is_unavailable_and_validates_release_id_before_fake_ssh(tmp_path: Path) -> None:
+def test_rollback_apply_remains_unavailable_and_validates_release_id_before_fake_ssh(tmp_path: Path) -> None:
     env, log = env_with_fake_bin(tmp_path)
     unsafe = run(str(ROLLBACK_SCRIPT), "--target-release", "../bad", "--apply", env=env, check=False)
     assert unsafe.returncode == 64
@@ -418,6 +424,5 @@ def test_rollback_apply_is_unavailable_and_validates_release_id_before_fake_ssh(
         check=False,
     )
     assert result.returncode == 78
-    assert "rollback is unavailable" in result.stderr
-    assert "backup compatibility" in result.stderr
+    assert "transaction engine re-review is complete" in result.stderr
     assert not log.exists()

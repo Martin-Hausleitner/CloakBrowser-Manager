@@ -72,5 +72,7 @@ if [[ "$apply" != "1" ]]; then
   exit 0
 fi
 
-echo "Refusing --apply: rollback is unavailable until compose restart, health/auth verification, and backup compatibility gates are implemented." >&2
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+echo "Refusing --apply: rollback is unavailable until transaction engine re-review is complete." >&2
+echo "Run scripts/vcvm_release_transaction.py rollback directly with a fake RemoteExecutor for review-only testing." >&2
 exit 78

@@ -12,7 +12,7 @@
       "release_free_space_gib >= 8",
       "new_worktree_free_space_gib >= 12",
       "manifest records measurement_source as local, override, or vcvm-remote",
-      "apply is unavailable until remote verification, backup, build-before-switch, rollback, worker skew, and service receipt gates are implemented",
+      "apply is unavailable until transaction engine re-review passes",
       "dry-run is the default",
       "raw secrets and credentialed URLs are forbidden"
     ],
@@ -49,7 +49,8 @@
             "commit",
             "remote_name",
             "remote",
-            "dirty"
+            "dirty",
+            "archive_sha256"
           ],
           "properties": {
             "kind": {
@@ -70,6 +71,10 @@
             },
             "dirty": {
               "type": "boolean"
+            },
+            "archive_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
             }
           },
           "additionalProperties": false

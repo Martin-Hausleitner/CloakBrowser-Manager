@@ -138,15 +138,12 @@ records:
   `free_gib`;
 - artifact SHA-256 hashes and the detected migration set;
 - a deterministic `artifact_set_sha256` over the selected release artifacts;
-- release policy flags showing that live apply is currently unavailable.
+- release policy flags for the dry-run manifest gate.
 
-`--apply` currently fails closed. It does not create
-`/home/coder/cloakbrowser-manager`, `releases/`, `current`, env files, compose
-state or any backup/state receipt. Live release remains unavailable until the
-implementation can prove remote source-hash verification, SQLite/profile backup
-receipts, build-before-switch, automatic failure restore, worker/runtime commit
-binding, and required Orca, Browser Use, ACPX, proxychecker, stream and
-Tailscale private-access receipts.
+`--apply` remains unavailable until the transaction engine re-review gate is
+green for the live VCVM path.
+The independent engine can be tested with fake executors, but the wrapper does
+not delegate to live SSH, transfer, Docker or systemd operations.
 
 Legacy live flags such as `--auth-token-file` and `--serve-private` are rejected
 while apply is unavailable; they are not accepted as successful dry-run no-ops.
@@ -157,9 +154,8 @@ Rollback is also dry-run by default:
 ./scripts/rollback_vcvm_release.sh
 ```
 
-`rollback_vcvm_release.sh --apply` also fails closed until rollback can restart
-the previous compose release, verify health/auth, validate DB/profile backup
-compatibility and update state only after success.
+`rollback_vcvm_release.sh --apply` also remains unavailable until the
+transaction engine re-review gate is green for rollback.
 
 ## Deploy
 
@@ -172,9 +168,9 @@ remote configured:
   --expected-source-remote https://github.com/Martin-Hausleitner/CloakBrowser-Manager.git
 ```
 
-There is no live VCVM deploy command in this slice. `--apply` currently fails closed
-with an error that names the missing P0 gates instead of performing a partial
-release.
+There is no wrapper-enabled live VCVM deploy command in this slice. `--apply`
+currently fails closed on the transaction re-review gate instead of performing
+a partial release.
 
 Optional Browser-Use worker bootstrap uses a separate `.env.worker.vcvm` file
 (only `CBM_WORKER_ID` / `CBM_WORKER_TOKEN`) attached by Compose

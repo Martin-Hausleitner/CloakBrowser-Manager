@@ -15,6 +15,7 @@ COMPOSE_FILE = ROOT / "docker-compose.vcvm.yml"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy_vcvm.sh"
 ROLLBACK_SCRIPT = ROOT / "scripts" / "rollback_vcvm_release.sh"
 RELEASE_MANIFEST_SCRIPT = ROOT / "scripts" / "cbm_release_manifest.py"
+RELEASE_TRANSACTION_SCRIPT = ROOT / "scripts" / "vcvm_release_transaction.py"
 RELEASE_CONTRACT = ROOT / "docs" / "contracts" / "vcvm-release-v1.json"
 DOC_FILE = ROOT / "docs" / "VCVM-DEPLOYMENT.md"
 WORKER_DOC_FILE = ROOT / "docs" / "BROWSER_USE_WORKER.md"
@@ -158,25 +159,19 @@ def test_deploy_vcvm_sh_fails_closed_before_remote_writes() -> None:
     assert_true("apply=0" in deploy_text, "deploy must be dry-run by default")
     assert_true("--apply" in deploy_text, "live deploy flag must exist and fail closed")
     assert_true("cbm_release_manifest.py" in deploy_text, "deploy must generate a release manifest")
+    assert_true('exec python3 "$repo_root/scripts/vcvm_release_transaction.py"' not in deploy_text, "deploy --apply must not delegate while re-review is open")
     assert_true("--disk-free-bytes" in deploy_text, "manifest must record measured VCVM free capacity")
     assert_true(
         deploy_text.index('if [[ "$apply" == "1" ]]') < deploy_text.index("manifest_args=("),
-        "deploy must refuse unavailable apply before manifest generation",
+        "deploy apply must fail closed before dry-run manifest generation",
     )
     for mutation in ('ssh "$target_host"', "rsync -az", "docker compose", "mkdir -p \"\\$remote_path/releases\""):
-        assert_true(mutation not in deploy_text, f"apply-unavailable deploy must not contain {mutation}")
-    assert_true(
-        "live VCVM release is unavailable" in deploy_text,
-        "deploy --apply must fail closed instead of running a partial release",
-    )
-    assert_true(
-        "source-hash verification" in deploy_text and "worker/runtime skew checks" in deploy_text,
-        "deploy --apply refusal must name missing P0 release gates",
-    )
+        assert_true(mutation not in deploy_text, f"deploy wrapper must not contain partial mutation logic: {mutation}")
 
 
 def test_release_manifest_and_rollback_files_are_documented() -> None:
     assert_true(RELEASE_MANIFEST_SCRIPT.exists(), "missing scripts/cbm_release_manifest.py")
+    assert_true(RELEASE_TRANSACTION_SCRIPT.exists(), "missing scripts/vcvm_release_transaction.py")
     assert_true(ROLLBACK_SCRIPT.exists(), "missing scripts/rollback_vcvm_release.sh")
     assert_true(RELEASE_CONTRACT.exists(), "missing docs/contracts/vcvm-release-v1.json")
     deploy_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
@@ -187,14 +182,16 @@ def test_release_manifest_and_rollback_files_are_documented() -> None:
     assert_true("release_min_free_gib" in RELEASE_MANIFEST_SCRIPT.read_text(encoding="utf-8"), "manifest must record release disk gate")
     assert_true("new_worktree_min_free_gib" in RELEASE_MANIFEST_SCRIPT.read_text(encoding="utf-8"), "manifest must record worktree disk gate")
     assert_true("SECRET_PATTERNS" in RELEASE_MANIFEST_SCRIPT.read_text(encoding="utf-8"), "manifest must fail closed on secrets")
+    assert_true("run_release" in RELEASE_TRANSACTION_SCRIPT.read_text(encoding="utf-8"), "transaction engine must expose release execution")
+    assert_true("run_rollback" in RELEASE_TRANSACTION_SCRIPT.read_text(encoding="utf-8"), "transaction engine must expose rollback execution")
     assert_true("apply=0" in rollback_text, "rollback must be dry-run by default")
     assert_true("release_id_re" in rollback_text, "rollback must validate release ID shape")
-    assert_true("rollback is unavailable" in rollback_text, "rollback --apply must fail closed")
+    assert_true("rollback is unavailable" in rollback_text, "rollback --apply must fail closed while re-review is open")
     for phrase in (
         "Release manifest dry-run gate",
         "dry-run by default",
         "at least 8 GiB",
-        "`--apply` currently fails closed",
+        "`--apply` remains unavailable",
         "contracts/vcvm-release-v1.json",
     ):
         assert_true(phrase in doc_text, f"deployment docs missing {phrase}")
@@ -401,10 +398,10 @@ def main() -> None:
         "deploy script must restrict the proxychecker boundary to the Docker host gateway",
     )
     assert_true("cbm_release_manifest.py" in deploy_text, "deploy script must generate manifest dry-runs")
-    assert_true("live VCVM release is unavailable" in deploy_text, "deploy --apply must fail closed")
+    assert_true("transaction engine re-review is complete" in deploy_text, "deploy --apply must fail closed while re-review is open")
     assert_true("rsync -az" not in deploy_text, "deploy must not carry partial rsync release logic")
     assert_true("docker compose" not in deploy_text, "deploy must not carry partial compose release logic")
-    assert_true('ssh "$target_host"' not in deploy_text, "deploy must not open SSH while apply is unavailable")
+    assert_true('ssh "$target_host"' not in deploy_text, "deploy wrapper must not open SSH")
     preflight_text = (ROOT / "scripts" / "vcvm_orca_preflight.py").read_text(encoding="utf-8")
     assert_true("worktree show" in preflight_text, "preflight must verify worktree show")
     assert_true("check_agent_key_file" in preflight_text, "preflight must validate agent key file")

@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -22,15 +23,7 @@ DEFAULT_REMOTE_PATH = "/home/coder/cloakbrowser-manager"
 DEFAULT_SOURCE_REMOTE = "fork"
 RELEASE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{11,80}$")
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-MISSING_APPLY_GATES = (
-    "vcvm_remote_source_hash_verification",
-    "sqlite_profile_backup_receipt",
-    "build_before_current_switch",
-    "failed_build_health_auth_acceptance_restore",
-    "rollback_compose_health_auth_backup_compatibility",
-    "browser_use_acpx_working_directory_commit_binding",
-    "orca_browser_use_acpx_proxychecker_stream_tailscale_receipts",
-)
+MISSING_APPLY_GATES = ("transaction_engine_re_review",)
 DEFAULT_ARTIFACTS = (
     "Dockerfile",
     "docker-compose.vcvm.yml",
@@ -230,6 +223,19 @@ def artifact_set_sha256(artifacts: list[dict[str, object]]) -> str:
     return digest.hexdigest()
 
 
+def git_archive_sha256(root: Path, commit: str) -> str:
+    with tempfile.NamedTemporaryFile(prefix=f"cbm-manifest-{commit[:12]}-", suffix=".tar", delete=True) as archive:
+        subprocess.run(
+            ("git", "archive", "--format=tar", "--prefix=source/", "-o", archive.name, commit),
+            cwd=root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return hash_file(Path(archive.name))
+
+
 def migration_set(root: Path) -> list[dict[str, str]]:
     candidates = [
         root / "backend" / "migrations",
@@ -292,6 +298,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
     release_id = args.release_id or f"{created_at.replace(':', '').replace('-', '').replace('Z', 'Z')}-{str(git['commit'])[:12]}"
     release_id = validate_release_id(release_id)
     artifacts = [hash_path(root, item) for item in args.artifact]
+    archive_sha256 = git_archive_sha256(root, str(git["commit"]))
     migrations = migration_set(root)
     if not migrations:
         raise ManifestError("release manifest requires a non-empty migration set")
@@ -306,6 +313,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
             "remote_name": git["remote_name"],
             "remote": git["remote"],
             "dirty": git["dirty"],
+            "archive_sha256": archive_sha256,
         },
         "target": {
             "host": args.host,

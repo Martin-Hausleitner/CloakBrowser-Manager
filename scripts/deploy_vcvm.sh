@@ -12,7 +12,7 @@ MANAGED_MARKER=".cloakbrowser-manager-vcvm-managed"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy_vcvm.sh [--host vcvm] [--remote-path /home/coder/cloakbrowser-manager] [--port 18115] [--source-remote fork] [--expected-source-remote URL] [--apply]
+Usage: scripts/deploy_vcvm.sh [--host vcvm] [--remote-path /home/coder/cloakbrowser-manager] [--port 18115] [--source-remote fork] [--expected-source-remote URL] [--expected-current-worker-commit COMMIT] [--apply]
 
 Plan or deploy CloakBrowser Manager to the authorized VCVM Docker host.
 
@@ -48,6 +48,7 @@ apply=0
 source_root=""
 source_remote="${CBM_RELEASE_SOURCE_REMOTE:-fork}"
 expected_source_remote="${CBM_EXPECTED_SOURCE_REMOTE:-https://github.com/Martin-Hausleitner/CloakBrowser-Manager.git}"
+expected_current_worker_commit="${CBM_EXPECTED_CURRENT_WORKER_COMMIT:-}"
 disk_free_bytes="${CBM_RELEASE_FREE_BYTES:-}"
 tailscale_https_port="${TAILSCALE_HTTPS_PORT:-$DEFAULT_TAILSCALE_HTTPS_PORT}"
 proxychecker_url="${PROXYCHECKER_URL-http://host.docker.internal:18899}"
@@ -89,6 +90,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --expected-source-remote)
       expected_source_remote="${2:-}"
+      shift 2
+      ;;
+    --expected-current-worker-commit)
+      expected_current_worker_commit="${2:-}"
       shift 2
       ;;
     --disk-free-bytes)
@@ -156,12 +161,6 @@ if [[ -n "$auth_token_file" || "$serve_private" == "1" ]]; then
   exit 64
 fi
 
-if [[ "$apply" == "1" ]]; then
-  echo "Refusing --apply: live VCVM release is unavailable until CBM-022 remote verification is complete." >&2
-  echo "Required missing gates: remote source-hash verification, DB/profile backup receipt, build-before-switch, failure rollback, worker/runtime skew checks, and service receipts." >&2
-  exit 78
-fi
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -z "$source_root" ]]; then
   source_root="$repo_root"
@@ -171,6 +170,12 @@ source_root="$(cd "$source_root" && pwd)"
 if [[ ! -f "$source_root/$COMPOSE_FILE" || ! -f "$source_root/Dockerfile" || ! -d "$source_root/backend" || ! -d "$source_root/frontend" ]]; then
   echo "Refusing to deploy from an incomplete repository checkout." >&2
   exit 72
+fi
+
+if [[ "$apply" == "1" ]]; then
+  echo "Refusing --apply: live VCVM release is unavailable until transaction engine re-review is complete." >&2
+  echo "Run scripts/vcvm_release_transaction.py directly with a fake RemoteExecutor for review-only testing." >&2
+  exit 78
 fi
 
 remote_disk_args=()

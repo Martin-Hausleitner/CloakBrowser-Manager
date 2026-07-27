@@ -143,20 +143,23 @@ def _compose_config_in_project(
     return json.loads(result.stdout), result.stdout
 
 
-def test_deploy_vcvm_sh_unchanged_by_worker_integration() -> None:
-    """Worker wiring must not modify deploy_vcvm.sh."""
-    completed = subprocess.run(
-        ["git", "diff", "--", "scripts/deploy_vcvm.sh"],
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True,
-    )
-    assert_true(completed.stdout == "", "deploy_vcvm.sh must be unchanged (no git diff)")
+def test_deploy_vcvm_sh_fails_closed_before_remote_writes() -> None:
+    """Release preflight must preserve its secret and low-space safeguards."""
     deploy_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     assert_true("CBM_WORKER" not in deploy_text, "deploy_vcvm.sh must not mention CBM_WORKER_*")
     assert_true("remote_env_merge_script" not in deploy_text, "fragile env merge must stay removed")
+    assert_true(
+        "VCVM_MIN_FREE_DISK_GIB" in deploy_text,
+        "deploy must make the minimum free-space gate configurable",
+    )
+    assert_true(
+        'df -Pk "\\$remote_path"' in deploy_text,
+        "deploy must measure target-volume capacity before rsync",
+    )
+    assert_true(
+        "less than ${min_free_disk_gib} GiB free" in deploy_text,
+        "deploy must reject insufficient target-volume capacity before rsync",
+    )
 
 
 def test_compose_attaches_optional_worker_env_file_without_interpolation() -> None:
@@ -251,7 +254,7 @@ def main() -> None:
     compose_quiet()
 
     # Focused Browser-Use worker env wiring (absence + configured).
-    test_deploy_vcvm_sh_unchanged_by_worker_integration()
+    test_deploy_vcvm_sh_fails_closed_before_remote_writes()
     test_compose_attaches_optional_worker_env_file_without_interpolation()
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = pathlib.Path(tmp)

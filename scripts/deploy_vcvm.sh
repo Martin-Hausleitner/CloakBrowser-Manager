@@ -7,6 +7,7 @@ DEFAULT_REMOTE_PATH="/home/coder/cloakbrowser-manager"
 DEFAULT_TARGET_HOST="vcvm"
 DEFAULT_MANAGER_PORT="18115"
 DEFAULT_TAILSCALE_HTTPS_PORT="443"
+DEFAULT_MIN_FREE_DISK_GIB="8"
 MANAGED_MARKER=".cloakbrowser-manager-vcvm-managed"
 
 usage() {
@@ -23,6 +24,7 @@ Safety:
   - The Manager binds only to 127.0.0.1 on the VCVM.
   - ACCESS_CONTROL_ENABLED is always forced to 1.
   - Persistent browser data stays in Docker volume cloakbrowser-manager-vcvm-data.
+  - Deployment refuses to start with less than 8 GiB free on the VCVM volume.
   - Optional Tailscale Serve is added only after auth/access checks pass.
   - Host Orca bridge requires /home/coder/orca, /home/coder/.local, and
     /home/coder/.config/orca (read-only mounts). Preflight fails closed if absent.
@@ -38,6 +40,7 @@ auth_token_file="${AUTH_TOKEN_FILE:-}"
 serve_private=0
 tailscale_https_port="${TAILSCALE_HTTPS_PORT:-$DEFAULT_TAILSCALE_HTTPS_PORT}"
 proxychecker_url="${PROXYCHECKER_URL-http://host.docker.internal:18899}"
+min_free_disk_gib="${VCVM_MIN_FREE_DISK_GIB:-$DEFAULT_MIN_FREE_DISK_GIB}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -93,6 +96,11 @@ if [[ ! "$tailscale_https_port" =~ ^[0-9]{2,5}$ ]] || (( tailscale_https_port < 
   exit 64
 fi
 
+if [[ ! "$min_free_disk_gib" =~ ^[1-9][0-9]?$ ]] || (( min_free_disk_gib > 64 )); then
+  echo "Refusing invalid VCVM_MIN_FREE_DISK_GIB; expected 1-64." >&2
+  exit 64
+fi
+
 if [[ -n "$proxychecker_url" ]]; then
   if [[ ! "$proxychecker_url" =~ ^http://host\.docker\.internal:([0-9]{2,5})$ ]]; then
     echo "Refusing PROXYCHECKER_URL outside the VCVM Docker host gateway." >&2
@@ -138,8 +146,14 @@ fi
 ssh "$target_host" "bash -s" <<REMOTE_PREFLIGHT
 set -euo pipefail
 remote_path='$remote_path'
+min_free_disk_kib=$(( $min_free_disk_gib * 1024 * 1024 ))
 marker="\$remote_path/$MANAGED_MARKER"
 mkdir -p "\$remote_path"
+available_disk_kib="\$(df -Pk "\$remote_path" | awk 'NR == 2 { print \$4 }')"
+if [[ ! "\$available_disk_kib" =~ ^[0-9]+$ ]] || (( available_disk_kib < min_free_disk_kib )); then
+  echo "Refusing VCVM deploy: less than ${min_free_disk_gib} GiB free on the target volume." >&2
+  exit 75
+fi
 if [[ -f "\$marker" ]]; then
   if ! grep -qx 'project=$PROJECT_NAME' "\$marker"; then
     echo "Refusing remote path with mismatched managed marker." >&2

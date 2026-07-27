@@ -235,6 +235,63 @@ def build_prompt_command(
     return command
 
 
+def build_close_command(
+    *,
+    executable: str,
+    cwd: Path,
+    agent: str,
+    session_name: str,
+) -> list[str]:
+    """Build deterministic cleanup for a short-lived ACP session."""
+    return [
+        str(executable),
+        "--cwd",
+        str(_validate_cwd(cwd)),
+        "--format",
+        "json",
+        "--json-strict",
+        _validate_agent(agent),
+        "sessions",
+        "close",
+        _validate_session_name(session_name),
+    ]
+
+
+def classify_acpx_control_failure(raw: bytes) -> str:
+    """Map raw JSON-RPC control failures to a small non-secret reason code."""
+    text = raw.decode("utf-8", errors="replace")
+    detail_code = ""
+    message = ""
+    for line in text.splitlines():
+        try:
+            frame = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(frame, dict) or frame.get("jsonrpc") != "2.0":
+            continue
+        error = frame.get("error")
+        if not isinstance(error, dict):
+            continue
+        message = str(error.get("message") or "").lower()
+        data = error.get("data")
+        if isinstance(data, dict):
+            detail_code = str(data.get("detailCode") or "").upper()
+        break
+    if detail_code == "AUTH_REQUIRED" or "credential" in message or "auth" in message:
+        return "auth_required"
+    if "MCP" in detail_code or "mcp" in message:
+        return "mcp_unavailable"
+    if detail_code == "VERSION_MISMATCH" or "version mismatch" in message:
+        return "version_mismatch"
+    if "requires acpx" in message and "found" in message:
+        return "version_mismatch"
+    if detail_code in {"AGENT_NOT_FOUND", "SPAWN_FAILED", "COMMAND_NOT_FOUND"}:
+        return "adapter_unavailable"
+    if "not found" in message or "spawn" in message or "executable" in message:
+        return "adapter_unavailable"
+    return "protocol_error"
+
+
 def parse_acpx_event(line: str) -> dict[str, Any]:
     """Parse one bounded, versioned ACPX NDJSON envelope."""
     encoded = (line or "").encode("utf-8")
@@ -339,8 +396,10 @@ __all__ = [
     "ACPX_VERSION",
     "ACP_SDK_CONTRACT_BASELINE",
     "SUPPORTED_AGENTS",
+    "build_close_command",
     "build_ensure_command",
     "build_prompt_command",
+    "classify_acpx_control_failure",
     "derive_session_name",
     "map_acpx_event",
     "parse_acpx_event",

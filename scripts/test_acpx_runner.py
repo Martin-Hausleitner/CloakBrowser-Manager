@@ -9,8 +9,10 @@ import pytest
 from backend.models import TaskOutputCreate
 from scripts.acpx_runner import (
     ACPX_VERSION,
+    build_close_command,
     build_ensure_command,
     build_prompt_command,
+    classify_acpx_control_failure,
     derive_session_name,
     map_acpx_event,
     parse_acpx_event,
@@ -18,6 +20,68 @@ from scripts.acpx_runner import (
     validate_mcp_config,
     validate_permission_policy,
 )
+
+
+def test_build_close_command_is_bounded(tmp_path: Path):
+    session_name = derive_session_name("doctor-test")
+    command = build_close_command(
+        executable="acpx",
+        cwd=tmp_path,
+        agent="cursor",
+        session_name=session_name,
+    )
+    assert command == [
+        "acpx",
+        "--cwd",
+        str(tmp_path),
+        "--format",
+        "json",
+        "--json-strict",
+        "cursor",
+        "sessions",
+        "close",
+        session_name,
+    ]
+
+
+def test_classify_acpx_control_failure_redacts_auth_and_mcp():
+    auth = (
+        b'{"jsonrpc":"2.0","id":null,"error":{"message":"no matching credentials found",'
+        b'"data":{"detailCode":"AUTH_REQUIRED"}}}'
+    )
+    mcp = (
+        b'{"jsonrpc":"2.0","id":null,"error":{"message":"MCP server failed",'
+        b'"data":{"detailCode":"RUNTIME"}}}'
+    )
+    assert classify_acpx_control_failure(auth) == "auth_required"
+    assert classify_acpx_control_failure(mcp) == "mcp_unavailable"
+    assert classify_acpx_control_failure(b"not json") == "protocol_error"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            b'{"jsonrpc":"2.0","id":null,"error":{"message":"adapter binary missing",'
+            b'"data":{"detailCode":"COMMAND_NOT_FOUND"}}}',
+            "adapter_unavailable",
+        ),
+        (
+            b'{"jsonrpc":"2.0","id":null,"error":{"message":"requires acpx 0.12.1; found 9.9.9",'
+            b'"data":{"detailCode":"VERSION_MISMATCH"}}}',
+            "version_mismatch",
+        ),
+        (
+            b'{"jsonrpc":"2.0","id":null,"error":{"message":"unexpected frame",'
+            b'"data":{"detailCode":"PROTOCOL_ERROR"}}}',
+            "protocol_error",
+        ),
+    ],
+)
+def test_classify_acpx_control_failure_distinguishes_adapter_version_and_protocol(
+    raw: bytes, expected: str
+):
+    assert classify_acpx_control_failure(raw) == expected
 
 
 def test_version_is_pinned_and_rejects_drift():

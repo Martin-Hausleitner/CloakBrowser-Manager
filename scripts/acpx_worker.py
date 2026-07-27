@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import signal
 import sys
 import tempfile
@@ -25,8 +26,10 @@ from urllib.parse import urlencode
 
 from scripts.acpx_runner import (
     SUPPORTED_AGENTS,
+    build_close_command,
     build_ensure_command,
     build_prompt_command,
+    classify_acpx_control_failure,
     derive_session_name,
     map_acpx_event,
     parse_acpx_event,
@@ -48,10 +51,17 @@ CLAIM_PATH = "/internal/task-runs/claim"
 CLAIM_QUERY = urlencode({"harness": SUPPORTED_HARNESS})
 MAX_CONTROL_LINE_BYTES = 65_536
 MAX_STDERR_BYTES = 16_384
+CONTROL_TERMINATE_TIMEOUT_SECONDS = 2.0
+CLOSE_SESSION_ATTEMPTS = 2
+CLOSE_SESSION_RETRY_DELAY_SECONDS = 0.1
 
 
 class AcpxRuntimeError(RuntimeError):
     """Redacted runtime failure safe to map to a Manager terminal state."""
+
+    def __init__(self, message: str, *, reason_code: str = "protocol_error") -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 @dataclass(frozen=True)
@@ -65,6 +75,7 @@ class AcpxWorkerConfig:
     acpx_executable: str = "acpx"
     poll_interval_seconds: float = 2.0
     heartbeat_interval_seconds: float = 1.0
+    preflight_interval_seconds: float = 240.0
     token: str | None = None
     token_file: str | None = None
 
@@ -77,6 +88,13 @@ class AcpxManagerClient(ManagerClient):
         if response.status_code == 204:
             return None
         return response.json()
+
+    def report_preflight(self, *, agent: str, ready: bool, reason_code: str) -> None:
+        self.request(
+            "POST",
+            "/internal/task-harnesses/acpx/preflights",
+            json={"agent": agent, "ready": ready, "reason_code": reason_code},
+        )
 
 
 class AcpxRuntime:
@@ -95,27 +113,42 @@ class AcpxRuntime:
         child_env = os.environ.copy()
         if environment:
             child_env.update(environment)
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=child_env,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=child_env,
+            )
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            raise AcpxRuntimeError(
+                "ACPX adapter unavailable",
+                reason_code="adapter_unavailable",
+            ) from exc
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
         except asyncio.TimeoutError as exc:
-            process.kill()
-            await process.wait()
+            await _terminate_process(process)
             raise AcpxRuntimeError("ACPX control command timed out") from exc
+        except asyncio.CancelledError:
+            await _terminate_process(process)
+            raise
         if process.returncode != 0:
+            raw = stdout + b"\n" + stderr
             message = _safe_process_error(stderr or stdout)
-            raise AcpxRuntimeError(message or "ACPX control command failed")
+            raise AcpxRuntimeError(
+                message or "ACPX control command failed",
+                reason_code=classify_acpx_control_failure(raw),
+            )
         return stdout
 
     async def validate_version(self) -> None:
         stdout = await self._run_control([self.config.acpx_executable, "--version"])
-        validate_acpx_version(stdout.decode("utf-8", errors="replace"))
+        try:
+            validate_acpx_version(stdout.decode("utf-8", errors="replace"))
+        except ValueError as exc:
+            raise AcpxRuntimeError(str(exc), reason_code="version_mismatch") from exc
 
     async def ensure_session(
         self,
@@ -134,6 +167,58 @@ class AcpxRuntime:
             mcp_config=self.config.mcp_config,
         )
         await self._run_control(command, environment=environment)
+
+    async def close_session(
+        self,
+        *,
+        cwd: Path,
+        agent: str,
+        session_name: str,
+    ) -> None:
+        command = build_close_command(
+            executable=self.config.acpx_executable,
+            cwd=cwd,
+            agent=agent,
+            session_name=session_name,
+        )
+        last_error: AcpxRuntimeError | None = None
+        for attempt in range(CLOSE_SESSION_ATTEMPTS):
+            try:
+                await self._run_control(command, timeout=10.0)
+                return
+            except AcpxRuntimeError as exc:
+                last_error = exc
+                if attempt + 1 >= CLOSE_SESSION_ATTEMPTS:
+                    break
+                await asyncio.sleep(CLOSE_SESSION_RETRY_DELAY_SECONDS)
+        raise last_error or AcpxRuntimeError("ACPX close command failed")
+
+    async def preflight_agent(
+        self,
+        *,
+        cwd: Path,
+        agent: str,
+        session_name: str,
+        environment: dict[str, str],
+    ) -> dict[str, Any]:
+        try:
+            await self.ensure_session(
+                cwd=cwd,
+                agent=agent,
+                session_name=session_name,
+                environment=environment,
+            )
+        except AcpxRuntimeError as exc:
+            return {"ready": False, "reason_code": exc.reason_code}
+        try:
+            await self.close_session(
+                cwd=cwd,
+                agent=agent,
+                session_name=session_name,
+            )
+        except AcpxRuntimeError:
+            return {"ready": False, "reason_code": "protocol_error"}
+        return {"ready": True, "reason_code": "ok"}
 
     async def cancel(self, *, cwd: Path, agent: str, session_name: str) -> None:
         command = [
@@ -293,6 +378,26 @@ def _safe_process_error(raw: bytes) -> str:
     return clean or "ACPX runtime failed"
 
 
+async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(
+            process.wait(),
+            timeout=CONTROL_TERMINATE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        await process.wait()
+
+
 class AcpxWorker:
     """Execute ACPX claims and mirror their lifecycle into Manager state."""
 
@@ -370,6 +475,65 @@ class AcpxWorker:
             path.unlink(missing_ok=True)
             raise
         return path
+
+    async def refresh_preflights(self) -> None:
+        """Probe every supported ACP adapter without exposing credentials."""
+        capability_file = self._write_capability_file(
+            f"cbm_run_{secrets.token_hex(32)}"
+        )
+        environment = {
+            "CBM_MANAGER_URL": self.config.manager_url,
+            "CBM_RUN_CAPABILITY_FILE": str(capability_file),
+            "CBM_PROFILE_ID": "preflight-profile",
+            "CBM_TASK_RUN_ID": "preflight-run",
+            "CBM_ALLOWED_ORIGINS": "[]",
+        }
+        try:
+            try:
+                await self.runtime.validate_version()
+            except AcpxRuntimeError as exc:
+                for agent in sorted(SUPPORTED_AGENTS):
+                    await asyncio.to_thread(
+                        self.client.report_preflight,
+                        agent=agent,
+                        ready=False,
+                        reason_code=exc.reason_code,
+                    )
+                return
+            except Exception:  # noqa: BLE001 - publish only redacted reason codes
+                for agent in sorted(SUPPORTED_AGENTS):
+                    await asyncio.to_thread(
+                        self.client.report_preflight,
+                        agent=agent,
+                        ready=False,
+                        reason_code="protocol_error",
+                    )
+                return
+
+            for agent in sorted(SUPPORTED_AGENTS):
+                session_name = derive_session_name(
+                    f"preflight:{self.config.worker_id}:{self.config.worktree}:{agent}"
+                )
+                try:
+                    result = await self.runtime.preflight_agent(
+                        cwd=self.config.worktree,
+                        agent=agent,
+                        session_name=session_name,
+                        environment=environment,
+                    )
+                    ready = bool(result.get("ready"))
+                    reason_code = str(result.get("reason_code") or "protocol_error")
+                except Exception:  # noqa: BLE001 - fail closed per adapter
+                    ready = False
+                    reason_code = "protocol_error"
+                await asyncio.to_thread(
+                    self.client.report_preflight,
+                    agent=agent,
+                    ready=ready,
+                    reason_code=reason_code,
+                )
+        finally:
+            capability_file.unlink(missing_ok=True)
 
     async def execute_claim(self, claim: dict[str, Any]) -> dict[str, str]:
         run_id = str(claim.get("id") or "")
@@ -474,19 +638,46 @@ class AcpxWorker:
 
     async def run_forever(self, *, stop_event: asyncio.Event | None = None) -> None:
         stop = stop_event or asyncio.Event()
-        while not stop.is_set():
-            try:
-                claim = await asyncio.to_thread(self.client.claim)
-            except Exception:  # noqa: BLE001 - continue after transient claim errors
-                claim = None
-            if claim:
-                await self.execute_claim(claim)
-            try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=max(0.01, self.config.poll_interval_seconds)
-                )
-            except asyncio.TimeoutError:
-                continue
+        preflight_task: asyncio.Task[None] | None = None
+        next_preflight_at = 0.0
+        loop = asyncio.get_running_loop()
+        try:
+            while not stop.is_set():
+                if (
+                    loop.time() >= next_preflight_at
+                    and (preflight_task is None or preflight_task.done())
+                ):
+                    if preflight_task is not None:
+                        try:
+                            await preflight_task
+                        except Exception:  # noqa: BLE001 - retry on next interval
+                            logger.warning("ACPX preflight refresh failed")
+                    preflight_task = asyncio.create_task(self.refresh_preflights())
+                    next_preflight_at = loop.time() + max(
+                        30.0, self.config.preflight_interval_seconds
+                    )
+                try:
+                    claim = await asyncio.to_thread(self.client.claim)
+                except Exception:  # noqa: BLE001 - continue after transient claim errors
+                    claim = None
+                if claim:
+                    await self.execute_claim(claim)
+                try:
+                    await asyncio.wait_for(
+                        stop.wait(), timeout=max(0.01, self.config.poll_interval_seconds)
+                    )
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            if preflight_task is not None:
+                if not preflight_task.done():
+                    preflight_task.cancel()
+                try:
+                    await preflight_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # noqa: BLE001 - shutdown remains best effort
+                    logger.warning("ACPX preflight refresh failed during shutdown")
 
 
 def _absolute_directory(raw: str, *, label: str, private: bool = False) -> Path:
@@ -517,6 +708,7 @@ def build_worker_config(argv: list[str] | None = None) -> AcpxWorkerConfig:
     )
     parser.add_argument("--acpx", default=os.environ.get("CBM_ACPX_EXECUTABLE") or "acpx")
     parser.add_argument("--poll-interval", type=float, default=2.0)
+    parser.add_argument("--preflight-interval", type=float, default=240.0)
     args = parser.parse_args(argv)
 
     manager_url = str(args.manager_url or "").strip().rstrip("/")
@@ -549,6 +741,7 @@ def build_worker_config(argv: list[str] | None = None) -> AcpxWorkerConfig:
         capability_dir=capability_dir,
         acpx_executable=executable,
         poll_interval_seconds=max(0.01, float(args.poll_interval)),
+        preflight_interval_seconds=max(30.0, float(args.preflight_interval)),
         token=token,
         token_file=token_file,
     )

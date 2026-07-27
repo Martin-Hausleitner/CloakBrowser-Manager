@@ -45,6 +45,7 @@ class FakeManager:
         self.completed = []
         self.failed = []
         self.revoked = []
+        self.preflights = []
         self.heartbeat_calls = 0
 
     def issue_capability(self, run_id):
@@ -74,6 +75,9 @@ class FakeManager:
 
     def revoke_capability(self, run_id):
         self.revoked.append(run_id)
+
+    def report_preflight(self, *, agent, ready, reason_code):
+        self.preflights.append((agent, ready, reason_code))
 
 
 class FakeRuntime:
@@ -193,6 +197,201 @@ def test_worker_executes_acpx_session_streams_outputs_and_cleans_capability(tmp_
     assert manager.failed == []
     assert manager.revoked == ["run-1"]
     assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_reports_agent_preflights_and_cleans_doctor_capability(tmp_path: Path):
+    manager = FakeManager()
+
+    class DoctorRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.preflight_calls = []
+
+        async def preflight_agent(self, *, cwd, agent, session_name, environment):
+            capability_file = Path(environment["CBM_RUN_CAPABILITY_FILE"])
+            assert capability_file.is_file()
+            assert capability_file.stat().st_mode & 0o077 == 0
+            self.preflight_calls.append((agent, session_name))
+            if agent == "cursor":
+                return {"ready": True, "reason_code": "ok"}
+            return {"ready": False, "reason_code": "auth_required"}
+
+    runtime = DoctorRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    asyncio.run(worker.refresh_preflights())
+    first_sessions = list(runtime.preflight_calls)
+    asyncio.run(worker.refresh_preflights())
+    second_sessions = runtime.preflight_calls[len(first_sessions):]
+
+    assert runtime.version_checked is True
+    assert [item[0] for item in manager.preflights] == [
+        "claude",
+        "codex",
+        "cursor",
+        "grok-build",
+        "opencode",
+    ] * 2
+    assert first_sessions == second_sessions
+    assert ("cursor", True, "ok") in manager.preflights
+    assert ("codex", False, "auth_required") in manager.preflights
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_keeps_claim_polling_while_preflight_runs_in_background(tmp_path: Path):
+    class PollingManager(FakeManager):
+        def __init__(self):
+            super().__init__()
+            self.claim_calls = 0
+
+        def claim(self):
+            self.claim_calls += 1
+            return None
+
+    class SlowPreflightRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def preflight_agent(self, **_kwargs):
+            self.started.set()
+            await asyncio.Event().wait()
+
+    async def scenario():
+        manager = PollingManager()
+        runtime = SlowPreflightRuntime()
+        worker = AcpxWorker(
+            manager,
+            replace(make_config(tmp_path), poll_interval_seconds=0.01),
+            runtime=runtime,
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(worker.run_forever(stop_event=stop))
+        await asyncio.wait_for(runtime.started.wait(), timeout=1)
+        await asyncio.wait_for(_wait_for(lambda: manager.claim_calls > 0), timeout=1)
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+        return manager.claim_calls
+
+    assert asyncio.run(scenario()) > 0
+
+
+def test_real_preflight_fails_closed_when_cleanup_fails(tmp_path: Path):
+    executable = tmp_path / "fake-acpx-preflight"
+    executable.write_text(
+        """#!/usr/bin/env python3
+import json, sys
+if '--version' in sys.argv:
+    print('0.12.1')
+elif 'ensure' in sys.argv:
+    print(json.dumps({'acpxRecordId': 'record-1', 'acpxSessionId': 'session-1'}))
+elif 'close' in sys.argv:
+    print(json.dumps({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32603, 'message': 'cleanup failed'}}))
+    raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(replace(make_config(tmp_path), acpx_executable=str(executable)))
+
+    result = asyncio.run(runtime.preflight_agent(
+        cwd=tmp_path,
+        agent="codex",
+        session_name="cbm-0123456789abcdef0123456789abcdef",
+        environment={},
+    ))
+
+    assert result == {"ready": False, "reason_code": "protocol_error"}
+
+
+def test_real_preflight_retries_close_before_reporting_ready(tmp_path: Path):
+    count_file = tmp_path / "close-count.txt"
+    executable = tmp_path / "fake-acpx-preflight-retry"
+    executable.write_text(
+        f"""#!/usr/bin/env python3
+import json, pathlib, sys
+count_file = pathlib.Path({str(count_file)!r})
+if '--version' in sys.argv:
+    print('0.12.1')
+elif 'ensure' in sys.argv:
+    print(json.dumps({{'acpxRecordId': 'record-1', 'acpxSessionId': 'session-1'}}))
+elif 'close' in sys.argv:
+    count = int(count_file.read_text() or '0') if count_file.exists() else 0
+    count_file.write_text(str(count + 1))
+    if count == 0:
+        print(json.dumps({{'jsonrpc': '2.0', 'id': None, 'error': {{'code': -32603, 'message': 'transient cleanup failed'}}}}))
+        raise SystemExit(1)
+    print(json.dumps({{'closed': True}}))
+""",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(replace(make_config(tmp_path), acpx_executable=str(executable)))
+
+    result = asyncio.run(runtime.preflight_agent(
+        cwd=tmp_path,
+        agent="codex",
+        session_name="cbm-0123456789abcdef0123456789abcdef",
+        environment={},
+    ))
+
+    assert result == {"ready": True, "reason_code": "ok"}
+    assert count_file.read_text(encoding="utf-8") == "2"
+
+
+def test_preflight_reports_missing_adapter_separately_from_version_mismatch(tmp_path: Path):
+    manager = FakeManager()
+    config = replace(make_config(tmp_path), acpx_executable=str(tmp_path / "missing-acpx"))
+    runtime = AcpxRuntime(config)
+    worker = AcpxWorker(manager, config, runtime=runtime)
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert manager.preflights
+    assert {ready for _agent, ready, _reason in manager.preflights} == {False}
+    assert {reason for _agent, _ready, reason in manager.preflights} == {"adapter_unavailable"}
+
+
+def test_validate_version_classifies_drift_as_version_mismatch(tmp_path: Path):
+    executable = tmp_path / "fake-acpx-version-drift"
+    executable.write_text(
+        """#!/usr/bin/env python3
+print('acpx 9.9.9')
+""",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(replace(make_config(tmp_path), acpx_executable=str(executable)))
+
+    with pytest.raises(AcpxRuntimeError) as exc:
+        asyncio.run(runtime.validate_version())
+    assert exc.value.reason_code == "version_mismatch"
+
+
+def test_run_control_cancellation_cleans_child_process(tmp_path: Path):
+    pid_file = tmp_path / "child.pid"
+    executable = tmp_path / "fake-acpx-slow-control"
+    executable.write_text(
+        f"""#!/usr/bin/env python3
+import pathlib, time, os
+pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))
+time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(replace(make_config(tmp_path), acpx_executable=str(executable)))
+
+    async def scenario():
+        task = asyncio.create_task(runtime._run_control([str(executable)], timeout=30))
+        await asyncio.wait_for(_wait_for(lambda: pid_file.exists()), timeout=1)
+        pid = int(pid_file.read_text(encoding="utf-8"))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(_wait_for(lambda: not _process_exists(pid)), timeout=1)
+
+    asyncio.run(scenario())
 
 
 def test_worker_propagates_manager_cancellation_to_acpx(tmp_path: Path):
@@ -422,3 +621,11 @@ async def _append_async(items: list, item) -> None:
 async def _wait_for(predicate) -> None:
     while not predicate():
         await asyncio.sleep(0)
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True

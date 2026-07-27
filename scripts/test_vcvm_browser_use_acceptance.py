@@ -101,6 +101,83 @@ def test_acceptance_passes_only_with_complete_matching_evidence() -> None:
     assert result["summary"] == {"passed": 15, "failed": 0, "degraded": 0}
 
 
+def test_expected_migration_set_is_exact_eight_with_task_artifacts() -> None:
+    assert gate.EXPECTED_MIGRATIONS == (
+        "agent_workspace_v1",
+        "task_runs_v1",
+        "task_artifacts_v1",
+        "worker_runtime_v1",
+        "task_runs_acpx_v1",
+        "worker_harness_presence_v1",
+        "worker_harness_preflights_v1",
+        "task_run_binding_v1",
+    )
+
+
+def test_acceptance_rejects_evidence_missing_task_artifacts_migration() -> None:
+    evidence = valid_evidence()
+    old_required_migrations = [
+        "agent_workspace_v1",
+        "task_runs_v1",
+        "worker_runtime_v1",
+        "task_runs_acpx_v1",
+        "worker_harness_presence_v1",
+        "worker_harness_preflights_v1",
+        "task_run_binding_v1",
+    ]
+    evidence["live"]["manager"]["migrations"] = old_required_migrations
+
+    result = gate.verify(evidence)
+
+    assert result["status"] == "failed"
+    assert check(result, "migration_set")["status"] == "failed"
+    assert check(result, "migration_set")["evidence"]["missing"] == ["task_artifacts_v1"]
+
+
+def test_acceptance_rejects_actual_unknown_migration() -> None:
+    evidence = valid_evidence()
+    evidence["live"]["manager"]["migrations"] = [
+        *gate.EXPECTED_MIGRATIONS,
+        "unknown_migration_v1",
+    ]
+
+    result = gate.verify(evidence)
+
+    assert result["status"] == "failed"
+    assert check(result, "migration_set")["status"] == "failed"
+    assert check(result, "migration_set")["evidence"]["unexpected"] == ["unknown_migration_v1"]
+
+
+def test_acceptance_rejects_expected_override_with_unknown_migration() -> None:
+    evidence = valid_evidence()
+    widened = [
+        *gate.EXPECTED_MIGRATIONS,
+        "unknown_migration_v1",
+    ]
+    evidence["expected"]["migrations"] = widened
+    evidence["live"]["manager"]["migrations"] = widened
+
+    result = gate.verify(evidence)
+
+    assert result["status"] == "failed"
+    assert check(result, "migration_set")["status"] == "failed"
+    assert check(result, "migration_set")["evidence"]["unexpected"] == ["unknown_migration_v1"]
+
+
+def test_acceptance_rejects_duplicate_migration_entries() -> None:
+    evidence = valid_evidence()
+    evidence["live"]["manager"]["migrations"] = [
+        *gate.EXPECTED_MIGRATIONS,
+        "task_artifacts_v1",
+    ]
+
+    result = gate.verify(evidence)
+
+    assert result["status"] == "failed"
+    assert check(result, "migration_set")["status"] == "failed"
+    assert check(result, "migration_set")["evidence"]["duplicates"] == ["task_artifacts_v1"]
+
+
 def test_live_version_skew_is_a_hard_failure() -> None:
     evidence = valid_evidence()
     evidence["live"]["manager"]["commit"] = ""

@@ -25,6 +25,7 @@ EXPECTED_BROWSER_USE_VERSION = "0.13.6"
 EXPECTED_MIGRATIONS = (
     "agent_workspace_v1",
     "task_runs_v1",
+    "task_artifacts_v1",
     "worker_runtime_v1",
     "task_runs_acpx_v1",
     "worker_harness_presence_v1",
@@ -206,11 +207,12 @@ def verify_commits(evidence: dict[str, Any]) -> list[Check]:
 
 
 def verify_migrations(evidence: dict[str, Any]) -> Check:
-    expected = tuple(expected_value(evidence, "migrations", list(EXPECTED_MIGRATIONS)) or [])
+    expected = EXPECTED_MIGRATIONS
     actual = tuple(nested(evidence, "live.manager.migrations", []) or [])
     missing = [item for item in expected if item not in actual]
     unexpected = [item for item in actual if item not in expected]
-    if actual and not missing and not unexpected:
+    duplicates = list(dict.fromkeys(item for item in actual if actual.count(item) > 1))
+    if actual and sorted(actual) == sorted(expected):
         return passed("migration_set", "Migration set matches Browser-Use workspace contract", actual=list(actual))
     return failed(
         "migration_set",
@@ -219,6 +221,7 @@ def verify_migrations(evidence: dict[str, Any]) -> Check:
         actual=list(actual),
         missing=missing,
         unexpected=unexpected,
+        duplicates=duplicates,
     )
 
 

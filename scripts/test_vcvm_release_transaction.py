@@ -152,6 +152,7 @@ class FakeRemoteExecutor:
             "candidate_migrations": [
                 "agent_workspace_v1",
                 "task_runs_v1",
+                "task_artifacts_v1",
                 "worker_runtime_v1",
                 "task_runs_acpx_v1",
                 "worker_harness_presence_v1",
@@ -950,6 +951,38 @@ def test_candidate_migrations_must_match_exact_required_set(tmp_path: Path) -> N
     with pytest.raises(tx.TransactionError, match="migration set"):
         tx.run_release(release_config(repo), fake)
     assert fake.candidate_removed is True
+
+
+def test_candidate_migrations_require_task_artifacts_v1(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    old_required_migrations = [
+        "agent_workspace_v1",
+        "task_runs_v1",
+        "worker_runtime_v1",
+        "task_runs_acpx_v1",
+        "worker_harness_presence_v1",
+        "worker_harness_preflights_v1",
+        "task_run_binding_v1",
+    ]
+    fake = FakeRemoteExecutor(candidate_migrations=old_required_migrations)
+
+    with pytest.raises(tx.TransactionError, match="migration set"):
+        tx.run_release(release_config(repo), fake)
+
+    assert fake.candidate_removed is True
+
+
+def test_required_migration_set_is_exact_eight_with_task_artifacts() -> None:
+    assert tx.REQUIRED_MIGRATIONS == (
+        "agent_workspace_v1",
+        "task_runs_v1",
+        "task_artifacts_v1",
+        "worker_runtime_v1",
+        "task_runs_acpx_v1",
+        "worker_harness_presence_v1",
+        "worker_harness_preflights_v1",
+        "task_run_binding_v1",
+    )
 
 
 @pytest.mark.parametrize(

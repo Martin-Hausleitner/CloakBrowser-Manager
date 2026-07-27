@@ -56,6 +56,7 @@ COMMAND_REPR_RE = re.compile(r"Command \[.*?\](?: returned non-zero exit status 
 REQUIRED_MIGRATIONS = (
     "agent_workspace_v1",
     "task_runs_v1",
+    "task_artifacts_v1",
     "worker_runtime_v1",
     "task_runs_acpx_v1",
     "worker_harness_presence_v1",

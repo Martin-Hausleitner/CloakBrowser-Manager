@@ -624,6 +624,36 @@ def test_candidate_verify_waits_through_transient_curl_56_then_succeeds(monkeypa
     assert sleeps == [0.1]
 
 
+def test_candidate_verify_requires_task_artifacts_migration(monkeypatch: pytest.MonkeyPatch) -> None:
+    commit = REVISION
+    old_required_migrations = [
+        "agent_workspace_v1",
+        "task_runs_v1",
+        "worker_runtime_v1",
+        "task_runs_acpx_v1",
+        "worker_harness_presence_v1",
+        "worker_harness_preflights_v1",
+        "task_run_binding_v1",
+    ]
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/health":
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[0] == "curl" and argv[-1] == f"http://127.0.0.1:{remote.CANDIDATE_PORT}/api/auth/status":
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"auth_required": True, "access_control_enabled": True}), stderr="")
+        if argv[:3] == ["docker", "inspect", "candidate"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=commit + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "CANDIDATE_READINESS_TIMEOUT_SECONDS", 10.0, raising=False)
+    monkeypatch.setattr(remote, "_candidate_authenticated_json", lambda path, timeout: old_required_migrations)
+
+    with pytest.raises(remote.HelperError, match=r"attempt_count=1.*reason=migration_set_exact"):
+        remote.op_candidate_verify({"commit": commit, "container": "candidate"})
+
+
 def test_candidate_verify_waits_through_malformed_startup_json_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     commit = REVISION
     auth_attempts = {"count": 0}

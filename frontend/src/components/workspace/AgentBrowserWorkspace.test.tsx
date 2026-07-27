@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrcaCapabilities, OrcaSession, Profile, TaskRun } from "../../lib/api";
+import { UI_STATE, expectUiState } from "../../lib/uiFlowRegistry";
 import { AgentBrowserWorkspace } from "./AgentBrowserWorkspace";
 
 const apiMock = vi.hoisted(() => ({
@@ -189,6 +190,10 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     expect(await screen.findByTestId("agent-browser-workspace")).toBeTruthy();
+    expectUiState(document.body, UI_STATE.agentWorkspace);
+    expectUiState(document.body, UI_STATE.agentSessionPane);
+    expectUiState(document.body, UI_STATE.agentViewerPane);
+    expectUiState(document.body, UI_STATE.profileViewer);
     expect(screen.getByTestId("mock-profile-viewer").textContent).toContain("viewer:profile-live");
     expect(screen.getByTestId("orca-cap-pause").textContent).toMatch(/unavailable/i);
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);

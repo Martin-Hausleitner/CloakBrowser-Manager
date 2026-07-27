@@ -33,6 +33,7 @@ import {
   type TaskHarnessCapabilities,
   type TaskHarnessMessage,
 } from "../../lib/taskHarness";
+import { UI_STATE, uiStateAttr } from "../../lib/uiFlowRegistry";
 import { StatusIndicator } from "../StatusIndicator";
 
 interface MobileSplitScreenProps {
@@ -791,6 +792,7 @@ export function MobileSplitScreen({
         id={editorId}
         className={`mobile-viewport-editor ${fullscreen ? "mobile-fullscreen-viewport-editor" : ""}`}
         aria-label={fullscreen ? "Fullscreen viewport controls" : "Viewport controls"}
+        data-ui-state={UI_STATE.mobileViewportControls}
       >
         {!fullscreen ? (
           <>
@@ -1157,6 +1159,7 @@ export function MobileSplitScreen({
     <div
       className={`mobile-browser-frame ${isLiveBrowser ? "mobile-browser-frame-live" : ""}`}
       data-testid="mobile-browser-frame"
+      data-ui-state={UI_STATE.mobileBrowserFrame}
     >
       {!isLiveBrowser ? (
         <div className="mobile-browser-chrome">
@@ -1193,11 +1196,16 @@ export function MobileSplitScreen({
       className={`mobile-split-root ${compactWorkspace ? "mobile-workspace-collapsed" : ""} ${detailPanelOpen ? "mobile-detail-panel-open" : ""} ${keyboardOpen ? "mobile-keyboard-open" : ""} bg-surface-0 text-gray-100`}
       style={rootStyle}
       data-keyboard-open={keyboardOpen ? "true" : "false"}
+      data-ui-state={UI_STATE.mobileWorkspace}
     >
       <section
         className={`mobile-live-pane ${isLiveBrowser ? "mobile-live-pane-running" : ""} ${fitLivePaneToBrowser ? "mobile-live-pane-fit" : ""} ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
         style={livePaneStyle}
         data-fullscreen-fit={fullscreenOpen ? fullscreenFitMode : undefined}
+        data-ui-state={uiStateAttr(
+          UI_STATE.mobileLivePane,
+          fullscreenOpen && UI_STATE.mobileFullscreenBrowser,
+        )}
         role={fullscreenOpen ? "dialog" : undefined}
         aria-modal={fullscreenOpen ? true : undefined}
         aria-label={fullscreenOpen ? "Fullscreen browser viewer" : undefined}
@@ -1248,6 +1256,7 @@ export function MobileSplitScreen({
         className="mobile-control-pane"
         aria-hidden={fullscreenOpen ? true : undefined}
         inert={fullscreenOpen ? true : undefined}
+        data-ui-state={UI_STATE.mobileControlPane}
       >
         {error ? (
           <div className="mx-3 mt-3 rounded-md border border-red-600/30 bg-red-600/15 px-3 py-2 text-xs text-red-300">
@@ -1256,7 +1265,12 @@ export function MobileSplitScreen({
         ) : null}
 
         {remoteToolsOpen ? (
-          <div id="mobile-tools-sheet" className="mobile-tools-sheet" aria-label="Browser tools">
+          <div
+            id="mobile-tools-sheet"
+            className="mobile-tools-sheet"
+            aria-label="Browser tools"
+            data-ui-state={UI_STATE.mobileToolsSheet}
+          >
             {!toolPanelOpen && canOperate ? (
               <div className="mobile-tools-row mobile-tools-row-primary">
                 {selected?.status === "running" ? (
@@ -1371,7 +1385,12 @@ export function MobileSplitScreen({
             {viewportOpen ? renderViewportEditor("inline") : null}
 
             {adminOpen ? (
-              <div id="mobile-admin-tools" className="mobile-tools-row mobile-admin-tools" aria-label="Browser administration">
+              <div
+                id="mobile-admin-tools"
+                className="mobile-tools-row mobile-admin-tools"
+                aria-label="Browser administration"
+                data-ui-state={UI_STATE.mobileAdminTools}
+              >
                 {canManageProfiles ? (
                   <button type="button" onClick={onNew} className="mobile-tool-action" aria-label="New profile">
                     <Plus className="h-4 w-4" aria-hidden="true" />
@@ -1394,7 +1413,12 @@ export function MobileSplitScreen({
             ) : null}
 
             {gridOpen ? (
-              <div id="mobile-running-grid" className="mobile-grid" aria-label="Running browser grid">
+              <div
+                id="mobile-running-grid"
+                className="mobile-grid"
+                aria-label="Running browser grid"
+                data-ui-state={UI_STATE.mobileSessionGrid}
+              >
                 {(runningProfiles.length > 0 ? runningProfiles : organizedProfiles.slice(0, 4)).map((profile) => (
                   <button
                     key={profile.id}
@@ -1454,6 +1478,7 @@ export function MobileSplitScreen({
             id="mobile-task-chat-panel"
             className="mobile-chat-panel"
             aria-label="Task chat"
+            data-ui-state={UI_STATE.mobileTaskChat}
           >
             <div className="mobile-chat-header">
               <MessageSquareText className="h-4 w-4 text-accent" aria-hidden="true" />

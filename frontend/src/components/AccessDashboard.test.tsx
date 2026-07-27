@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { UI_STATE, expectUiState } from "../lib/uiFlowRegistry";
 import { AccessDashboard } from "./AccessDashboard";
 
 const apiMock = vi.hoisted(() => ({
@@ -101,6 +102,8 @@ describe("AccessDashboard", () => {
     render(<AccessDashboard onClose={vi.fn()} />);
 
     expect(await screen.findByText("alice")).toBeTruthy();
+    expectUiState(document.body, UI_STATE.accessDashboard);
+    expectUiState(document.body, UI_STATE.accessIdentities);
     expect(screen.getByRole("tab", { name: "Identities" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.queryByLabelText("Username")).toBeNull();
     expect(screen.queryByLabelText("Display name")).toBeNull();
@@ -169,6 +172,7 @@ describe("AccessDashboard", () => {
 
     expect(await screen.findByText("alice")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Groups" }));
+    expectUiState(document.body, UI_STATE.accessGroups);
     expect(screen.getByText("Research team")).toBeTruthy();
     expect(screen.queryByText("Shared private research browsers")).toBeNull();
 

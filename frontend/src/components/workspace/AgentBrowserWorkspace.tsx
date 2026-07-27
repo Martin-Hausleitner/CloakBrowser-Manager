@@ -12,6 +12,7 @@ import {
   type TaskHarnessPresence,
   type TaskRun,
 } from "../../lib/api";
+import { UI_STATE, uiStateAttr } from "../../lib/uiFlowRegistry";
 import { ProfileViewer } from "../ProfileViewer";
 import { AgentOutputTimeline } from "./AgentOutputTimeline";
 
@@ -612,12 +613,14 @@ export function AgentBrowserWorkspace({
     <div
       className="agent-browser-workspace flex h-full min-h-0 w-full overflow-hidden bg-[#0d0d0d] text-[#e6e6e6]"
       data-testid="agent-browser-workspace"
+      data-ui-state={UI_STATE.agentWorkspace}
     >
       <section
         className="flex min-w-0 w-[42%] max-w-[36rem] flex-col border-r border-[#2a2a2a]"
         aria-label="Orca agent session"
         aria-hidden={viewerFullscreen || undefined}
         inert={viewerFullscreen || undefined}
+        data-ui-state={UI_STATE.agentSessionPane}
       >
         <header className="flex items-center gap-2 border-b border-[#2a2a2a] bg-[#141414] px-3 py-2">
           <TerminalSquare className="h-3.5 w-3.5 text-[#8b8b8b]" />
@@ -845,6 +848,7 @@ export function AgentBrowserWorkspace({
           <div
             className="min-h-0 flex-1 overflow-auto bg-[#0a0a0a] px-3 py-2"
             data-testid={browserUseMode ? "browser-use-output" : "managed-agent-output"}
+            data-ui-state={UI_STATE.agentManagedOutput}
           >
             {taskOutputs.length ? (
               <AgentOutputTimeline outputs={taskOutputs} />
@@ -859,6 +863,7 @@ export function AgentBrowserWorkspace({
           <pre
             className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-[#0a0a0a] px-3 py-2 font-mono text-[11px] leading-relaxed text-[#d0d0d0]"
             data-testid="orca-transcript"
+            data-ui-state={UI_STATE.agentOrcaTranscript}
             aria-label="CLI transcript"
           >
             {transcript || "No Orca output yet. Launch an allowlisted agent CLI to stream a real terminal."}
@@ -912,6 +917,10 @@ export function AgentBrowserWorkspace({
         role={viewerFullscreen ? "dialog" : undefined}
         aria-modal={viewerFullscreen || undefined}
         data-testid="agent-browser-viewer-pane"
+        data-ui-state={uiStateAttr(
+          UI_STATE.agentViewerPane,
+          viewerFullscreen && UI_STATE.agentViewerFullscreen,
+        )}
       >
         <header className="relative flex min-h-10 flex-wrap items-center gap-2 border-b border-[#2a2a2a] bg-[#141414] px-3 py-1.5">
           <MonitorSmartphone className="h-3.5 w-3.5 text-[#8b8b8b]" />
@@ -1023,7 +1032,12 @@ export function AgentBrowserWorkspace({
             </div>
           ) : null}
         </header>
-        <div className="min-h-0 flex-1">
+        <div
+          className="min-h-0 flex-1"
+          data-ui-state={uiStateAttr(
+            selectedProfile?.status === "running" && UI_STATE.profileViewer,
+          )}
+        >
           {selectedProfile && selectedProfile.status === "running" ? (
             <ProfileViewer
               key={selectedProfile.id}

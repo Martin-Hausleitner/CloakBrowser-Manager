@@ -6,6 +6,7 @@ import {
   type ProfileHarness,
   type ProxyInventoryItem,
 } from "../lib/api";
+import { UI_STATE, uiStateAttr } from "../lib/uiFlowRegistry";
 
 interface ProxyOverviewProps {
   harness: ProfileHarness;
@@ -36,7 +37,16 @@ export function ProxyOverview({ harness, projectId, onProfileCreated }: ProxyOve
   }, [refresh]);
 
   return (
-    <div className="mx-auto flex h-full max-w-3xl flex-col gap-4 p-6">
+    <div
+      className="mx-auto flex h-full max-w-3xl flex-col gap-4 p-6"
+      data-ui-state={uiStateAttr(
+        UI_STATE.proxyOverview,
+        loading && UI_STATE.proxyOverviewLoading,
+        Boolean(error) && UI_STATE.proxyOverviewError,
+        !loading && !error && items.length === 0 && UI_STATE.proxyOverviewEmpty,
+        !loading && !error && items.length > 0 && UI_STATE.proxyOverviewList,
+      )}
+    >
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-gray-100">Proxies</h2>

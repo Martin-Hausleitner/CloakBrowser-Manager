@@ -24,6 +24,7 @@ import {
 } from "../lib/api";
 import { hasAccessPermission } from "../lib/accessPermissions";
 import { profileOrganizationLabel } from "../lib/profileOrganization";
+import { UI_STATE, uiStateAttr } from "../lib/uiFlowRegistry";
 
 interface AccessDashboardProps {
   onClose: () => void;
@@ -524,7 +525,11 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
   };
 
   return (
-    <main className="mx-auto min-w-0 w-full max-w-5xl p-3 sm:p-6" aria-label="Browser access controls">
+    <main
+      className="mx-auto min-w-0 w-full max-w-5xl p-3 sm:p-6"
+      aria-label="Browser access controls"
+      data-ui-state={uiStateAttr(UI_STATE.appAccessDashboard, UI_STATE.accessDashboard)}
+    >
       <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
           <div className="mt-0.5 rounded-lg bg-accent/10 p-2 text-accent">
@@ -593,7 +598,12 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
       )}
 
       {activeTab === "identities" ? (
-        <section className="min-w-0 space-y-4" role="tabpanel" aria-label="Identities">
+        <section
+          className="min-w-0 space-y-4"
+          role="tabpanel"
+          aria-label="Identities"
+          data-ui-state={UI_STATE.accessIdentities}
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <UserRound className="h-4 w-4 text-accent" />
@@ -834,7 +844,12 @@ export function AccessDashboard({ onClose }: AccessDashboardProps) {
           ) : null}
         </section>
       ) : (
-        <section className="min-w-0 space-y-4" role="tabpanel" aria-label="Groups">
+        <section
+          className="min-w-0 space-y-4"
+          role="tabpanel"
+          aria-label="Groups"
+          data-ui-state={UI_STATE.accessGroups}
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <UsersRound className="h-4 w-4 text-accent" />

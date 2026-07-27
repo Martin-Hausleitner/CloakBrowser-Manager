@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 
 import { createPortal } from "react-dom";
 import { ClipboardCopy, Code2, Ellipsis, Maximize2, Minimize2 } from "lucide-react";
 import { api } from "../lib/api";
+import { UI_STATE, uiStateAttr } from "../lib/uiFlowRegistry";
 
 interface ProfileViewerProps {
   profileId: string;
@@ -684,7 +685,10 @@ export function ProfileViewer({
 
   if (error) {
     return (
-      <div className="flex items-center justify-center h-full">
+      <div
+        className="flex items-center justify-center h-full"
+        data-ui-state={uiStateAttr(UI_STATE.profileViewer, UI_STATE.profileViewerFailed)}
+      >
         <div className="text-center">
           <p className="text-red-400 text-sm mb-2">Connection failed</p>
           <p className="text-gray-500 text-xs">{error}</p>
@@ -694,7 +698,16 @@ export function ProfileViewer({
   }
 
   return (
-    <div className={`profile-viewer relative flex h-full flex-col ${compactControls ? "profile-viewer-compact" : ""}`}>
+    <div
+      className={`profile-viewer relative flex h-full flex-col ${compactControls ? "profile-viewer-compact" : ""}`}
+      data-ui-state={uiStateAttr(
+        UI_STATE.profileViewer,
+        connectionStatus === "connecting" && UI_STATE.profileViewerConnecting,
+        connectionStatus === "connected" && UI_STATE.profileViewerConnected,
+        connectionStatus === "reconnecting" && UI_STATE.profileViewerReconnecting,
+        !canInteract && UI_STATE.profileViewerViewOnly,
+      )}
+    >
       {compactPortalTools}
       <div className={`profile-viewer-toolbar flex items-center justify-between bg-surface-1 px-3 py-1.5 border-b border-border ${compactControls && remoteToolsPortalId ? "profile-viewer-toolbar-hidden" : ""}`}>
         <div className="flex items-center gap-2">

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../lib/api";
+import { UI_STATE, expectUiState } from "../lib/uiFlowRegistry";
 import { ProfileViewer } from "./ProfileViewer";
 
 const rfbMock = vi.hoisted(() => {
@@ -137,12 +138,16 @@ describe("ProfileViewer", () => {
   it("keeps the viewer in reconnecting state after a transient noVNC disconnect", async () => {
     const { onDisconnect } = await renderProfileViewer();
 
+    expectUiState(document.body, UI_STATE.profileViewer);
+    expectUiState(document.body, UI_STATE.profileViewerConnecting);
     act(() => rfbMock.instances[0]?.emit("connect"));
+    expectUiState(document.body, UI_STATE.profileViewerConnected);
     expect(screen.getByText("Connected")).toBeTruthy();
 
     act(() => rfbMock.instances[0]?.emit("disconnect"));
 
     expect(onDisconnect).not.toHaveBeenCalled();
+    expectUiState(document.body, UI_STATE.profileViewerReconnecting);
     expect(screen.getByText("Reconnecting...")).toBeTruthy();
 
     await act(async () => {
@@ -247,6 +252,7 @@ describe("ProfileViewer", () => {
     act(() => rfbMock.instances[0]?.emit("securityfailure", { reason: "bad auth" }));
 
     expect(onDisconnect).toHaveBeenCalledTimes(1);
+    expectUiState(document.body, UI_STATE.profileViewerFailed);
     expect(screen.getByText("Connection failed")).toBeTruthy();
     expect(screen.getByText("Security failure: bad auth")).toBeTruthy();
   });
@@ -264,6 +270,7 @@ describe("ProfileViewer", () => {
     await flushAsyncWork();
 
     expect(rfbMock.instances[0]?.viewOnly).toBe(true);
+    expectUiState(document.body, UI_STATE.profileViewerViewOnly);
     expect(screen.getByText("View only")).toBeTruthy();
     expect(screen.queryByLabelText("Paste text into remote browser")).toBeNull();
     expect(screen.queryByLabelText("Enable clipboard sync")).toBeNull();

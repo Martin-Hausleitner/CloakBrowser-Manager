@@ -11,6 +11,7 @@ import {
   type ProfileHarness,
 } from "./lib/api";
 import { hasAccessPermission } from "./lib/accessPermissions";
+import { UI_STATE, type UIStateId } from "./lib/uiFlowRegistry";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
 import { CreateProfileFlow } from "./components/CreateProfileFlow";
@@ -124,14 +125,14 @@ export default function App() {
   if (authState === "checking") {
     return (
       <div className="h-screen flex items-center justify-center">
-        <div className="text-gray-500 text-sm">Loading...</div>
+        <div className="text-gray-500 text-sm" data-ui-state={UI_STATE.appAuthChecking}>Loading...</div>
       </div>
     );
   }
 
   if (authState === "error") {
     return (
-      <div className="h-screen flex items-center justify-center bg-surface-0">
+      <div className="h-screen flex items-center justify-center bg-surface-0" data-ui-state={UI_STATE.appAuthError}>
         <div className="text-center">
           <p className="text-red-400 text-sm mb-2">Unable to reach the server</p>
           <button
@@ -346,7 +347,10 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
       const editing = view === "edit" && selected;
 
       return (
-        <div className="flex h-dvh flex-col overflow-hidden bg-surface-0">
+        <div
+          className="flex h-dvh flex-col overflow-hidden bg-surface-0"
+          data-ui-state={UI_STATE.appMobileProfileForm}
+        >
           <div className="flex items-center justify-between border-b border-border bg-surface-1 px-3 py-2">
             <div className="flex min-w-0 items-center gap-2">
               <button
@@ -439,7 +443,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   }
 
   return (
-    <div className="h-screen flex">
+    <div className="h-screen flex" data-ui-state={UI_STATE.appDesktopShell}>
       {/* Compact Browser-Use style sidebar */}
       {sidebarOpen && (
         <div className="w-48 border-r border-border bg-surface-1 flex-shrink-0 flex flex-col">
@@ -596,7 +600,10 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
         ) : null}
 
         {/* Content */}
-        <div className="flex-1 overflow-hidden overscroll-contain">
+        <div
+          className="flex-1 overflow-hidden overscroll-contain"
+          data-ui-state={desktopViewState(view)}
+        >
           {view === "home" && (
             <BrowserUseHome
               projects={projects}
@@ -758,6 +765,21 @@ function canAccess(identity: AccessIdentity | null, profile: Profile | null, per
   if (!identity || !profile) return false;
   if (isAdministrator(identity)) return true;
   return hasAccessPermission(identity.grants, profile.sandbox_id, permission);
+}
+
+function desktopViewState(view: View): UIStateId {
+  const states: Record<View, UIStateId> = {
+    home: UI_STATE.appDesktopHome,
+    empty: UI_STATE.appDesktopEmpty,
+    create: UI_STATE.appDesktopCreate,
+    edit: UI_STATE.appDesktopEdit,
+    view: UI_STATE.appDesktopAgentWorkspace,
+    access: UI_STATE.appAccessDashboard,
+    proxies: UI_STATE.appDesktopProxies,
+    profiles: UI_STATE.appDesktopProfiles,
+    accounts: UI_STATE.appDesktopAccounts,
+  };
+  return states[view];
 }
 
 function useIsMobile() {

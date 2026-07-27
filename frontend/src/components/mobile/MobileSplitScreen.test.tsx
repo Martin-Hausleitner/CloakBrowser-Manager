@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { api, type Profile } from "../../lib/api";
 import { codexComputerUseProvider, taskHarnessReadyEvent } from "../../lib/taskHarness";
+import { UI_STATE, expectUiState } from "../../lib/uiFlowRegistry";
 import { MobileSplitScreen } from "./MobileSplitScreen";
 
 const stoppedProfile: Profile = {
@@ -176,6 +177,10 @@ describe("MobileSplitScreen", () => {
   it("renders the default Codex Computer Use composer with browser tools and chat collapsed", async () => {
     renderMobileSplit();
 
+    expectUiState(document.body, UI_STATE.mobileWorkspace);
+    expectUiState(document.body, UI_STATE.mobileLivePane);
+    expectUiState(document.body, UI_STATE.mobileControlPane);
+    expectUiState(document.body, UI_STATE.mobileBrowserFrame);
     expect(await screen.findByText("Codex Computer Use")).toBeTruthy();
     expect(await screen.findByPlaceholderText("Ask Codex Computer Use...")).toBeTruthy();
     expect(screen.getByLabelText("Open browser tools")).toBeTruthy();
@@ -699,9 +704,11 @@ describe("MobileSplitScreen", () => {
     openBrowserTools();
 
     const tools = screen.getByLabelText("Browser tools");
+    expectUiState(document.body, UI_STATE.mobileToolsSheet);
     expect(within(tools).getByRole("button", { name: /Stop/i })).toBeTruthy();
     expect(within(tools).queryByLabelText("New profile")).toBeNull();
     fireEvent.click(within(tools).getByLabelText("Toggle browser administration"));
+    expectUiState(document.body, UI_STATE.mobileAdminTools);
     expect(within(tools).getByLabelText("New profile")).toBeTruthy();
     expect(within(tools).getByLabelText("Edit selected profile")).toBeTruthy();
     expect(within(tools).getByLabelText("Browser access controls")).toBeTruthy();
@@ -759,11 +766,13 @@ describe("MobileSplitScreen", () => {
 
     fireEvent.click(screen.getByLabelText("Toggle grid view"));
     expect(screen.getByLabelText("Running browser grid")).toBeTruthy();
+    expectUiState(document.body, UI_STATE.mobileSessionGrid);
     expect(screen.queryByLabelText("Viewport controls")).toBeNull();
     expect(workspace.classList.contains("mobile-detail-panel-open")).toBe(true);
 
     fireEvent.click(screen.getByLabelText("Edit browser viewport"));
     expect(screen.getByLabelText("Viewport controls")).toBeTruthy();
+    expectUiState(document.body, UI_STATE.mobileViewportControls);
     expect(screen.queryByLabelText("Running browser grid")).toBeNull();
     expect(screen.queryByLabelText("Pinned browser actions")).toBeNull();
     expect(workspace.classList.contains("mobile-detail-panel-open")).toBe(true);
@@ -918,6 +927,7 @@ describe("MobileSplitScreen", () => {
     const { props } = runningSplit();
 
     fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
+    expectUiState(document.body, UI_STATE.mobileFullscreenBrowser);
 
     const fullscreenDialog = screen.getByRole("dialog", { name: "Fullscreen browser viewer" }) as HTMLElement;
     expect(fullscreenDialog).toBeTruthy();

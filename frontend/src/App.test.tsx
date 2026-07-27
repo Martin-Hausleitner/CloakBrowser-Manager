@@ -3,12 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App, { applyProfileViewport, toggleProfilePin } from "./App";
 import { ProfileForm } from "./components/ProfileForm";
 import type { Profile } from "./lib/api";
+import { UI_STATE, expectUiState } from "./lib/uiFlowRegistry";
 
 const apiMock = vi.hoisted(() => ({
   authStatus: vi.fn(),
   logout: vi.fn(),
   setOnUnauthorized: vi.fn(),
   getOrcaCapabilities: vi.fn(),
+  listProxies: vi.fn(),
 }));
 
 const useProfilesMock = vi.hoisted(() => vi.fn());
@@ -22,6 +24,7 @@ vi.mock("./lib/api", async () => {
       authStatus: apiMock.authStatus,
       logout: apiMock.logout,
       getOrcaCapabilities: apiMock.getOrcaCapabilities,
+      listProxies: apiMock.listProxies,
     },
     setOnUnauthorized: apiMock.setOnUnauthorized,
   };
@@ -115,6 +118,7 @@ beforeEach(() => {
     },
     notes: [],
   });
+  apiMock.listProxies.mockResolvedValue([]);
   useProfilesMock.mockReset();
   Object.defineProperty(window, "matchMedia", {
     writable: true,
@@ -168,6 +172,36 @@ describe("App Browser Use home handoff", () => {
 
     const workspacePrompt = await screen.findByTestId("orca-prompt");
     expect((workspacePrompt as HTMLTextAreaElement).value).toBe(task);
+  });
+
+  it("exposes stable UI states across desktop navigation into the live workspace", async () => {
+    useProfilesMock.mockReturnValue({
+      profiles: [runningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopShell));
+    expectUiState(document.body, UI_STATE.appDesktopHome);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Proxies" })[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProxies));
+    expectUiState(document.body, UI_STATE.proxyOverview);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Profiles" })[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProfiles));
+
+    fireEvent.click(screen.getAllByText("Live Checkout QA")[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAgentWorkspace));
+    expectUiState(document.body, UI_STATE.agentWorkspace);
   });
 });
 

@@ -170,6 +170,147 @@ def test_filtered_claim_reports_redacted_harness_presence(client_access: TestCli
     assert stale.json()["reason"] == "The last authenticated ACPX worker check-in is stale"
 
 
+def test_acpx_preflight_is_agent_scoped_redacted_and_expires(client_access: TestClient):
+    from backend import main
+
+    reported = client_access.post(
+        "/internal/task-harnesses/acpx/preflights",
+        headers=worker_headers(),
+        json={"agent": "cursor", "ready": True, "reason_code": "ok"},
+    )
+    assert reported.status_code == 204
+
+    auth_required = client_access.post(
+        "/internal/task-harnesses/acpx/preflights",
+        headers=worker_headers(),
+        json={
+            "agent": "codex",
+            "ready": False,
+            "reason_code": "auth_required",
+        },
+    )
+    assert auth_required.status_code == 204
+
+    response = client_access.get(
+        "/api/task-harnesses/acpx/preflights",
+        headers=bootstrap_headers(),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["harness"] == "acpx"
+    agents = {item["agent"]: item for item in body["agents"]}
+    assert agents["cursor"]["state"] == "ready"
+    assert agents["cursor"]["ready"] is True
+    assert agents["cursor"]["reason_code"] == "ok"
+    assert agents["codex"]["state"] == "failed"
+    assert agents["codex"]["ready"] is False
+    assert agents["codex"]["reason_code"] == "auth_required"
+    assert "worker_id" not in agents["cursor"]
+    assert agents["claude"] == {
+        "agent": "claude",
+        "ready": False,
+        "state": "unavailable",
+        "reason_code": "not_checked",
+        "checked_at": None,
+    }
+
+    checked_at = datetime.fromisoformat(agents["cursor"]["checked_at"])
+    main.worker_runtime_service._clock = lambda: checked_at + timedelta(seconds=301)
+    expired = client_access.get(
+        "/api/task-harnesses/acpx/preflights",
+        headers=bootstrap_headers(),
+    ).json()
+    expired_agents = {item["agent"]: item for item in expired["agents"]}
+    assert expired_agents["cursor"]["state"] == "stale"
+    assert expired_agents["cursor"]["ready"] is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"agent": "cursor", "ready": True, "reason_code": "auth_required"},
+        {"agent": "cursor", "ready": False, "reason_code": "ok"},
+        {"agent": "unknown", "ready": True, "reason_code": "ok"},
+        {
+            "agent": "cursor",
+            "ready": True,
+            "reason_code": "ok",
+            "detail": "must not be persisted",
+        },
+    ],
+)
+def test_acpx_preflight_rejects_invalid_payloads(
+    client_access: TestClient,
+    payload: dict[str, object],
+):
+    response = client_access.post(
+        "/internal/task-harnesses/acpx/preflights",
+        headers=worker_headers(),
+        json=payload,
+    )
+    assert response.status_code == 422
+    with db.get_db() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM worker_harness_preflights"
+        ).fetchone()[0] == 0
+
+
+def test_acpx_preflight_enforces_worker_and_public_auth(client_access: TestClient):
+    payload = {"agent": "cursor", "ready": True, "reason_code": "ok"}
+    assert client_access.get("/api/task-harnesses/acpx/preflights").status_code == 401
+    assert client_access.post(
+        "/internal/task-harnesses/acpx/preflights",
+        headers=bootstrap_headers(),
+        json=payload,
+    ).status_code == 401
+    assert client_access.post(
+        "/internal/task-harnesses/acpx/preflights",
+        headers={"Authorization": "Bearer cbm_worker_invalid"},
+        json=payload,
+    ).status_code == 401
+
+
+def test_acpx_preflight_uses_newest_active_worker_result(client_access: TestClient):
+    from backend import main
+
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    main.worker_runtime_service._clock = lambda: now
+    with db.get_db() as conn:
+        conn.executemany(
+            """
+            INSERT INTO worker_identities
+                (id, key_digest, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                ("worker-old", "digest-old", 1, now.isoformat(), now.isoformat()),
+                ("worker-new", "digest-new", 1, now.isoformat(), now.isoformat()),
+                ("worker-inactive", "digest-inactive", 0, now.isoformat(), now.isoformat()),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO worker_harness_preflights
+                (worker_id, harness, agent, ready, reason_code, checked_at)
+            VALUES (?, 'acpx', 'cursor', ?, ?, ?)
+            """,
+            [
+                ("worker-old", 0, "auth_required", (now - timedelta(seconds=30)).isoformat()),
+                ("worker-new", 1, "ok", (now - timedelta(seconds=10)).isoformat()),
+                ("worker-inactive", 0, "protocol_error", (now - timedelta(seconds=1)).isoformat()),
+            ],
+        )
+        conn.commit()
+
+    cursor = {
+        item["agent"]: item
+        for item in main.worker_runtime_service.agent_preflights("acpx")["agents"]
+    }["cursor"]
+    assert cursor["ready"] is True
+    assert cursor["reason_code"] == "ok"
+    assert cursor["checked_at"] == (now - timedelta(seconds=10)).isoformat()
+
+
 def test_unfiltered_claim_still_picks_oldest_any_harness(client_access: TestClient):
     profile_a = db.create_profile("A", sandbox_id="alpha")
     profile_b = db.create_profile("B", sandbox_id="alpha")

@@ -1155,6 +1155,50 @@ class TaskHarnessPresenceResponse(BaseModel):
     reason: str | None = None
 
 
+AcpxPreflightReason = Literal[
+    "ok",
+    "auth_required",
+    "adapter_unavailable",
+    "version_mismatch",
+    "mcp_unavailable",
+    "protocol_error",
+    "internal_error",
+]
+
+
+class WorkerAcpxPreflightRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent: AcpxAgent
+    ready: bool
+    reason_code: AcpxPreflightReason
+
+    @model_validator(mode="after")
+    def validate_ready_reason(self):
+        if self.ready and self.reason_code != "ok":
+            raise ValueError("ready preflight requires reason_code=ok")
+        if not self.ready and self.reason_code == "ok":
+            raise ValueError("failed preflight requires a failure reason")
+        return self
+
+
+class TaskHarnessAgentPreflightResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent: AcpxAgent
+    ready: bool
+    state: Literal["ready", "failed", "stale", "unavailable"]
+    reason_code: str
+    checked_at: str | None = None
+
+
+class TaskHarnessPreflightsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    harness: Literal["acpx"]
+    agents: list[TaskHarnessAgentPreflightResponse] = Field(default_factory=list)
+
+
 class WorkerCapabilityResponse(BaseModel):
     token: str
     cdp_url: str

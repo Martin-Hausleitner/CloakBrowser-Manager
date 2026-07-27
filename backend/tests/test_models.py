@@ -13,6 +13,7 @@ from backend.models import (
     ProfileUpdate,
     TagCreate,
     TaskRunCreate,
+    WorkerAcpxPreflightRequest,
 )
 
 
@@ -61,6 +62,22 @@ def test_profile_health_response_rejects_out_of_range_scores():
 def test_profile_health_response_rejects_unknown_source_state():
     with pytest.raises(ValidationError):
         ProfileHealthResponse(profile_id="profile-1", sources={"browser_scan": "trusted"})
+
+
+@pytest.mark.parametrize(
+    ("ready", "reason_code"),
+    [
+        (True, "auth_required"),
+        (False, "ok"),
+    ],
+)
+def test_acpx_preflight_requires_consistent_ready_reason(ready: bool, reason_code: str):
+    with pytest.raises(ValidationError):
+        WorkerAcpxPreflightRequest(
+            agent="cursor",
+            ready=ready,
+            reason_code=reason_code,
+        )
 
 
 # ── ProfileCreate ────────────────────────────────────────────────────────────

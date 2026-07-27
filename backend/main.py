@@ -101,6 +101,7 @@ if __package__:
         TaskRunHealthOverrideRequest,
         TaskRunResponse,
         TaskHarnessPresenceResponse,
+        TaskHarnessPreflightsResponse,
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
@@ -114,6 +115,7 @@ if __package__:
         WorkerClaimResponse,
         WorkerFailRequest,
         WorkerHeartbeatResponse,
+        WorkerAcpxPreflightRequest,
     )
     from . import proxy_inventory
     from . import session_links
@@ -196,6 +198,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
         TaskRunHealthOverrideRequest,
         TaskRunResponse,
         TaskHarnessPresenceResponse,
+        TaskHarnessPreflightsResponse,
         TaskSessionCreate,
         TaskSessionResponse,
         TaskSessionUpdate,
@@ -209,6 +212,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
         WorkerClaimResponse,
         WorkerFailRequest,
         WorkerHeartbeatResponse,
+        WorkerAcpxPreflightRequest,
     )
     import proxy_inventory
     import session_links
@@ -3181,6 +3185,33 @@ async def get_task_harness_presence(harness: Harness, request: Request):
     _require_identity(request.scope)
     return TaskHarnessPresenceResponse(
         **worker_runtime_service.harness_presence(harness)
+    )
+
+
+@app.post("/internal/task-harnesses/acpx/preflights", status_code=204)
+async def report_internal_acpx_preflight(
+    body: WorkerAcpxPreflightRequest,
+    request: Request,
+):
+    worker = _require_worker(request)
+    worker_runtime_service.record_agent_preflight(
+        worker.id,
+        harness="acpx",
+        agent=body.agent,
+        ready=body.ready,
+        reason_code=body.reason_code,
+    )
+    return Response(status_code=204)
+
+
+@app.get(
+    "/api/task-harnesses/acpx/preflights",
+    response_model=TaskHarnessPreflightsResponse,
+)
+async def get_acpx_preflights(request: Request):
+    _require_identity(request.scope)
+    return TaskHarnessPreflightsResponse(
+        **worker_runtime_service.agent_preflights("acpx")
     )
 
 

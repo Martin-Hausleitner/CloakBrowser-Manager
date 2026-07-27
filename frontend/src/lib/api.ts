@@ -550,6 +550,19 @@ export interface TaskHarnessPresence {
   reason: string | null;
 }
 
+export interface TaskHarnessAgentPreflight {
+  agent: AcpxAgent;
+  ready: boolean;
+  state: "ready" | "failed" | "stale" | "unavailable";
+  reason_code: string;
+  checked_at: string | null;
+}
+
+export interface TaskHarnessPreflights {
+  harness: "acpx";
+  agents: TaskHarnessAgentPreflight[];
+}
+
 export interface TaskOutput {
   id: string;
   run_id: string;
@@ -932,6 +945,14 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
     options?: { signal?: AbortSignal },
   ) => request<TaskHarnessPresence>(
     `/api/task-harnesses/${encodeURIComponent(harness)}/presence`,
+    { signal: options?.signal },
+  ),
+
+  getTaskHarnessPreflights: (
+    harness: "acpx",
+    options?: { signal?: AbortSignal },
+  ) => request<TaskHarnessPreflights>(
+    `/api/task-harnesses/${encodeURIComponent(harness)}/preflights`,
     { signal: options?.signal },
   ),
 

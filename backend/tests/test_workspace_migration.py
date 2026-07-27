@@ -268,9 +268,35 @@ def test_workspace_migration_preserves_history_and_snapshots_ownership(
     ]
     assert [row["version"] for row in migrations] == [
         "agent_workspace_v1",
+        "task_runs_acpx_v1",
         "task_runs_v1",
+        "worker_harness_preflights_v1",
+        "worker_harness_presence_v1",
         "worker_runtime_v1",
     ]
+    with db.get_db() as conn:
+        preflight_columns = {
+            row["name"]: row for row in conn.execute(
+                "PRAGMA table_info(worker_harness_preflights)"
+            ).fetchall()
+        }
+        preflight_fks = conn.execute(
+            "PRAGMA foreign_key_list(worker_harness_preflights)"
+        ).fetchall()
+        preflight_indexes = {
+            row["name"] for row in conn.execute(
+                "PRAGMA index_list(worker_harness_preflights)"
+            ).fetchall()
+        }
+    assert [preflight_columns[name]["pk"] for name in ("worker_id", "harness", "agent")] == [1, 2, 3]
+    assert any(
+        row["table"] == "worker_identities"
+        and row["from"] == "worker_id"
+        and row["to"] == "id"
+        and row["on_delete"] == "CASCADE"
+        for row in preflight_fks
+    )
+    assert "idx_worker_harness_preflights_lookup" in preflight_indexes
     assert profile_fk["table"] == "profiles"
     assert profile_fk["on_delete"] == "SET NULL"
 
@@ -296,11 +322,18 @@ def test_workspace_migration_is_idempotent(legacy_database: Path):
     db.init_db()
 
     with db.get_db() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 6
         assert {
             row["version"]
             for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
-        } == {"agent_workspace_v1", "task_runs_v1", "worker_runtime_v1"}
+        } == {
+            "agent_workspace_v1",
+            "task_runs_acpx_v1",
+            "task_runs_v1",
+            "worker_harness_preflights_v1",
+            "worker_harness_presence_v1",
+            "worker_runtime_v1",
+        }
         assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM task_sessions").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == 1
@@ -420,11 +453,18 @@ def test_workspace_migration_serializes_concurrent_initialization(
             initialization.result(timeout=10)
 
     with db.get_db() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 6
         assert {
             row["version"]
             for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
-        } == {"agent_workspace_v1", "task_runs_v1", "worker_runtime_v1"}
+        } == {
+            "agent_workspace_v1",
+            "task_runs_acpx_v1",
+            "task_runs_v1",
+            "worker_harness_preflights_v1",
+            "worker_harness_presence_v1",
+            "worker_runtime_v1",
+        }
         assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM task_sessions").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == 0

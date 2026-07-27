@@ -696,9 +696,20 @@ describe("api.taskRuns", () => {
       last_seen_at: "2026-07-27T00:00:00Z",
       reason: null,
     };
+    const preflights = {
+      harness: "acpx" as const,
+      agents: [{
+        agent: "cursor",
+        ready: true,
+        state: "ready",
+        reason_code: "ok",
+        checked_at: "2026-07-27T00:00:00Z",
+      }],
+    };
     mockFetch
       .mockResolvedValueOnce(jsonResponse(run, 201))
-      .mockResolvedValueOnce(jsonResponse(presence));
+      .mockResolvedValueOnce(jsonResponse(presence))
+      .mockResolvedValueOnce(jsonResponse(preflights));
 
     await api.createTaskRun("session-acpx", {
       harness: "acpx",
@@ -708,6 +719,7 @@ describe("api.taskRuns", () => {
       allowed_origins: ["https://example.com"],
     });
     await expect(api.getTaskHarnessPresence("acpx")).resolves.toEqual(presence);
+    await expect(api.getTaskHarnessPreflights("acpx")).resolves.toEqual(preflights);
 
     expect(JSON.parse(String(mockFetch.mock.calls[0][1]?.body))).toMatchObject({
       harness: "acpx",
@@ -716,6 +728,7 @@ describe("api.taskRuns", () => {
     expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
       "/api/task-sessions/session-acpx/runs",
       "/api/task-harnesses/acpx/presence",
+      "/api/task-harnesses/acpx/preflights",
     ]);
   });
 });

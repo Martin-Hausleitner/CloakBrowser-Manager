@@ -513,6 +513,53 @@ def _migrate_worker_harness_presence_v1(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_worker_harness_preflights_v1(conn: sqlite3.Connection) -> None:
+    """Persist redacted per-agent adapter preflight results."""
+    migration_version = "worker_harness_preflights_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        workers_exist = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_identities'"
+        ).fetchone()
+        if workers_exist is None:
+            conn.rollback()
+            return
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_harness_preflights (
+                worker_id TEXT NOT NULL REFERENCES worker_identities(id) ON DELETE CASCADE,
+                harness TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                ready BOOLEAN NOT NULL,
+                reason_code TEXT NOT NULL,
+                checked_at TEXT NOT NULL,
+                PRIMARY KEY (worker_id, harness, agent)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_worker_harness_preflights_lookup
+                ON worker_harness_preflights(harness, agent, checked_at DESC)
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
@@ -750,49 +797,41 @@ def init_db():
         """)
         conn.commit()
 
-        # Migrations for existing databases
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(profiles)").fetchall()}
-        if "clipboard_sync" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN clipboard_sync BOOLEAN DEFAULT 1")
+        # Serialize legacy profile-column upgrades. Multiple API processes may
+        # initialize the same SQLite database concurrently during a rollout;
+        # the column snapshot and every ALTER must share one write lock.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(profiles)").fetchall()
+            }
+            profile_columns = {
+                "clipboard_sync": "BOOLEAN DEFAULT 1",
+                "launch_args": "TEXT DEFAULT '[]'",
+                "auto_launch": "BOOLEAN DEFAULT 0",
+                "color_scheme": "TEXT",
+                "search_engine": "TEXT",
+                "extension_ids": "TEXT NOT NULL DEFAULT '[]'",
+                "sandbox_id": "TEXT NOT NULL DEFAULT 'default'",
+                "project_id": "TEXT NOT NULL DEFAULT 'default'",
+                "folder_path": "TEXT NOT NULL DEFAULT ''",
+                "pinned": "BOOLEAN NOT NULL DEFAULT 0",
+                "accent_color": "TEXT",
+                "harness": "TEXT NOT NULL DEFAULT 'codex'",
+            }
+            for column, definition in profile_columns.items():
+                if column not in cols:
+                    conn.execute(f"ALTER TABLE profiles ADD COLUMN {column} {definition}")
             conn.commit()
-        if "launch_args" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN launch_args TEXT DEFAULT '[]'")
-            conn.commit()
-        if "auto_launch" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN auto_launch BOOLEAN DEFAULT 0")
-            conn.commit()
-        if "color_scheme" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN color_scheme TEXT")
-            conn.commit()
-        if "search_engine" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN search_engine TEXT")
-            conn.commit()
-        if "extension_ids" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN extension_ids TEXT NOT NULL DEFAULT '[]'")
-            conn.commit()
-        if "sandbox_id" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN sandbox_id TEXT NOT NULL DEFAULT 'default'")
-            conn.commit()
-        if "project_id" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'")
-            conn.commit()
-        if "folder_path" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN folder_path TEXT NOT NULL DEFAULT ''")
-            conn.commit()
-        if "pinned" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN pinned BOOLEAN NOT NULL DEFAULT 0")
-            conn.commit()
-        if "accent_color" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN accent_color TEXT")
-            conn.commit()
-        if "harness" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN harness TEXT NOT NULL DEFAULT 'codex'")
-            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         _migrate_agent_workspace_v1(conn)
         _migrate_task_runs_v1(conn)
         _migrate_worker_runtime_v1(conn)
         _migrate_task_runs_acpx_v1(conn)
         _migrate_worker_harness_presence_v1(conn)
+        _migrate_worker_harness_preflights_v1(conn)
 
 
 def _now() -> str:

@@ -27,6 +27,8 @@ MIN_ELIGIBILITY_TIMEOUT_SECONDS = 30
 MAX_ELIGIBILITY_TIMEOUT_SECONDS = 300
 WORKER_MAINTENANCE_INTERVAL_SECONDS = 5
 HARNESS_PRESENCE_TTL_SECONDS = 45
+HARNESS_PREFLIGHT_TTL_SECONDS = 300
+ACPX_AGENTS = ("codex", "claude", "cursor", "grok-build", "opencode")
 
 ALLOWLISTED_FAIL_CODES = frozenset(
     {
@@ -427,6 +429,96 @@ class WorkerRuntimeService:
             "last_seen_at": row["last_seen_at"],
             "reason": None,
         }
+
+    def record_agent_preflight(
+        self,
+        worker_id: str,
+        *,
+        harness: str,
+        agent: str,
+        ready: bool,
+        reason_code: str,
+    ) -> None:
+        """Store one authenticated redacted adapter/auth preflight result."""
+        now = self._clock()
+        with self._get_db() as conn:
+            active = conn.execute(
+                "SELECT 1 FROM worker_identities WHERE id = ? AND active = 1",
+                (worker_id,),
+            ).fetchone()
+            if active is None:
+                raise WorkerNotFound(worker_id)
+            conn.execute(
+                """
+                INSERT INTO worker_harness_preflights (
+                    worker_id, harness, agent, ready, reason_code, checked_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(worker_id, harness, agent) DO UPDATE SET
+                    ready = excluded.ready,
+                    reason_code = excluded.reason_code,
+                    checked_at = excluded.checked_at
+                """,
+                (worker_id, harness, agent, bool(ready), reason_code, _iso(now)),
+            )
+            conn.commit()
+
+    def agent_preflights(self, harness: str) -> dict[str, Any]:
+        """Return latest active-worker preflights with strict freshness semantics."""
+        now = self._clock()
+        agents = ACPX_AGENTS if harness == "acpx" else ()
+        with self._get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.agent, p.ready, p.reason_code, p.checked_at
+                FROM worker_harness_preflights p
+                JOIN worker_identities w ON w.id = p.worker_id
+                WHERE p.harness = ? AND w.active = 1
+                ORDER BY p.checked_at DESC
+                """,
+                (harness,),
+            ).fetchall()
+        latest: dict[str, Any] = {}
+        for row in rows:
+            latest.setdefault(str(row["agent"]), row)
+        result: list[dict[str, Any]] = []
+        for agent in agents:
+            row = latest.get(agent)
+            if row is None:
+                result.append(
+                    {
+                        "agent": agent,
+                        "ready": False,
+                        "state": "unavailable",
+                        "reason_code": "not_checked",
+                        "checked_at": None,
+                    }
+                )
+                continue
+            checked_at = _parse_dt(row["checked_at"])
+            if checked_at is None or now - checked_at > timedelta(
+                seconds=HARNESS_PREFLIGHT_TTL_SECONDS
+            ):
+                result.append(
+                    {
+                        "agent": agent,
+                        "ready": False,
+                        "state": "stale",
+                        "reason_code": "stale",
+                        "checked_at": row["checked_at"],
+                    }
+                )
+                continue
+            ready = bool(row["ready"])
+            result.append(
+                {
+                    "agent": agent,
+                    "ready": ready,
+                    "state": "ready" if ready else "failed",
+                    "reason_code": row["reason_code"],
+                    "checked_at": row["checked_at"],
+                }
+            )
+        return {"harness": harness, "agents": result}
 
     # ── Eligibility ──────────────────────────────────────────────────────────
 

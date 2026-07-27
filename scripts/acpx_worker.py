@@ -57,6 +57,9 @@ MAX_STDERR_BYTES = 16_384
 CONTROL_TERMINATE_TIMEOUT_SECONDS = 2.0
 CLOSE_SESSION_ATTEMPTS = 2
 CLOSE_SESSION_RETRY_DELAY_SECONDS = 0.1
+PREFLIGHT_TRANSIENT_RETRY_REASON_CODES = frozenset(
+    {"adapter_unavailable", "protocol_error"}
+)
 PREFLIGHT_SCRUBBED_ENV_KEYS = frozenset(
     {
         "CBM_RUN_CAPABILITY_FILE",
@@ -529,6 +532,51 @@ class AcpxWorker:
             path.unlink(missing_ok=True)
             raise
 
+    async def _preflight_agent_once(
+        self,
+        *,
+        agent: str,
+        session_name: str,
+        environment: dict[str, str],
+        mcp_config: Path,
+    ) -> tuple[bool, str]:
+        try:
+            result = await self.runtime.preflight_agent(
+                cwd=self.config.worktree,
+                agent=agent,
+                session_name=session_name,
+                environment=environment,
+                mcp_config=mcp_config,
+            )
+            ready = bool(result.get("ready"))
+            reason_code = str(result.get("reason_code") or "protocol_error")
+            return ready, reason_code
+        except Exception:  # noqa: BLE001 - fail closed per adapter
+            return False, "protocol_error"
+
+    async def _preflight_agent_with_transient_retry(
+        self,
+        *,
+        agent: str,
+        session_name: str,
+        environment: dict[str, str],
+        mcp_config: Path,
+    ) -> tuple[bool, str]:
+        ready, reason_code = await self._preflight_agent_once(
+            agent=agent,
+            session_name=session_name,
+            environment=environment,
+            mcp_config=mcp_config,
+        )
+        if ready or reason_code not in PREFLIGHT_TRANSIENT_RETRY_REASON_CODES:
+            return ready, reason_code
+        return await self._preflight_agent_once(
+            agent=agent,
+            session_name=session_name,
+            environment=environment,
+            mcp_config=mcp_config,
+        )
+
     async def refresh_preflights(self) -> None:
         """Probe every supported ACP adapter without exposing credentials."""
         mcp_config = self._write_preflight_mcp_config()
@@ -561,19 +609,12 @@ class AcpxWorker:
                 session_name = derive_session_name(
                     f"preflight-v2:{self.config.worker_id}:{self.config.worktree}:{agent}"
                 )
-                try:
-                    result = await self.runtime.preflight_agent(
-                        cwd=self.config.worktree,
-                        agent=agent,
-                        session_name=session_name,
-                        environment=environment,
-                        mcp_config=mcp_config,
-                    )
-                    ready = bool(result.get("ready"))
-                    reason_code = str(result.get("reason_code") or "protocol_error")
-                except Exception:  # noqa: BLE001 - fail closed per adapter
-                    ready = False
-                    reason_code = "protocol_error"
+                ready, reason_code = await self._preflight_agent_with_transient_retry(
+                    agent=agent,
+                    session_name=session_name,
+                    environment=environment,
+                    mcp_config=mcp_config,
+                )
                 await asyncio.to_thread(
                     self.client.report_preflight,
                     agent=agent,

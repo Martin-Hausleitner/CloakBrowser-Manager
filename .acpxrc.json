@@ -1,0 +1,8 @@
+{
+  "agents": {
+    "opencode": {
+      "command": "opencode",
+      "args": ["acp", "--pure"]
+    }
+  }
+}

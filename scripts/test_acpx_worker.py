@@ -18,6 +18,8 @@ from scripts.acpx_worker import (
     build_worker_config,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 class FakeHTTPResponse:
     def __init__(self, status_code: int, data=None):
@@ -184,6 +186,24 @@ def claim(**overrides):
     return body
 
 
+def test_checked_in_acpx_config_only_overrides_opencode_to_pure_local_acp():
+    parsed = json.loads((ROOT / ".acpxrc.json").read_text(encoding="utf-8"))
+
+    assert parsed == {
+        "agents": {
+            "opencode": {
+                "command": "opencode",
+                "args": ["acp", "--pure"],
+            }
+        }
+    }
+    serialized = json.dumps(parsed).lower()
+    assert "auth" not in serialized
+    assert "mcp" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
 def test_manager_client_claims_only_acpx_runs():
     http = FakeHTTP([FakeHTTPResponse(200, claim())])
     client = AcpxManagerClient(
@@ -252,6 +272,98 @@ def test_worker_reports_agent_preflights_and_cleans_empty_mcp_config(tmp_path: P
     assert ("cursor", True, "ok") in manager.preflights
     assert ("codex", False, "auth_required") in manager.preflights
     assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+@pytest.mark.parametrize("transient_reason", ["adapter_unavailable", "protocol_error"])
+def test_worker_preflight_retries_one_transient_failure_per_agent_before_reporting(
+    tmp_path: Path,
+    transient_reason: str,
+):
+    manager = FakeManager()
+
+    class TransientRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.calls_by_agent = {}
+
+        async def preflight_agent(self, *, agent, **_kwargs):
+            count = self.calls_by_agent.get(agent, 0) + 1
+            self.calls_by_agent[agent] = count
+            if count == 1:
+                return {"ready": False, "reason_code": transient_reason}
+            return {"ready": True, "reason_code": "ok"}
+
+    runtime = TransientRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert set(runtime.calls_by_agent) == {
+        "claude",
+        "codex",
+        "cursor",
+        "grok-build",
+        "opencode",
+    }
+    assert set(runtime.calls_by_agent.values()) == {2}
+    assert {ready for _agent, ready, _reason in manager.preflights} == {True}
+    assert {reason for _agent, _ready, reason in manager.preflights} == {"ok"}
+
+
+def test_worker_preflight_does_not_retry_auth_required_or_ready_results(tmp_path: Path):
+    manager = FakeManager()
+
+    class StableRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.calls_by_agent = {}
+
+        async def preflight_agent(self, *, agent, **_kwargs):
+            count = self.calls_by_agent.get(agent, 0) + 1
+            self.calls_by_agent[agent] = count
+            if agent == "opencode":
+                return {"ready": False, "reason_code": "auth_required"}
+            return {"ready": True, "reason_code": "ok"}
+
+    runtime = StableRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert set(runtime.calls_by_agent.values()) == {1}
+    assert ("opencode", False, "auth_required") in manager.preflights
+    assert all(
+        reason == "ok"
+        for agent, ready, reason in manager.preflights
+        if agent != "opencode" and ready
+    )
+
+
+def test_worker_preflight_reports_permanent_transient_failure_after_one_retry(
+    tmp_path: Path,
+):
+    manager = FakeManager()
+
+    class PermanentlyUnavailableRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.calls_by_agent = {}
+
+        async def preflight_agent(self, *, agent, **_kwargs):
+            count = self.calls_by_agent.get(agent, 0) + 1
+            self.calls_by_agent[agent] = count
+            return {"ready": False, "reason_code": "adapter_unavailable"}
+
+    runtime = PermanentlyUnavailableRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert set(runtime.calls_by_agent.values()) == {2}
+    assert {ready for _agent, ready, _reason in manager.preflights} == {False}
+    assert {reason for _agent, _ready, reason in manager.preflights} == {
+        "adapter_unavailable"
+    }
 
 
 def test_worker_preflight_uses_private_empty_mcp_without_cbm_run_env(tmp_path: Path):

@@ -35,6 +35,7 @@ from scripts.acpx_runner import (
     derive_session_name,
     map_acpx_event,
     parse_acpx_event,
+    parse_acpx_frame,
     validate_acpx_version,
     validate_mcp_config,
     validate_permission_policy,
@@ -44,6 +45,7 @@ from scripts.browser_use_worker import (
     ManagerClient,
     ManagerHTTPError,
     sanitize_manager_error_message,
+    sanitize_output_payload,
     validate_worker_token,
 )
 
@@ -315,6 +317,9 @@ class AcpxRuntime:
 
         last_summary: str | None = None
         protocol_error: str | None = None
+        prompt_request_id: str | None = None
+        assistant_chunks: list[str] = []
+        jsonrpc_seq = 0
 
         async def drain_stderr() -> bytes:
             if process.stderr is None:
@@ -330,7 +335,7 @@ class AcpxRuntime:
             return bytes(retained)
 
         async def consume_stdout() -> None:
-            nonlocal last_summary, protocol_error
+            nonlocal jsonrpc_seq, last_summary, prompt_request_id, protocol_error
             async for raw_line in process.stdout:
                 if len(raw_line) > MAX_CONTROL_LINE_BYTES:
                     raise AcpxRuntimeError("ACPX output line exceeds size bound")
@@ -338,11 +343,9 @@ class AcpxRuntime:
                 if not line:
                     continue
                 try:
-                    raw = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise AcpxRuntimeError("ACPX emitted invalid JSON") from exc
-                if not isinstance(raw, dict):
-                    raise AcpxRuntimeError("ACPX emitted non-object JSON")
+                    raw = parse_acpx_frame(line)
+                except ValueError as exc:
+                    raise AcpxRuntimeError(str(exc)) from exc
                 if raw.get("eventVersion") == 1:
                     event = parse_acpx_event(line)
                     mapped = map_acpx_event(event)
@@ -350,16 +353,48 @@ class AcpxRuntime:
                     if mapped.get("kind") == "summary":
                         last_summary = str(mapped.get("summary") or "") or last_summary
                     continue
-                # ACPX may emit raw JSON-RPC control/error frames before a session
-                # envelope exists (for example AUTH_REQUIRED during initialize).
-                if raw.get("jsonrpc") == "2.0":
-                    error = raw.get("error")
-                    if isinstance(error, dict):
-                        protocol_error = sanitize_manager_error_message(
-                            str(error.get("message") or "ACPX protocol error")
-                        )
+                if raw.get("jsonrpc") != "2.0":
+                    raise AcpxRuntimeError("ACPX emitted unsupported JSON envelope")
+
+                error = raw.get("error")
+                if isinstance(error, dict):
+                    protocol_error = sanitize_manager_error_message(
+                        str(error.get("message") or "ACPX protocol error")
+                    )
                     continue
-                raise AcpxRuntimeError("ACPX emitted unsupported JSON envelope")
+
+                if raw.get("method") == "session/prompt" and "id" in raw:
+                    prompt_request_id = str(raw.get("id"))
+                    continue
+
+                if raw.get("method") == "session/update":
+                    jsonrpc_seq += 1
+                    params = raw.get("params")
+                    update = params.get("update") if isinstance(params, dict) else None
+                    update_type = update.get("sessionUpdate") if isinstance(update, dict) else None
+                    if update_type == "agent_message_chunk":
+                        chunk = _jsonrpc_content_text(update.get("content"))
+                        if chunk:
+                            assistant_chunks.append(chunk)
+                        continue
+                    raw["_seq"] = jsonrpc_seq
+                    mapped = map_acpx_event(raw)
+                    await emit(mapped)
+                    continue
+
+                if _is_matching_prompt_result(raw, prompt_request_id):
+                    text = "".join(assistant_chunks).strip()
+                    if text:
+                        jsonrpc_seq += 1
+                        mapped = {
+                            "idempotency_key": f"acpx-jsonrpc-{jsonrpc_seq}",
+                            "kind": "summary",
+                            "summary": text[:500],
+                            "payload": {"text": text[:500]},
+                        }
+                        await emit(mapped)
+                        last_summary = mapped["summary"]
+                    continue
 
         stream_task = asyncio.create_task(consume_stdout())
         stderr_task = asyncio.create_task(drain_stderr())
@@ -388,6 +423,8 @@ class AcpxRuntime:
                 raise AcpxRuntimeError(protocol_error)
             if return_code != 0:
                 raise AcpxRuntimeError(_safe_process_error(stderr) or "ACPX prompt failed")
+            if not last_summary:
+                raise AcpxRuntimeError("ACPX prompt produced no terminal assistant output")
             return last_summary
         finally:
             cancel_task.cancel()
@@ -407,6 +444,28 @@ class AcpxRuntime:
                     await stderr_task
                 except asyncio.CancelledError:
                     pass
+
+
+def _jsonrpc_content_text(value: Any) -> str:
+    if isinstance(value, dict):
+        if value.get("type") == "text" and isinstance(value.get("text"), str):
+            return str(sanitize_output_payload(value["text"]))
+        if isinstance(value.get("text"), str):
+            return str(sanitize_output_payload(value["text"]))
+    if isinstance(value, list):
+        return "".join(_jsonrpc_content_text(item) for item in value)
+    if isinstance(value, str):
+        return str(sanitize_output_payload(value))
+    return ""
+
+
+def _is_matching_prompt_result(frame: dict[str, Any], prompt_request_id: str | None) -> bool:
+    if frame.get("jsonrpc") != "2.0" or prompt_request_id is None:
+        return False
+    if str(frame.get("id")) != prompt_request_id:
+        return False
+    result = frame.get("result")
+    return isinstance(result, dict) and isinstance(result.get("stopReason"), str)
 
 
 def _safe_process_error(raw: bytes) -> str:
@@ -694,9 +753,9 @@ class AcpxWorker:
             )
             if cancel_event.is_set() or claim_lost.is_set():
                 return {"status": "cancelled"}
-            if summary:
-                # The ACP event stream already persisted the final summary.
-                pass
+            if not summary:
+                raise AcpxRuntimeError("ACPX prompt produced no terminal assistant output")
+            # The ACP event stream already persisted the final summary.
             result = await asyncio.to_thread(self.client.complete, run_id)
             return {"status": str(result.get("status") or "succeeded")}
         except Exception as exc:  # noqa: BLE001 - sanitized terminal boundary

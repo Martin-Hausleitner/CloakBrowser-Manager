@@ -416,8 +416,106 @@ def _event_text(event: dict[str, Any], fallback: str) -> str:
     return fallback
 
 
+def parse_acpx_frame(line: str) -> dict[str, Any]:
+    """Parse one bounded ACPX line, accepting legacy envelopes and JSON-RPC frames."""
+    encoded = (line or "").encode("utf-8")
+    if len(encoded) > MAX_EVENT_BYTES:
+        raise ValueError("ACPX frame is too large")
+    try:
+        frame = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise ValueError("ACPX frame is not valid JSON") from exc
+    if not isinstance(frame, dict):
+        raise ValueError("ACPX frame must be an object")
+    if frame.get("eventVersion") == EVENT_VERSION:
+        return parse_acpx_event(line)
+    if frame.get("jsonrpc") != "2.0":
+        raise ValueError("ACPX frame is not a supported envelope")
+    return frame
+
+
+def _jsonrpc_update(frame: dict[str, Any]) -> dict[str, Any] | None:
+    if frame.get("jsonrpc") != "2.0" or frame.get("method") != "session/update":
+        return None
+    params = frame.get("params")
+    if not isinstance(params, dict):
+        return None
+    update = params.get("update")
+    if not isinstance(update, dict):
+        return None
+    if not isinstance(update.get("sessionUpdate"), str):
+        return None
+    return update
+
+
+def _jsonrpc_seq(frame: dict[str, Any]) -> int:
+    seq = frame.get("_seq")
+    if isinstance(seq, int) and seq >= 0:
+        return seq
+    params = frame.get("params")
+    if isinstance(params, dict):
+        update = params.get("update")
+        if isinstance(update, dict) and isinstance(update.get("seq"), int) and update["seq"] >= 0:
+            return update["seq"]
+    return 0
+
+
+def _content_text(value: Any) -> str:
+    if isinstance(value, dict):
+        if value.get("type") == "text" and isinstance(value.get("text"), str):
+            return str(_redact(value["text"].strip()))[:500]
+        if isinstance(value.get("text"), str):
+            return str(_redact(value["text"].strip()))[:500]
+    if isinstance(value, list):
+        parts = [_content_text(item) for item in value]
+        return " ".join(part for part in parts if part).strip()[:500]
+    if isinstance(value, str):
+        return str(_redact(value.strip()))[:500]
+    return ""
+
+
+def map_acpx_jsonrpc_update(frame: dict[str, Any]) -> dict[str, Any] | None:
+    """Map ACPX 0.12 JSON-RPC session/update notifications to typed outputs."""
+    update = _jsonrpc_update(frame)
+    if update is None:
+        return None
+    update_type = str(update["sessionUpdate"])
+    seq = _jsonrpc_seq(frame)
+    base = {"idempotency_key": f"acpx-jsonrpc-{seq}", "summary": update_type.replace("_", " ")}
+
+    if update_type == "agent_message_chunk":
+        text = _content_text(update.get("content")) or "Assistant message chunk"
+        return {**base, "summary": text, "kind": "status", "payload": {"status": "running", "detail": text}}
+    if update_type == "agent_thought_chunk":
+        text = _content_text(update.get("content")) or "Agent thought"
+        return {**base, "summary": text, "kind": "observation", "payload": {"text": text}}
+    if update_type == "tool_call":
+        name = str(_redact(update.get("title") or update.get("kind") or "ACP tool"))[:200]
+        # Keep ACP-internal correlation fields outside the public action contract.
+        return {**base, "summary": name, "kind": "action", "payload": {"name": name}}
+    if update_type == "tool_call_update":
+        text = _content_text(update.get("content")) or str(_redact(update.get("status") or "Tool call update"))[:500]
+        return {**base, "summary": text, "kind": "observation", "payload": {"text": text}}
+    if update_type == "usage_update":
+        usage = update.get("usage") if isinstance(update.get("usage"), dict) else update
+        used = usage.get("used", usage.get("promptTokens", 0)) if isinstance(usage, dict) else 0
+        size = usage.get("size", usage.get("completionTokens", 0)) if isinstance(usage, dict) else 0
+        return {
+            **base,
+            "summary": "usage",
+            "kind": "metric",
+            "payload": {"name": "usage", "value": used, "unit": "tokens"},
+        }
+    return {**base, "kind": "status", "payload": {"status": "running", "detail": base["summary"]}}
+
+
 def map_acpx_event(event: dict[str, Any]) -> dict[str, Any]:
     """Map an ACPX event onto the Manager's allowlisted typed-output shapes."""
+    if event.get("jsonrpc") == "2.0":
+        mapped = map_acpx_jsonrpc_update(event)
+        if mapped is not None:
+            return mapped
+        raise ValueError("unsupported ACPX JSON-RPC frame")
     if event.get("eventVersion") != EVENT_VERSION:
         raise ValueError("unsupported ACPX eventVersion")
     seq = event.get("seq")
@@ -483,7 +581,9 @@ __all__ = [
     "classify_acpx_control_failure",
     "derive_session_name",
     "map_acpx_event",
+    "map_acpx_jsonrpc_update",
     "parse_acpx_event",
+    "parse_acpx_frame",
     "validate_acpx_version",
     "validate_mcp_config",
     "validate_permission_policy",

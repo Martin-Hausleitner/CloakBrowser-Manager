@@ -17,7 +17,9 @@ from scripts.acpx_runner import (
     classify_acpx_control_failure,
     derive_session_name,
     map_acpx_event,
+    map_acpx_jsonrpc_update,
     parse_acpx_event,
+    parse_acpx_frame,
     validate_acpx_version,
     validate_mcp_config,
     validate_permission_policy,
@@ -487,3 +489,170 @@ def test_event_mapping_preserves_benign_security_words(message: str):
 def test_every_mapped_event_validates_as_manager_task_output(event: dict):
     mapped = map_acpx_event({"eventVersion": 1, "seq": 11, **event})
     TaskOutputCreate.model_validate(mapped)
+
+
+# =============================================================================
+# ACP JSON-RPC session/update frame handling tests (acpx 0.12.1 contract)
+# =============================================================================
+
+
+def jsonrpc_update(update: dict, *, seq: int = 1) -> dict:
+    return {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"sessionId": "cbm-xxx", "update": update},
+        "_seq": seq,
+    }
+
+
+def test_parse_acpx_frame_accepts_jsonrpc_and_legacy_event_version():
+    legacy = {
+        "eventVersion": 1,
+        "sessionId": "session-1",
+        "requestId": "request-1",
+        "seq": 4,
+        "stream": "assistant",
+        "type": "assistant_message",
+        "text": "Finished",
+    }
+    frame = {"jsonrpc": "2.0", "method": "session/prompt", "id": "req-1"}
+
+    assert parse_acpx_frame(json.dumps(legacy))["eventVersion"] == 1
+    assert parse_acpx_frame(json.dumps(frame))["method"] == "session/prompt"
+    with pytest.raises(ValueError, match="supported envelope"):
+        parse_acpx_frame(json.dumps({"eventVersion": 2, "type": "assistant_message"}))
+
+
+def test_jsonrpc_agent_message_chunk_is_not_a_terminal_summary():
+    mapped = map_acpx_jsonrpc_update(
+        jsonrpc_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Hello from ACP"},
+            }
+        )
+    )
+
+    assert mapped is not None
+    assert mapped["kind"] == "status"
+    assert mapped["summary"] == "Hello from ACP"
+    TaskOutputCreate.model_validate(mapped)
+
+
+def test_jsonrpc_agent_thought_chunk_maps_to_observation_and_redacts():
+    mapped = map_acpx_jsonrpc_update(
+        jsonrpc_update(
+            {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": "Authorization: Bearer top-secret"},
+            }
+        )
+    )
+
+    assert mapped is not None
+    assert mapped["kind"] == "observation"
+    encoded = json.dumps(mapped)
+    assert "top-secret" not in encoded
+    assert "[REDACTED]" in encoded
+    TaskOutputCreate.model_validate(mapped)
+
+
+def test_jsonrpc_tool_call_maps_to_action_with_safe_fields():
+    mapped = map_acpx_jsonrpc_update(
+        jsonrpc_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tc1",
+                "title": "Navigate browser",
+                "status": "pending",
+                "kind": "execute",
+                "rawInput": {"authorization": "Bearer top-secret"},
+            }
+        )
+    )
+
+    assert mapped is not None
+    assert mapped["kind"] == "action"
+    assert mapped["payload"] == {"name": "Navigate browser"}
+    assert "top-secret" not in json.dumps(mapped)
+    TaskOutputCreate.model_validate(mapped)
+
+
+def test_jsonrpc_tool_call_update_maps_to_observation():
+    mapped = map_acpx_jsonrpc_update(
+        jsonrpc_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc1",
+                "status": "completed",
+                "content": {"type": "text", "text": "Navigation OK"},
+                "rawOutput": {"ok": True},
+            }
+        )
+    )
+
+    assert mapped is not None
+    assert mapped["kind"] == "observation"
+    assert mapped["summary"] == "Navigation OK"
+    TaskOutputCreate.model_validate(mapped)
+
+
+def test_jsonrpc_usage_update_maps_to_metric():
+    mapped = map_acpx_jsonrpc_update(
+        jsonrpc_update(
+            {
+                "sessionUpdate": "usage_update",
+                "used": 123,
+                "size": 400,
+                "cost": 0.01,
+                "_meta": {"model": "claude"},
+            }
+        )
+    )
+
+    assert mapped is not None
+    assert mapped["kind"] == "metric"
+    assert mapped["payload"] == {"name": "usage", "value": 123, "unit": "tokens"}
+    TaskOutputCreate.model_validate(mapped)
+
+
+def test_jsonrpc_prompt_result_does_not_invent_summary_without_accumulated_text():
+    frame = {
+        "jsonrpc": "2.0",
+        "id": "req-1",
+        "result": {
+            "stopReason": "end_turn",
+            "usage": {"used": 150, "size": 300},
+        },
+    }
+
+    with pytest.raises(ValueError, match="unsupported ACPX JSON-RPC frame"):
+        map_acpx_event(frame)
+
+
+def test_prompt_command_has_no_duplicate_cwd(tmp_path: Path):
+    """build_prompt_command must not emit duplicate --cwd flags"""
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"defaultAction":"deny"}', encoding="utf-8")
+    os.chmod(policy, 0o600)
+    mcp = tmp_path / "mcp.json"
+    mcp.write_text(
+        json.dumps(
+            {"mcpServers": [{"name": "cloakbrowser", "command": "cbm-mcp", "args": []}]}
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(mcp, 0o600)
+
+    command = build_prompt_command(
+        executable="acpx",
+        cwd=tmp_path,
+        agent="cursor",
+        session_name="cbm-0123456789abcdef0123456789abcdef",
+        permission_policy=policy,
+        mcp_config=mcp,
+    )
+
+    # Count --cwd occurrences - must be exactly 1
+    cwd_count = command.count("--cwd")
+    assert cwd_count == 1, f"Expected exactly one --cwd flag, found {cwd_count}: {command}"

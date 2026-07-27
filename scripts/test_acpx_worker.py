@@ -234,6 +234,37 @@ def test_worker_executes_acpx_session_streams_outputs_and_cleans_capability(tmp_
     assert list((tmp_path / "capabilities").iterdir()) == []
 
 
+def test_worker_fails_clean_acpx_prompt_that_emits_no_outputs(tmp_path: Path):
+    manager = FakeManager()
+
+    class SilentRuntime(FakeRuntime):
+        async def run_prompt(self, **kwargs):
+            capability_file = Path(kwargs["environment"]["CBM_RUN_CAPABILITY_FILE"])
+            assert capability_file.read_text(encoding="utf-8") == "cbm_run_private_capability"
+            self.prompt_calls.append(
+                (
+                    kwargs["cwd"],
+                    kwargs["agent"],
+                    kwargs["session_name"],
+                    kwargs["prompt"],
+                    kwargs["timeout_seconds"],
+                )
+            )
+            return None
+
+    runtime = SilentRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    result = asyncio.run(worker.execute_claim(claim()))
+
+    assert result == {"status": "failed"}
+    assert manager.completed == []
+    assert manager.failed and manager.failed[0][1] == "internal_error"
+    assert "no terminal assistant output" in manager.failed[0][2]
+    assert manager.revoked == ["run-1"]
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
 def test_worker_reports_agent_preflights_and_cleans_empty_mcp_config(tmp_path: Path):
     manager = FakeManager()
 

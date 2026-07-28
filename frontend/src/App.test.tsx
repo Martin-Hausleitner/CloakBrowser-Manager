@@ -433,7 +433,7 @@ describe("App Browser Use home handoff", () => {
     expect(apiMock.listTaskSessions).toHaveBeenCalledWith(runningProfile.id, expect.objectContaining({ limit: 8 }));
 
     fireEvent.click(screen.getByText("Checkout run"));
-    const detail = await screen.findByRole("region", { name: "Session details for Checkout run" });
+    const detail = await screen.findByRole("region", { name: "Task chat details for Checkout run" });
     expect(screen.getByRole("tablist", { name: "Tables workspace" })).toBeTruthy();
     fireEvent.click(within(detail).getByRole("button", { name: "Open live profile Live Checkout QA" }));
     await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAgentWorkspace));

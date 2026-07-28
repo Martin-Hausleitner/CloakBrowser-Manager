@@ -11,6 +11,7 @@ vi.mock("../lib/api", async () => {
     api: {
       ...actual.api,
       listTaskSessions: vi.fn(),
+      updateTaskSession: vi.fn(),
     },
   };
 });
@@ -104,6 +105,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 1200 });
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 600 });
   vi.mocked(api.listTaskSessions).mockReset();
+  vi.mocked(api.updateTaskSession).mockReset();
 });
 
 afterEach(() => {
@@ -111,6 +113,109 @@ afterEach(() => {
 });
 
 describe("SessionsOverview", () => {
+  it("filters task chats and updates done archived and retention lifecycle", async () => {
+    setSessionsMedia(true);
+    const openChat = session({
+      id: "chat-open",
+      title: "Open checkout chat",
+      workflow_state: "open",
+      status: "active",
+      retention_class: "project",
+      row_version: 3,
+    });
+    const doneChat = session({
+      id: "chat-done",
+      title: "Done checkout chat",
+      workflow_state: "done",
+      status: "active",
+      retention_class: "temporary",
+      row_version: 4,
+    });
+    const archivedChat = session({
+      id: "chat-archived",
+      title: "Archived checkout chat",
+      workflow_state: "done",
+      status: "archived",
+      retention_class: "temporary",
+      row_version: 5,
+      archived_at: "2026-07-27T11:00:00Z",
+    });
+    const serverState = new Map([
+      [openChat.id, openChat],
+      [doneChat.id, doneChat],
+      [archivedChat.id, archivedChat],
+    ]);
+    vi.mocked(api.listTaskSessions).mockResolvedValue([openChat, doneChat, archivedChat]);
+    vi.mocked(api.updateTaskSession).mockImplementation(async (sessionId, payload) => {
+      const current = serverState.get(sessionId);
+      if (!current) throw new Error("Unknown task chat");
+      const next = session({
+        ...current,
+        row_version: payload.row_version + 1,
+        workflow_state: payload.workflow_state ?? current.workflow_state,
+        done_at: payload.workflow_state === "done"
+          ? "2026-07-27T12:00:00Z"
+          : payload.workflow_state === "open"
+            ? null
+            : current.done_at,
+        status: payload.archived === true ? "archived" : payload.archived === false ? "active" : current.status,
+        archived_at: payload.archived === true ? "2026-07-27T12:00:00Z" : payload.archived === false ? null : current.archived_at,
+        retention_class: payload.retention_class ?? current.retention_class,
+      });
+      serverState.set(sessionId, next);
+      return next;
+    });
+
+    render(
+      <SessionsOverview
+        profiles={[profile({ id: "profile-1", name: "Checkout QA" })]}
+        selectedId={null}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Open checkout chat")).toBeTruthy();
+    expect(screen.queryByText("Done checkout chat")).toBeNull();
+    expect(screen.queryByText("Archived checkout chat")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Open task chats" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show details for Open checkout chat" }));
+    const openDetail = await screen.findByRole("region", { name: "Task chat details for Open checkout chat" });
+    fireEvent.click(within(openDetail).getByRole("button", { name: "Mark Open checkout chat done" }));
+    await waitFor(() => expect(api.updateTaskSession).toHaveBeenCalledWith("chat-open", {
+      row_version: 3,
+      workflow_state: "done",
+    }));
+    await waitFor(() => expect(screen.queryByText("Open checkout chat")).toBeNull());
+
+    fireEvent.click(screen.getByRole("tab", { name: "Done task chats" }));
+    expect(await screen.findByText("Open checkout chat")).toBeTruthy();
+    expect(screen.getByText("Done checkout chat")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show details for Open checkout chat" }));
+    const doneDetail = await screen.findByRole("region", { name: "Task chat details for Open checkout chat" });
+    fireEvent.click(within(doneDetail).getByRole("button", { name: "Make Open checkout chat temporary" }));
+    await waitFor(() => expect(api.updateTaskSession).toHaveBeenCalledWith("chat-open", {
+      row_version: 4,
+      retention_class: "temporary",
+    }));
+
+    fireEvent.click(within(doneDetail).getByRole("button", { name: "Archive Open checkout chat" }));
+    await waitFor(() => expect(api.updateTaskSession).toHaveBeenCalledWith("chat-open", {
+      row_version: 5,
+      archived: true,
+    }));
+
+    fireEvent.click(screen.getByRole("tab", { name: "Archived task chats" }));
+    expect(await screen.findByText("Open checkout chat")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show details for Open checkout chat" }));
+    const archivedDetail = await screen.findByRole("region", { name: "Task chat details for Open checkout chat" });
+    fireEvent.click(within(archivedDetail).getByRole("button", { name: "Restore Open checkout chat" }));
+    await waitFor(() => expect(api.updateTaskSession).toHaveBeenCalledWith("chat-open", {
+      row_version: 6,
+      archived: false,
+    }));
+  });
+
   it("aggregates bounded per-profile task sessions into a redacted desktop grid", async () => {
     const onSelectProfile = vi.fn();
     const profiles = Array.from({ length: MAX_SESSION_PROFILE_CALLS + 2 }, (_, index) =>
@@ -144,7 +249,7 @@ describe("SessionsOverview", () => {
     expect(screen.queryByText(/super-secret|api_key|hidden/i)).toBeNull();
 
     fireEvent.click(within(grid).getByText("Checkout validation"));
-    const detail = await screen.findByRole("region", { name: "Session details for Checkout validation" });
+    const detail = await screen.findByRole("region", { name: "Task chat details for Checkout validation" });
     expect(screen.getByTestId("sessions-desktop-grid")).toBeTruthy();
     for (const value of ["Profile 1", "commerce", "open", "active", "project", "session-a"]) {
       expect(within(detail).getAllByText(value).length).toBeGreaterThan(0);
@@ -153,7 +258,7 @@ describe("SessionsOverview", () => {
     fireEvent.click(within(detail).getByRole("button", { name: "Open live profile Profile 1" }));
     expect(onSelectProfile).toHaveBeenCalledWith("profile-1");
 
-    fireEvent.change(screen.getByLabelText("Search sessions grid"), { target: { value: "missing" } });
+    fireEvent.change(screen.getByLabelText("Search task chats"), { target: { value: "missing" } });
     await waitFor(() => expect(within(grid).queryByText("Checkout validation")).toBeNull());
   }, 15000);
 
@@ -175,7 +280,7 @@ describe("SessionsOverview", () => {
 
     expect(screen.getByText(/Loading sessions/)).toBeTruthy();
     resolveList([]);
-    expect(await screen.findByText("No task sessions found.")).toBeTruthy();
+    expect(await screen.findByText("No task chats found.")).toBeTruthy();
     unmount();
 
     vi.mocked(api.listTaskSessions).mockRejectedValue(new Error("Task session API offline"));
@@ -188,7 +293,7 @@ describe("SessionsOverview", () => {
     );
 
     expect(await screen.findByText(/Error Profile: Task session API offline/)).toBeTruthy();
-    expect(screen.getByText("No task sessions found.")).toBeTruthy();
+    expect(screen.getByText("No task chats found.")).toBeTruthy();
   });
 
 
@@ -263,7 +368,7 @@ describe("SessionsOverview", () => {
     expect(screen.queryByTestId("sessions-desktop-grid")).toBeNull();
     expect(screen.queryByRole("grid")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show details for Mobile session" }));
-    const detail = await screen.findByRole("region", { name: "Session details for Mobile session" });
+    const detail = await screen.findByRole("region", { name: "Task chat details for Mobile session" });
     fireEvent.click(within(detail).getByRole("button", { name: "Open live profile Mobile Profile" }));
     expect(onSelectProfile).toHaveBeenCalledWith("profile-mobile");
   });

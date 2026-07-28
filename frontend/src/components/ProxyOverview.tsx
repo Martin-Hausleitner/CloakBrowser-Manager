@@ -1,6 +1,6 @@
 import type { ICellRendererParams, ValueGetterParams } from "ag-grid-community";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Globe2, Loader2, Plus, RefreshCw, Search, Shield } from "lucide-react";
+import { ChevronDown, Globe2, Loader2, Plus, RefreshCw, Search, Shield, X } from "lucide-react";
 import {
   api,
   type Profile,
@@ -66,7 +66,9 @@ export function ProxyOverview({ harness, projectId, onProfileCreated }: ProxyOve
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [quickFilter, setQuickFilter] = useState("");
+  const [selectedProxyId, setSelectedProxyId] = useState<string | null>(null);
   const useFallbackCards = useProxyGridFallback();
+  const selectedProxy = items.find((item) => item.id === selectedProxyId) ?? null;
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -217,7 +219,8 @@ export function ProxyOverview({ harness, projectId, onProfileCreated }: ProxyOve
 
   return (
     <div
-      className="mx-auto flex h-full w-full max-w-6xl flex-col gap-4 p-6"
+      className="flex h-full w-full max-w-none flex-col gap-3 p-3 lg:p-5"
+      data-testid="proxy-overview"
       data-ui-state={uiStateAttr(
         UI_STATE.proxyOverview,
         loading && UI_STATE.proxyOverviewLoading,
@@ -264,6 +267,8 @@ export function ProxyOverview({ harness, projectId, onProfileCreated }: ProxyOve
         <ProxyCards
           items={items}
           busyId={busyId}
+          selectedId={selectedProxyId}
+          onToggleDetails={(item) => setSelectedProxyId((current) => current === item.id ? null : item.id)}
           onCheck={checkProxy}
           onCreateProfile={createProfile}
         />
@@ -280,16 +285,27 @@ export function ProxyOverview({ harness, projectId, onProfileCreated }: ProxyOve
               aria-label="Search proxies grid"
             />
           </div>
-          <CompactDataGrid<ProxyInventoryItem>
-            ariaLabel="Proxies grid"
-            storageKey="proxies"
-            columns={columns}
-            rows={items}
-            quickFilterText={quickFilter}
-            selectedId={null}
-            onRowClick={() => undefined}
-            testId="proxy-desktop-grid"
-          />
+          <div className="grid min-h-0 flex-1 grid-rows-[minmax(12rem,1fr)_auto] gap-2">
+            <CompactDataGrid<ProxyInventoryItem>
+              ariaLabel="Proxies grid"
+              storageKey="proxies"
+              columns={columns}
+              rows={items}
+              quickFilterText={quickFilter}
+              selectedId={selectedProxyId}
+              onRowClick={(item) => setSelectedProxyId((current) => current === item.id ? null : item.id)}
+              testId="proxy-desktop-grid"
+            />
+            {selectedProxy ? (
+              <ProxyDetail
+                item={selectedProxy}
+                busy={busyId === selectedProxy.id}
+                onClose={() => setSelectedProxyId(null)}
+                onCheck={() => void checkProxy(selectedProxy)}
+                onCreateProfile={() => void createProfile(selectedProxy)}
+              />
+            ) : null}
+          </div>
         </div>
       )}
     </div>
@@ -299,22 +315,35 @@ export function ProxyOverview({ harness, projectId, onProfileCreated }: ProxyOve
 function ProxyCards({
   items,
   busyId,
+  selectedId,
+  onToggleDetails,
   onCheck,
   onCreateProfile,
 }: {
   items: ProxyInventoryItem[];
   busyId: string | null;
+  selectedId: string | null;
+  onToggleDetails: (item: ProxyInventoryItem) => void;
   onCheck: (item: ProxyInventoryItem) => void;
   onCreateProfile: (item: ProxyInventoryItem) => void;
 }) {
   return (
     <div className="space-y-2 overflow-y-auto">
       {items.map((item) => (
-        <div key={item.id} className="rounded-xl border border-border bg-surface-1 px-4 py-3">
+        <div key={item.id} className="rounded-xl border border-border bg-surface-1 px-3 py-2.5">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="truncate text-sm font-medium text-gray-100">{item.label}</span>
+                <button
+                  type="button"
+                  className="inline-flex min-w-0 items-center gap-1 text-left text-sm font-medium text-gray-100"
+                  onClick={() => onToggleDetails(item)}
+                  aria-label={`${selectedId === item.id ? "Hide" : "Show"} details for ${item.label}`}
+                  aria-expanded={selectedId === item.id}
+                >
+                  <ChevronDown className={`h-3.5 w-3.5 shrink-0 transition-transform ${selectedId === item.id ? "rotate-180" : ""}`} />
+                  <span className="truncate">{item.label}</span>
+                </button>
                 <StatePill state={item.check_state} />
                 {item.country_code ? (
                   <span className="rounded bg-surface-3 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
@@ -352,9 +381,113 @@ function ProxyCards({
               </button>
             </div>
           </div>
+          {selectedId === item.id ? (
+            <ProxyDetail
+              item={item}
+              busy={busyId === item.id}
+              onClose={() => onToggleDetails(item)}
+              onCheck={() => onCheck(item)}
+              onCreateProfile={() => onCreateProfile(item)}
+            />
+          ) : null}
         </div>
       ))}
     </div>
+  );
+}
+
+function DetailValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[9px] font-semibold uppercase tracking-wide text-gray-500">{label}</dt>
+      <dd className="mt-0.5 truncate text-[11px] text-gray-200" title={value}>{value}</dd>
+    </div>
+  );
+}
+
+function ProxyDetail({
+  item,
+  busy,
+  onClose,
+  onCheck,
+  onCreateProfile,
+}: {
+  item: ProxyInventoryItem;
+  busy: boolean;
+  onClose: () => void;
+  onCheck: () => void;
+  onCreateProfile: () => void;
+}) {
+  const reachable = item.reachable == null ? "Unknown" : item.reachable ? "Reachable" : "Unreachable";
+  return (
+    <section
+      className="mt-2 max-h-[clamp(10rem,24dvh,17rem)] overflow-auto rounded-lg border border-sky-500/25 bg-[#10141b] p-3"
+      role="region"
+      aria-label={`Proxy checker details for ${item.label}`}
+    >
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs font-semibold text-gray-100">{item.label}</div>
+          <div className="mt-0.5 text-[10px] text-sky-300">VCVM Proxy-Checker · redacted inventory</div>
+        </div>
+        <button
+          type="button"
+          className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-gray-400 hover:bg-surface-3 hover:text-white"
+          onClick={onClose}
+          aria-label={`Close proxy details for ${item.label}`}
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4 xl:grid-cols-6">
+        <DetailValue label="Host" value={item.host_masked || "Unknown"} />
+        <DetailValue label="Port" value={item.port == null ? "Unknown" : String(item.port)} />
+        <DetailValue label="User" value={item.username_masked || "Not set"} />
+        <DetailValue label="Credentials" value={item.has_credentials ? "Configured" : "Not set"} />
+        <DetailValue label="State" value={item.check_state} />
+        <DetailValue label="Reachability" value={reachable} />
+        <DetailValue label="Latency" value={formatLatency(item.latency_ms)} />
+        <DetailValue label="Risk" value={formatScore(item.risk_score)} />
+        <DetailValue label="Authenticity" value={formatScore(item.authenticity_score)} />
+        <DetailValue label="Country" value={item.country_code || "Unknown"} />
+        <DetailValue label="Timezone" value={item.timezone_hint || "Unknown"} />
+        <DetailValue label="Locale" value={item.locale_hint || "Unknown"} />
+        <DetailValue label="Last checked" value={formatDateTime(item.last_checked_at)} />
+        <DetailValue label="Created" value={formatDateTime(item.created_at)} />
+        <DetailValue label="Updated" value={formatDateTime(item.updated_at)} />
+        <DetailValue label="Active" value={item.active ? "Yes" : "No"} />
+      </dl>
+      {item.warnings.length || item.blockers.length ? (
+        <div className="mt-3 flex flex-wrap gap-1.5 text-[10px]">
+          {item.warnings.map((warning) => (
+            <span key={`warning-${warning}`} className="rounded bg-amber-500/15 px-2 py-1 text-amber-200">{warning}</span>
+          ))}
+          {item.blockers.map((blocker) => (
+            <span key={`blocker-${blocker}`} className="rounded bg-red-500/15 px-2 py-1 text-red-200">{blocker}</span>
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="btn btn-secondary h-8 text-xs"
+          disabled={busy}
+          onClick={onCheck}
+          aria-label={`Run VCVM check for ${item.label}`}
+        >
+          <Shield className="mr-1 h-3.5 w-3.5" /> Check now
+        </button>
+        <button
+          type="button"
+          className="btn btn-primary h-8 text-xs"
+          disabled={busy}
+          onClick={onCreateProfile}
+          aria-label={`Create profile from proxy details ${item.label}`}
+        >
+          <Plus className="mr-1 h-3.5 w-3.5" /> Auto profile
+        </button>
+      </div>
+    </section>
   );
 }
 

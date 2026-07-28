@@ -130,6 +130,7 @@ describe("SessionsOverview", () => {
     expect(api.listTaskSessions).not.toHaveBeenCalledWith(`profile-${MAX_SESSION_PROFILE_CALLS + 1}`, expect.anything());
 
     const grid = await screen.findByTestId("sessions-desktop-grid");
+    expect(screen.getByTestId("sessions-overview").className).toContain("max-w-none");
     for (const header of ["Profile", "Title", "Project", "Workflow", "Status", "Retention", "Activity"]) {
       expect(await within(grid).findByText(header)).toBeTruthy();
     }
@@ -142,7 +143,14 @@ describe("SessionsOverview", () => {
     expect(within(grid).getByText("2026-07-27 10:30")).toBeTruthy();
     expect(screen.queryByText(/super-secret|api_key|hidden/i)).toBeNull();
 
-    fireEvent.click(within(grid).getByRole("button", { name: "Open session Checkout validation for Profile 1" }));
+    fireEvent.click(within(grid).getByText("Checkout validation"));
+    const detail = await screen.findByRole("region", { name: "Session details for Checkout validation" });
+    expect(screen.getByTestId("sessions-desktop-grid")).toBeTruthy();
+    for (const value of ["Profile 1", "commerce", "open", "active", "project", "session-a"]) {
+      expect(within(detail).getAllByText(value).length).toBeGreaterThan(0);
+    }
+    expect(detail.textContent).not.toMatch(/super-secret|api_key|hidden/i);
+    fireEvent.click(within(detail).getByRole("button", { name: "Open live profile Profile 1" }));
     expect(onSelectProfile).toHaveBeenCalledWith("profile-1");
 
     fireEvent.change(screen.getByLabelText("Search sessions grid"), { target: { value: "missing" } });
@@ -254,7 +262,9 @@ describe("SessionsOverview", () => {
     expect(await screen.findByText("Mobile session")).toBeTruthy();
     expect(screen.queryByTestId("sessions-desktop-grid")).toBeNull();
     expect(screen.queryByRole("grid")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /Mobile session/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Show details for Mobile session" }));
+    const detail = await screen.findByRole("region", { name: "Session details for Mobile session" });
+    fireEvent.click(within(detail).getByRole("button", { name: "Open live profile Mobile Profile" }));
     expect(onSelectProfile).toHaveBeenCalledWith("profile-mobile");
   });
 });

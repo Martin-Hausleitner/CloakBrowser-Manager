@@ -75,5 +75,9 @@ describe("BrowserUseHome", () => {
 
     expect(onSelectProfile).toHaveBeenCalledWith(runningProfile.id);
     expect(onOpenSettings).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Proxies" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Profiles" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Accounts" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New in project" })).toBeNull();
   });
 });

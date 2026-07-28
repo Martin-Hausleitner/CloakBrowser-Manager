@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Plus, Users, KeyRound, History } from "lucide-react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Users, KeyRound, History } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import {
   api,
@@ -568,16 +568,6 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                 <History className="h-3 w-3" />
                 Sessions
               </button>
-              {canManageProfiles ? (
-                <button
-                  type="button"
-                  onClick={handleNew}
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] text-gray-400 hover:bg-surface-2"
-                >
-                  <Plus className="h-3 w-3" />
-                  New profile
-                </button>
-              ) : null}
             </div>
           </div>
           <div className="min-h-0 flex-1">

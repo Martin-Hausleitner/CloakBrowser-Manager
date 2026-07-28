@@ -161,6 +161,8 @@ describe("ProxyOverview", () => {
         country_code: "JP",
         timezone_hint: "Asia/Tokyo",
         locale_hint: "ja-JP",
+        warnings: ["elevated_risk"],
+        blockers: ["proxychecker_unavailable"],
         last_checked_at: null,
       }),
     ]);
@@ -170,6 +172,7 @@ describe("ProxyOverview", () => {
     renderProxyOverview(onProfileCreated);
 
     const grid = await screen.findByTestId("proxy-desktop-grid");
+    expect(screen.getByTestId("proxy-overview").className).toContain("max-w-none");
     expect(await within(grid).findByText("State")).toBeTruthy();
     expect(within(grid).getByText("Label")).toBeTruthy();
     expect(within(grid).getByText("Country")).toBeTruthy();
@@ -194,6 +197,27 @@ describe("ProxyOverview", () => {
     expect(within(grid).getByText("2026-07-27 10:30")).toBeTruthy();
     expect(within(grid).getByText("Yes")).toBeTruthy();
     expect(within(grid).getByText("No credentials")).toBeTruthy();
+
+    fireEvent.click(within(grid).getByText("Residential Lisbon"));
+    const detail = await screen.findByRole("region", {
+      name: "Proxy checker details for Residential Lisbon",
+    });
+    expect(screen.getByTestId("proxy-desktop-grid")).toBeTruthy();
+    for (const value of [
+      "198.51.100.xxx",
+      "8080",
+      "li***on",
+      "Reachable",
+      "91 ms",
+      "12",
+      "96",
+      "Europe/Lisbon",
+      "pt-PT",
+    ]) {
+      expect(within(detail).getAllByText(value).length).toBeGreaterThan(0);
+    }
+    expect(detail.textContent).toContain("VCVM Proxy-Checker");
+    expect(detail.textContent).not.toContain("secret-password");
 
     fireEvent.click(within(grid).getByRole("button", { name: "Check Residential Lisbon" }));
     await waitFor(() => expect(api.checkProxy).toHaveBeenCalledWith("proxy-1"));
@@ -223,5 +247,7 @@ describe("ProxyOverview", () => {
     expect(await screen.findByText("Mobile Proxy")).toBeTruthy();
     expect(screen.queryByTestId("proxy-desktop-grid")).toBeNull();
     expect(screen.queryByRole("grid")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show details for Mobile Proxy" }));
+    expect(await screen.findByRole("region", { name: "Proxy checker details for Mobile Proxy" })).toBeTruthy();
   });
 });

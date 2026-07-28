@@ -209,7 +209,7 @@ export function AccountsOverview({ profiles, selectedId, onSelect }: AccountsOve
   );
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-6xl flex-col gap-4 p-6">
+    <div className="flex h-full w-full max-w-none flex-col gap-3 p-3 lg:p-5">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-gray-100">Accounts &amp; 2FA</h2>

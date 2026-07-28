@@ -29,16 +29,11 @@ export function BrowserUseHome({
   harness,
   profiles,
   task,
-  canManage,
   onProjectChange,
   onHarnessChange,
   onTaskChange,
   onSelectProfile,
   onOpenSettings,
-  onOpenProxies,
-  onOpenProfiles,
-  onOpenAccounts,
-  onCreateProjectProfile,
   onLaunchSelected,
   selectedProfile,
 }: BrowserUseHomeProps) {
@@ -90,28 +85,6 @@ export function BrowserUseHome({
               </option>
             ))}
           </select>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {canManage ? (
-            <>
-              <button type="button" className="btn btn-secondary text-xs" onClick={onOpenProxies}>
-                Proxies
-              </button>
-              <button type="button" className="btn btn-secondary text-xs" onClick={onOpenProfiles}>
-                Profiles
-              </button>
-              <button type="button" className="btn btn-secondary text-xs" onClick={onOpenAccounts}>
-                Accounts
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary text-xs"
-                onClick={onCreateProjectProfile}
-              >
-                New in project
-              </button>
-            </>
-          ) : null}
         </div>
       </div>
 

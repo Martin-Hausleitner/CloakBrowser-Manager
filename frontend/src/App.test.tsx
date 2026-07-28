@@ -411,6 +411,7 @@ describe("App Browser Use home handoff", () => {
 
     await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopHome));
     expect(screen.queryByRole("tablist", { name: "Tables workspace" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "New profile" })).toHaveLength(1);
 
     fireEvent.click(screen.getAllByRole("button", { name: "Profiles" })[0]);
     await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProfiles));
@@ -431,7 +432,10 @@ describe("App Browser Use home handoff", () => {
     expect(await screen.findByText("Checkout run")).toBeTruthy();
     expect(apiMock.listTaskSessions).toHaveBeenCalledWith(runningProfile.id, expect.objectContaining({ limit: 8 }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Open session Checkout run for Live Checkout QA" }));
+    fireEvent.click(screen.getByText("Checkout run"));
+    const detail = await screen.findByRole("region", { name: "Session details for Checkout run" });
+    expect(screen.getByRole("tablist", { name: "Tables workspace" })).toBeTruthy();
+    fireEvent.click(within(detail).getByRole("button", { name: "Open live profile Live Checkout QA" }));
     await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAgentWorkspace));
     expect(screen.queryByRole("tablist", { name: "Tables workspace" })).toBeNull();
   }, 15000);

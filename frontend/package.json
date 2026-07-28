@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@novnc/novnc": "^1.4.0",
+    "ag-grid-react": "^36.0.2",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

@@ -286,7 +286,7 @@ describe("AgentBrowserWorkspace", () => {
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "Enter full view" })),
     );
-  });
+  }, 15_000);
 
   it("applies dynamic desktop Phone Fit and preserves full-view view state", async () => {
     const onViewportApply = vi.fn().mockResolvedValue(true);

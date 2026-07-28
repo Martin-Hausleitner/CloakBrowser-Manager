@@ -244,6 +244,7 @@ export function SessionsOverview({ profiles, selectedId, onSelectProfile }: Sess
           </div>
           <CompactDataGrid<SessionRow>
             ariaLabel="Sessions grid"
+            storageKey="sessions"
             columns={columns}
             rows={rows}
             quickFilterText={quickFilter}

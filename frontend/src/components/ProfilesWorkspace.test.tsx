@@ -64,6 +64,7 @@ function setProfilesWorkspaceMedia(matches: boolean) {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   setProfilesWorkspaceMedia(false);
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 1200 });
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 600 });
@@ -151,4 +152,49 @@ describe("ProfilesWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(onEdit).toHaveBeenCalledWith("mobile");
   });
+
+  it("offers persistent density and column controls for the middle table view", async () => {
+    const { unmount } = render(
+      <ProfilesWorkspace
+        profiles={[profile({ id: "desktop", name: "Desktop Profile" })]}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onEdit={vi.fn()}
+        canManage
+      />,
+    );
+
+    const grid = screen.getByTestId("profiles-desktop-grid");
+    expect(within(grid).getByText("1 row")).toBeTruthy();
+
+    fireEvent.change(within(grid).getByLabelText("Grid density"), {
+      target: { value: "comfortable" },
+    });
+    expect(grid.getAttribute("data-density")).toBe("comfortable");
+
+    fireEvent.click(within(grid).getByRole("button", { name: "Columns" }));
+    const viewportToggle = within(grid).getByRole("checkbox", { name: "Show Viewport" });
+    fireEvent.click(viewportToggle);
+    await waitFor(() => expect(within(grid).queryByRole("columnheader", { name: "Viewport" })).toBeNull());
+
+    unmount();
+
+    render(
+      <ProfilesWorkspace
+        profiles={[profile({ id: "desktop", name: "Desktop Profile" })]}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onEdit={vi.fn()}
+        canManage
+      />,
+    );
+
+    const restoredGrid = screen.getByTestId("profiles-desktop-grid");
+    expect(restoredGrid.getAttribute("data-density")).toBe("comfortable");
+    await waitFor(() => expect(within(restoredGrid).queryByRole("columnheader", { name: "Viewport" })).toBeNull());
+
+    fireEvent.click(within(restoredGrid).getByRole("button", { name: "Reset table view" }));
+    expect(restoredGrid.getAttribute("data-density")).toBe("compact");
+    await waitFor(() => expect(within(restoredGrid).getByRole("columnheader", { name: "Viewport" })).toBeTruthy());
+  }, 15000);
 });

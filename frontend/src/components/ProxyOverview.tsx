@@ -282,6 +282,7 @@ export function ProxyOverview({ harness, projectId, onProfileCreated }: ProxyOve
           </div>
           <CompactDataGrid<ProxyInventoryItem>
             ariaLabel="Proxies grid"
+            storageKey="proxies"
             columns={columns}
             rows={items}
             quickFilterText={quickFilter}

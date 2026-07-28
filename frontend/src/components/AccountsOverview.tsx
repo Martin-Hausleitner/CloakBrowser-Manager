@@ -332,6 +332,7 @@ export function AccountsOverview({ profiles, selectedId, onSelect }: AccountsOve
           </div>
           <CompactDataGrid<AccountRow>
             ariaLabel="Accounts and 2FA grid"
+            storageKey="accounts"
             columns={columns}
             rows={gridRows}
             quickFilterText={quickFilter}

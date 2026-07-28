@@ -232,6 +232,7 @@ export function ProfilesWorkspace({
           </div>
           <CompactDataGrid<Profile>
             ariaLabel="Profiles grid"
+            storageKey="profiles"
             columns={columns}
             rows={sorted}
             quickFilterText={quickFilter}

@@ -417,9 +417,9 @@ describe("App Browser Use home handoff", () => {
     expect(screen.getByRole("tablist", { name: "Tables workspace" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Profiles" }).getAttribute("aria-selected")).toBe("true");
 
-    fireEvent.click(screen.getByRole("tab", { name: "Accounts" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Accounts & 2FA" }));
     await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAccounts));
-    expect(screen.getByRole("tab", { name: "Accounts" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Accounts & 2FA" }).getAttribute("aria-selected")).toBe("true");
 
     fireEvent.click(screen.getByRole("tab", { name: "Proxies" }));
     await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProxies));

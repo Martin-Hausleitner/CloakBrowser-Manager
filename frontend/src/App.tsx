@@ -665,7 +665,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             <div className="inline-flex rounded-lg border border-border bg-surface-1 p-1" role="tablist" aria-label="Tables workspace">
               {[
                 { id: "profiles", label: "Profiles", available: true },
-                { id: "accounts", label: "Accounts", available: true },
+                { id: "accounts", label: "Accounts & 2FA", available: true },
                 { id: "proxies", label: "Proxies", available: canManageProfiles },
                 { id: "sessions", label: "Sessions", available: true },
               ].filter((tab) => tab.available).map((tab) => (

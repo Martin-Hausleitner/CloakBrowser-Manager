@@ -409,8 +409,9 @@ class BrowserManager:
         except Exception as exc:
             logger.warning("Error closing context for %s: %s", profile_id, exc)
 
-        if running.proxy_bridge is not None:
-            await running.proxy_bridge.stop()
+        proxy_bridge = getattr(running, "proxy_bridge", None)
+        if proxy_bridge is not None:
+            await proxy_bridge.stop()
 
         await self.vnc.stop_vnc(running.display)
 

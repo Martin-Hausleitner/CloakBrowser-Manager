@@ -1693,7 +1693,7 @@ class TaskOutputResponse(BaseModel):
 
 # ── Orca agent browser workspace ─────────────────────────────────────────────
 
-OrcaAgentCli = Literal["cursor-agent", "grok", "codex"]
+OrcaAgentCli = Literal["cursor-agent", "grok", "agy", "codex"]
 OrcaSessionStatus = Literal["starting", "running", "closed", "error"]
 
 

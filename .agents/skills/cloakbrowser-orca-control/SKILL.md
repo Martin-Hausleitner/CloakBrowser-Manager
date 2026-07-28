@@ -1,11 +1,12 @@
 ---
 name: cloakbrowser-orca-control
-description: Use when an Orca-managed cursor-agent, grok, or codex CLI session must control a CloakBrowser Manager profile through the Manager public API — prefer direct lease+CDP control for immediate actions, and Browser-Use task/run APIs for async worker-backed automation.
+description: Use when an Orca-managed AGY, Grok, cursor-agent, or Codex CLI session must control the selected CloakBrowser Manager profile through the Manager public API — prefer direct lease+CDP control for immediate actions, and Browser-Use task/run APIs for async worker-backed automation.
 metadata:
   category: integration-documentation
   triggers:
     - CloakBrowser Orca
     - AgentBrowserWorkspace
+    - agy
     - cursor-agent
     - grok
     - codex
@@ -16,7 +17,7 @@ metadata:
 # CloakBrowser Orca control path
 
 You are running inside an **Orca-managed terminal** started by CloakBrowser Manager's
-Agent Browser workspace via `scripts/orca_agent_cli.sh <cursor-agent|grok|codex>`.
+Agent Browser workspace via `scripts/orca_agent_cli.sh <cursor-agent|grok|agy|codex>`.
 A real CloakBrowser profile is already selected in the UI live viewer. Do **not**
 launch Chromium, call Browser-Use Cloud, invent CDP ports, or drive the browser
 with arbitrary shell.
@@ -26,6 +27,19 @@ Worktree (must already be registered in Orca):
 ```text
 path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use
 ```
+
+## Interactive CLI startup
+
+- Prefer **AGY** for the default live terminal. Manager injects the selected
+  `profile_id`, this skill path, the safe key-file path, and the operator task,
+  then commits AGY's multi-line draft automatically.
+- **Grok** starts with `--no-alt-screen` so its real login/chat screen remains
+  visible in browser terminal scrollback. If Grok asks for authentication,
+  complete it inside that terminal; never paste a token into the Manager chat.
+- The Antigravity managed preset currently routes through **ACPX + Grok Build**,
+  not Claude. Provider preflight remains fail-closed when Grok Build is not signed in.
+- Follow-up text entered below the transcript is sent to the same owned Orca
+  terminal. Do not launch a second CLI or browser for the selected task.
 
 ## Auth (never print secrets)
 

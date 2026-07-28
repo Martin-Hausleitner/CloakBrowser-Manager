@@ -13,7 +13,7 @@ export type ProfileHarness =
   | "stagehand"
   | "acpx";
 
-export type OrcaAgentCli = "cursor-agent" | "grok" | "codex";
+export type OrcaAgentCli = "cursor-agent" | "grok" | "agy" | "codex";
 export type AcpxAgent = "codex" | "claude" | "cursor" | "grok-build" | "opencode";
 
 export interface OrcaSessionCapabilities {

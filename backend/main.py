@@ -3105,9 +3105,9 @@ async def create_task_run(session_id: str, body: TaskRunCreate, request: Request
     if (
         str(profile.get("harness") or "codex") == "antigravity"
         and body.harness == "acpx"
-        and body.agent != "claude"
+        and body.agent != "grok-build"
     ):
-        raise HTTPException(status_code=422, detail="Antigravity profiles require ACPX with Claude")
+        raise HTTPException(status_code=422, detail="Antigravity profiles require ACPX with Grok Build")
 
     if not body.allowed_origins and not _can_operate_task_sandbox(identity, sandbox_id):
         raise HTTPException(

@@ -214,7 +214,7 @@ def test_create_run_allows_default_codex_profile_as_universal_binding(
     assert response.status_code == 201, response.text
 
 
-def test_create_run_allows_antigravity_profile_only_as_acpx_claude_preset(
+def test_create_run_allows_antigravity_profile_only_as_acpx_grok_build_preset(
     client_access: TestClient,
 ):
     profile = db.create_profile("Antigravity preset", sandbox_id="alpha", harness="antigravity")
@@ -225,7 +225,7 @@ def test_create_run_allows_antigravity_profile_only_as_acpx_claude_preset(
 
     acpx_response = client_access.post(
         f"/api/task-sessions/{session['id']}/runs",
-        json=run_body(profile_id=profile["id"], harness="acpx", agent="claude", model_alias=None),
+        json=run_body(profile_id=profile["id"], harness="acpx", agent="grok-build", model_alias=None),
     )
     assert acpx_response.status_code == 201, acpx_response.text
 
@@ -237,8 +237,8 @@ def test_create_run_allows_antigravity_profile_only_as_acpx_claude_preset(
     assert browser_use_response.json()["detail"] == "Profile harness is not compatible with run harness"
 
 
-@pytest.mark.parametrize("agent", ["codex", "cursor", "grok-build", "opencode"])
-def test_create_run_rejects_antigravity_acpx_with_non_claude_agent(
+@pytest.mark.parametrize("agent", ["codex", "claude", "cursor", "opencode"])
+def test_create_run_rejects_antigravity_acpx_with_non_grok_build_agent(
     client_access: TestClient,
     agent: str,
 ):
@@ -254,7 +254,7 @@ def test_create_run_rejects_antigravity_acpx_with_non_claude_agent(
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "Antigravity profiles require ACPX with Claude"
+    assert response.json()["detail"] == "Antigravity profiles require ACPX with Grok Build"
 
 
 @pytest.mark.parametrize("agent", ["codex", "claude", "cursor", "grok-build", "opencode"])

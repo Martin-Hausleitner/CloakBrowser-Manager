@@ -57,7 +57,7 @@ export const HARNESS_OPTIONS: HarnessOption[] = [
     label: "Antigravity",
     short: "AG",
     approach: "agent-bridge",
-    description: "Managed ACPX/Claude workflow preset",
+    description: "Managed ACPX/Grok Build workflow preset",
   },
   {
     value: "claude-code",

@@ -6,13 +6,13 @@ set -euo pipefail
 
 AGENT="${1:-}"
 if [[ $# -lt 1 ]]; then
-  echo "usage: orca_agent_cli.sh <cursor-agent|grok|codex> [args...]" >&2
+  echo "usage: orca_agent_cli.sh <cursor-agent|grok|agy|codex> [args...]" >&2
   exit 64
 fi
 shift
 
 case "$AGENT" in
-  cursor-agent|grok|codex)
+  cursor-agent|grok|agy|codex)
     ;;
   *)
     echo "refusing unsupported agent CLI" >&2
@@ -30,4 +30,16 @@ if ! command -v "$AGENT" >/dev/null 2>&1; then
   exit 69
 fi
 
-exec "$AGENT" "$@"
+case "$AGENT" in
+  grok)
+    # Keep Grok's screen in Orca's scrollback so the web UI can mirror it.
+    exec grok --no-alt-screen "$@"
+    ;;
+  agy)
+    # AGY is already authenticated on VCVM and stays interactive in the PTY.
+    exec agy "$@"
+    ;;
+  cursor-agent|codex)
+    exec "$AGENT" "$@"
+    ;;
+esac

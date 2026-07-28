@@ -21,7 +21,7 @@ orca-ide worktree show --worktree path:/home/coder/vk-repos/CloakBrowser-Manager
 ## What shipped
 
 1. **Host Orca bridge** in `docker-compose.vcvm.yml`: RO mounts for `/home/coder/orca`, `/home/coder/.local`, `/home/coder/.config/orca`; `HOME=/home/coder`; `CBM_ORCA_BIN`, worktree, wrapper, host-loopback `CBM_BASE_URL`, `CBM_AGENT_KEY_FILE`.
-2. **`scripts/orca_agent_cli.sh`**: allowlists `cursor-agent|grok|codex`, exports base URL + key file path only, `exec`s the agent (no secrets on argv).
+2. **`scripts/orca_agent_cli.sh`**: allowlists `cursor-agent|grok|agy|codex`, exports base URL + key file path only, keeps Grok visible with `--no-alt-screen`, and starts AGY as the interactive default (no secrets on argv).
 3. **`backend/orca_adapter.py`**: `terminal.create --command` uses fixed wrapper + validated agent (not bare agent string).
 4. **`scripts/cbm_agent_ctl.py`**: reads `CBM_AGENT_KEY_FILE` when `CBM_AGENT_KEY` absent; adds `tasks create|run` and `runs get|cancel|outputs`.
 5. **`scripts/vcvm_orca_preflight.py`** + deploy hook: fail closed on missing paths/runtime/unregistered worktree; never prints secrets.
@@ -53,3 +53,16 @@ Orca-launched agents: one automation lease per command, Playwright
 `X-CBM-Automation-Lease` headers only, always released in `finally`. Focused
 mocked tests: `scripts/test_cbm_browser_ctl.py` (5 passed). Skill updated to
 prefer this path over async Browser-Use runs for navigate/click/fill/text/screenshot.
+
+## Follow-up: AGY/Grok browser-terminal E2E (2026-07-28)
+
+- The desktop split workspace defaults to **AGY · Live CLI** and mirrors the
+  owned Orca PTY on the left while the selected CloakBrowser profile remains on
+  the right.
+- Manager injects the profile-bound system context and commits AGY's multi-line
+  draft automatically. A fresh VCVM run navigated the already-running profile
+  to `https://www.iana.org/` and returned
+  `AGY_AUTO_OK Internet Assigned Numbers Authority` without a manual submit.
+- Grok remains selectable as a visible interactive login/chat terminal. It does
+  not silently fall back to Claude when authentication is missing.
+- Antigravity managed runs now require **ACPX + Grok Build**.

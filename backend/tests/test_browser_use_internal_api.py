@@ -178,7 +178,7 @@ def test_capability_allows_antigravity_profile_for_acpx_run(client_access: TestC
         headers=bootstrap_headers(),
         json={
             "harness": "acpx",
-            "agent": "claude",
+            "agent": "grok-build",
             "task": "Navigate",
             "profile_id": profile["id"],
             "allowed_origins": ["https://example.com"],

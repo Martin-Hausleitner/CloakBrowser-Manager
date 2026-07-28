@@ -58,10 +58,10 @@ describe("harnessOptions", () => {
     }
   });
 
-  it("describes Antigravity as the ACPX Claude managed workflow without making it callable", () => {
+  it("describes Antigravity as the ACPX Grok Build managed workflow without making it callable", () => {
     const antigravity = HARNESS_OPTIONS.find((option) => option.value === "antigravity");
 
-    expect(antigravity?.description).toBe("Managed ACPX/Claude workflow preset");
+    expect(antigravity?.description).toBe("Managed ACPX/Grok Build workflow preset");
     expect(CALLABLE_BROWSER_HARNESSES).not.toContain("antigravity");
   });
 

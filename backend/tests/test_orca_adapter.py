@@ -75,6 +75,32 @@ def test_build_argv_never_uses_shell_string():
     ]
 
 
+def test_agy_commits_multiline_profile_context_after_the_tui_paste():
+    runner = FakeRunner()
+    runner.queue(_ok({"terminal": {"handle": "term_owned-agy-ready"}}))
+    runner.queue(_ok({"ok": True}))
+    runner.queue(_ok({"ok": True}))
+    adapter = oa.OrcaAdapter(
+        orca_bin="/bin/fake-orca",
+        runner=runner,
+        worktree_selector="path:/repo",
+    )
+
+    session = adapter.start_session(
+        profile_id="profile-agy",
+        sandbox_id="alpha",
+        agent="agy",
+        owner_key="agent:ops",
+    )
+
+    assert session.status == "running"
+    assert runner.calls[1][0][1:4] == ["terminal", "send", "--json"]
+    assert runner.calls[2][0][1:4] == ["terminal", "send", "--json"]
+    submit_argv = runner.calls[2][0]
+    assert submit_argv[submit_argv.index("--text") + 1] == " "
+    assert submit_argv[-1] == "--enter"
+
+
 @pytest.mark.parametrize("agent", ["bash", "sh", "python", "cursor", "opencode"])
 def test_validate_agent_cli_rejects_non_allowlisted(agent: str):
     with pytest.raises(oa.OrcaAdapterError) as exc:
@@ -82,7 +108,7 @@ def test_validate_agent_cli_rejects_non_allowlisted(agent: str):
     assert exc.value.code == "agent_not_allowed"
 
 
-@pytest.mark.parametrize("agent", ["cursor-agent", "grok", "codex"])
+@pytest.mark.parametrize("agent", ["cursor-agent", "grok", "agy", "codex"])
 def test_validate_agent_cli_allows_supported(agent: str):
     assert oa.validate_agent_cli(agent) == agent
 
@@ -287,6 +313,7 @@ def test_capabilities_report_no_pause_resume_when_ready():
     assert caps["actions"]["pause"] is False
     assert caps["actions"]["resume"] is False
     assert "cursor-agent" in caps["agents"]
+    assert "agy" in caps["agents"]
     assert any("owner-only" in note for note in caps["notes"])
     assert any("vcvm_orca_preflight" in note for note in caps["notes"])
     assert any("not mounted into the Manager container" in note for note in caps["notes"])
@@ -364,6 +391,10 @@ def test_build_agent_launch_command_uses_fixed_wrapper_only():
         wrapper="/repo/scripts/orca_agent_cli.sh",
     )
     assert command == "/repo/scripts/orca_agent_cli.sh grok"
+    assert oa.build_agent_launch_command(
+        "agy",
+        wrapper="/repo/scripts/orca_agent_cli.sh",
+    ) == "/repo/scripts/orca_agent_cli.sh agy"
     with pytest.raises(oa.OrcaAdapterError) as exc:
         oa.build_agent_launch_command("codex", wrapper="/tmp/evil.sh")
     assert exc.value.code == "wrapper_not_allowed"

@@ -18,9 +18,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
 
-AgentCli = Literal["cursor-agent", "grok", "codex"]
+AgentCli = Literal["cursor-agent", "grok", "agy", "codex"]
 
-ALLOWED_AGENT_CLIS: frozenset[str] = frozenset({"cursor-agent", "grok", "codex"})
+ALLOWED_AGENT_CLIS: frozenset[str] = frozenset({"cursor-agent", "grok", "agy", "codex"})
 
 # Operations the Manager may invoke. Values are fixed argv prefixes after the
 # orca binary; dynamic flags are appended only from validated kwargs.
@@ -176,7 +176,7 @@ def validate_agent_cli(agent: str) -> AgentCli:
     if agent not in ALLOWED_AGENT_CLIS:
         raise OrcaAdapterError(
             "agent_not_allowed",
-            "Agent CLI must be one of: cursor-agent, grok, codex",
+            "Agent CLI must be one of: cursor-agent, grok, agy, codex",
             status_code=400,
         )
     return agent  # type: ignore[return-value]
@@ -639,6 +639,16 @@ class OrcaAdapter:
                 enter=True,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
             )
+            if agent_cli == "agy":
+                # AGY treats a bracketed multi-line paste as a draft. A second,
+                # harmless submit commits the complete context after the paste.
+                self.invoke(
+                    "terminal.send",
+                    terminal=handle,
+                    text=" ",
+                    enter=True,
+                    timeout=DEFAULT_TIMEOUT_SECONDS,
+                )
         except OrcaAdapterError as exc:
             session.status = "error"
             session.last_error = exc.message

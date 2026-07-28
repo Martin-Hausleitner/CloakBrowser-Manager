@@ -40,22 +40,22 @@ const AGENT_OPTIONS: AgentMode[] = [
   "browser-use",
   "acpx",
   "antigravity",
-  "cursor-agent",
+  "agy",
   "grok",
+  "cursor-agent",
   "codex",
 ];
 const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
-  { value: "codex", label: "Codex" },
-  { value: "claude", label: "Claude" },
-  { value: "cursor", label: "Cursor" },
   { value: "grok-build", label: "Grok Build" },
+  { value: "codex", label: "Codex" },
+  { value: "cursor", label: "Cursor" },
   { value: "opencode", label: "OpenCode" },
 ];
 function preferredAgent(profile: Profile | null): AgentMode {
   if (profile?.harness === "browser-use") return "browser-use";
   if (profile?.harness === "acpx") return "acpx";
   if (profile?.harness === "antigravity") return "antigravity";
-  return "cursor-agent";
+  return "agy";
 }
 
 function allowedOrigins(task: string): string[] {
@@ -147,7 +147,7 @@ export function AgentBrowserWorkspace({
   onViewerDisconnect,
 }: AgentBrowserWorkspaceProps) {
   const [agent, setAgent] = useState<AgentMode>(() => preferredAgent(selectedProfile));
-  const [acpxAgent, setAcpxAgent] = useState<AcpxAgent>("cursor");
+  const [acpxAgent, setAcpxAgent] = useState<AcpxAgent>("grok-build");
   const [prompt, setPrompt] = useState("");
   const [caps, setCaps] = useState<OrcaCapabilities | null>(null);
   const [session, setSession] = useState<OrcaSession | null>(null);
@@ -172,7 +172,7 @@ export function AgentBrowserWorkspace({
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const runPollRef = useRef<number | null>(null);
-  const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const transcriptEndRef = useRef<HTMLSpanElement | null>(null);
   const appliedInitialPromptDraftIdRef = useRef<string | null>(null);
   const viewerPaneRef = useRef<HTMLElement | null>(null);
   const viewerFullscreenButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -207,7 +207,7 @@ export function AgentBrowserWorkspace({
   const antigravityMode = agent === "antigravity";
   const antigravitySupported = selectedProfile?.harness === "antigravity";
   const acpxBackedMode = acpxMode || antigravityMode;
-  const selectedAcpxAgent: AcpxAgent = antigravityMode ? "claude" : acpxAgent;
+  const selectedAcpxAgent: AcpxAgent = antigravityMode ? "grok-build" : acpxAgent;
   const selectedAcpxPreflight = acpxPreflights.find((item) => item.agent === selectedAcpxAgent);
   const managedRunMode = browserUseMode || acpxBackedMode;
   const managedRunActive = Boolean(taskRun && ACTIVE_TASK_RUN_STATES.has(taskRun.status));
@@ -247,7 +247,7 @@ export function AgentBrowserWorkspace({
   const terminalMode = !managedRunMode;
   const compactWorkspaceMode = terminalMode
     ? "cli"
-    : antigravityMode || (acpxMode && acpxAgent === "claude")
+    : antigravityMode
       ? "acpx"
       : acpxMode
         ? "acp"
@@ -261,12 +261,12 @@ export function AgentBrowserWorkspace({
   const chooseCompactWorkspaceMode = (mode: "cli" | "acp" | "acpx") => {
     if (sessionActive) return;
     if (mode === "cli") {
-      setAgent((current) => managedRunMode ? "cursor-agent" : current);
+      setAgent((current) => managedRunMode ? "agy" : current);
       return;
     }
     if (mode === "acp") {
       setAgent("acpx");
-      if (acpxAgent === "claude") setAcpxAgent("cursor");
+      setAcpxAgent("grok-build");
       return;
     }
     if (antigravitySupported) {
@@ -274,7 +274,7 @@ export function AgentBrowserWorkspace({
       return;
     }
     setAgent("acpx");
-    setAcpxAgent("claude");
+    setAcpxAgent("grok-build");
   };
 
   useEffect(() => {
@@ -801,10 +801,10 @@ export function AgentBrowserWorkspace({
                 { mode: "acp", label: "ACP", title: "Run through the selected ACP adapter" },
                 {
                   mode: "acpx",
-                  label: antigravitySupported ? "ACPX · Antigravity" : "ACPX",
+                  label: antigravitySupported ? "ACPX · Grok" : "ACPX",
                   title: antigravitySupported
-                    ? "Run Antigravity through the ACPX Claude preset"
-                    : "Run ACPX through the Claude adapter",
+                    ? "Run Antigravity through the ACPX Grok Build preset"
+                    : "Run ACPX through the Grok Build adapter",
                 },
               ] as const).map((option) => (
                 <button
@@ -900,7 +900,7 @@ export function AgentBrowserWorkspace({
             >
               {visibleAgentOptions.map((option) => (
                 <option key={option} value={option}>
-                  {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option === "antigravity" ? "Antigravity · ACPX/Claude" : option}
+                  {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option === "antigravity" ? "Antigravity · ACPX/Grok" : option === "agy" ? "AGY · Live CLI" : option === "grok" ? "Grok · Live CLI" : option}
                 </option>
               ))}
             </select>
@@ -926,7 +926,7 @@ export function AgentBrowserWorkspace({
           </div>
           {!settingsOpen ? (
             <span className="truncate text-[9px] text-[#a1a1aa]">
-              {managedRunMode ? "Typed output" : "Live terminal"} · {runningProfiles.length}/{profiles.length} live
+              {managedRunMode ? "Typed output" : `${agent === "agy" ? "AGY" : agent === "grok" ? "Grok" : agent} · Live terminal`} · {runningProfiles.length}/{profiles.length} live
             </span>
           ) : null}
         </div>
@@ -1024,7 +1024,7 @@ export function AgentBrowserWorkspace({
             ) : (
               <p className="text-[11px] text-[#a1a1aa]">
                 Add an explicit URL, then run {antigravityMode
-                  ? "Antigravity · ACPX/Claude"
+                  ? "Antigravity · ACPX/Grok"
                   : acpxMode
                     ? `ACPX with ${selectedAcpxAgent}`
                     : "Browser Use"}. Actions, screenshots, data and the
@@ -1033,15 +1033,27 @@ export function AgentBrowserWorkspace({
             )}
           </div>
         ) : (
-          <pre
-            className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-[#0a0a0c] px-2.5 py-2 font-mono text-[11px] leading-relaxed text-[#e4e4e7]"
-            data-testid="orca-transcript"
-            data-ui-state={UI_STATE.agentOrcaTranscript}
-            aria-label="CLI transcript"
-          >
-            {transcript || "No Orca output yet. Launch an allowlisted agent CLI to stream a real terminal."}
-            <div ref={transcriptEndRef} />
-          </pre>
+          <div className="flex min-h-0 flex-1 flex-col bg-[#08080a]">
+            <div className="flex items-center justify-between gap-2 border-b border-[#24242a] bg-[#101014] px-2.5 py-1 text-[9px] text-[#b7b7c2]">
+              <span className="min-w-0 leading-tight" data-testid="orca-cli-context">
+                {agent === "grok"
+                  ? "Grok CLI · sign in inside this terminal if prompted · profile context auto-injected"
+                  : agent === "agy"
+                    ? "AGY CLI · profile context and CloakBrowser control skill auto-injected"
+                    : `${agent} · profile context auto-injected`}
+              </span>
+              <span className="shrink-0 text-emerald-400">VCVM PTY</span>
+            </div>
+            <pre
+              className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words px-2.5 py-2 font-mono text-[11px] leading-relaxed text-[#f0f0f3]"
+              data-testid="orca-transcript"
+              data-ui-state={UI_STATE.agentOrcaTranscript}
+              aria-label="CLI transcript"
+            >
+              {transcript || "Launch AGY or Grok to mirror the real Orca terminal here."}
+              <span ref={transcriptEndRef} aria-hidden="true" />
+            </pre>
+          </div>
         )}
 
         <form

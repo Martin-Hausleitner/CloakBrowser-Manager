@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Plus, Users, KeyRound } from "lucide-react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Plus, Users, KeyRound, History } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import {
   api,
@@ -32,12 +32,13 @@ import { BrowserUseHome } from "./components/BrowserUseHome";
 import { ProxyOverview } from "./components/ProxyOverview";
 import { ProfilesWorkspace } from "./components/ProfilesWorkspace";
 import { AccountsOverview } from "./components/AccountsOverview";
+import { SessionsOverview } from "./components/SessionsOverview";
 import { LiveDevPanel } from "./components/LiveDevPanel";
 import { SessionStreamButtons } from "./components/SessionStreamButtons";
 import { AgentBrowserWorkspace } from "./components/workspace/AgentBrowserWorkspace";
 
 type AuthState = "checking" | "required" | "ok" | "error";
-type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies" | "profiles" | "accounts";
+type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies" | "profiles" | "accounts" | "sessions";
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 type MobileConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
 const FIXED_PROJECTS = ["default", "proxied", "mobile", "research"] as const;
@@ -392,6 +393,8 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     });
   }, [canManageProfiles, profiles, update]);
 
+  const showTableTabs = isTableView(view);
+
   if (view === "access" && canManageProfiles && accessControlEnabled) {
     return <AccessDashboard onClose={() => setView(selected ? "view" : "home")} />;
   }
@@ -555,6 +558,16 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                 <KeyRound className="h-3 w-3" />
                 Accounts
               </button>
+              <button
+                type="button"
+                onClick={() => setView("sessions")}
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                  view === "sessions" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <History className="h-3 w-3" />
+                Sessions
+              </button>
               {canManageProfiles ? (
                 <button
                   type="button"
@@ -594,7 +607,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             >
               {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
             </button>
-            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && (
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && view !== "sessions" && (
               <div className="flex items-center gap-2">
                 <StatusIndicator status={selected.status} size="md" />
                 <span className="text-sm font-medium">{selected.name}</span>
@@ -611,7 +624,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             {selected && selected.status === "running" ? (
               <SessionStreamButtons profileId={selected.id} running />
             ) : null}
-            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && (
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && view !== "sessions" && (
               canOperateSelected && (
               <LaunchButton
                 status={selected.status}
@@ -646,6 +659,32 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             )}
           </div>
         </div>
+
+        {showTableTabs ? (
+          <div className="border-b border-border bg-surface-0 px-4 py-2">
+            <div className="inline-flex rounded-lg border border-border bg-surface-1 p-1" role="tablist" aria-label="Tables workspace">
+              {[
+                { id: "profiles", label: "Profiles", available: true },
+                { id: "accounts", label: "Accounts", available: true },
+                { id: "proxies", label: "Proxies", available: canManageProfiles },
+                { id: "sessions", label: "Sessions", available: true },
+              ].filter((tab) => tab.available).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={view === tab.id}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium ${
+                    view === tab.id ? "bg-surface-3 text-gray-100" : "text-gray-500 hover:text-gray-200"
+                  }`}
+                  onClick={() => setView(tab.id as View)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         {/* Error banner */}
         {error && (
@@ -755,6 +794,20 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             />
           )}
 
+          {view === "sessions" && (
+            <SessionsOverview
+              profiles={profiles}
+              selectedId={selectedId}
+              onSelectProfile={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+                setView("view");
+              }}
+            />
+          )}
+
           {view === "empty" && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
@@ -830,6 +883,10 @@ function canAccess(identity: AccessIdentity | null, profile: Profile | null, per
   return hasAccessPermission(identity.grants, profile.sandbox_id, permission);
 }
 
+function isTableView(view: View) {
+  return view === "profiles" || view === "accounts" || view === "proxies" || view === "sessions";
+}
+
 function desktopViewState(view: View): UIStateId {
   const states: Record<View, UIStateId> = {
     home: UI_STATE.appDesktopHome,
@@ -841,6 +898,7 @@ function desktopViewState(view: View): UIStateId {
     proxies: UI_STATE.appDesktopProxies,
     profiles: UI_STATE.appDesktopProfiles,
     accounts: UI_STATE.appDesktopAccounts,
+    sessions: UI_STATE.appDesktopSessions,
   };
   return states[view];
 }

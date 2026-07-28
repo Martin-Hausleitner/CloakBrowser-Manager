@@ -13,6 +13,7 @@ const apiMock = vi.hoisted(() => ({
   setOnUnauthorized: vi.fn(),
   getOrcaCapabilities: vi.fn(),
   listProxies: vi.fn(),
+  listTaskSessions: vi.fn(),
   getTaskRun: vi.fn(),
   listTaskRunOutputs: vi.fn(),
 }));
@@ -29,6 +30,7 @@ vi.mock("./lib/api", async () => {
       logout: apiMock.logout,
       getOrcaCapabilities: apiMock.getOrcaCapabilities,
       listProxies: apiMock.listProxies,
+      listTaskSessions: apiMock.listTaskSessions,
       getTaskRun: apiMock.getTaskRun,
       listTaskRunOutputs: apiMock.listTaskRunOutputs,
     },
@@ -170,6 +172,7 @@ beforeEach(() => {
     notes: [],
   });
   apiMock.listProxies.mockResolvedValue([]);
+  apiMock.listTaskSessions.mockResolvedValue([]);
   apiMock.getTaskRun.mockRejectedValue(new Error("unexpected getTaskRun call"));
   apiMock.listTaskRunOutputs.mockRejectedValue(new Error("unexpected listTaskRunOutputs call"));
   useProfilesMock.mockReset();
@@ -368,6 +371,70 @@ describe("App Browser Use home handoff", () => {
     await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAgentWorkspace));
     expectUiState(document.body, UI_STATE.agentWorkspace);
   });
+
+  it("shows the central table tab strip only inside data table views", async () => {
+    useProfilesMock.mockReturnValue({
+      profiles: [runningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+    apiMock.listTaskSessions.mockResolvedValue([
+      {
+        id: "session-1",
+        profile_id: runningProfile.id,
+        sandbox_id: "default",
+        project_id: "commerce",
+        title: "Checkout run",
+        status: "active",
+        workflow_state: "open",
+        done_at: null,
+        archived_at: null,
+        retention_class: "project",
+        expires_at: null,
+        activity_at: "2026-07-27T10:30:00Z",
+        row_version: 1,
+        created_by_kind: "user",
+        created_by_id: "user-1",
+        created_at: "2026-07-27T10:00:00Z",
+        updated_at: "2026-07-27T10:30:00Z",
+        metadata: {},
+      },
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopHome));
+    expect(screen.queryByRole("tablist", { name: "Tables workspace" })).toBeNull();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Profiles" })[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProfiles));
+    expect(screen.getByRole("tablist", { name: "Tables workspace" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Profiles" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Accounts" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAccounts));
+    expect(screen.getByRole("tab", { name: "Accounts" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Proxies" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProxies));
+    expect(screen.getByRole("tab", { name: "Proxies" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopSessions));
+    expect(screen.getByRole("tab", { name: "Sessions" }).getAttribute("aria-selected")).toBe("true");
+    expect(await screen.findByText("Checkout run")).toBeTruthy();
+    expect(apiMock.listTaskSessions).toHaveBeenCalledWith(runningProfile.id, expect.objectContaining({ limit: 8 }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open session Checkout run for Live Checkout QA" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAgentWorkspace));
+    expect(screen.queryByRole("tablist", { name: "Tables workspace" })).toBeNull();
+  }, 15000);
 });
 
 describe("applyProfileViewport", () => {

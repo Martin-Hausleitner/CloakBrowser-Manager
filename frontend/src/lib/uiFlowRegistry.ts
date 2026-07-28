@@ -7,6 +7,7 @@ export const UI_STATE = {
   appDesktopProxies: "app.desktop.proxies",
   appDesktopProfiles: "app.desktop.profiles",
   appDesktopAccounts: "app.desktop.accounts",
+  appDesktopSessions: "app.desktop.sessions",
   appDesktopEmpty: "app.desktop.empty",
   appDesktopCreate: "app.desktop.create",
   appDesktopEdit: "app.desktop.edit",

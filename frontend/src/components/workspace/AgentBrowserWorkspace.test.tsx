@@ -509,7 +509,7 @@ describe("AgentBrowserWorkspace", () => {
     fireEvent.change(screen.getByTestId("orca-prompt"), {
       target: { value: "Use the CloakBrowser control skill" },
     });
-    fireEvent.click(screen.getByTestId("orca-launch"));
+    expect(fireEvent.keyDown(screen.getByTestId("orca-prompt"), { key: "Enter", code: "Enter" })).toBe(false);
 
     await waitFor(() => {
       expect(apiMock.startOrcaSession).toHaveBeenCalledWith({
@@ -693,10 +693,13 @@ describe("AgentBrowserWorkspace", () => {
 
     await screen.findByTestId("orca-launch");
     expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("browser-use");
-    fireEvent.change(screen.getByTestId("orca-prompt"), {
+    const promptInput = screen.getByTestId("orca-prompt");
+    fireEvent.change(promptInput, {
       target: { value: "Open https://example.com and report the heading" },
     });
-    fireEvent.click(screen.getByTestId("orca-launch"));
+    expect(fireEvent.keyDown(promptInput, { key: "Enter", code: "Enter", shiftKey: true })).toBe(true);
+    expect(apiMock.createTaskRun).not.toHaveBeenCalled();
+    expect(fireEvent.keyDown(promptInput, { key: "Enter", code: "Enter" })).toBe(false);
 
     await waitFor(() => {
       expect(apiMock.createTaskRun).toHaveBeenCalledWith(
@@ -711,6 +714,41 @@ describe("AgentBrowserWorkspace", () => {
     });
     expect(await screen.findByText("navigate")).toBeTruthy();
     expect(screen.getByTestId("browser-use-output")).toBeTruthy();
+  });
+
+  it("switches compact Browser Terminal and ACP modes without remounting the live viewer", async () => {
+    const browserUseProfile: Profile = { ...runningProfile, harness: "browser-use" };
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[browserUseProfile]}
+        selectedProfile={browserUseProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("orca-launch");
+    const viewer = screen.getByTestId("mock-profile-viewer");
+    const settings = screen.getByTestId("workspace-settings");
+    expect(settings.hasAttribute("hidden")).toBe(true);
+
+    fireEvent.click(screen.getByTestId("workspace-settings-toggle"));
+    expect(settings.hasAttribute("hidden")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "ACP / ACPX" }));
+    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("acpx");
+    expect(screen.getByTestId("mock-profile-viewer")).toBe(viewer);
+
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("cursor-agent");
+    expect(screen.getByTestId("mock-profile-viewer")).toBe(viewer);
+
+    fireEvent.change(screen.getByTestId("orca-agent-select"), { target: { value: "grok" } });
+    expect(screen.getByRole("button", { name: "Terminal" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("grok");
   });
 
   it("starts ACPX with the selected ACP agent and renders typed outputs", async () => {

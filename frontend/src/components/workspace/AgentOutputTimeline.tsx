@@ -1,7 +1,9 @@
+import { useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  ChevronRight,
   Eye,
   Gauge,
   Image as ImageIcon,
@@ -29,6 +31,35 @@ const ICONS: Record<TaskOutputKind, typeof Activity> = {
   approval: ShieldQuestion,
   summary: CheckCircle2,
 };
+
+const GROUPABLE_KINDS = new Set<TaskOutputKind>(["metric", "observation", "status"]);
+
+interface OutputGroup {
+  output: TaskOutput;
+  count: number;
+}
+
+function groupRepeatedOutputs(outputs: TaskOutput[]): OutputGroup[] {
+  const grouped: OutputGroup[] = [];
+  for (const output of outputs) {
+    if (!GROUPABLE_KINDS.has(output.kind)) {
+      grouped.push({ output, count: 1 });
+      continue;
+    }
+    const key = `${output.kind}\u0000${output.summary}`;
+    const previousIndex = grouped.length - 1;
+    const previous = grouped[previousIndex];
+    const previousKey = previous && GROUPABLE_KINDS.has(previous.output.kind)
+      ? `${previous.output.kind}\u0000${previous.output.summary}`
+      : null;
+    if (previous && previousKey === key) {
+      grouped[previousIndex] = { output, count: previous.count + 1 };
+    } else {
+      grouped.push({ output, count: 1 });
+    }
+  }
+  return grouped;
+}
 
 function scalar(value: unknown): string {
   if (value == null) return "—";
@@ -152,35 +183,59 @@ function OutputBody({ output }: { output: TaskOutput }) {
 }
 
 export function AgentOutputTimeline({ outputs }: AgentOutputTimelineProps) {
-  const ordered = [...outputs].sort((a, b) => a.sequence - b.sequence);
+  const [showAll, setShowAll] = useState(false);
+  const ordered = useMemo(() => [...outputs].sort((a, b) => a.sequence - b.sequence), [outputs]);
+  const compact = useMemo(() => groupRepeatedOutputs(ordered), [ordered]);
+  const visible = showAll ? ordered.map((output) => ({ output, count: 1 })) : compact;
+  const hasGroupedEvents = compact.length < ordered.length;
 
   return (
-    <ol className="space-y-2" aria-label="Agent output">
-      {ordered.map((output) => {
+    <div>
+      {hasGroupedEvents ? (
+        <div className="mb-1 flex justify-end">
+          <button
+            type="button"
+            className="h-6 rounded border border-[#3c3c43] bg-[#18181b] px-2 text-[9px] font-medium text-[#d4d4d8] hover:bg-[#27272a]"
+            onClick={() => setShowAll((current) => !current)}
+          >
+            {showAll ? "Group repeated events" : "Show all events"}
+          </button>
+        </div>
+      ) : null}
+      <ol className="space-y-1" aria-label="Agent output">
+      {visible.map(({ output, count }) => {
         const Icon = ICONS[output.kind] ?? ListTree;
+        const defaultOpen = !GROUPABLE_KINDS.has(output.kind);
         return (
           <li
-            key={output.id}
-            className="rounded border border-[#2a2a2a] bg-[#151515] p-2.5"
+            key={`${output.id}-${showAll ? "raw" : "grouped"}`}
+            className="rounded border border-[#303036] bg-[#141417]"
             data-output-kind={output.kind}
           >
-            <div className="flex items-start gap-2">
-              <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#8b8b8b]" />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-[11px] font-medium text-[#e4e4e4]">
+            <details className="group" open={defaultOpen || undefined}>
+              <summary className="flex min-h-7 cursor-pointer list-none items-center gap-1.5 px-2 py-1 marker:hidden hover:bg-[#1c1c20]">
+                <ChevronRight className="h-2.5 w-2.5 shrink-0 text-[#8f8f99] transition-transform group-open:rotate-90" />
+                <Icon className="h-3 w-3 shrink-0 text-[#b4b4bd]" />
+                <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-[#f4f4f5]">
                     {output.summary}
+                </span>
+                {count > 1 ? (
+                  <span className="rounded bg-[#302e58] px-1.5 py-0.5 text-[8px] font-semibold text-[#dedcff]">
+                    {count} events
                   </span>
-                  <span className="ml-auto text-[9px] uppercase tracking-wide text-[#666]">
-                    {output.kind.replace("_", " ")}
-                  </span>
-                </div>
+                ) : null}
+                <span className="text-[8px] uppercase tracking-wide text-[#a1a1aa]">
+                  {output.kind.replace("_", " ")}
+                </span>
+              </summary>
+              <div className="border-t border-[#29292e] px-2 pb-2 pt-0.5">
                 <OutputBody output={output} />
               </div>
-            </div>
+            </details>
           </li>
         );
       })}
-    </ol>
+      </ol>
+    </div>
   );
 }

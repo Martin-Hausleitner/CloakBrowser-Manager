@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Play, Square, SendHorizontal, TerminalSquare, MonitorSmartphone } from "lucide-react";
+import {
+  MonitorSmartphone,
+  Play,
+  SendHorizontal,
+  Settings2,
+  Square,
+  TerminalSquare,
+} from "lucide-react";
 import {
   api,
   type AcpxAgent,
@@ -40,6 +47,12 @@ const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
   { value: "cursor", label: "Cursor" },
   { value: "grok-build", label: "Grok Build" },
   { value: "opencode", label: "OpenCode" },
+];
+const WORKSPACE_MODES: ReadonlyArray<{ value: AgentMode; label: string }> = [
+  { value: "browser-use", label: "Browser" },
+  { value: "cursor-agent", label: "Terminal" },
+  { value: "acpx", label: "ACP / ACPX" },
+  { value: "antigravity", label: "Anti" },
 ];
 function preferredAgent(profile: Profile | null): AgentMode {
   if (profile?.harness === "browser-use") return "browser-use";
@@ -157,6 +170,7 @@ export function AgentBrowserWorkspace({
   const [viewportWidth, setViewportWidth] = useState(selectedProfile?.screen_width ?? 1280);
   const [viewportHeight, setViewportHeight] = useState(selectedProfile?.screen_height ?? 720);
   const [viewportApplying, setViewportApplying] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const runPollRef = useRef<number | null>(null);
@@ -205,6 +219,7 @@ export function AgentBrowserWorkspace({
     !sessionActive &&
     !busy;
   const canSend = Boolean(!managedRunMode && sessionActive && canInteract && prompt.trim() && !busy);
+  const submitStartsSession = managedRunMode || !sessionActive;
   const canStop = Boolean(
     (managedRunMode ? canAutomate : canInteract) &&
     !busy &&
@@ -212,6 +227,7 @@ export function AgentBrowserWorkspace({
       ? taskRun && ACTIVE_TASK_RUN_STATES.has(taskRun.status)
       : session && session.status !== "closed"),
   );
+  const terminalMode = !managedRunMode;
 
   useEffect(() => {
     let cancelled = false;
@@ -688,180 +704,182 @@ export function AgentBrowserWorkspace({
 
   return (
     <div
-      className="agent-browser-workspace flex h-full min-h-0 w-full overflow-hidden bg-[#0d0d0d] text-[#e6e6e6]"
+      className="agent-browser-workspace flex h-full min-h-0 w-full overflow-hidden bg-[#09090b] text-[#f4f4f5]"
       data-testid="agent-browser-workspace"
       data-ui-state={UI_STATE.agentWorkspace}
     >
       <section
-        className="flex min-w-0 w-[42%] max-w-[36rem] flex-col border-r border-[#2a2a2a]"
+        className="flex min-w-[22rem] w-[36%] max-w-[30rem] flex-col border-r border-[#35353b] bg-[#0d0d0f]"
         aria-label="Orca agent session"
         aria-hidden={viewerFullscreen || undefined}
         inert={viewerFullscreen || undefined}
         data-ui-state={UI_STATE.agentSessionPane}
       >
-        <header className="flex items-center gap-2 border-b border-[#2a2a2a] bg-[#141414] px-3 py-2">
-          <TerminalSquare className="h-3.5 w-3.5 text-[#8b8b8b]" />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[12px] font-semibold tracking-tight">
-              {browserUseMode
-                ? "Browser Use"
-                : antigravityMode
-                  ? "Antigravity · ACPX/Claude"
-                  : acpxMode
-                    ? "ACPX / ACP"
-                    : "Orca CLI"}
+        <header className="border-b border-[#35353b] bg-[#111113] px-2.5 py-1.5">
+          <div className="flex min-w-0 items-center gap-2">
+            <TerminalSquare className="h-3.5 w-3.5 shrink-0 text-[#c4c4cc]" />
+            <div className="min-w-0 flex-1 truncate text-[11px] font-semibold tracking-tight">
+              {selectedProfile?.name ?? "Agent workspace"}
             </div>
-            <div className="truncate text-[10px] text-[#8b8b8b]" data-testid="orca-connection-status">
+            <span
+              className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
+                sessionActive ? "bg-emerald-950 text-emerald-300" : "bg-[#29292e] text-[#c4c4cc]"
+              }`}
+              data-testid="orca-run-status"
+            >
+              {managedRunMode ? taskRun?.status ?? "idle" : session?.status ?? "idle"}
+            </span>
+            <button
+              type="button"
+              className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#3c3c43] bg-[#18181b] text-[#d4d4d8] hover:border-[#60606b] hover:bg-[#232329]"
+              onClick={() => setSettingsOpen((open) => !open)}
+              aria-label={settingsOpen ? "Hide workspace settings" : "Show workspace settings"}
+              aria-expanded={settingsOpen}
+              data-testid="workspace-settings-toggle"
+              title="Profiles and harness settings"
+            >
+              <Settings2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="mt-1.5 flex items-center gap-1">
+            <div
+              className="grid min-w-0 flex-1 grid-cols-4 rounded-md border border-[#35353b] bg-[#0b0b0d] p-0.5"
+              role="group"
+              aria-label="Workspace mode"
+            >
+              {WORKSPACE_MODES.map((mode) => {
+                const selected = mode.value === "cursor-agent" ? terminalMode : agent === mode.value;
+                return (
+                  <button
+                    key={mode.value}
+                    type="button"
+                    aria-pressed={selected}
+                    className={`h-6 truncate rounded px-1 text-[9px] font-semibold transition-colors ${
+                      selected
+                        ? "bg-[#2e2b5f] text-white"
+                        : "text-[#a1a1aa] hover:bg-[#202024] hover:text-white"
+                    }`}
+                    onClick={() => {
+                      if (mode.value === "cursor-agent" && terminalMode) return;
+                      setAgent(mode.value);
+                    }}
+                    disabled={sessionActive}
+                  >
+                    {mode.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                className="btn btn-primary inline-flex h-7 items-center gap-1 px-2 text-[10px]"
+                onClick={() => void handleStart()}
+                disabled={!canStart}
+                data-testid="orca-launch"
+                title="Launch the selected mode"
+              >
+                <Play className="h-3 w-3" />
+                Launch
+              </button>
+              <button
+                type="button"
+                className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#493434] bg-[#211515] text-red-300 hover:bg-[#3b1919] disabled:opacity-40"
+                onClick={() => void handleStop()}
+                disabled={!canStop}
+                data-testid="orca-stop"
+                aria-label="Stop active run"
+              >
+                <Square className="h-3 w-3" />
+              </button>
+            </div>
+          </div>
+          <details className="mt-1 text-[9px] text-[#a1a1aa]">
+            <summary className="w-fit cursor-pointer select-none hover:text-white">Session details</summary>
+            <div className="mt-1 truncate" data-testid="orca-connection-status">
               {managedRunMode
                 ? taskRun
                   ? `Managed worker · ${taskRun.id}`
                   : acpxBackedMode
                     ? acpxPresence?.worker_seen_recently
                       ? selectedAcpxPreflight?.ready
-                        ? antigravityMode
-                          ? "Managed run · Claude · ACP ready"
-                          : `Managed run · ${selectedAcpxAgent} · ACP ready`
+                        ? `Managed run · ${selectedAcpxAgent} · ACP ready`
                         : `Managed run · ${selectedAcpxAgent} · ${selectedAcpxPreflight?.state ?? "checking"}`
-                      : acpxPresence
-                        ? `Managed run · ${selectedAcpxAgent} · ${acpxPresence.state}`
-                        : `Managed run · ${selectedAcpxAgent} · checking worker`
+                      : `Managed run · ${selectedAcpxAgent} · ${acpxPresence?.state ?? "checking"}`
                     : "Managed VCVM worker"
                 : statusLabel(session, caps)}
               {!managedRunMode && session ? ` · ${session.terminal_handle}` : ""}
             </div>
-          </div>
-          <span
-            className={`rounded px-1.5 py-0.5 text-[10px] ${
-              sessionActive ? "bg-[#1f3d2a] text-[#9ae6b4]" : "bg-[#2a2a2a] text-[#a0a0a0]"
-            }`}
-            data-testid="orca-run-status"
-          >
-            {managedRunMode ? taskRun?.status ?? "idle" : session?.status ?? "idle"}
-          </span>
+          </details>
         </header>
 
-        <div className="flex flex-wrap items-center gap-2 border-b border-[#2a2a2a] px-3 py-2">
-          <label className="sr-only" htmlFor="orca-profile">
-            Profile
-          </label>
-          <select
-            id="orca-profile"
-            className="input h-8 max-w-[12rem] bg-[#1a1a1a] py-1 text-[11px]"
-            value={selectedProfile?.id ?? ""}
-            onChange={(event) => onSelectProfile(event.target.value)}
-            data-testid="orca-profile-select"
+        <div className="flex items-center gap-1.5 border-b border-[#35353b] bg-[#111113] px-2.5 py-1.5">
+          <div
+            className="flex min-w-0 flex-1 items-center gap-1.5"
+            data-testid="workspace-settings"
+            hidden={!settingsOpen}
           >
-            <option value="" disabled>
-              Select profile
-            </option>
-            {profiles.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.name}
-                {profile.status === "running" ? " · live" : ""}
-              </option>
-            ))}
-          </select>
-
-          <label className="sr-only" htmlFor="orca-agent">
-            Harness
-          </label>
-          <select
-            id="orca-agent"
-            className="input h-8 max-w-[10rem] bg-[#1a1a1a] py-1 text-[11px]"
-            value={agent}
-            onChange={(event) => setAgent(event.target.value as AgentMode)}
-            disabled={sessionActive || (!managedRunMode && unavailable)}
-            data-testid="orca-agent-select"
-          >
-            {AGENT_OPTIONS.map((option) => (
-              <option key={option} value={option}>
-                {option === "browser-use"
-                  ? "Browser Use"
-                  : option === "acpx"
-                    ? "ACPX / ACP"
-                    : option === "antigravity"
-                      ? "Antigravity · ACPX/Claude"
-                      : option}
-              </option>
-            ))}
-          </select>
-
-          {acpxMode ? (
-            <>
-              <label className="sr-only" htmlFor="acpx-agent">
-                ACP agent
-              </label>
-              <select
-                id="acpx-agent"
-                className="input h-8 max-w-[9rem] bg-[#1a1a1a] py-1 text-[11px]"
-                value={acpxAgent}
-                onChange={(event) => setAcpxAgent(event.target.value as AcpxAgent)}
-                disabled={sessionActive}
-                data-testid="acpx-agent-select"
-                aria-label="ACP agent"
-              >
-                {ACPX_AGENT_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </>
-          ) : null}
-
-          <div className="ml-auto flex items-center gap-1.5">
-            <button
-              type="button"
-              className="btn btn-primary inline-flex h-8 items-center gap-1 px-2 text-[11px]"
-              onClick={() => void handleStart()}
-              disabled={!canStart}
-              data-testid="orca-launch"
-              title={
-                !managedRunMode && unavailable
-                  ? "Orca runtime unavailable"
-                  : !hasModePermissions
-                    ? managedRunMode
-                      ? "Requires automate"
-                      : "Requires automate and interact"
-                    : managedRunMode
-                      ? `Run ${
-                          antigravityMode
-                            ? "Antigravity · ACPX/Claude"
-                            : acpxMode
-                              ? `ACPX with ${selectedAcpxAgent}`
-                              : "Browser Use"
-                        } on this live profile`
-                      : "Launch Orca agent session"
-              }
+            <label className="sr-only" htmlFor="orca-profile">Profile</label>
+            <select
+              id="orca-profile"
+              className="input h-7 max-w-[10rem] bg-[#18181b] py-0.5 text-[10px]"
+              value={selectedProfile?.id ?? ""}
+              onChange={(event) => onSelectProfile(event.target.value)}
+              data-testid="orca-profile-select"
             >
-              <Play className="h-3 w-3" />
-              Launch
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary inline-flex h-8 items-center gap-1 px-2 text-[11px]"
-              onClick={() => void handleStop()}
-              disabled={!canStop}
-              data-testid="orca-stop"
+              <option value="" disabled>Select profile</option>
+              {profiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}{profile.status === "running" ? " · live" : ""}
+                </option>
+              ))}
+            </select>
+
+            <label className="sr-only" htmlFor="orca-agent">Harness</label>
+            <select
+              id="orca-agent"
+              className="input h-7 max-w-[9rem] bg-[#18181b] py-0.5 text-[10px]"
+              value={agent}
+              onChange={(event) => setAgent(event.target.value as AgentMode)}
+              disabled={sessionActive || (!managedRunMode && unavailable)}
+              data-testid="orca-agent-select"
             >
-              <Square className="h-3 w-3" />
-              Stop
-            </button>
+              {AGENT_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option === "antigravity" ? "Antigravity · ACPX/Claude" : option}
+                </option>
+              ))}
+            </select>
+
+            {acpxMode ? (
+              <>
+                <label className="sr-only" htmlFor="acpx-agent">ACP agent</label>
+                <select
+                  id="acpx-agent"
+                  className="input h-7 max-w-[8rem] bg-[#18181b] py-0.5 text-[10px]"
+                  value={acpxAgent}
+                  onChange={(event) => setAcpxAgent(event.target.value as AcpxAgent)}
+                  disabled={sessionActive}
+                  data-testid="acpx-agent-select"
+                  aria-label="ACP agent"
+                >
+                  {ACPX_AGENT_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </>
+            ) : null}
           </div>
+          {!settingsOpen ? (
+            <span className="truncate text-[9px] text-[#a1a1aa]">
+              {managedRunMode ? "Typed output" : "Live terminal"} · {runningProfiles.length}/{profiles.length} live
+            </span>
+          ) : null}
         </div>
 
-        <div className="flex flex-wrap gap-1.5 border-b border-[#2a2a2a] px-3 py-1.5 text-[10px] text-[#8b8b8b]">
-          <span data-testid="orca-cap-pause">
-            {managedRunMode ? "outputs: typed" : "pause: unavailable"}
-          </span>
-          <span>·</span>
-          <span data-testid="orca-cap-resume">
-            {managedRunMode ? (acpxBackedMode ? "session: ACP" : "worker: managed") : "resume: unavailable"}
-          </span>
-          <span>·</span>
-          <span>
-            live profiles: {runningProfiles.length}/{profiles.length}
-          </span>
+        <div className="sr-only" aria-live="polite">
+          <span data-testid="orca-cap-pause">{managedRunMode ? "outputs: typed" : "pause: unavailable"}</span>
+          <span data-testid="orca-cap-resume">{managedRunMode ? (acpxBackedMode ? "session: ACP" : "worker: managed") : "resume: unavailable"}</span>
         </div>
 
         {error ? (
@@ -943,14 +961,14 @@ export function AgentBrowserWorkspace({
 
         {managedRunMode ? (
           <div
-            className="min-h-0 flex-1 overflow-auto bg-[#0a0a0a] px-3 py-2"
+            className="min-h-0 flex-1 overflow-auto bg-[#0a0a0c] px-2 py-1.5"
             data-testid={browserUseMode ? "browser-use-output" : "managed-agent-output"}
             data-ui-state={UI_STATE.agentManagedOutput}
           >
             {taskOutputs.length ? (
               <AgentOutputTimeline outputs={taskOutputs} />
             ) : (
-              <p className="text-[11px] text-[#777]">
+              <p className="text-[11px] text-[#a1a1aa]">
                 Add an explicit URL, then run {antigravityMode
                   ? "Antigravity · ACPX/Claude"
                   : acpxMode
@@ -962,7 +980,7 @@ export function AgentBrowserWorkspace({
           </div>
         ) : (
           <pre
-            className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-[#0a0a0a] px-3 py-2 font-mono text-[11px] leading-relaxed text-[#d0d0d0]"
+            className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-[#0a0a0c] px-2.5 py-2 font-mono text-[11px] leading-relaxed text-[#e4e4e7]"
             data-testid="orca-transcript"
             data-ui-state={UI_STATE.agentOrcaTranscript}
             aria-label="CLI transcript"
@@ -973,10 +991,10 @@ export function AgentBrowserWorkspace({
         )}
 
         <form
-          className="flex items-end gap-2 border-t border-[#2a2a2a] bg-[#141414] px-3 py-2"
+          className="flex items-end gap-1.5 border-t border-[#35353b] bg-[#111113] px-2.5 py-1.5"
           onSubmit={(event) => {
             event.preventDefault();
-            void (managedRunMode && !sessionActive ? handleStart() : handleSend());
+            void (submitStartsSession ? handleStart() : handleSend());
           }}
         >
           <label className="sr-only" htmlFor="orca-prompt">
@@ -984,10 +1002,15 @@ export function AgentBrowserWorkspace({
           </label>
           <textarea
             id="orca-prompt"
-            className="input min-h-[2.5rem] flex-1 resize-none bg-[#1a1a1a] py-2 text-[12px]"
-            rows={2}
+            className="input min-h-8 flex-1 resize-none border-[#3c3c43] bg-[#18181b] py-1.5 text-[11px] text-white placeholder:text-[#71717a]"
+            rows={1}
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }}
             placeholder={
               managedRunMode
                 ? "Describe the task and include an explicit https:// URL…"
@@ -1000,12 +1023,12 @@ export function AgentBrowserWorkspace({
           />
           <button
             type="submit"
-            className="btn btn-primary inline-flex h-9 items-center gap-1 px-2.5 text-[11px]"
-            disabled={managedRunMode ? !canStart : !canSend}
+            className="btn btn-primary inline-flex h-8 items-center gap-1 px-2 text-[10px]"
+            disabled={submitStartsSession ? !canStart : !canSend}
             data-testid="orca-send"
           >
             <SendHorizontal className="h-3.5 w-3.5" />
-            {managedRunMode ? "Run" : "Send"}
+            {managedRunMode ? "Run" : submitStartsSession ? "Launch" : "Send"}
           </button>
         </form>
       </section>

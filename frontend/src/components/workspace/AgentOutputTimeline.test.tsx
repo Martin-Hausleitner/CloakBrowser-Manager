@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { TaskOutput } from "../../lib/api";
 import { AgentOutputTimeline } from "./AgentOutputTimeline";
@@ -76,5 +76,26 @@ describe("AgentOutputTimeline", () => {
     expect(screen.getByText("Future output")).toBeTruthy();
     expect(screen.getByText(/details/i)).toBeTruthy();
     expect(screen.queryByText("<script>")).toBeNull();
+  });
+
+  it("groups repeated low-value events until the operator asks to show every event", () => {
+    const { container } = render(
+      <AgentOutputTimeline
+        outputs={[
+          output({ id: "metric-1", sequence: 1, kind: "metric", summary: "usage", payload: { name: "usage", value: 100 } }),
+          output({ id: "metric-2", sequence: 2, kind: "metric", summary: "usage", payload: { name: "usage", value: 120 } }),
+          output({ id: "action-1", sequence: 3, kind: "action", summary: "Navigate", payload: { name: "navigate" } }),
+          output({ id: "metric-3", sequence: 4, kind: "metric", summary: "usage", payload: { name: "usage", value: 140 } }),
+          output({ id: "summary-1", sequence: 5, kind: "summary", summary: "Completed", payload: { text: "Done" } }),
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll('[data-output-kind="metric"]')).toHaveLength(2);
+    expect(screen.getByText("2 events")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all events" }));
+    expect(container.querySelectorAll('[data-output-kind="metric"]')).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Group repeated events" })).toBeTruthy();
   });
 });

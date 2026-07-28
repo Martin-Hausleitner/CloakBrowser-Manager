@@ -1101,6 +1101,31 @@ def test_workers_rebind_normal_release_still_requires_existing_acpx_unit(
     assert ("systemctl", "--user", "show", remote.ACPX_UNIT, "-p", "FragmentPath", "--value") in calls
 
 
+def test_candidate_clone_rejects_overlong_derived_volume_before_docker_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    backup = write_backup(paths)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        remote,
+        "run",
+        lambda argv, **kwargs: calls.append([str(item) for item in argv])
+        or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+    )
+
+    with pytest.raises(remote.HelperError, match="unsafe candidate volume"):
+        remote.op_candidate_clone(
+            {
+                "release_id": "release-20260728-513c8f7-antigravity-grid",
+                "backup": backup,
+            }
+        )
+
+    assert calls == []
+
+
 def test_manager_docker_run_paths_publish_canonical_container_port_and_host_gateway(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     paths = patch_remote_paths(monkeypatch, tmp_path)
     calls: list[tuple[str, ...]] = []
@@ -1859,6 +1884,81 @@ def write_release_acpx_target(paths: dict[str, Path], release_id: str = "release
     return target
 
 
+def write_promoted_acpx_assets(paths: dict[str, Path], release_id: str) -> dict[str, Path]:
+    release = paths["releases"] / release_id
+    source = release / "source"
+    source.mkdir(parents=True, exist_ok=True)
+    (source / "scripts").mkdir(parents=True, exist_ok=True)
+    (source / "scripts" / "cbm-mcp").write_text("#!/bin/sh\n", encoding="utf-8")
+    (source / "scripts" / "cbm-mcp").chmod(0o700)
+    cli = write_release_acpx_target(paths, release_id, promoted=True)
+    venv_python = release / "acpx-venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True, exist_ok=True)
+    (venv_python.parent / "python3").symlink_to("/usr/bin/python3")
+    venv_python.symlink_to("python3")
+    npm_bin = release / "acpx-runtime" / "node_modules" / ".bin"
+    npm_bin.mkdir(parents=True, exist_ok=True)
+    (npm_bin / "acpx").symlink_to("../acpx/dist/cli.js")
+    capability = release / "acpx-capability"
+    capability.mkdir(parents=True, exist_ok=True)
+    capability.chmod(0o700)
+    policy = capability / "permission-policy.json"
+    policy.write_text(json.dumps({"defaultAction": "deny"}) + "\n", encoding="utf-8")
+    policy.chmod(0o600)
+    mcp = capability / "mcp-config.json"
+    mcp.write_text(
+        json.dumps({"mcpServers": [{"name": "cloakbrowser", "command": str(source / "scripts" / "cbm-mcp"), "args": []}]})
+        + "\n",
+        encoding="utf-8",
+    )
+    mcp.chmod(0o600)
+    return {
+        "release": release,
+        "source": source,
+        "runtime": release / "acpx-runtime",
+        "venv": release / "acpx-venv",
+        "capability": capability,
+        "policy": policy,
+        "mcp": mcp,
+        "cli": cli,
+        "python": venv_python,
+    }
+
+
+def acpx_unit_exec_start(paths: dict[str, Path], release_id: str, worker_id: str = "acpx-worker") -> str:
+    release = paths["releases"] / release_id
+    capability = release / "acpx-capability"
+    return (
+        f"{release / 'acpx-venv' / 'bin' / 'python'} -m scripts.acpx_worker "
+        " --manager-url http://127.0.0.1:18115"
+        f" --token-file {remote.REMOTE_PATH / '.env.acpx.vcvm'}"
+        f" --worker-id {worker_id}"
+        f" --worktree {release / 'source'}"
+        f" --permission-policy {capability / 'permission-policy.json'}"
+        f" --mcp-config {capability / 'mcp-config.json'}"
+        f" --capability-dir {capability}"
+        f" --acpx {release / 'acpx-runtime' / 'node_modules' / 'acpx' / 'dist' / 'cli.js'}"
+        " --preflight-interval 240"
+    )
+
+
+def acpx_capture(paths: dict[str, Path], release_id: str = "release-old-0001") -> dict[str, object]:
+    unit = paths["home"] / ".config" / "systemd" / "user" / remote.ACPX_UNIT
+    unit.write_text(f"[Service]\nExecStart={acpx_unit_exec_start(paths, release_id)}\n", encoding="utf-8")
+    return {
+        "acpx_was_absent": False,
+        "acpx_active_state": "active",
+        "acpx_unit_path": str(unit),
+        "acpx_unit_sha256": remote.file_sha256(unit),
+        "acpx_dropin_path": str(remote.release_dropin(remote.ACPX_UNIT)),
+        "acpx_dropin_exists": False,
+        "acpx_dropin_content": "",
+        "acpx_dropin_sha256": "",
+        "acpx_working_directory": str(paths["releases"] / release_id / "source"),
+        "acpx_exec_start": acpx_unit_exec_start(paths, release_id),
+    }
+
+
 def write_npm_bin_symlink(paths: dict[str, Path], release_id: str = "release-0000001", *, promoted: bool = False) -> Path:
     runtime = "acpx-runtime" if promoted else "acpx-bootstrap/node-runtime"
     link = paths["releases"] / release_id / runtime / "node_modules" / ".bin" / "acpx"
@@ -2015,6 +2115,220 @@ def test_acpx_executable_contract_requires_direct_package_cli_not_npm_bin_symlin
     assert remote._validate_acpx_executable_path("release-0000001", str(direct), kind="candidate") == direct
     with pytest.raises(remote.HelperError, match="allowlisted|non-symlink"):
         remote._validate_acpx_executable_path("release-0000001", str(npm_symlink), kind="candidate")
+
+
+def test_acpx_stage_runtime_is_registered_and_copies_old_promoted_assets_into_target_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    old = write_promoted_acpx_assets(paths, "release-old-0001")
+    target = paths["releases"] / "release-0000001"
+    (target / "source" / "scripts").mkdir(parents=True)
+    (target / "source" / "scripts" / "cbm-mcp").write_text("#!/bin/sh\n", encoding="utf-8")
+    (target / "source" / "scripts" / "cbm-mcp").chmod(0o700)
+    (target / "COMMIT").write_text(REVISION + "\n", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+
+    result = remote.handle_request(
+        {
+            "operation": "acpx.stage-runtime",
+            "args": {
+                "release_id": "release-0000001",
+                "capture": acpx_capture(paths),
+            },
+        }
+    )
+
+    assert result["source_release"] == "release-old-0001"
+    assert result["target_release"] == "release-0000001"
+    assert result["runtime"]["mode"] == "755" or result["runtime"]["mode"] == "700"
+    assert (target / "acpx-runtime" / "node_modules" / "acpx" / "dist" / "cli.js").is_file()
+    assert (target / "acpx-venv" / "bin" / "python").is_file()
+    copied_mcp = json.loads((target / "acpx-capability" / "mcp-config.json").read_text(encoding="utf-8"))
+    assert copied_mcp["mcpServers"][0]["command"] == str(target / "source" / "scripts" / "cbm-mcp")
+    assert json.loads((target / "acpx-capability" / "permission-policy.json").read_text(encoding="utf-8")) == {
+        "defaultAction": "deny"
+    }
+    assert stat.S_IMODE((target / "acpx-capability" / "mcp-config.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((target / "acpx-capability" / "permission-policy.json").stat().st_mode) == 0o600
+    assert calls == []
+    assert "release-old-0001" in old["source"].as_posix()
+
+
+@pytest.mark.parametrize(
+    ("bad_state", "match"),
+    [
+        ("missing_source_runtime", "missing"),
+        ("source_runtime_symlink", "symlink"),
+        ("wrong_capture_release", "release"),
+        ("partial_target", "partial|receipt"),
+        ("target_root_symlink", "symlink"),
+    ],
+)
+def test_acpx_stage_runtime_rejects_unsafe_or_partial_inputs_before_service_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    bad_state: str,
+    match: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    write_promoted_acpx_assets(paths, "release-old-0001")
+    target = paths["releases"] / "release-0000001"
+    (target / "source" / "scripts").mkdir(parents=True)
+    mcp_entrypoint = target / "source" / "scripts" / "cbm-mcp"
+    mcp_entrypoint.write_text("#!/bin/sh\n", encoding="utf-8")
+    mcp_entrypoint.chmod(0o700)
+    (target / "COMMIT").write_text(REVISION + "\n", encoding="utf-8")
+    capture = acpx_capture(paths)
+    if bad_state == "missing_source_runtime":
+        remote.shutil.rmtree(paths["releases"] / "release-old-0001" / "acpx-runtime")
+    elif bad_state == "source_runtime_symlink":
+        remote.shutil.rmtree(paths["releases"] / "release-old-0001" / "acpx-runtime")
+        outside = tmp_path / "outside-runtime"
+        outside.mkdir()
+        (paths["releases"] / "release-old-0001" / "acpx-runtime").symlink_to(outside, target_is_directory=True)
+    elif bad_state == "wrong_capture_release":
+        capture["acpx_exec_start"] = acpx_unit_exec_start(paths, "release-foreign-0001")
+    elif bad_state == "partial_target":
+        (target / "acpx-runtime").mkdir()
+        (target / "acpx-runtime" / "partial.txt").write_text("partial\n", encoding="utf-8")
+    else:
+        remote.shutil.rmtree(target)
+        outside_target = tmp_path / "outside-target"
+        outside_target.mkdir()
+        target.symlink_to(outside_target, target_is_directory=True)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+
+    with pytest.raises(remote.HelperError, match=match):
+        remote.op_acpx_stage_runtime({"release_id": "release-0000001", "capture": capture})
+
+    assert calls == []
+
+
+def test_workers_rebind_writes_target_scoped_acpx_execstart_and_validates_effective_unit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    capture = valid_capture(paths)
+    write_promoted_acpx_assets(paths, "release-old-0001")
+    write_promoted_acpx_assets(paths, "release-0000001")
+    release = paths["releases"] / "release-0000001"
+    (release / "COMMIT").write_text(REVISION + "\n", encoding="utf-8")
+    browser_unit = paths["home"] / ".config" / "systemd" / "user" / BROWSER_USE_UNIT
+    browser_unit.write_text("[Service]\nExecStart=browser\n", encoding="utf-8")
+    capture.update(acpx_capture(paths))
+    commands: list[list[str]] = []
+    show_exec = acpx_unit_exec_start(paths, "release-0000001")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        commands.append([str(item) for item in argv])
+        if argv == ["systemctl", "--user", "show", BROWSER_USE_UNIT, "-p", "FragmentPath", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{browser_unit}\n", stderr="")
+        if argv == ["systemctl", "--user", "show", remote.ACPX_UNIT, "-p", "FragmentPath", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{paths['home'] / '.config' / 'systemd' / 'user' / remote.ACPX_UNIT}\n", stderr="")
+        if argv[:4] == ["systemctl", "--user", "show", BROWSER_USE_UNIT]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"WorkingDirectory={release / 'source'}\nActiveState=active\nFragmentPath={browser_unit}\n", stderr="")
+        if argv[:4] == ["systemctl", "--user", "show", remote.ACPX_UNIT]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    f"WorkingDirectory={release / 'source'}\n"
+                    "ActiveState=active\n"
+                    f"FragmentPath={paths['home'] / '.config' / 'systemd' / 'user' / remote.ACPX_UNIT}\n"
+                    f"ExecStart={show_exec}\n"
+                    "ExecMainPID=4321\n"
+                ),
+                stderr="",
+            )
+        if argv[:3] == ["systemctl", "--user", "is-active"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="active\n", stderr="")
+        if argv[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_validate_running_acpx_process", lambda _show, _expected: None)
+    token = remote.REMOTE_PATH / ".env.acpx.vcvm"
+    token.parent.mkdir(parents=True, exist_ok=True)
+    token.write_text("CBM_WORKER_TOKEN=test\n", encoding="utf-8")
+    token.chmod(0o600)
+    monkeypatch.setattr(remote, "op_preflight_browser_use", lambda _args: {"active": True, "token_mode": "600"})
+    monkeypatch.setattr(remote, "_manager_json_on_port", lambda port, path, timeout=None: {"agents": [{"agent": agent, "ready": True, "state": "ready", "reason_code": "ok"} for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS]}, raising=False)
+
+    result = remote.op_workers_rebind({"release_id": "release-0000001", "commit": REVISION, "capture": capture})
+
+    dropin = remote.release_dropin(remote.ACPX_UNIT)
+    content = dropin.read_text(encoding="utf-8")
+    assert stat.S_IMODE(dropin.stat().st_mode) == 0o600
+    assert f"WorkingDirectory={release / 'source'}" in content
+    assert f"Environment=CBM_RELEASE_WORKTREE={release / 'source'}" in content
+    assert "ExecStart=\n" in content
+    effective = remote._effective_unit_exec_start(content)
+    remote._parse_acpx_worker_exec_start(effective, "release-0000001")
+    assert "release-old-0001" not in content
+    assert result["dropins"][remote.ACPX_UNIT]["working_directory"] == str(release / "source")
+    assert ["systemctl", "--user", "restart", remote.ACPX_UNIT] in commands
+
+
+def test_verify_acpx_fails_when_effective_execstart_contains_old_release_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    write_promoted_acpx_assets(paths, "release-0000001")
+    stale_exec = acpx_unit_exec_start(paths, "release-old-0001")
+    monkeypatch.setattr(remote, "_unit_state", lambda unit: {"active_state": "active", "unit_sha256": "2" * 64})
+    monkeypatch.setattr(
+        remote,
+        "_unit_show",
+        lambda unit: {
+            "WorkingDirectory": str(release_source),
+            "FragmentPath": "/unit",
+            "ExecStart": stale_exec,
+            "ExecMainPID": "0",
+        },
+    )
+    monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr=""))
+    monkeypatch.setattr(remote, "_manager_json_on_port", lambda port, path, timeout=None: {"agents": [{"agent": agent, "ready": True, "state": "ready", "reason_code": "ok"} for agent in remote.EXPECTED_ACPX_PREFLIGHT_AGENTS]}, raising=False)
+
+    with pytest.raises(remote.HelperError, match="ExecStart|old-release"):
+        remote.op_verify_acpx(
+            {
+                "release_source": str(release_source),
+                "expected_absent": False,
+                "acpx_executable": str(paths["releases"] / "release-0000001" / "acpx-runtime" / remote.ACPX_DIRECT_CLI),
+            }
+        )
+
+
+def test_restore_runtime_removes_new_acpx_rebind_dropin_when_capture_had_no_dropin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    capture = valid_capture(paths)
+    capture.update(acpx_capture(paths))
+    capture["acpx_dropin_exists"] = False
+    capture["acpx_dropin_content"] = ""
+    new_dropin = remote.release_dropin(remote.ACPX_UNIT)
+    new_dropin.parent.mkdir(parents=True, exist_ok=True)
+    new_dropin.write_text("[Service]\nExecStart=new\n", encoding="utf-8")
+    new_dropin.chmod(0o600)
+    monkeypatch.setattr(remote, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+    monkeypatch.setattr(remote, "_validate_manager_bind_sources", lambda: None)
+
+    remote.op_restore_runtime({"capture": capture, "backup": write_backup(paths)})
+
+    assert not new_dropin.exists()
 
 
 @pytest.mark.parametrize(
@@ -4170,6 +4484,12 @@ def test_verify_acpx_still_uses_promoted_release_executable_when_global_acpx_is_
         "_unit_show",
         lambda unit: {"WorkingDirectory": str(release_source), "FragmentPath": "/unit"},
     )
+    monkeypatch.setattr(
+        remote,
+        "_acpx_exec_show",
+        lambda: {"ExecStart": acpx_unit_exec_start(paths, "release-0000001"), "ExecMainPID": "4321"},
+    )
+    monkeypatch.setattr(remote, "_validate_running_acpx_process", lambda _show, _expected: None)
     monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
     monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
 

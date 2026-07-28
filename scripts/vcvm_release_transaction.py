@@ -129,6 +129,7 @@ PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "bootstrap.acpx_cleanup": ("cbm-release", "bootstrap-acpx-cleanup", json.dumps({"release_id": "release-0000001"})),
     "candidate.cleanup": ("cbm-release", "candidate-cleanup", json.dumps({"release_id": "release-0000001"})),
     "capture.state": ("cbm-release", "capture-live-state", json.dumps({"commit": _COMMIT})),
+    "acpx.stage-runtime": ("cbm-release", "stage-acpx-runtime", json.dumps({"release_id": "release-0000001", "capture": _CAPTURE})),
     "quiesce.stop_workers": ("cbm-release", "stop-workers", "{}"),
     "quiesce.stop_live": ("cbm-release", "stop-live", "{}"),
     "live.start": ("cbm-release", "start-live", json.dumps({"image_ref": "sha256:" + _SHA, "volume": DEFAULT_VOLUME, "port": DEFAULT_LIVE_PORT})),
@@ -146,10 +147,11 @@ PHASE_REQUEST_EXAMPLES: dict[str, tuple[str, ...]] = {
     "rollback.verify_backup": ("cbm-release", "verify-backup", json.dumps({"backup": _BACKUP})),
     "rollback.verify_previous": ("cbm-release", "verify-previous", json.dumps({"previous_runtime": _IMAGE})),
     "rollback.start_previous": ("cbm-release", "start-previous", json.dumps({"previous_runtime": _IMAGE})),
-    "state.commit": ("cbm-release", "commit-state", json.dumps({"release_id": "release-0000001", "current_release": "release-0000001", "previous_release": "release-previous-1", "image": _IMAGE, "final_backup": _BACKUP, "capture": _CAPTURE, "previous_runtime": {"image_ref": "sha256:" + ("d" * 64), "image_id": "sha256:" + ("d" * 64), "image_digest": "d" * 64, "revision": "1" * 40, "revision_available": True, "pointer": "release-previous-1"}})),
+    "state.commit": ("cbm-release", "commit-state", json.dumps({"release_id": "release-0000001", "current_release": "release-0000001", "previous_release": "release-previous-1", "image": _IMAGE, "final_backup": _BACKUP, "capture": _CAPTURE, "acpx_stage": {}, "previous_runtime": {"image_ref": "sha256:" + ("d" * 64), "image_id": "sha256:" + ("d" * 64), "image_digest": "d" * 64, "revision": "1" * 40, "revision_available": True, "pointer": "release-previous-1"}})),
 }
 OPTIONAL_PHASE_ARGS: dict[str, set[str]] = {
     "verify.acpx": {"acpx_executable"},
+    "state.commit": {"acpx_stage"},
 }
 POST_QUIESCE_PHASES = {
     "quiesce.stop_workers",
@@ -438,6 +440,23 @@ def validate_backup_receipt(value: object, *, phase: str) -> dict[str, object]:
     require(receipt.get("volume") == DEFAULT_VOLUME, "backup volume mismatch", phase=phase)
     validate_commit(receipt.get("source_revision"))
     require(receipt.get("compatible") is True, "backup receipt is incompatible", phase=phase)
+    return receipt
+
+
+def validate_acpx_stage_receipt(value: object, release_id: str) -> dict[str, object]:
+    phase = "acpx.stage-runtime"
+    require(isinstance(value, dict), "ACPX stage receipt must be an object", phase=phase)
+    receipt = dict(value)
+    source_release = validate_release_id(str(receipt.get("source_release", "")))
+    require(source_release != release_id, "ACPX stage source and target releases must differ", phase=phase)
+    require(receipt.get("target_release") == release_id, "ACPX stage target release mismatch", phase=phase)
+    for name in ("runtime", "venv", "capability"):
+        item = receipt.get(name)
+        require(isinstance(item, dict), f"ACPX stage {name} receipt is missing", phase=phase)
+        digest = validate_sha256(item.get("sha256"), f"ACPX stage {name} sha256")
+        require(item.get("ref") == f"sha256:{digest}", f"ACPX stage {name} ref mismatch", phase=phase)
+        require(str(item.get("mode", "")) in {"700", "755"}, f"ACPX stage {name} mode is unsafe", phase=phase)
+        require(isinstance(item.get("entries"), int) and int(item["entries"]) > 0, f"ACPX stage {name} is empty", phase=phase)
     return receipt
 
 
@@ -927,6 +946,7 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
     acpx_bootstrap_touched = False
     acpx_bootstrap: dict[str, object] = {}
     acpx_cleanup: dict[str, object] = {}
+    acpx_stage: dict[str, object] = {}
     try:
         preflight = run_preflight(config, executor, source)
         preflight_completed_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -1001,6 +1021,16 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
         validate_sha256(capture.get("browser_use_unit_sha256"), "Browser Use unit hash")
         validate_sha256(capture.get("acpx_unit_sha256"), "ACPX unit hash")
         require(capture.get("live_volume") == DEFAULT_VOLUME, "captured live volume mismatch", phase="capture.state")
+        if not config.bootstrap_acpx:
+            acpx_stage = validate_acpx_stage_receipt(
+                _remote(
+                    executor,
+                    "acpx.stage-runtime",
+                    {"release_id": config.release_id, "capture": capture},
+                    mutation=True,
+                ),
+                config.release_id,
+            )
         quiesce_started = True
         _remote(executor, "quiesce.stop_workers", mutation=True)
         _remote(executor, "quiesce.stop_live", mutation=True)
@@ -1057,6 +1087,7 @@ def run_release(config: ReleaseConfig, executor: RemoteExecutor) -> dict[str, ob
             "image": image,
             "final_backup": final_backup,
             "capture": capture,
+            "acpx_stage": acpx_stage,
             "previous_runtime": {
                 "image_ref": capture.get("old_image_id"),
                 "image_id": capture.get("old_image_id"),

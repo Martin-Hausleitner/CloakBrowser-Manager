@@ -275,6 +275,14 @@ class FakeRemoteExecutor:
                 "migrations": self.facts["candidate_migrations"],
                 "revision": self.facts["candidate_revision"] or args["commit"],
             }
+        if phase == "acpx.stage-runtime":
+            return {
+                "source_release": "release-old-0001",
+                "target_release": args["release_id"],
+                "runtime": {"ref": "sha256:" + ("a" * 64), "sha256": "a" * 64, "mode": "700", "entries": 3},
+                "venv": {"ref": "sha256:" + ("b" * 64), "sha256": "b" * 64, "mode": "700", "entries": 3},
+                "capability": {"ref": "sha256:" + ("c" * 64), "sha256": "c" * 64, "mode": "700", "entries": 3},
+            }
         if phase == "bootstrap.acpx_install":
             return {
                 "node": {"version": "v22.13.0"},
@@ -508,6 +516,7 @@ def test_successful_release_runs_exact_order_and_emits_secret_safe_receipt(tmp_p
         "candidate.start",
         "candidate.verify",
         "capture.state",
+        "acpx.stage-runtime",
         "quiesce.stop_workers",
         "quiesce.stop_live",
         "backup.final_stopped",
@@ -524,6 +533,7 @@ def test_successful_release_runs_exact_order_and_emits_secret_safe_receipt(tmp_p
         "candidate.cleanup",
     ]
     assert fake.phases.count("candidate.cleanup") == 1
+    assert fake.phases.index("capture.state") < fake.phases.index("acpx.stage-runtime") < fake.phases.index("quiesce.stop_workers")
     preflight_end = fake.phases.index("preflight.tailscale")
     assert not any(call["mutation"] for call in fake.calls[: preflight_end + 1])
     assert receipt["status"] == "success"
@@ -573,6 +583,19 @@ def test_bootstrap_acpx_success_installs_candidate_worker_before_quiesce_and_pro
     assert bootstrap["preflight_completed_at"]
     assert bootstrap["cleanup"]["removed"] == "release-acpx-only"
     assert "cbm_worker_" not in json.dumps(receipt)
+    assert "acpx.stage-runtime" not in fake.phases
+
+
+def test_normal_release_requires_acpx_stage_runtime_receipt_before_worker_quiesce(tmp_path: Path) -> None:
+    repo = fixture_repo(tmp_path)
+    fake = FakeRemoteExecutor(fail_phase="acpx.stage-runtime")
+
+    with pytest.raises(tx.TransactionError) as exc_info:
+        tx.run_release(release_config(repo), fake)
+
+    assert exc_info.value.phase == "acpx.stage-runtime"
+    assert "quiesce.stop_workers" not in fake.phases
+    assert "restore.runtime" not in fake.phases
 
 
 @pytest.mark.parametrize(

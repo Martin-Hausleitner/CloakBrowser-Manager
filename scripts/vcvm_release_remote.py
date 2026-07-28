@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -122,6 +123,7 @@ OPERATION_SCHEMAS: dict[str, set[str]] = {
     "bootstrap.acpx_cleanup": {"release_id"},
     "candidate.cleanup": {"release_id"},
     "capture.state": {"commit"},
+    "acpx.stage-runtime": {"release_id", "capture"},
     "quiesce.stop_workers": set(),
     "quiesce.stop_live": set(),
     "live.start": {"image_ref", "volume", "port"},
@@ -139,10 +141,11 @@ OPERATION_SCHEMAS: dict[str, set[str]] = {
     "rollback.verify_backup": {"backup"},
     "rollback.verify_previous": {"previous_runtime"},
     "rollback.start_previous": {"previous_runtime"},
-    "state.commit": {"release_id", "current_release", "previous_release", "image", "final_backup", "capture", "previous_runtime"},
+    "state.commit": {"release_id", "current_release", "previous_release", "image", "final_backup", "capture", "acpx_stage", "previous_runtime"},
 }
 OPTIONAL_OPERATION_ARGS: dict[str, set[str]] = {
     "verify.acpx": {"acpx_executable"},
+    "state.commit": {"acpx_stage"},
 }
 SECRET_PATTERNS = (
     re.compile(r'(?i)"(?:helper_source|token|secret|password|passwd|apikey|api_key)"\s*:\s*"[^"]*"'),
@@ -604,6 +607,153 @@ def _unit_show(name: str) -> dict[str, str]:
             key, value = line.split("=", 1)
             values[key] = value
     return values
+
+
+def _acpx_exec_show() -> dict[str, str]:
+    output = run(
+        [
+            "systemctl",
+            "--user",
+            "show",
+            ACPX_UNIT,
+            "-p",
+            "ExecStart",
+            "-p",
+            "ExecMainPID",
+        ]
+    ).stdout
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+    return values
+
+
+def _effective_unit_exec_start(*contents: str) -> str:
+    current: list[str] = []
+    for content in contents:
+        for line in content.splitlines():
+            if not line.startswith("ExecStart="):
+                continue
+            value = line.split("=", 1)[1].strip()
+            if not value:
+                current = []
+            else:
+                current.append(value)
+    require(len(current) == 1, "ACPX unit must resolve to exactly one ExecStart")
+    return current[0]
+
+
+def _exec_start_tokens(value: object) -> list[str]:
+    raw = str(value or "").strip()
+    require(bool(raw), "ACPX ExecStart is missing")
+    if raw.startswith("ExecStart="):
+        raw = raw.split("=", 1)[1].strip()
+    if raw.startswith("{"):
+        require(" argv[]=" in raw and " ; ignore_errors=" in raw, "ACPX effective ExecStart is malformed")
+        raw = raw.split(" argv[]=", 1)[1].split(" ; ignore_errors=", 1)[0].strip()
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as exc:
+        raise HelperError("ACPX ExecStart could not be parsed safely") from exc
+    require(tokens, "ACPX ExecStart token list is empty")
+    return tokens
+
+
+def _parse_acpx_worker_exec_start(value: object, release_id: str) -> dict[str, str]:
+    tokens = _exec_start_tokens(value)
+    release = require_existing_release_dir(release_id)
+    require(tokens[0] == str(release / "acpx-venv" / "bin" / "python"), "ACPX ExecStart python path is not release-scoped")
+    require(tokens[1:3] == ["-m", "scripts.acpx_worker"], "ACPX ExecStart module is not allowlisted")
+    options: dict[str, str] = {}
+    index = 3
+    while index < len(tokens):
+        key = tokens[index]
+        require(key.startswith("--") and index + 1 < len(tokens), "ACPX ExecStart options are malformed")
+        value_token = tokens[index + 1]
+        require(key not in options, f"ACPX ExecStart option is duplicated: {key}")
+        options[key] = value_token
+        index += 2
+    required = {
+        "--manager-url",
+        "--token-file",
+        "--worker-id",
+        "--worktree",
+        "--permission-policy",
+        "--mcp-config",
+        "--capability-dir",
+        "--acpx",
+        "--preflight-interval",
+    }
+    require(set(options) == required, "ACPX ExecStart option set is not allowlisted")
+    require(options["--worktree"] == str(release / "source"), "ACPX ExecStart worktree path mismatch")
+    require(
+        options["--permission-policy"] == str(release / "acpx-capability" / "permission-policy.json"),
+        "ACPX ExecStart permission policy path mismatch",
+    )
+    require(
+        options["--mcp-config"] == str(release / "acpx-capability" / "mcp-config.json"),
+        "ACPX ExecStart MCP config path mismatch",
+    )
+    require(options["--capability-dir"] == str(release / "acpx-capability"), "ACPX ExecStart capability path mismatch")
+    require(options["--acpx"] == str(release / "acpx-runtime" / ACPX_DIRECT_CLI), "ACPX ExecStart ACPX path mismatch")
+    require(options["--manager-url"].startswith("http://127.0.0.1:"), "ACPX manager URL is not loopback")
+    require(Path(options["--token-file"]) == REMOTE_PATH / ".env.acpx.vcvm", "ACPX token file is not allowlisted")
+    validate_name(options["--worker-id"], "ACPX worker id")
+    require(options["--preflight-interval"].isdigit(), "ACPX preflight interval must be numeric")
+    return options
+
+
+def _validate_running_acpx_process(show: dict[str, str], expected_exec_start: str) -> None:
+    raw_pid = str(show.get("ExecMainPID", "0"))
+    require(raw_pid.isdigit() and int(raw_pid) > 0, "ACPX running process id is missing")
+    path = Path("/proc") / raw_pid / "cmdline"
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise HelperError("ACPX running process command line is unavailable") from exc
+    require(0 < len(payload) <= 16 * 1024, "ACPX running process command line is invalid")
+    actual = [item.decode("utf-8") for item in payload.rstrip(b"\0").split(b"\0")]
+    require(actual == _exec_start_tokens(expected_exec_start), "ACPX running process is not release-bound")
+
+
+def _validate_effective_acpx_binding(show: dict[str, str], release_id: str, *, verify_process: bool) -> dict[str, str]:
+    release = require_existing_release_dir(release_id)
+    require(show.get("WorkingDirectory") == str(release / "source"), "ACPX WorkingDirectory is not release-bound")
+    effective = str(show.get("ExecStart", ""))
+    options = _parse_acpx_worker_exec_start(effective, release_id)
+    if verify_process:
+        _validate_running_acpx_process(show, effective)
+    return options
+
+
+def _build_acpx_worker_exec_start(release_id: str, captured: dict[str, str]) -> str:
+    release = require_existing_release_dir(release_id)
+    tokens = [
+        str(release / "acpx-venv" / "bin" / "python"),
+        "-m",
+        "scripts.acpx_worker",
+        "--manager-url",
+        captured["--manager-url"],
+        "--token-file",
+        captured["--token-file"],
+        "--worker-id",
+        captured["--worker-id"],
+        "--worktree",
+        str(release / "source"),
+        "--permission-policy",
+        str(release / "acpx-capability" / "permission-policy.json"),
+        "--mcp-config",
+        str(release / "acpx-capability" / "mcp-config.json"),
+        "--capability-dir",
+        str(release / "acpx-capability"),
+        "--acpx",
+        str(release / "acpx-runtime" / ACPX_DIRECT_CLI),
+        "--preflight-interval",
+        captured["--preflight-interval"],
+    ]
+    return shlex.join(tokens)
 
 
 def _env_auth_token() -> str:
@@ -1172,6 +1322,171 @@ def _write_acpx_bootstrap_configs(release_id: str, release_source: Path, capabil
     return {"policy": policy, "mcp": mcp}
 
 
+def _validate_acpx_tree_links(path: Path, label: str) -> None:
+    require(not path.is_symlink(), f"{label} must not be a symlink")
+    require(path.exists() and path.is_dir(), f"{label} is missing or unsafe")
+    for item in path.rglob("*"):
+        if not item.is_symlink():
+            continue
+        target = os.readlink(item)
+        if os.path.isabs(target):
+            allowed_python = (
+                path.name == "acpx-venv"
+                and item.parent == path / "bin"
+                and item.name == "python3"
+                and target == "/usr/bin/python3"
+            )
+            require(allowed_python, f"{label} contains unsafe absolute symlink")
+            continue
+        allowed_python_alias = (
+            path.name == "acpx-venv"
+            and item.parent == path / "bin"
+            and item.name in {"python", "python3.12"}
+            and target == "python3"
+        )
+        if allowed_python_alias:
+            continue
+        try:
+            (item.parent / target).resolve(strict=True).relative_to(path.resolve(strict=True))
+        except (OSError, ValueError) as exc:
+            raise HelperError(f"{label} contains escaping symlink") from exc
+
+
+def _require_release_asset_dir(release_id: str, path: Path, label: str) -> Path:
+    release = require_existing_release_dir(release_id)
+    require(path.parent == release, f"{label} path is not release-scoped")
+    _validate_acpx_tree_links(path, label)
+    return path
+
+
+def _tree_receipt(path: Path) -> dict[str, object]:
+    entries: list[dict[str, object]] = []
+    for item in sorted([path, *path.rglob("*")], key=lambda value: str(value.relative_to(path) if value != path else ".")):
+        relative = "." if item == path else str(item.relative_to(path))
+        item_stat = item.lstat()
+        mode = stat.S_IMODE(item_stat.st_mode)
+        if stat.S_ISLNK(item_stat.st_mode):
+            entries.append({"path": relative, "type": "symlink", "mode": f"{mode:o}", "target": os.readlink(item)})
+        elif item.is_dir():
+            entries.append({"path": relative, "type": "dir", "mode": f"{mode:o}"})
+        else:
+            entries.append({"path": relative, "type": "file", "mode": f"{mode:o}", "sha256": file_sha256(item)})
+    digest = hashlib.sha256(json.dumps(entries, sort_keys=True).encode("utf-8")).hexdigest()
+    return {"ref": f"sha256:{digest}", "sha256": digest, "mode": f"{stat.S_IMODE(path.stat().st_mode):o}", "entries": len(entries)}
+
+
+def _rewrite_acpx_mcp_config(path: Path, source_release: Path, target_release: Path) -> None:
+    require(path.exists() and path.is_file() and not path.is_symlink(), "ACPX MCP config is missing")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    old_command = str(source_release / "source" / "scripts" / "cbm-mcp")
+    new_command = str(target_release / "source" / "scripts" / "cbm-mcp")
+
+    def rewrite(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: rewrite(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        if value == old_command:
+            return new_command
+        return value
+
+    rewritten = rewrite(payload)
+    text = json.dumps(rewritten, sort_keys=True) + "\n"
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o600)
+    require(old_command not in text and new_command in text, "ACPX MCP config rewrite failed")
+
+
+def _stage_acpx_tree(source: Path, target: Path, tmp_root: Path, label: str) -> Path:
+    require(source.exists() and source.is_dir() and not source.is_symlink(), f"{label} source is missing")
+    staged = tmp_root / target.name
+    shutil.copytree(source, staged, symlinks=True, copy_function=shutil.copy2)
+    require(staged.exists() and staged.is_dir() and not staged.is_symlink(), f"{label} staging failed")
+    return staged
+
+
+def _captured_acpx_source_release(capture: dict[str, object]) -> tuple[str, Path]:
+    working_directory = str(capture.get("acpx_working_directory") or "")
+    if not working_directory:
+        show = _unit_show(ACPX_UNIT)
+        working_directory = show.get("WorkingDirectory", "")
+    source_release_id = _release_id_from_acpx_unit_working_directory(working_directory)
+    require(source_release_id is not None, "captured ACPX WorkingDirectory is not release-scoped")
+    source_release = require_existing_release_dir(source_release_id)
+    exec_start = str(capture.get("acpx_exec_start") or "")
+    if not exec_start:
+        exec_start = _effective_unit_exec_start(
+            str(capture.get("acpx_unit_content") or ""),
+            str(capture.get("acpx_dropin_content") or ""),
+        )
+    _parse_acpx_worker_exec_start(exec_start, source_release_id)
+    return source_release_id, source_release
+
+
+def op_acpx_stage_runtime(args: dict[str, object]) -> dict[str, object]:
+    target_release_id = validate_release_id(args["release_id"])
+    target_release = require_existing_release_dir(target_release_id)
+    capture = dict(args["capture"])
+    source_release_id, source_release = _captured_acpx_source_release(capture)
+    require(source_release_id != target_release_id, "ACPX source and target releases must differ")
+    for name, label in (
+        ("acpx-runtime", "ACPX runtime"),
+        ("acpx-venv", "ACPX venv"),
+        ("acpx-capability", "ACPX capability"),
+    ):
+        _require_release_asset_dir(source_release_id, source_release / name, label)
+        target = target_release / name
+        require(not target.is_symlink(), f"{label} target must not be a symlink")
+    mcp_entrypoint = target_release / "source" / "scripts" / "cbm-mcp"
+    require(
+        mcp_entrypoint.exists() and mcp_entrypoint.is_file() and not mcp_entrypoint.is_symlink() and os.access(mcp_entrypoint, os.X_OK),
+        "target ACPX MCP entrypoint is missing or unsafe",
+    )
+    tmp_root = target_release / ".acpx-stage-runtime.tmp"
+    require(not tmp_root.exists() and not tmp_root.is_symlink(), "ACPX staging temp path already exists")
+    tmp_root.mkdir(mode=0o700)
+    try:
+        staged_paths = {
+            "runtime": _stage_acpx_tree(source_release / "acpx-runtime", target_release / "acpx-runtime", tmp_root, "ACPX runtime"),
+            "venv": _stage_acpx_tree(source_release / "acpx-venv", target_release / "acpx-venv", tmp_root, "ACPX venv"),
+            "capability": _stage_acpx_tree(
+                source_release / "acpx-capability",
+                target_release / "acpx-capability",
+                tmp_root,
+                "ACPX capability",
+            ),
+        }
+        for staged in staged_paths.values():
+            staged.chmod(0o700)
+        capability = staged_paths["capability"]
+        policy = capability / "permission-policy.json"
+        mcp = capability / "mcp-config.json"
+        require(policy.exists() and policy.is_file() and not policy.is_symlink(), "ACPX permission policy is missing")
+        policy.chmod(0o600)
+        _rewrite_acpx_mcp_config(mcp, source_release, target_release)
+        for key, label in (("runtime", "ACPX runtime"), ("venv", "ACPX venv"), ("capability", "ACPX capability")):
+            _validate_acpx_tree_links(staged_paths[key], label)
+        receipts = {key: _tree_receipt(path) for key, path in staged_paths.items()}
+        targets = {
+            "runtime": target_release / "acpx-runtime",
+            "venv": target_release / "acpx-venv",
+            "capability": target_release / "acpx-capability",
+        }
+        existing = {key: path.exists() for key, path in targets.items()}
+        require(set(existing.values()) in ({False}, {True}), "ACPX target contains partial staging receipt")
+        if all(existing.values()):
+            current = {key: _tree_receipt(path) for key, path in targets.items()}
+            require(current == receipts, "ACPX target staging receipt mismatch")
+        else:
+            for key, path in staged_paths.items():
+                shutil.move(str(path), str(targets[key]))
+        for key, path in targets.items():
+            require(_tree_receipt(path) == receipts[key], "ACPX staged receipt verification failed")
+    finally:
+        _remove_tree_if_present(tmp_root, "ACPX staging temp")
+    return {"source_release": source_release_id, "target_release": target_release_id, **receipts}
+
+
 def _remove_tree_if_present(path: Path, label: str) -> None:
     require(not path.is_symlink(), f"{label} must not be a symlink")
     if not path.exists():
@@ -1355,7 +1670,7 @@ def op_candidate_clone(args: dict[str, object]) -> dict[str, object]:
     backup = dict(args["backup"])
     _validate_backup(backup)
     release_id = validate_release_id(args["release_id"])
-    candidate_volume = f"{MANAGER_VOLUME}-candidate-{release_id}"
+    candidate_volume = validate_name(f"{MANAGER_VOLUME}-candidate-{release_id}", "candidate volume")
     run(["docker", "volume", "create", candidate_volume])
     run(
         [
@@ -2306,6 +2621,9 @@ def op_capture_state(args: dict[str, object]) -> dict[str, object]:
         "acpx_dropin_exists": acpx["dropin_exists"],
         "acpx_dropin_content": acpx["dropin_content"],
         "acpx_dropin_sha256": acpx["dropin_sha256"],
+        "acpx_working_directory": acpx.get("working_directory", ""),
+        "acpx_exec_start": acpx.get("exec_start", ""),
+        "acpx_exec_main_pid": acpx.get("exec_main_pid", ""),
         "acpx_was_absent": acpx.get("was_absent") is True,
         "acpx_absence": acpx.get("absence", {}),
         "live_volume": MANAGER_VOLUME,
@@ -2366,6 +2684,26 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
     require(marker.read_text(encoding="utf-8").strip() == commit, "release commit marker mismatch")
     capture = dict(args["capture"])
     defer_acpx_rebind = _validate_acpx_bootstrap_absence_for_rebind(capture, release_id)
+    target_acpx_exec_start = ""
+    if not defer_acpx_rebind:
+        _unit_state(ACPX_UNIT)
+        source_release_id, _source_release = _captured_acpx_source_release(capture)
+        captured_exec_start = str(capture.get("acpx_exec_start") or "")
+        if not captured_exec_start:
+            captured_exec_start = _effective_unit_exec_start(
+                str(capture.get("acpx_unit_content") or ""),
+                str(capture.get("acpx_dropin_content") or ""),
+            )
+        captured_options = _parse_acpx_worker_exec_start(captured_exec_start, source_release_id)
+        _require_release_asset_dir(release_id, release_dir(release_id) / "acpx-runtime", "ACPX runtime")
+        _validate_promoted_acpx_venv_path(release_id)
+        _require_release_asset_dir(release_id, release_dir(release_id) / "acpx-capability", "ACPX capability")
+        _validate_acpx_executable_path(
+            release_id,
+            release_dir(release_id) / "acpx-runtime" / ACPX_DIRECT_CLI,
+            kind="promoted",
+        )
+        target_acpx_exec_start = _build_acpx_worker_exec_start(release_id, captured_options)
     dropins: dict[str, dict[str, object]] = {}
     for unit in (BROWSER_USE_UNIT, ACPX_UNIT):
         if unit == ACPX_UNIT and defer_acpx_rebind:
@@ -2379,6 +2717,8 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
         dropin = release_dropin(unit)
         require(not dropin.is_symlink(), f"drop-in file is symlink: {unit}")
         content = f"[Service]\nWorkingDirectory={source_path}\nEnvironment=CBM_RELEASE_WORKTREE={source_path}\n"
+        if unit == ACPX_UNIT:
+            content += f"ExecStart=\nExecStart={target_acpx_exec_start}\n"
         _write_text_mode_0600_atomic(dropin, content)
         digest = file_sha256(dropin)
         run(["systemctl", "--user", "daemon-reload"])
@@ -2390,6 +2730,9 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
         show = _unit_show(unit)
         require(show.get("WorkingDirectory") == str(source_path), f"unit WorkingDirectory not rebound: {unit}")
         require(bool(show.get("FragmentPath")), f"unit FragmentPath missing: {unit}")
+        if unit == ACPX_UNIT and intended_state == "active":
+            show.update(_acpx_exec_show())
+            _validate_effective_acpx_binding(show, release_id, verify_process=True)
         require(file_sha256(dropin) == digest and dropin.read_text(encoding="utf-8") == content, f"drop-in receipt mismatch: {unit}")
         require(f"{stat.S_IMODE(dropin.stat().st_mode):o}" == "600", f"drop-in mode mismatch: {unit}")
         dropins[unit] = {
@@ -2399,6 +2742,8 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
             "active_state": show.get("ActiveState", intended_state),
             "fragment_path": show.get("FragmentPath", ""),
             "working_directory": show.get("WorkingDirectory", ""),
+            "exec_start": show.get("ExecStart", "") if unit == ACPX_UNIT else "",
+            "exec_main_pid": show.get("ExecMainPID", "") if unit == ACPX_UNIT else "",
         }
     browser = op_preflight_browser_use({})
     if defer_acpx_rebind:
@@ -2564,6 +2909,8 @@ def op_verify_acpx(args: dict[str, object]) -> dict[str, object]:
     state = _preflight_acpx_with_adapter_probe(verify_args, _acpx_adapter_probe_at(acpx_executable))
     release_source = str(release / "source")
     show = _unit_show(ACPX_UNIT)
+    show.update(_acpx_exec_show())
+    _validate_effective_acpx_binding(show, release_id, verify_process=True)
     manager_preflights = _acpx_manager_preflights_ready()
     state["bound"] = bool(release_source) and show.get("WorkingDirectory") == release_source
     state["preflights"] = state["adapters_ready"] is True and manager_preflights["ready"] is True
@@ -2809,6 +3156,7 @@ OPERATIONS: dict[str, Callable[[dict[str, object]], dict[str, object]]] = {
     "bootstrap.acpx_cleanup": op_bootstrap_acpx_cleanup,
     "candidate.cleanup": op_candidate_cleanup,
     "capture.state": op_capture_state,
+    "acpx.stage-runtime": op_acpx_stage_runtime,
     "quiesce.stop_workers": op_quiesce_stop_workers,
     "quiesce.stop_live": op_quiesce_stop_live,
     "live.start": op_live_start,
@@ -2839,7 +3187,7 @@ def handle_request(request: dict[str, object]) -> dict[str, object]:
         raise HelperError(f"unknown remote operation: {operation}")
     optional = OPTIONAL_OPERATION_ARGS.get(operation, set())
     actual = set(args)
-    missing = schema - actual
+    missing = (schema - optional) - actual
     extra = actual - schema - optional
     if missing or extra:
         raise HelperError(f"invalid args for {operation}: missing={sorted(missing)} extra={sorted(extra)}")

@@ -253,6 +253,11 @@ class BrowserManager:
 
         # Set up bookmarks and search engine on first launch
         _init_profile_defaults(user_data_dir, profile.get("search_engine"))
+        screen_width = int(profile.get("screen_width", 1920))
+        screen_height = int(profile.get("screen_height", 1080))
+        phone_viewport = min(screen_width, screen_height) <= 600 and max(
+            screen_width, screen_height
+        ) <= 1200
 
         proxy_bridge: ProxyBridge | None = None
         try:
@@ -260,8 +265,8 @@ class BrowserManager:
             await self.vnc.start_vnc(
                 display,
                 ws_port,
-                width=profile.get("screen_width", 1920),
-                height=profile.get("screen_height", 1080),
+                width=screen_width,
+                height=screen_height,
             )
 
             # Build fingerprint args from profile settings
@@ -304,9 +309,13 @@ class BrowserManager:
                         color_scheme=profile.get("color_scheme") or None,
                         user_agent=profile.get("user_agent") or None,
                         viewport={
-                            "width": profile.get("screen_width", 1920),
-                            "height": profile.get("screen_height", 1080) - 133,
+                            "width": screen_width,
+                            "height": screen_height - 133,
                         },
+                        screen={"width": screen_width, "height": screen_height},
+                        device_scale_factor=1,
+                        is_mobile=phone_viewport,
+                        has_touch=phone_viewport,
                         env={**os.environ, "DISPLAY": display_value},
                     )
                 finally:
@@ -317,8 +326,8 @@ class BrowserManager:
 
             await self._fit_window_to_vnc(
                 context,
-                width=profile.get("screen_width", 1920),
-                height=profile.get("screen_height", 1080),
+                width=screen_width,
+                height=screen_height,
             )
 
             # Inject clipboard listener: captures copied text on every page

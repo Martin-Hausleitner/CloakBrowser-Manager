@@ -234,6 +234,88 @@ async def test_launch_auth_proxy_stops_bridge_when_browser_launch_fails(
 
 
 @pytest.mark.asyncio
+async def test_launch_phone_viewport_enables_mobile_touch_context(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(45, 6045)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+    monkeypatch.setattr(mgr, "_fit_window_to_vnc", AsyncMock())
+
+    captured: dict[str, object] = {}
+    context = MagicMock()
+    context.pages = []
+    context.add_init_script = AsyncMock()
+    context.close = AsyncMock()
+    context.on = MagicMock()
+
+    async def fake_launch(**kwargs: object) -> MagicMock:
+        captured.update(kwargs)
+        return context
+
+    monkeypatch.setattr(
+        "backend.browser_manager.launch_persistent_context_async", fake_launch
+    )
+
+    profile = {
+        "id": "phone-fit-profile",
+        "user_data_dir": str(tmp_path),
+        "screen_width": 390,
+        "screen_height": 844,
+    }
+
+    await mgr.launch(profile)
+
+    assert captured["is_mobile"] is True
+    assert captured["has_touch"] is True
+    assert captured["device_scale_factor"] == 1
+    assert captured["screen"] == {"width": 390, "height": 844}
+
+    await mgr.stop(profile["id"])
+
+
+@pytest.mark.asyncio
+async def test_launch_landscape_phone_viewport_stays_mobile(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(46, 6046)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+    monkeypatch.setattr(mgr, "_fit_window_to_vnc", AsyncMock())
+
+    captured: dict[str, object] = {}
+    context = MagicMock()
+    context.pages = []
+    context.add_init_script = AsyncMock()
+    context.close = AsyncMock()
+    context.on = MagicMock()
+
+    async def fake_launch(**kwargs: object) -> MagicMock:
+        captured.update(kwargs)
+        return context
+
+    monkeypatch.setattr(
+        "backend.browser_manager.launch_persistent_context_async", fake_launch
+    )
+
+    profile = {
+        "id": "landscape-phone-fit-profile",
+        "user_data_dir": str(tmp_path),
+        "screen_width": 844,
+        "screen_height": 390,
+    }
+
+    await mgr.launch(profile)
+
+    assert captured["is_mobile"] is True
+    assert captured["has_touch"] is True
+
+    await mgr.stop(profile["id"])
+
+
+@pytest.mark.asyncio
 async def test_launch_rejects_authenticated_socks_proxy_before_browser_launch(
     monkeypatch, tmp_path: Path
 ):

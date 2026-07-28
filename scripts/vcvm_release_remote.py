@@ -1415,8 +1415,17 @@ def _captured_acpx_source_release(capture: dict[str, object]) -> tuple[str, Path
     source_release = require_existing_release_dir(source_release_id)
     exec_start = str(capture.get("acpx_exec_start") or "")
     if not exec_start:
+        unit_content = str(capture.get("acpx_unit_content") or "")
+        if not unit_content:
+            unit_path = Path(str(capture.get("acpx_unit_path") or ""))
+            require(unit_path == expected_unit_path(ACPX_UNIT), "captured ACPX unit path is not allowlisted")
+            unit_content = _read_unit_fragment(unit_path, ACPX_UNIT)
+            require(
+                hashlib.sha256(unit_content.encode("utf-8")).hexdigest() == str(capture.get("acpx_unit_sha256") or ""),
+                "captured ACPX unit hash mismatch",
+            )
         exec_start = _effective_unit_exec_start(
-            str(capture.get("acpx_unit_content") or ""),
+            unit_content,
             str(capture.get("acpx_dropin_content") or ""),
         )
     _parse_acpx_worker_exec_start(exec_start, source_release_id)

@@ -2130,13 +2130,15 @@ def test_acpx_stage_runtime_is_registered_and_copies_old_promoted_assets_into_ta
     (target / "COMMIT").write_text(REVISION + "\n", encoding="utf-8")
     calls: list[list[str]] = []
     monkeypatch.setattr(remote, "run", lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+    capture = acpx_capture(paths)
+    capture.pop("acpx_exec_start")
 
     result = remote.handle_request(
         {
             "operation": "acpx.stage-runtime",
             "args": {
                 "release_id": "release-0000001",
-                "capture": acpx_capture(paths),
+                "capture": capture,
             },
         }
     )

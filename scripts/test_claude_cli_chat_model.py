@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from scripts.claude_cli_chat_model import ClaudeCLIChatModel
 from scripts.cursor_chat_model import CursorAgentError, CursorAgentTimeout
@@ -16,6 +16,12 @@ from scripts.cursor_chat_model import CursorAgentError, CursorAgentTimeout
 
 class Answer(BaseModel):
     answer: str
+
+
+class BrowserUseLikeOutput(BaseModel):
+    min_items: int = 0
+    current_plan_item: int | None = None
+    action: list[Answer] = Field(..., json_schema_extra={"min_items": 1})
 
 
 def completed(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess[str]:
@@ -49,6 +55,40 @@ def test_claude_cli_uses_argv_only_json_schema_and_stdin_prompt(tmp_path: Path):
     assert "hello" in prompt
     assert "--workspace" not in argv
     assert tmp_path.stat().st_mode & 0o777 == 0o700
+
+
+def test_claude_cli_normalizes_legacy_browser_use_schema_keywords(tmp_path: Path):
+    calls: list[list[str]] = []
+
+    def runner(argv, timeout, cancel_event=None, input_text=None):
+        calls.append(list(argv))
+        return completed(
+            json.dumps(
+                {
+                    "structured_output": {
+                        "current_plan_item": None,
+                        "min_items": 0,
+                        "action": [{"answer": "ok"}],
+                    }
+                }
+            )
+        )
+
+    model = ClaudeCLIChatModel(timeout_seconds=3, runner=runner)
+    result = asyncio.run(
+        model.invoke_structured(
+            [{"role": "user", "content": "hello"}],
+            BrowserUseLikeOutput,
+            tmp_path,
+        )
+    )
+
+    assert result.action == [Answer(answer="ok")]
+    schema = json.loads(calls[0][calls[0].index("--json-schema") + 1])
+    assert schema["properties"]["action"]["minItems"] == 1
+    assert "min_items" not in schema["properties"]["action"]
+    assert "min_items" in schema["properties"]
+    assert "current_plan_item" in schema["properties"]
 
 
 def test_default_model_omits_claude_model_flag(tmp_path: Path):

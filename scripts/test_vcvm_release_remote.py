@@ -2223,6 +2223,7 @@ def test_workers_rebind_writes_target_scoped_acpx_execstart_and_validates_effect
     browser_unit = paths["home"] / ".config" / "systemd" / "user" / BROWSER_USE_UNIT
     browser_unit.write_text("[Service]\nExecStart=browser\n", encoding="utf-8")
     capture.update(acpx_capture(paths))
+    capture.pop("acpx_exec_start")
     commands: list[list[str]] = []
     show_exec = acpx_unit_exec_start(paths, "release-0000001")
 

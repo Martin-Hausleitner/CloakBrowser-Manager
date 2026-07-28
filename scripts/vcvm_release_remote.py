@@ -1405,14 +1405,7 @@ def _stage_acpx_tree(source: Path, target: Path, tmp_root: Path, label: str) -> 
     return staged
 
 
-def _captured_acpx_source_release(capture: dict[str, object]) -> tuple[str, Path]:
-    working_directory = str(capture.get("acpx_working_directory") or "")
-    if not working_directory:
-        show = _unit_show(ACPX_UNIT)
-        working_directory = show.get("WorkingDirectory", "")
-    source_release_id = _release_id_from_acpx_unit_working_directory(working_directory)
-    require(source_release_id is not None, "captured ACPX WorkingDirectory is not release-scoped")
-    source_release = require_existing_release_dir(source_release_id)
+def _captured_acpx_exec_start(capture: dict[str, object]) -> str:
     exec_start = str(capture.get("acpx_exec_start") or "")
     if not exec_start:
         unit_content = str(capture.get("acpx_unit_content") or "")
@@ -1428,6 +1421,18 @@ def _captured_acpx_source_release(capture: dict[str, object]) -> tuple[str, Path
             unit_content,
             str(capture.get("acpx_dropin_content") or ""),
         )
+    return exec_start
+
+
+def _captured_acpx_source_release(capture: dict[str, object]) -> tuple[str, Path]:
+    working_directory = str(capture.get("acpx_working_directory") or "")
+    if not working_directory:
+        show = _unit_show(ACPX_UNIT)
+        working_directory = show.get("WorkingDirectory", "")
+    source_release_id = _release_id_from_acpx_unit_working_directory(working_directory)
+    require(source_release_id is not None, "captured ACPX WorkingDirectory is not release-scoped")
+    source_release = require_existing_release_dir(source_release_id)
+    exec_start = _captured_acpx_exec_start(capture)
     _parse_acpx_worker_exec_start(exec_start, source_release_id)
     return source_release_id, source_release
 
@@ -2697,12 +2702,7 @@ def op_workers_rebind(args: dict[str, object]) -> dict[str, object]:
     if not defer_acpx_rebind:
         _unit_state(ACPX_UNIT)
         source_release_id, _source_release = _captured_acpx_source_release(capture)
-        captured_exec_start = str(capture.get("acpx_exec_start") or "")
-        if not captured_exec_start:
-            captured_exec_start = _effective_unit_exec_start(
-                str(capture.get("acpx_unit_content") or ""),
-                str(capture.get("acpx_dropin_content") or ""),
-            )
+        captured_exec_start = _captured_acpx_exec_start(capture)
         captured_options = _parse_acpx_worker_exec_start(captured_exec_start, source_release_id)
         _require_release_asset_dir(release_id, release_dir(release_id) / "acpx-runtime", "ACPX runtime")
         _validate_promoted_acpx_venv_path(release_id)

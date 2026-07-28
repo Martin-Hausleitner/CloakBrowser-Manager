@@ -694,7 +694,9 @@ class OrcaAdapter:
             if "Antigravity CLI" in last_text:
                 return
             if not fallback_sent and (
-                "coder@vcvm:" in last_text or last_text.rstrip().endswith("$")
+                "coder@vcvm:" in last_text
+                or last_text.rstrip().endswith("$")
+                or (_attempt >= 7 and not last_text.strip())
             ):
                 self.invoke(
                     "terminal.send",

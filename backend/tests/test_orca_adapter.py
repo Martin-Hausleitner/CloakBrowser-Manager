@@ -134,11 +134,43 @@ def test_agy_restarts_fixed_wrapper_when_orca_opens_only_a_shell():
     assert runner.calls[5][0][1:4] == ["terminal", "send", "--json"]
 
 
+def test_agy_restarts_fixed_wrapper_when_orca_terminal_stays_blank():
+    runner = FakeRunner()
+    runner.queue(_ok({"terminal": {"handle": "term_owned-agy-blank"}}))
+    for _ in range(8):
+        runner.queue(_ok({"output": ""}))
+    runner.queue(_ok({"ok": True}))
+    runner.queue(_ok({"output": "Antigravity CLI 1.1.8\n>"}))
+    runner.queue(_ok({"ok": True}))
+    runner.queue(_ok({"ok": True}))
+    adapter = oa.OrcaAdapter(
+        orca_bin="/bin/fake-orca",
+        runner=runner,
+        worktree_selector="path:/repo",
+        probe_runtime=True,
+        sleeper=lambda _seconds: None,
+    )
+
+    session = adapter.start_session(
+        profile_id="profile-agy",
+        sandbox_id="alpha",
+        agent="agy",
+        owner_key="agent:ops",
+    )
+
+    assert session.status == "running"
+    fallback_argv = runner.calls[9][0]
+    assert fallback_argv[1:4] == ["terminal", "send", "--json"]
+    assert fallback_argv[fallback_argv.index("--text") + 1].endswith(
+        "scripts/orca_agent_cli.sh agy"
+    )
+
+
 def test_agy_start_failure_keeps_handle_owned_when_terminal_close_fails():
     runner = FakeRunner()
     runner.queue(_ok({"terminal": {"handle": "term_owned-agy-cleanup"}}))
     for _ in range(30):
-        runner.queue(_ok({"output": ""}))
+        runner.queue(_ok({"output": "AGY is still starting"}))
     runner.queue("", returncode=1)
     adapter = oa.OrcaAdapter(
         orca_bin="/bin/fake-orca",

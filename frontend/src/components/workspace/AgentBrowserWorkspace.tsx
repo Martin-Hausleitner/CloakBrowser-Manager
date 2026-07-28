@@ -32,6 +32,9 @@ import { AgentOutputTimeline } from "./AgentOutputTimeline";
 type AgentMode = "browser-use" | "acpx" | "antigravity" | OrcaAgentCli;
 type FullViewPanel = "view" | "viewport" | "sessions" | null;
 type FullViewFitMode = "fit" | "width" | "height";
+type FullViewMode = "single" | "grid";
+
+const MAX_DESKTOP_GRID_STREAMS = 6;
 
 const AGENT_OPTIONS: AgentMode[] = [
   "browser-use",
@@ -160,6 +163,7 @@ export function AgentBrowserWorkspace({
   const [viewerFullscreen, setViewerFullscreen] = useState(false);
   const [fullViewPanel, setFullViewPanel] = useState<FullViewPanel>(null);
   const [fullViewFitMode, setFullViewFitMode] = useState<FullViewFitMode>("fit");
+  const [fullViewMode, setFullViewMode] = useState<FullViewMode>("single");
   const [viewportControlsOpen, setViewportControlsOpen] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(selectedProfile?.screen_width ?? 1280);
   const [viewportHeight, setViewportHeight] = useState(selectedProfile?.screen_height ?? 720);
@@ -178,6 +182,24 @@ export function AgentBrowserWorkspace({
     () => profiles.filter((profile) => profile.status === "running"),
     [profiles],
   );
+  const desktopGridProfiles = useMemo(() => {
+    const selectedId = selectedProfile?.id;
+    return [...runningProfiles]
+      .sort((left, right) => {
+        if (left.id === selectedId) return -1;
+        if (right.id === selectedId) return 1;
+        return 0;
+      })
+      .slice(0, MAX_DESKTOP_GRID_STREAMS);
+  }, [runningProfiles, selectedProfile?.id]);
+  const desktopGridAvailable = runningProfiles.length >= 2;
+  const desktopGridOverflow = Math.max(0, runningProfiles.length - desktopGridProfiles.length);
+
+  useEffect(() => {
+    if (fullViewMode === "grid" && !desktopGridAvailable) {
+      setFullViewMode("single");
+    }
+  }, [desktopGridAvailable, fullViewMode]);
 
   const unavailable = caps != null && !caps.available;
   const browserUseMode = agent === "browser-use";
@@ -1078,15 +1100,22 @@ export function AgentBrowserWorkspace({
         data-ui-state={uiStateAttr(
           UI_STATE.agentViewerPane,
           viewerFullscreen && UI_STATE.agentViewerFullscreen,
+          viewerFullscreen && fullViewMode === "grid" && UI_STATE.agentViewerGrid,
         )}
       >
         <header className="relative flex min-h-10 flex-wrap items-center gap-2 border-b border-[#2a2a2a] bg-[#141414] px-3 py-1.5">
           <MonitorSmartphone className="h-3.5 w-3.5 text-[#8b8b8b]" />
           <div className="min-w-0 flex-1 truncate text-[12px] font-semibold">
-            {selectedProfile ? selectedProfile.name : "No profile selected"}
+            {viewerFullscreen && fullViewMode === "grid"
+              ? "Live browser grid"
+              : selectedProfile
+                ? selectedProfile.name
+                : "No profile selected"}
           </div>
           <span className="text-[10px] uppercase tracking-wide text-[#8b8b8b]">
-            {selectedProfile?.status ?? "none"}
+            {viewerFullscreen && fullViewMode === "grid"
+              ? `${desktopGridProfiles.length}/${runningProfiles.length} live`
+              : selectedProfile?.status ?? "none"}
           </span>
           {viewerFullscreen ? (
             <div
@@ -1364,25 +1393,61 @@ export function AgentBrowserWorkspace({
               id="desktop-full-view-sessions-panel"
               className="absolute right-3 top-[3.4rem] z-20 w-72 rounded-md border border-[#333] bg-[#171717] p-2 text-[10px] text-[#bbb]"
             >
-              <label className="space-y-1">
-                <span className="block text-[#888]">Profile</span>
-                <select
-                  className="input h-11 w-full bg-[#0f0f0f] px-2 text-[11px]"
-                  value={selectedProfile?.id ?? ""}
-                  onChange={(event) => onSelectProfile(event.target.value)}
-                  aria-label="Switch full-view browser session"
+              <span className="block text-[#888]">View mode</span>
+              <div className="mt-1 grid grid-cols-2 gap-1" role="group" aria-label="Full-view browser layout">
+                <button
+                  type="button"
+                  className={fullViewPanelButtonClass}
+                  onClick={() => setFullViewMode("single")}
+                  aria-label="Show one browser"
+                  aria-pressed={fullViewMode === "single"}
                 >
-                  <option value="" disabled>
-                    Select profile
-                  </option>
-                  {profiles.map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.name}
-                      {profile.status === "running" ? " · live" : ""}
+                  Single
+                </button>
+                <button
+                  type="button"
+                  className={fullViewPanelButtonClass}
+                  onClick={() => {
+                    if (!desktopGridAvailable) return;
+                    if (selectedProfile?.status !== "running" && runningProfiles[0]) {
+                      onSelectProfile(runningProfiles[0].id);
+                    }
+                    setFullViewMode("grid");
+                  }}
+                  disabled={!desktopGridAvailable}
+                  aria-label="Show browser grid"
+                  aria-pressed={fullViewMode === "grid"}
+                  title={desktopGridAvailable ? undefined : "Grid requires two running browsers"}
+                >
+                  Grid · {runningProfiles.length}
+                </button>
+              </div>
+              {fullViewMode === "single" ? (
+                <label className="mt-2 block space-y-1">
+                  <span className="block text-[#888]">Profile</span>
+                  <select
+                    className="input h-11 w-full bg-[#0f0f0f] px-2 text-[11px]"
+                    value={selectedProfile?.id ?? ""}
+                    onChange={(event) => onSelectProfile(event.target.value)}
+                    aria-label="Switch full-view browser session"
+                  >
+                    <option value="" disabled>
+                      Select profile
                     </option>
-                  ))}
-                </select>
-              </label>
+                    {profiles.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.name}
+                        {profile.status === "running" ? " · live" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <div className="mt-2 text-[10px] text-[#999]">
+                  {desktopGridProfiles.length} live streams visible
+                  {desktopGridOverflow > 0 ? ` · ${desktopGridOverflow} more available from Sessions` : ""}
+                </div>
+              )}
             </div>
           ) : null}
         </header>
@@ -1390,9 +1455,67 @@ export function AgentBrowserWorkspace({
           className="min-h-0 flex-1"
           data-ui-state={uiStateAttr(
             selectedProfile?.status === "running" && UI_STATE.profileViewer,
+            viewerFullscreen && fullViewMode === "grid" && UI_STATE.agentViewerGrid,
           )}
         >
-          {selectedProfile && selectedProfile.status === "running" ? (
+          {viewerFullscreen && fullViewMode === "grid" && desktopGridAvailable ? (
+            <div
+              className="grid h-full min-h-0 grid-cols-1 gap-1.5 overflow-auto bg-[#090909] p-1.5 xl:grid-cols-2 2xl:grid-cols-3"
+              role="list"
+              aria-label="Running browser grid"
+              data-testid="desktop-browser-grid"
+              data-ui-state={UI_STATE.agentViewerGrid}
+            >
+              {desktopGridProfiles.map((profile) => {
+                const selected = profile.id === selectedProfile?.id;
+                return (
+                  <article
+                    key={profile.id}
+                    className={`flex min-h-[18rem] min-w-0 flex-col overflow-hidden rounded-md border bg-[#101012] ${
+                      selected ? "border-[#6366f1]" : "border-[#2a2a2f]"
+                    }`}
+                    role="listitem"
+                    data-testid="desktop-browser-grid-tile"
+                    data-profile-id={profile.id}
+                  >
+                    <button
+                      type="button"
+                      className="flex min-h-11 w-full items-center gap-2 border-b border-[#2a2a2f] bg-[#151518] px-2 text-left text-[11px] text-[#d4d4d8] hover:bg-[#202024] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#6366f1]"
+                      onClick={() => onSelectProfile(profile.id)}
+                      aria-label={`Select ${profile.name}`}
+                      aria-pressed={selected}
+                    >
+                      <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400" aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate font-semibold">{profile.name}</span>
+                      <span className="shrink-0 text-[9px] uppercase tracking-wide text-[#8b8b8b]">
+                        {selected ? "Control" : "View only"}
+                      </span>
+                    </button>
+                    <div className="min-h-0 flex-1" data-ui-state={UI_STATE.profileViewer}>
+                      <ProfileViewer
+                        profileId={profile.id}
+                        cdpUrl={selected ? profile.cdp_url : null}
+                        clipboardSync={selected && profile.clipboard_sync}
+                        canInteract={selected && canInteract}
+                        compactControls
+                        viewportScale={viewerZoom / 100}
+                        fitMode={fullViewFitMode}
+                        layoutMode="fullscreen"
+                        nativeFullscreenEnabled={false}
+                        onConnectionStatusChange={selected ? onConnectionStatusChange : undefined}
+                        onDisconnect={selected ? onViewerDisconnect ?? (() => undefined) : () => undefined}
+                      />
+                    </div>
+                  </article>
+                );
+              })}
+              {desktopGridOverflow > 0 ? (
+                <div className="col-span-full flex min-h-11 items-center justify-center rounded-md border border-dashed border-[#333] px-3 text-[11px] text-[#8b8b8b]">
+                  {desktopGridOverflow} more live browsers
+                </div>
+              ) : null}
+            </div>
+          ) : selectedProfile && selectedProfile.status === "running" ? (
             <ProfileViewer
               key={selectedProfile.id}
               profileId={selectedProfile.id}

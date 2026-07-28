@@ -33,17 +33,30 @@ vi.mock("../../lib/api", async () => {
 vi.mock("../ProfileViewer", () => ({
   ProfileViewer: ({
     profileId,
+    cdpUrl,
+    clipboardSync,
+    canInteract,
+    layoutMode,
     viewportScale,
     fitMode,
     nativeFullscreenEnabled,
   }: {
     profileId: string;
+    cdpUrl?: string | null;
+    clipboardSync?: boolean;
+    canInteract?: boolean;
+    layoutMode?: string;
     viewportScale?: number;
     fitMode?: string;
     nativeFullscreenEnabled?: boolean;
   }) => (
     <div
       data-testid="mock-profile-viewer"
+      data-profile-id={profileId}
+      data-cdp-url={cdpUrl ?? "off"}
+      data-clipboard-sync={clipboardSync ? "on" : "off"}
+      data-can-interact={canInteract === false ? "off" : "on"}
+      data-layout-mode={layoutMode ?? "inline"}
       data-scale={viewportScale ?? 1}
       data-fit-mode={fitMode ?? "fit"}
       data-native-fullscreen={nativeFullscreenEnabled === false ? "off" : "on"}
@@ -201,6 +214,127 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("mock-profile-viewer").textContent).toContain("viewer:profile-live");
     expect(screen.getByTestId("orca-cap-pause").textContent).toMatch(/unavailable/i);
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
+  });
+
+  it("renders a full-view grid of running browsers while keeping stopped profiles out", async () => {
+    const alternate = {
+      ...runningProfile,
+      id: "profile-alt",
+      name: "Alt Live",
+      clipboard_sync: false,
+    };
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile, stoppedProfile, alternate]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("agent-browser-workspace");
+    fireEvent.click(screen.getByRole("button", { name: "Enter full view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view Sessions controls" }));
+
+    expect(screen.getByRole("button", { name: "Show one browser" }).getAttribute("aria-pressed")).toBe("true");
+    const gridButton = screen.getByRole("button", { name: "Show browser grid" });
+    expect((gridButton as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(gridButton);
+
+    const grid = screen.getByRole("list", { name: "Running browser grid" });
+    expect(grid).toBeTruthy();
+    expect(screen.getAllByTestId("desktop-browser-grid-tile").map((node) => node.getAttribute("data-profile-id"))).toEqual([
+      runningProfile.id,
+      alternate.id,
+    ]);
+    expect(screen.queryByRole("button", { name: `Select ${stoppedProfile.name}` })).toBeNull();
+    expect(screen.getAllByTestId("mock-profile-viewer")).toHaveLength(2);
+
+    const selectedViewer = screen.getAllByTestId("mock-profile-viewer").find(
+      (node) => node.getAttribute("data-profile-id") === runningProfile.id,
+    );
+    const passiveViewer = screen.getAllByTestId("mock-profile-viewer").find(
+      (node) => node.getAttribute("data-profile-id") === alternate.id,
+    );
+    expect(selectedViewer?.getAttribute("data-can-interact")).toBe("on");
+    expect(selectedViewer?.getAttribute("data-clipboard-sync")).toBe("on");
+    expect(selectedViewer?.getAttribute("data-cdp-url")).toBe(runningProfile.cdp_url);
+    expect(passiveViewer?.getAttribute("data-can-interact")).toBe("off");
+    expect(passiveViewer?.getAttribute("data-clipboard-sync")).toBe("off");
+    expect(passiveViewer?.getAttribute("data-cdp-url")).toBe("off");
+  });
+
+  it("selects a running browser from the full-view grid with an accessible button", async () => {
+    const onSelectProfile = vi.fn();
+    const alternate = { ...runningProfile, id: "profile-alt", name: "Alt Live" };
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile, alternate]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={onSelectProfile}
+      />,
+    );
+
+    await screen.findByTestId("agent-browser-workspace");
+    fireEvent.click(screen.getByRole("button", { name: "Enter full view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view Sessions controls" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show browser grid" }));
+
+    const selected = screen.getByRole("button", { name: `Select ${runningProfile.name}` });
+    const alternateButton = screen.getByRole("button", { name: `Select ${alternate.name}` });
+    expect(selected.getAttribute("aria-pressed")).toBe("true");
+    expect(alternateButton.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.keyDown(alternateButton, { key: "Enter" });
+    fireEvent.click(alternateButton);
+    expect(onSelectProfile).toHaveBeenCalledWith(alternate.id);
+  });
+
+  it("caps the full-view grid at six live streams and reports overflow", async () => {
+    const profiles = Array.from({ length: 8 }, (_, index) => ({
+      ...runningProfile,
+      id: `profile-${index + 1}`,
+      name: `Live ${index + 1}`,
+    }));
+    render(
+      <AgentBrowserWorkspace
+        profiles={profiles}
+        selectedProfile={profiles[0]}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("agent-browser-workspace");
+    fireEvent.click(screen.getByRole("button", { name: "Enter full view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view Sessions controls" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show browser grid" }));
+
+    expect(screen.getAllByTestId("mock-profile-viewer")).toHaveLength(6);
+    expect(screen.getByText("2 more live browsers")).toBeTruthy();
+  });
+
+  it("keeps full-view grid unavailable until two browsers are running", async () => {
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile, stoppedProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("agent-browser-workspace");
+    fireEvent.click(screen.getByRole("button", { name: "Enter full view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view Sessions controls" }));
+    const gridButton = screen.getByRole("button", { name: "Show browser grid" });
+    expect((gridButton as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("list", { name: "Running browser grid" })).toBeNull();
+    expect(screen.getAllByTestId("mock-profile-viewer")).toHaveLength(1);
   });
 
   it("keeps desktop full-view controls behind exactly four compact groups", async () => {

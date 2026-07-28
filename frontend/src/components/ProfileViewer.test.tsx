@@ -226,6 +226,52 @@ describe("ProfileViewer", () => {
     expect(rfbMock.instances[0]?.disconnectCalls).toBe(0);
   });
 
+  it("updates view-only mode without reconnecting the VNC session", async () => {
+    const view = render(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        canInteract
+        onDisconnect={vi.fn()}
+      />,
+    );
+    await flushAsyncWork();
+    expect(rfbMock.instances).toHaveLength(1);
+    const instance = rfbMock.instances[0];
+    expect(instance?.viewOnly).toBe(false);
+
+    view.rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        canInteract={false}
+        onDisconnect={vi.fn()}
+      />,
+    );
+    await flushAsyncWork();
+
+    expect(rfbMock.instances).toHaveLength(1);
+    expect(instance?.disconnectCalls).toBe(0);
+    expect(instance?.viewOnly).toBe(true);
+
+    view.rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        canInteract
+        onDisconnect={vi.fn()}
+      />,
+    );
+    await flushAsyncWork();
+
+    expect(rfbMock.instances).toHaveLength(1);
+    expect(instance?.disconnectCalls).toBe(0);
+    expect(instance?.viewOnly).toBe(false);
+  });
+
   it("notifies the parent only after reconnect attempts are exhausted", async () => {
     const { onDisconnect } = await renderProfileViewer();
 

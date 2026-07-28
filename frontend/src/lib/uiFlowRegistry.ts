@@ -21,6 +21,7 @@ export const UI_STATE = {
   agentSessionPane: "agent.session-pane",
   agentViewerPane: "agent.viewer-pane",
   agentViewerFullscreen: "agent.viewer-fullscreen",
+  agentViewerGrid: "agent.viewer-grid",
   agentManagedOutput: "agent.managed-output",
   agentOrcaTranscript: "agent.orca-transcript",
   mobileWorkspace: "mobile.workspace",
@@ -124,6 +125,18 @@ export const UI_TRANSITIONS = [
       UI_STATE.agentWorkspace,
       UI_STATE.agentViewerPane,
       UI_STATE.agentViewerFullscreen,
+    ],
+  },
+  {
+    id: "desktop-agent-fullscreen-to-grid",
+    from: UI_STATE.agentViewerFullscreen,
+    action: "agent.viewer.grid",
+    to: UI_STATE.agentViewerGrid,
+    expectedVisible: [
+      UI_STATE.agentWorkspace,
+      UI_STATE.agentViewerPane,
+      UI_STATE.agentViewerFullscreen,
+      UI_STATE.agentViewerGrid,
     ],
   },
   {

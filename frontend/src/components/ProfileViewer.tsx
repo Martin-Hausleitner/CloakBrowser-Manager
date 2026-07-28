@@ -140,6 +140,8 @@ export function ProfileViewer({
   const rfbRef = useRef<any>(null);
   const onDisconnectRef = useRef(onDisconnect);
   onDisconnectRef.current = onDisconnect;
+  const canInteractRef = useRef(canInteract);
+  canInteractRef.current = canInteract;
   const [connected, setConnected] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -252,6 +254,12 @@ export function ProfileViewer({
   }, [connected, connectionStatus, onConnectionStatusChange]);
 
   useEffect(() => {
+    if (rfbRef.current) {
+      rfbRef.current.viewOnly = !canInteract;
+    }
+  }, [canInteract]);
+
+  useEffect(() => {
     let rfb: any = null;
     let cancelled = false;
     let connecting = false;
@@ -327,7 +335,7 @@ export function ProfileViewer({
         // Keep the local interaction model honest as well as server-side. The
         // backend still filters input, so this is a UX guard rather than the
         // authorization boundary.
-        instance.viewOnly = !canInteract;
+        instance.viewOnly = !canInteractRef.current;
 
         instance.addEventListener("connect", () => {
           if (cancelled || rfbRef.current !== instance) return;
@@ -388,7 +396,7 @@ export function ProfileViewer({
       }
       rfbRef.current = null;
     };
-  }, [profileId, canInteract]);
+  }, [profileId]);
 
   // Host→VNC: intercept Ctrl+V/Cmd+V at keydown (capture phase)
   // Must fire BEFORE noVNC's canvas listener to prevent the race condition

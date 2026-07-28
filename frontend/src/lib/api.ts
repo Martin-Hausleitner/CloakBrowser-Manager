@@ -175,6 +175,7 @@ export interface Profile {
   harness: ProfileHarness;
   fingerprint_seed: number;
   proxy: string | null;
+  proxy_display: string | null;
   timezone: string | null;
   locale: string | null;
   platform: string;
@@ -629,7 +630,10 @@ async function request<T>(
 }
 
 export const api = {
-  authStatus: async () => normalizeAuthStatus(await request<Partial<AuthStatus>>("/api/auth/status")),
+  authStatus: async () => normalizeAuthStatus(await request<Partial<AuthStatus>>("/api/auth/status", {
+    cache: "no-store",
+    credentials: "include",
+  })),
 
   login: (credentials: LoginCredentials | string) =>
     request<{ ok: boolean }>("/api/auth/login", {

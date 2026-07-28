@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import os
+import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -87,6 +91,35 @@ def controller(tmp_path: Path):
 
     ctl = CbmMcpController(make_run_context(tmp_path), connect_over_cdp=connect)
     return ctl, page, browser, calls
+
+
+def test_mcp_entrypoint_starts_from_outside_the_release_worktree(tmp_path: Path):
+    capability = tmp_path / "capability"
+    capability.write_text("cbm_run_test_only", encoding="utf-8")
+    os.chmod(capability, 0o600)
+    root = Path(__file__).resolve().parents[1]
+    environment = {
+        **os.environ,
+        "CBM_MANAGER_URL": "http://127.0.0.1:18115",
+        "CBM_RUN_CAPABILITY_FILE": str(capability),
+        "CBM_PROFILE_ID": "profile-1",
+        "CBM_TASK_RUN_ID": "run-1",
+        "CBM_ALLOWED_ORIGINS": '["https://example.com"]',
+    }
+
+    result = subprocess.run(
+        [str(root / "scripts" / "cbm-mcp")],
+        cwd=tmp_path,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
 
 
 def test_run_context_requires_private_capability_and_exact_profile(tmp_path: Path):
@@ -196,6 +229,42 @@ def test_server_factory_registers_only_bounded_tools(tmp_path: Path, monkeypatch
         "control_plane_resource_schema",
         "orca_web_capabilities",
     ]
+
+
+def test_fastmcp_browser_tools_offload_sync_playwright_from_event_loop(monkeypatch):
+    from scripts import cbm_mcp
+
+    registered = {}
+
+    class FakeFastMCP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def tool(self):
+            def decorate(fn):
+                registered[fn.__name__] = fn
+                return fn
+
+            return decorate
+
+    worker_threads = []
+
+    class ThreadRecordingController:
+        def navigate(self, url):
+            worker_threads.append(threading.get_ident())
+            return {"ok": True, "url": url}
+
+    monkeypatch.setattr(cbm_mcp, "_import_fastmcp", lambda: FakeFastMCP)
+    cbm_mcp.build_server(ThreadRecordingController())
+    navigate = registered["browser_navigate"]
+    event_loop_thread = threading.get_ident()
+
+    assert inspect.iscoroutinefunction(navigate)
+    assert asyncio.run(navigate("https://example.com")) == {
+        "ok": True,
+        "url": "https://example.com",
+    }
+    assert worker_threads and worker_threads[0] != event_loop_thread
 
 
 def test_mcp_resource_tools_return_bounded_envelopes_without_secret_paths(tmp_path: Path):

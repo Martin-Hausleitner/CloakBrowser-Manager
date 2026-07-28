@@ -392,3 +392,42 @@ def test_profile_response_cdp_url_default_none():
         created_at="2026-01-01T00:00:00", updated_at="2026-01-01T00:00:00",
     )
     assert r.cdp_url is None
+
+
+def test_profile_response_redacts_proxy_credentials():
+    r = ProfileResponse(
+        id="abc",
+        name="Test",
+        fingerprint_seed=12345,
+        proxy="http://proxy-user:top-secret@proxy.test:8080",
+        user_data_dir="/data/profiles/abc",
+        created_at="2026-01-01T00:00:00",
+        updated_at="2026-01-01T00:00:00",
+    )
+
+    dumped = r.model_dump()
+    assert dumped["proxy"] is None
+    assert dumped["proxy_display"] == "http://proxy.test:8080"
+    assert "proxy-user" not in str(dumped)
+    assert "top-secret" not in str(dumped)
+
+
+def test_profile_response_removes_proxy_path_query_and_fragment():
+    r = ProfileResponse(
+        id="abc",
+        name="Test",
+        fingerprint_seed=12345,
+        proxy="https://proxy-user:top-secret@proxy.test:8443/session/top-secret?token=query-secret#secret-fragment",
+        user_data_dir="/data/profiles/abc",
+        created_at="2026-01-01T00:00:00",
+        updated_at="2026-01-01T00:00:00",
+    )
+
+    dumped = r.model_dump()
+    assert dumped["proxy"] is None
+    assert dumped["proxy_display"] == "https://proxy.test:8443"
+    serialized = str(dumped)
+    assert "proxy-user" not in serialized
+    assert "top-secret" not in serialized
+    assert "query-secret" not in serialized
+    assert "secret-fragment" not in serialized

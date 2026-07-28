@@ -48,12 +48,6 @@ const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
   { value: "grok-build", label: "Grok Build" },
   { value: "opencode", label: "OpenCode" },
 ];
-const WORKSPACE_MODES: ReadonlyArray<{ value: AgentMode; label: string }> = [
-  { value: "browser-use", label: "Browser" },
-  { value: "cursor-agent", label: "Terminal" },
-  { value: "acpx", label: "ACP / ACPX" },
-  { value: "antigravity", label: "Anti" },
-];
 function preferredAgent(profile: Profile | null): AgentMode {
   if (profile?.harness === "browser-use") return "browser-use";
   if (profile?.harness === "acpx") return "acpx";
@@ -189,6 +183,7 @@ export function AgentBrowserWorkspace({
   const browserUseMode = agent === "browser-use";
   const acpxMode = agent === "acpx";
   const antigravityMode = agent === "antigravity";
+  const antigravitySupported = selectedProfile?.harness === "antigravity";
   const acpxBackedMode = acpxMode || antigravityMode;
   const selectedAcpxAgent: AcpxAgent = antigravityMode ? "claude" : acpxAgent;
   const selectedAcpxPreflight = acpxPreflights.find((item) => item.agent === selectedAcpxAgent);
@@ -228,6 +223,37 @@ export function AgentBrowserWorkspace({
       : session && session.status !== "closed"),
   );
   const terminalMode = !managedRunMode;
+  const compactWorkspaceMode = terminalMode
+    ? "cli"
+    : antigravityMode || (acpxMode && acpxAgent === "claude")
+      ? "acpx"
+      : acpxMode
+        ? "acp"
+        : browserUseMode
+          ? "browser"
+          : "cli";
+  const visibleAgentOptions = useMemo(
+    () => antigravitySupported ? AGENT_OPTIONS : AGENT_OPTIONS.filter((option) => option !== "antigravity"),
+    [antigravitySupported],
+  );
+  const chooseCompactWorkspaceMode = (mode: "cli" | "acp" | "acpx") => {
+    if (sessionActive) return;
+    if (mode === "cli") {
+      setAgent((current) => managedRunMode ? "cursor-agent" : current);
+      return;
+    }
+    if (mode === "acp") {
+      setAgent("acpx");
+      if (acpxAgent === "claude") setAcpxAgent("cursor");
+      return;
+    }
+    if (antigravitySupported) {
+      setAgent("antigravity");
+      return;
+    }
+    setAgent("acpx");
+    setAcpxAgent("claude");
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -743,32 +769,38 @@ export function AgentBrowserWorkspace({
           </div>
           <div className="mt-1.5 flex items-center gap-1">
             <div
-              className="grid min-w-0 flex-1 grid-cols-4 rounded-md border border-[#35353b] bg-[#0b0b0d] p-0.5"
+              className="grid min-w-0 flex-1 grid-cols-3 rounded-md border border-[#35353b] bg-[#0b0b0d] p-0.5"
               role="group"
-              aria-label="Workspace mode"
+              aria-label="CLI ACP ACPX mode"
+              data-testid="workspace-compact-mode"
             >
-              {WORKSPACE_MODES.map((mode) => {
-                const selected = mode.value === "cursor-agent" ? terminalMode : agent === mode.value;
-                return (
-                  <button
-                    key={mode.value}
-                    type="button"
-                    aria-pressed={selected}
-                    className={`h-6 truncate rounded px-1 text-[9px] font-semibold transition-colors ${
-                      selected
-                        ? "bg-[#2e2b5f] text-white"
-                        : "text-[#a1a1aa] hover:bg-[#202024] hover:text-white"
-                    }`}
-                    onClick={() => {
-                      if (mode.value === "cursor-agent" && terminalMode) return;
-                      setAgent(mode.value);
-                    }}
-                    disabled={sessionActive}
-                  >
-                    {mode.label}
-                  </button>
-                );
-              })}
+              {([
+                { mode: "cli", label: "CLI", title: "Run a live Orca CLI session" },
+                { mode: "acp", label: "ACP", title: "Run through the selected ACP adapter" },
+                {
+                  mode: "acpx",
+                  label: antigravitySupported ? "ACPX · Antigravity" : "ACPX",
+                  title: antigravitySupported
+                    ? "Run Antigravity through the ACPX Claude preset"
+                    : "Run ACPX through the Claude adapter",
+                },
+              ] as const).map((option) => (
+                <button
+                  key={option.mode}
+                  type="button"
+                  aria-pressed={compactWorkspaceMode === option.mode}
+                  className={`h-6 truncate rounded px-1 text-[9px] font-semibold transition-colors ${
+                    compactWorkspaceMode === option.mode
+                      ? "bg-[#2e2b5f] text-white"
+                      : "text-[#a1a1aa] hover:bg-[#202024] hover:text-white"
+                  }`}
+                  onClick={() => chooseCompactWorkspaceMode(option.mode)}
+                  disabled={sessionActive}
+                  title={option.title}
+                >
+                  {option.label}
+                </button>
+              ))}
             </div>
             <div className="flex items-center gap-1">
               <button
@@ -844,7 +876,7 @@ export function AgentBrowserWorkspace({
               disabled={sessionActive || (!managedRunMode && unavailable)}
               data-testid="orca-agent-select"
             >
-              {AGENT_OPTIONS.map((option) => (
+              {visibleAgentOptions.map((option) => (
                 <option key={option} value={option}>
                   {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option === "antigravity" ? "Antigravity · ACPX/Claude" : option}
                 </option>

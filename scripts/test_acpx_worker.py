@@ -90,6 +90,7 @@ class FakeRuntime:
         self.ensure_calls = []
         self.prompt_calls = []
         self.cancel_calls = []
+        self.close_calls = []
 
     async def validate_version(self):
         self.version_checked = True
@@ -129,6 +130,9 @@ class FakeRuntime:
 
     async def cancel(self, *, cwd, agent, session_name):
         self.cancel_calls.append((cwd, agent, session_name))
+
+    async def close_session(self, *, cwd, agent, session_name):
+        self.close_calls.append((cwd, agent, session_name))
 
 
 def make_config(tmp_path: Path) -> AcpxWorkerConfig:
@@ -226,7 +230,7 @@ def test_worker_executes_acpx_session_streams_outputs_and_cleans_capability(tmp_
     assert result == {"status": "succeeded"}
     assert runtime.version_checked is True
     assert runtime.ensure_calls[0][1] == "cursor"
-    assert runtime.prompt_calls[0][3] == "Inspect the browser"
+    assert runtime.prompt_calls[0][3].endswith("User task:\nInspect the browser")
     assert manager.outputs[0][1]["kind"] == "summary"
     assert manager.completed == ["run-1"]
     assert manager.failed == []
@@ -812,6 +816,56 @@ def test_worker_execute_claim_uses_manager_capability_and_real_mcp_config(tmp_pa
 
     assert result == {"status": "succeeded"}
     assert manager.revoked == ["run-1"]
+
+
+def test_worker_wraps_browser_task_with_run_scoped_mcp_contract(tmp_path: Path):
+    manager = FakeManager()
+    runtime = FakeRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    result = asyncio.run(
+        worker.execute_claim(
+            claim(
+                task="Open https://example.com and report the title",
+                allowed_origins=["https://example.com"],
+            )
+        )
+    )
+
+    assert result == {"status": "succeeded"}
+    prompt = runtime.prompt_calls[0][3]
+    assert "Open https://example.com and report the title" in prompt
+    assert "profile-1" in prompt
+    assert "https://example.com" in prompt
+    assert "cloakbrowser" in prompt
+    assert "browser_navigate" in prompt
+    assert "browser_inspect" in prompt
+    assert "browser_read_text" in prompt
+    assert "Fetch" in prompt
+    assert "Terminal" in prompt
+    assert "cbm_run_private_capability" not in prompt
+    assert "CBM_RUN_CAPABILITY_FILE" not in prompt
+    assert "/api/profiles/profile-1/cdp" not in prompt
+
+
+def test_worker_uses_and_closes_a_unique_acpx_session_for_each_run(tmp_path: Path):
+    manager = FakeManager()
+    runtime = FakeRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    assert asyncio.run(worker.execute_claim(claim(id="run-1"))) == {
+        "status": "succeeded"
+    }
+    assert asyncio.run(worker.execute_claim(claim(id="run-2"))) == {
+        "status": "succeeded"
+    }
+
+    ensured_sessions = [call[2] for call in runtime.ensure_calls]
+    prompted_sessions = [call[2] for call in runtime.prompt_calls]
+    closed_sessions = [call[2] for call in runtime.close_calls]
+    assert len(set(ensured_sessions)) == 2
+    assert prompted_sessions == ensured_sessions
+    assert closed_sessions == ensured_sessions
 
 
 def test_worker_starts_heartbeat_before_slow_session_ensure(tmp_path: Path):

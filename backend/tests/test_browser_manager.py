@@ -132,6 +132,130 @@ def test_auto_launch_failure_redacts_exception_details(monkeypatch, caplog):
     assert leaked_proxy not in caplog.text
 
 
+# ── authenticated proxy launch handling ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_launch_auth_http_proxy_passes_only_loopback_proxy_to_cloakbrowser(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(42, 6042)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+    monkeypatch.setattr(mgr, "_fit_window_to_vnc", AsyncMock())
+
+    captured: dict[str, object] = {}
+
+    class FakeBridge:
+        proxy_url = "http://127.0.0.1:39123"
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    fake_bridge = FakeBridge()
+
+    async def fake_start(proxy: str) -> FakeBridge:
+        assert proxy == "http://proxy-user:top-secret@proxy.test:8080"
+        return fake_bridge
+
+    context = MagicMock()
+    context.pages = []
+    context.add_init_script = AsyncMock()
+    context.close = AsyncMock()
+    context.on = MagicMock()
+
+    async def fake_launch(**kwargs: object) -> MagicMock:
+        captured.update(kwargs)
+        return context
+
+    monkeypatch.setattr("backend.browser_manager.ProxyBridge.start", fake_start)
+    monkeypatch.setattr(
+        "backend.browser_manager.launch_persistent_context_async", fake_launch
+    )
+
+    profile = {
+        "id": "auth-proxy-profile",
+        "user_data_dir": str(tmp_path),
+        "proxy": "http://proxy-user:top-secret@proxy.test:8080",
+    }
+
+    running = await mgr.launch(profile)
+
+    assert captured["proxy"] == "http://127.0.0.1:39123"
+    assert "proxy-user" not in str(captured)
+    assert "top-secret" not in str(captured)
+    assert getattr(running, "proxy_bridge") is fake_bridge
+
+    await mgr.stop(profile["id"])
+    assert fake_bridge.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_launch_auth_proxy_stops_bridge_when_browser_launch_fails(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(43, 6043)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+
+    fake_bridge = SimpleNamespace(
+        proxy_url="http://127.0.0.1:40001", stop=AsyncMock()
+    )
+
+    async def fake_start(proxy: str) -> object:
+        assert proxy == "http://proxy-user:top-secret@proxy.test:8080"
+        return fake_bridge
+
+    async def fail_launch(**kwargs: object) -> None:
+        assert kwargs["proxy"] == "http://127.0.0.1:40001"
+        raise RuntimeError("browser launch failed")
+
+    monkeypatch.setattr("backend.browser_manager.ProxyBridge.start", fake_start)
+    monkeypatch.setattr(
+        "backend.browser_manager.launch_persistent_context_async", fail_launch
+    )
+
+    profile = {
+        "id": "failed-auth-proxy-profile",
+        "user_data_dir": str(tmp_path),
+        "proxy": "http://proxy-user:top-secret@proxy.test:8080",
+    }
+
+    with pytest.raises(RuntimeError, match="browser launch failed"):
+        await mgr.launch(profile)
+
+    fake_bridge.stop.assert_awaited_once()
+    mgr.vnc.stop_vnc.assert_awaited_once_with(43)
+
+
+@pytest.mark.asyncio
+async def test_launch_rejects_authenticated_socks_proxy_before_browser_launch(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(44, 6044)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+
+    profile = {
+        "id": "auth-socks-profile",
+        "user_data_dir": str(tmp_path),
+        "proxy": "socks5://proxy-user:top-secret@proxy.test:1080",
+    }
+
+    with pytest.raises(
+        ValueError, match="Authenticated SOCKS proxies are not supported"
+    ):
+        await mgr.launch(profile)
+
+    mgr.vnc.stop_vnc.assert_awaited_once_with(44)
+
+
 # ── _build_fingerprint_args ──────────────────────────────────────────────────
 
 # Use the BrowserManager instance to call the method

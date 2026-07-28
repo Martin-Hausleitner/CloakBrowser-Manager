@@ -7,7 +7,7 @@ import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 FOLDER_SEGMENT_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._ -]*$"
@@ -71,6 +71,53 @@ CONTROL_PLANE_FORBIDDEN_OPERATIONS = (
     "free-form Chromium launch flags or manager-owned runtime flags",
     "arbitrary shell execution inside boxes or runtimes",
 )
+
+
+def _safe_proxy_host_port(host: str | None, port: int | None) -> str | None:
+    if not host:
+        return None
+    display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"{display_host}:{port}" if port is not None else display_host
+
+
+def _safe_raw_proxy_host_port(value: str) -> str | None:
+    if not value or any(char in value for char in "@/?#") or any(char.isspace() for char in value):
+        return None
+    parts = value.split(":")
+    if len(parts) != 2 or not parts[0] or not parts[1].isdigit():
+        return None
+    return value
+
+
+def redact_proxy_for_response(value: str | None) -> str | None:
+    """Return a display-safe proxy string with credentials and URL tails removed."""
+    if value is None:
+        return None
+
+    raw = str(value).strip()
+    if raw == "":
+        return None
+
+    if "://" in raw:
+        try:
+            parsed = urlsplit(raw)
+            host = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            return None
+        host_port = _safe_proxy_host_port(host, port)
+        if host_port is None:
+            return None
+        return urlunsplit((parsed.scheme, host_port, "", "", ""))
+
+    if "@" in raw:
+        return _safe_raw_proxy_host_port(raw.rsplit("@", 1)[-1])
+
+    parts = raw.split(":")
+    if len(parts) == 4 and parts[0] and parts[1].isdigit():
+        return f"{parts[0]}:{parts[1]}"
+
+    return _safe_raw_proxy_host_port(raw)
 
 
 def control_plane_resource_schema() -> dict[str, object]:
@@ -433,6 +480,7 @@ class ProfileResponse(BaseModel):
     harness: Harness = "codex"
     fingerprint_seed: int
     proxy: str | None = None
+    proxy_display: str | None = None
     timezone: str | None = None
     locale: str | None = None
     platform: str = "windows"
@@ -471,6 +519,12 @@ class ProfileResponse(BaseModel):
     status: str = "stopped"  # "running" | "stopped"
     vnc_ws_port: int | None = None
     cdp_url: str | None = None
+
+    @model_validator(mode="after")
+    def redact_proxy_secret(self) -> "ProfileResponse":
+        self.proxy_display = self.proxy_display or redact_proxy_for_response(self.proxy)
+        self.proxy = None
+        return self
 
 
 class SessionLinkSet(BaseModel):

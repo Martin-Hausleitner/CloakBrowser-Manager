@@ -9,6 +9,7 @@ CDP endpoints.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import contextmanager
@@ -249,29 +250,29 @@ def build_server(controller: CbmMcpController | None = None):
     )
 
     @server.tool()
-    def browser_inspect() -> dict[str, Any]:
+    async def browser_inspect() -> dict[str, Any]:
         """Return the current managed tab URL and title."""
-        return ctl.inspect()
+        return await asyncio.to_thread(ctl.inspect)
 
     @server.tool()
-    def browser_navigate(url: str) -> dict[str, Any]:
+    async def browser_navigate(url: str) -> dict[str, Any]:
         """Navigate within the exact Manager-approved origin set."""
-        return ctl.navigate(url)
+        return await asyncio.to_thread(ctl.navigate, url)
 
     @server.tool()
-    def browser_click(selector: str) -> dict[str, Any]:
+    async def browser_click(selector: str) -> dict[str, Any]:
         """Click one bounded Playwright selector in the managed tab."""
-        return ctl.click(selector)
+        return await asyncio.to_thread(ctl.click, selector)
 
     @server.tool()
-    def browser_fill(selector: str, text: str) -> dict[str, Any]:
+    async def browser_fill(selector: str, text: str) -> dict[str, Any]:
         """Fill one bounded selector without returning the submitted text."""
-        return ctl.fill(selector, text)
+        return await asyncio.to_thread(ctl.fill, selector, text)
 
     @server.tool()
-    def browser_read_text(selector: str | None = None) -> dict[str, Any]:
+    async def browser_read_text(selector: str | None = None) -> dict[str, Any]:
         """Read bounded visible text, never raw HTML or DOM snapshots."""
-        return ctl.read_text(selector)
+        return await asyncio.to_thread(ctl.read_text, selector)
 
     @server.tool()
     def control_plane_capabilities() -> dict[str, Any]:

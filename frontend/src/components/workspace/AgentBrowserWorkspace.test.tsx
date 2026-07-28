@@ -737,17 +737,23 @@ describe("AgentBrowserWorkspace", () => {
     fireEvent.click(screen.getByTestId("workspace-settings-toggle"));
     expect(settings.hasAttribute("hidden")).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "ACP / ACPX" }));
+    expect(screen.getByTestId("workspace-compact-mode")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Antigravity/ })).toBeNull();
+    expect(screen.queryByText("Antigravity · ACPX/Claude")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "ACP" }));
     expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("acpx");
+    expect(screen.getByRole("button", { name: "ACP" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByTestId("mock-profile-viewer")).toBe(viewer);
 
-    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    fireEvent.click(screen.getByRole("button", { name: "CLI" }));
     expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("cursor-agent");
+    expect(screen.getByRole("button", { name: "CLI" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByTestId("mock-profile-viewer")).toBe(viewer);
 
     fireEvent.change(screen.getByTestId("orca-agent-select"), { target: { value: "grok" } });
-    expect(screen.getByRole("button", { name: "Terminal" }).getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    expect(screen.getByRole("button", { name: "CLI" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "CLI" }));
     expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("grok");
   });
 
@@ -803,6 +809,8 @@ describe("AgentBrowserWorkspace", () => {
 
     await screen.findByTestId("orca-launch");
     expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("acpx");
+    expect(screen.getByRole("button", { name: "ACP" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByRole("button", { name: /Antigravity/ })).toBeNull();
     expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).toBe("cursor");
     fireEvent.change(screen.getByTestId("acpx-agent-select"), {
       target: { value: "opencode" },
@@ -827,6 +835,82 @@ describe("AgentBrowserWorkspace", () => {
       );
     });
     expect(screen.getByTestId("managed-agent-output")).toBeTruthy();
+  });
+
+  it("starts ACPX through the compact Claude preset without showing Antigravity on generic ACP profiles", async () => {
+    const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
+    apiMock.createTaskSession.mockResolvedValue({
+      id: "task-acpx-claude",
+      profile_id: acpxProfile.id,
+      sandbox_id: "default",
+      title: "Inspect example.com",
+      status: "active",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-27T00:00:00Z",
+      updated_at: "2026-07-27T00:00:00Z",
+      metadata: {},
+    });
+    apiMock.createTaskRun.mockResolvedValue({
+      id: "run-acpx-claude",
+      task_session_id: "task-acpx-claude",
+      task_message_id: "message-acpx-claude",
+      profile_id: acpxProfile.id,
+      profile_id_snapshot: acpxProfile.id,
+      sandbox_id: "default",
+      harness: "acpx",
+      agent: "claude",
+      status: "running",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: null,
+      deadline_at: "2026-07-27T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {},
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-27T00:00:00Z",
+      updated_at: "2026-07-27T00:00:00Z",
+    });
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[acpxProfile]}
+        selectedProfile={acpxProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("orca-launch");
+    expect(screen.queryByRole("button", { name: /Antigravity/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "ACPX" }));
+    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("acpx");
+    expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).toBe("claude");
+    fireEvent.change(screen.getByTestId("orca-prompt"), {
+      target: { value: "Inspect https://example.com" },
+    });
+    fireEvent.click(screen.getByTestId("orca-launch"));
+
+    await waitFor(() => {
+      expect(apiMock.createTaskSession).toHaveBeenCalledWith(expect.objectContaining({
+        metadata: { source: "agent-browser-workspace", harness: "acpx", agent: "claude" },
+      }));
+      expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+        "task-acpx-claude",
+        expect.objectContaining({
+          harness: "acpx",
+          agent: "claude",
+          profile_id: acpxProfile.id,
+          allowed_origins: ["https://example.com"],
+        }),
+      );
+    });
   });
 
   it("starts Antigravity as the ACPX Claude preset with truthful labels", async () => {
@@ -881,6 +965,7 @@ describe("AgentBrowserWorkspace", () => {
 
     await screen.findByTestId("orca-launch");
     expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("antigravity");
+    expect(screen.getByRole("button", { name: "ACPX · Antigravity" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
     expect(screen.getAllByText("Antigravity · ACPX/Claude").length).toBeGreaterThanOrEqual(1);
     fireEvent.change(screen.getByTestId("orca-prompt"), {

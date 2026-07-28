@@ -121,7 +121,8 @@ export function ProfilesWorkspace({
       },
       {
         headerName: "Proxy",
-        valueGetter: ({ data }: ValueGetterParams<Profile>) => redactProxyLabel(data?.proxy),
+        valueGetter: ({ data }: ValueGetterParams<Profile>) =>
+          redactProxyLabel(data ? data.proxy_display ?? data.proxy : null),
         minWidth: 150,
         flex: 1,
       },

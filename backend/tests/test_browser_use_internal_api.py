@@ -464,6 +464,10 @@ def test_cdp_http_and_ws_accept_run_capability(client_access: TestClient):
             "webSocketDebuggerUrl": "ws://127.0.0.1:19222/devtools/page/P1",
         }
     ]
+    protocol_payload = {
+        "version": {"major": "1", "minor": "3"},
+        "domains": [{"domain": "Browser", "commands": []}],
+    }
 
     try:
         with patch("httpx.AsyncClient") as client_cls:
@@ -477,6 +481,8 @@ def test_cdp_http_and_ws_accept_run_capability(client_access: TestClient):
                 resp.raise_for_status = MagicMock()
                 if url.endswith("/json/version"):
                     resp.json.return_value = version_payload
+                elif url.endswith("/json/protocol"):
+                    resp.json.return_value = protocol_payload
                 else:
                     resp.json.return_value = list_payload
                 return resp
@@ -493,6 +499,14 @@ def test_cdp_http_and_ws_accept_run_capability(client_access: TestClient):
             assert "19222" not in version.text
             assert "Authorization" not in version.text
             assert body["webSocketDebuggerUrl"].startswith("ws://")
+
+            protocol = client_access.get(
+                f"/api/profiles/{profile['id']}/cdp/json/protocol",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert protocol.status_code == 200, protocol.text
+            assert protocol.json() == protocol_payload
+            assert "Authorization" not in protocol.text
 
             query_rejected = client_access.get(
                 f"/api/profiles/{profile['id']}/cdp/json/version?token={token}",

@@ -21,11 +21,13 @@ if __package__:
     from . import live_diagnostics
     from . import extension_catalog
     from . import models as profile_models
+    from .proxy_bridge import ProxyBridge, proxy_requires_bridge
     from .vnc_manager import VNCManager
 else:  # Support importing browser_manager as a top-level module.
     import live_diagnostics
     import extension_catalog
     import models as profile_models
+    from proxy_bridge import ProxyBridge, proxy_requires_bridge
     from vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
@@ -209,6 +211,7 @@ class RunningProfile:
     ws_port: int
     cdp_port: int
     user_data_dir: str | None = None
+    proxy_bridge: ProxyBridge | None = None
 
 
 class BrowserManager:
@@ -251,6 +254,7 @@ class BrowserManager:
         # Set up bookmarks and search engine on first launch
         _init_profile_defaults(user_data_dir, profile.get("search_engine"))
 
+        proxy_bridge: ProxyBridge | None = None
         try:
             # Start KasmVNC on the allocated display
             await self.vnc.start_vnc(
@@ -273,6 +277,9 @@ class BrowserManager:
                 raise ValueError("Profile proxy is configured but could not be applied")
             if proxy:
                 _validate_proxy(proxy)
+                if proxy_requires_bridge(proxy):
+                    proxy_bridge = await ProxyBridge.start(proxy)
+                    proxy = proxy_bridge.proxy_url
                 # Also pin Chromium proxy flags so Playwright env gaps cannot
                 # silently launch without the assigned proxy.
                 extra_args.append(f"--proxy-server={proxy}")
@@ -344,6 +351,7 @@ class BrowserManager:
                 ws_port=ws_port,
                 cdp_port=cdp_port,
                 user_data_dir=str(user_data_dir),
+                proxy_bridge=proxy_bridge,
             )
 
             # Auto-cleanup if browser crashes or user closes Chrome via VNC
@@ -367,6 +375,8 @@ class BrowserManager:
             async with self._lock:
                 self._launching.discard(profile_id)
             live_diagnostics.live_diagnostics.mark_launch_failed(profile_id)
+            if proxy_bridge is not None:
+                await proxy_bridge.stop()
             await self.vnc.stop_vnc(display)
             raise
 
@@ -378,6 +388,8 @@ class BrowserManager:
         if running:
             logger.info("Browser closed for profile %s, cleaning up", profile_id)
             live_diagnostics.live_diagnostics.mark_stopped(profile_id)
+            if running.proxy_bridge is not None:
+                await running.proxy_bridge.stop()
             await self.vnc.stop_vnc(running.display)
 
     async def stop(self, profile_id: str):
@@ -396,6 +408,9 @@ class BrowserManager:
             await running.context.close()
         except Exception as exc:
             logger.warning("Error closing context for %s: %s", profile_id, exc)
+
+        if running.proxy_bridge is not None:
+            await running.proxy_bridge.stop()
 
         await self.vnc.stop_vnc(running.display)
 

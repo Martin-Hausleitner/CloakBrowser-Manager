@@ -253,7 +253,7 @@ CBM_WORKER_TOKEN: str | None = os.environ.get("CBM_WORKER_TOKEN") or None
 _AUTH_EXEMPT = frozenset({"/api/auth/status", "/api/auth/login", "/health"})
 # HTTP run-capability bypass: GET discovery only.
 _CDP_RUN_CAPABILITY_HTTP_PATH = re.compile(
-    r"^/api/profiles/[^/]+/cdp/json/(?:version|list)/?$"
+    r"^/api/profiles/[^/]+/cdp/json/(?:version|list|protocol)/?$"
 )
 # WebSocket run-capability bypass: browser WS + page/devtools WS only.
 _CDP_RUN_CAPABILITY_WS_PATH = re.compile(
@@ -2341,7 +2341,10 @@ def _revoke_user_websocket_access(user_ids: list[str]) -> None:
 
 
 @app.get("/api/auth/status")
-async def auth_status(request: starlette.requests.Request):
+async def auth_status(
+    request: starlette.requests.Request,
+    response: Response,
+):
     """Check if auth is enabled and if the current request is authenticated.
 
     Exempt from auth middleware so the frontend can always call it.
@@ -2361,6 +2364,7 @@ async def auth_status(request: starlette.requests.Request):
         if AUTH_TOKEN
         else False
     )
+    response.headers["Cache-Control"] = "private, no-store"
     return {
         "auth_required": AUTH_TOKEN is not None,
         "access_control_enabled": ACCESS_CONTROL_ENABLED,
@@ -4903,6 +4907,31 @@ async def cdp_json_version(profile_id: str, request: Request):
     ws_scheme = "wss" if _is_https(request) else "ws"
     manager_ws = f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp"
     return cdp_gateway.sanitize_cdp_version_discovery(data, manager_ws_url=manager_ws)
+
+
+@app.get("/api/profiles/{profile_id}/cdp/json/protocol/")
+@app.get("/api/profiles/{profile_id}/cdp/json/protocol")
+async def cdp_json_protocol(profile_id: str, request: Request):
+    """Proxy Chrome's read-only CDP protocol schema for external harnesses."""
+    _reject_token_like_query(request)
+    _require_cdp_automation_access(request, profile_id=profile_id)
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        raise HTTPException(status_code=404, detail="Profile not running")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{running.cdp_port}/json/protocol", timeout=5
+            )
+            data = resp.json()
+    except Exception as exc:
+        logger.error("CDP proxy: failed to read Chrome protocol for %s: %s", profile_id, exc)
+        raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
+    return data
 
 
 @app.get("/api/profiles/{profile_id}/cdp/json/list/")

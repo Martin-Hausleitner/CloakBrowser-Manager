@@ -25,6 +25,22 @@ beforeEach(() => {
 });
 
 describe("api.authStatus", () => {
+  it("bypasses caches and includes the current browser session", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      auth_required: true,
+      access_control_enabled: true,
+      authenticated: false,
+    }));
+
+    await api.authStatus();
+
+    expect(mockFetch).toHaveBeenCalledWith("/api/auth/status", {
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      credentials: "include",
+    });
+  });
+
   it("treats a legacy open backend as the local administrator", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ auth_required: false, authenticated: false }));
 

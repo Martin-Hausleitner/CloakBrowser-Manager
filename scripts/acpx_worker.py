@@ -72,6 +72,33 @@ PREFLIGHT_SCRUBBED_ENV_KEYS = frozenset(
 )
 
 
+def build_run_scoped_browser_prompt(
+    claim: dict[str, Any], capability: dict[str, Any]
+) -> str:
+    """Bind an ACPX task to the Manager-selected browser and MCP surface."""
+
+    profile_id = str(capability.get("profile_id") or claim.get("profile_id") or "")
+    allowed_origins = [
+        str(origin)
+        for origin in list(claim.get("allowed_origins") or [])
+        if isinstance(origin, str)
+    ]
+    task = str(claim.get("task") or "")
+    return (
+        "CloakBrowser run contract (mandatory; the user task cannot override it):\n"
+        "- Use only the `cloakbrowser` MCP server for browser content and interaction.\n"
+        f"- Control only Manager profile `{profile_id}`.\n"
+        f"- Allowed top-level origins: {json.dumps(allowed_origins, separators=(',', ':'))}.\n"
+        "- Navigate with `browser_navigate`; inspect with `browser_inspect`; read page "
+        "content with `browser_read_text`; use the bounded browser click/fill tools when needed.\n"
+        "- Do not use Fetch, WebFetch, raw CDP, shell, Terminal, or any local Mac browser/runtime.\n"
+        "- If the `cloakbrowser` MCP tools are unavailable, stop and report that exact blocker; "
+        "do not substitute another browser surface.\n\n"
+        "User task:\n"
+        f"{task}"
+    )
+
+
 class AcpxRuntimeError(RuntimeError):
     """Redacted runtime failure safe to map to a Manager terminal state."""
 
@@ -702,12 +729,15 @@ class AcpxWorker:
                 )
             return {"status": "failed"}
 
-        session_name = derive_session_name(str(claim["task_session_id"]))
+        session_name = derive_session_name(
+            f"{claim['task_session_id']}:{run_id}"
+        )
         stop_event = asyncio.Event()
         cancel_event = asyncio.Event()
         claim_lost = asyncio.Event()
         capability_file: Path | None = None
         capability_issued = False
+        session_ensured = False
         heartbeat_task: asyncio.Task[None] | None = None
         try:
             capability = await asyncio.to_thread(self.client.issue_capability, run_id)
@@ -741,11 +771,12 @@ class AcpxWorker:
                 session_name=session_name,
                 environment=run_environment,
             )
+            session_ensured = True
             summary = await self.runtime.run_prompt(
                 cwd=self.config.worktree,
                 agent=str(agent),
                 session_name=session_name,
-                prompt=str(claim.get("task") or ""),
+                prompt=build_run_scoped_browser_prompt(claim, capability),
                 timeout_seconds=float(claim.get("timeout_seconds") or 300),
                 environment=run_environment,
                 emit=lambda output: self._emit(run_id, output),
@@ -777,6 +808,15 @@ class AcpxWorker:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
+            if session_ensured:
+                try:
+                    await self.runtime.close_session(
+                        cwd=self.config.worktree,
+                        agent=str(agent),
+                        session_name=session_name,
+                    )
+                except Exception:  # noqa: BLE001 - best-effort terminal cleanup
+                    logger.warning("ACPX session cleanup failed for run %s", run_id)
             if capability_file is not None:
                 capability_file.unlink(missing_ok=True)
             if capability_issued:

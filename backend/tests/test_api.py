@@ -9,6 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from backend import main
+from backend import database as db
 from backend.browser_manager import RunningProfile
 
 
@@ -63,6 +64,36 @@ def test_create_profile_with_all_fields(app_client: TestClient):
     assert data["accent_color"] == "#1A2B3C"
     assert data["harness"] == "opencode"
     assert len(data["tags"]) == 1
+
+
+def test_profile_responses_do_not_expose_proxy_credentials(app_client: TestClient):
+    raw_proxy = "http://proxy-user:top-secret@proxy.test:8080"
+
+    created = app_client.post(
+        "/api/profiles",
+        json={"name": "Secret Proxy", "proxy": raw_proxy},
+    )
+
+    assert created.status_code == 201
+    created_data = created.json()
+    assert created_data["proxy"] is None
+    assert created_data["proxy_display"] == "http://proxy.test:8080"
+    assert "proxy-user" not in created.text
+    assert "top-secret" not in created.text
+    assert db.get_profile(created_data["id"])["proxy"] == raw_proxy
+
+    fetched = app_client.get(f"/api/profiles/{created_data['id']}")
+    listed = app_client.get("/api/profiles")
+
+    assert fetched.status_code == 200
+    assert listed.status_code == 200
+    assert fetched.json()["proxy"] is None
+    assert fetched.json()["proxy_display"] == "http://proxy.test:8080"
+    assert all(profile["proxy"] is None for profile in listed.json())
+    assert "proxy-user" not in fetched.text
+    assert "top-secret" not in fetched.text
+    assert "proxy-user" not in listed.text
+    assert "top-secret" not in listed.text
 
 
 def test_create_profile_invalid_platform(app_client: TestClient):

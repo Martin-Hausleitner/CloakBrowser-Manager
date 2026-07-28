@@ -248,6 +248,7 @@ function CompactSettingsCard({
   profile: Profile;
   onEdit: () => void;
 }) {
+  const proxyDisplay = profile.proxy_display ?? profile.proxy;
   const rows = [
     ["Viewport", `${profile.screen_width}×${profile.screen_height}`],
     ["Platform", profile.platform],
@@ -259,7 +260,7 @@ function CompactSettingsCard({
     ["Clipboard", profile.clipboard_sync ? "sync" : "off"],
     ["Color", profile.color_scheme || "default"],
     ["Search", profile.search_engine || "default"],
-    ["Proxy", profile.proxy ? "configured" : "none"],
+    ["Proxy", proxyDisplay ? "configured" : "none"],
     ["Headless", profile.headless ? "on" : "off"],
   ] as const;
 

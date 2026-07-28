@@ -50,6 +50,7 @@ def test_no_auth_profiles_accessible(client_no_auth: TestClient):
 def test_no_auth_status_shows_not_required(client_no_auth: TestClient):
     resp = client_no_auth.get("/api/auth/status")
     assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "private, no-store"
     data = resp.json()
     assert data["auth_required"] is False
     assert data["authenticated"] is False

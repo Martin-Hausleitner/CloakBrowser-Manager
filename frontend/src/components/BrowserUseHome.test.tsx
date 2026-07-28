@@ -14,6 +14,7 @@ const runningProfile: Profile = {
   harness: "browser-use",
   fingerprint_seed: 1,
   proxy: null,
+  proxy_display: null,
   timezone: null,
   locale: null,
   platform: "linux",
@@ -79,5 +80,33 @@ describe("BrowserUseHome", () => {
     expect(screen.queryByRole("button", { name: "Profiles" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Accounts" })).toBeNull();
     expect(screen.queryByRole("button", { name: "New in project" })).toBeNull();
+  });
+
+  it("shows configured proxy status from proxy_display when raw proxy is redacted", () => {
+    render(
+      <BrowserUseHome
+        projects={["default"]}
+        projectId="default"
+        harness="browser-use"
+        profiles={[{ ...runningProfile, proxy: null, proxy_display: "http://proxy.test:8080" }]}
+        task=""
+        canManage
+        selectedProfile={{ ...runningProfile, proxy: null, proxy_display: "http://proxy.test:8080" }}
+        onProjectChange={vi.fn()}
+        onHarnessChange={vi.fn()}
+        onTaskChange={vi.fn()}
+        onSelectProfile={vi.fn()}
+        onOpenSettings={vi.fn()}
+        onOpenProxies={vi.fn()}
+        onOpenProfiles={vi.fn()}
+        onOpenAccounts={vi.fn()}
+        onCreateProjectProfile={vi.fn()}
+        onLaunchSelected={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Proxy").nextElementSibling?.textContent).toBe("configured");
+    expect(document.body.textContent).not.toContain("proxy-user");
+    expect(document.body.textContent).not.toContain("top-secret");
   });
 });

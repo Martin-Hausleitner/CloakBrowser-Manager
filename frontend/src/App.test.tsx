@@ -295,6 +295,7 @@ describe("App Browser Use home handoff", () => {
 
     const outputRegion = await screen.findByRole("region", { name: "Managed task output" });
     expect((await screen.findByTestId("mock-profile-viewer")).textContent).toContain("viewer:profile-browser-use");
+    expect(screen.getByTestId("mock-live-dev-panel")).toBeTruthy();
     expect(apiMock.getTaskRun).toHaveBeenCalledWith("run-mobile-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(apiMock.listTaskRunOutputs).toHaveBeenCalledWith("run-mobile-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(within(outputRegion).getByRole("list", { name: /agent output/i })).toBeTruthy();

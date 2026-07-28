@@ -49,6 +49,7 @@ interface MobileSplitScreenProps {
   canManageAccess: boolean;
   identityName: string | null;
   browserView: ReactNode;
+  liveMetricsView?: ReactNode;
   browserZoom: number;
   taskOutputs?: TaskOutput[];
   browserConnectionStatus: "connecting" | "connected" | "reconnecting" | "failed" | null;
@@ -240,6 +241,7 @@ export function MobileSplitScreen({
   canManageAccess,
   identityName,
   browserView,
+  liveMetricsView = null,
   browserZoom,
   taskOutputs = [],
   browserConnectionStatus,
@@ -1248,6 +1250,8 @@ export function MobileSplitScreen({
             </div>
           </>
         ) : null}
+
+        {liveMetricsView}
 
         <div className={`mobile-browser-wrap ${isLiveBrowser ? "mobile-browser-wrap-live" : "px-3 pb-2"}`}>
           {fullscreenOpen ? renderFullscreenControls() : null}

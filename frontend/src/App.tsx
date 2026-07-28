@@ -488,6 +488,16 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           canManageAccess={canManageProfiles && accessControlEnabled}
           identityName={identity?.display_name ?? null}
           browserView={browserView}
+          liveMetricsView={
+            selected ? (
+              <LiveDevPanel
+                profileId={selected.id}
+                running={selected.status === "running"}
+                connectionStatus={mobileConnectionStatus}
+                variant="mobile"
+              />
+            ) : null
+          }
           browserZoom={mobileBrowserZoom}
           taskOutputs={mobileTaskOutputs}
           browserConnectionStatus={selected?.status === "running" ? mobileConnectionStatus : null}

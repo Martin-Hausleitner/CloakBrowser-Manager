@@ -18,7 +18,7 @@ from typing import Any
 ACPX_VERSION = "0.12.1"
 ACP_SDK_CONTRACT_BASELINE = "1.2.1"
 EVENT_VERSION = 1
-MAX_EVENT_BYTES = 65_536
+MAX_EVENT_BYTES = 1_048_576
 SUPPORTED_AGENTS = frozenset(
     {"codex", "claude", "cursor", "grok-build", "opencode"}
 )

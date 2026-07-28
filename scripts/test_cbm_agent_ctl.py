@@ -95,6 +95,117 @@ def test_tasks_run_builds_browser_use_request(monkeypatch: pytest.MonkeyPatch):
     assert captured["body"]["allowed_origins"] == ["https://example.com"]
 
 
+def test_tasks_run_builds_grok_acpx_request(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, query=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"id": "run-grok", "status": "queued"}
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(
+        [
+            "tasks",
+            "run",
+            "session-grok",
+            "--profile-id",
+            "profile-1",
+            "--task",
+            "Read the page title",
+            "--allowed-origin",
+            "https://example.com",
+            "--harness",
+            "acpx",
+            "--agent",
+            "grok-build",
+        ]
+    )
+    args.func(args)
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/api/task-sessions/session-grok/runs"
+    assert captured["body"]["harness"] == "acpx"
+    assert captured["body"]["agent"] == "grok-build"
+
+
+def test_tasks_run_requires_an_explicit_acpx_agent(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(
+        mod,
+        "_request",
+        lambda *_args, **_kwargs: pytest.fail("invalid ACPX request reached the API"),
+    )
+    args = mod.build_parser().parse_args(
+        [
+            "tasks",
+            "run",
+            "session-grok",
+            "--profile-id",
+            "profile-1",
+            "--task",
+            "Read the page title",
+            "--allowed-origin",
+            "https://example.com",
+            "--harness",
+            "acpx",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="--agent is required with --harness acpx"):
+        args.func(args)
+
+
+def test_tasks_run_rejects_acpx_agent_for_browser_use(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(
+        mod,
+        "_request",
+        lambda *_args, **_kwargs: pytest.fail("invalid Browser Use request reached the API"),
+    )
+    args = mod.build_parser().parse_args(
+        [
+            "tasks",
+            "run",
+            "session-browser-use",
+            "--profile-id",
+            "profile-1",
+            "--task",
+            "Read the page title",
+            "--harness",
+            "browser-use",
+            "--agent",
+            "grok-build",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="--agent is only valid with --harness acpx"):
+        args.func(args)
+
+
 def test_mutating_commands_emit_idempotency_and_version_headers(monkeypatch: pytest.MonkeyPatch):
     import importlib.util
 
@@ -252,6 +363,70 @@ def test_runs_cancel_posts_cancel(monkeypatch: pytest.MonkeyPatch):
     args = mod.build_parser().parse_args(["runs", "cancel", "run-1"])
     args.func(args)
     assert captured == {"method": "POST", "path": "/api/task-runs/run-1/cancel"}
+
+
+def test_runs_retry_health_posts_retry(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, query=None, **_options):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"id": "run-1", "status": "queued"}
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(["runs", "retry-health", "run-1"])
+    args.func(args)
+
+    assert captured == {
+        "method": "POST",
+        "path": "/api/task-runs/run-1/retry-health",
+        "body": None,
+    }
+
+
+def test_runs_override_health_posts_audited_reason(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, query=None, **_options):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"id": "run-1", "status": "queued"}
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(
+        [
+            "runs",
+            "override-health",
+            "run-1",
+            "--reason",
+            "Harmless example.com acceptance proof",
+        ]
+    )
+    args.func(args)
+
+    assert captured == {
+        "method": "POST",
+        "path": "/api/task-runs/run-1/override-health",
+        "body": {"reason": "Harmless example.com acceptance proof"},
+    }
 
 
 def test_cli_profiles_create_builds_expected_request(monkeypatch: pytest.MonkeyPatch):

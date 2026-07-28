@@ -21,6 +21,7 @@ Examples:
   scripts/cbm_agent_ctl.py profiles stop <id>
   scripts/cbm_agent_ctl.py tasks create --profile-id <id> --title "demo"
   scripts/cbm_agent_ctl.py tasks run <session_id> --profile-id <id> --task "Read title" --allowed-origin https://example.com
+  scripts/cbm_agent_ctl.py tasks run <session_id> --profile-id <id> --harness acpx --agent grok-build --task "Read title" --allowed-origin https://example.com
   scripts/cbm_agent_ctl.py runs get <run_id>
   scripts/cbm_agent_ctl.py runs cancel <run_id>
   scripts/cbm_agent_ctl.py worktree-audit --root /path/to/repo
@@ -513,7 +514,7 @@ def cmd_tasks_create(args: argparse.Namespace) -> None:
 
 def cmd_tasks_run(args: argparse.Namespace) -> None:
     body: dict[str, Any] = {
-        "harness": "browser-use",
+        "harness": args.harness,
         "task": args.task,
         "profile_id": args.profile_id,
         "launch_if_stopped": bool(args.launch_if_stopped),
@@ -521,6 +522,12 @@ def cmd_tasks_run(args: argparse.Namespace) -> None:
         "max_steps": args.max_steps,
         "timeout_seconds": args.timeout_seconds,
     }
+    if args.harness == "acpx":
+        if not args.agent:
+            raise SystemExit("--agent is required with --harness acpx")
+        body["agent"] = args.agent
+    elif args.agent:
+        raise SystemExit("--agent is only valid with --harness acpx")
     if args.model_alias:
         body["model_alias"] = args.model_alias
     _print(
@@ -540,6 +547,25 @@ def cmd_runs_get(args: argparse.Namespace) -> None:
 
 def cmd_runs_cancel(args: argparse.Namespace) -> None:
     _print(_request("POST", f"/api/task-runs/{args.run_id}/cancel", **_request_options(args)), args.json)
+
+
+def cmd_runs_retry_health(args: argparse.Namespace) -> None:
+    _print(
+        _request("POST", f"/api/task-runs/{args.run_id}/retry-health", **_request_options(args)),
+        args.json,
+    )
+
+
+def cmd_runs_override_health(args: argparse.Namespace) -> None:
+    _print(
+        _request(
+            "POST",
+            f"/api/task-runs/{args.run_id}/override-health",
+            body={"reason": args.reason},
+            **_request_options(args),
+        ),
+        args.json,
+    )
 
 
 def cmd_runs_outputs(args: argparse.Namespace) -> None:
@@ -769,10 +795,21 @@ def build_parser() -> argparse.ArgumentParser:
     tc.add_argument("--title")
     tc.set_defaults(func=cmd_tasks_create)
 
-    tr = tsub.add_parser("run", help="Queue a Browser-Use run on a task session")
+    tr = tsub.add_parser("run", help="Queue a managed Browser Use or ACPX run")
     tr.add_argument("session_id")
     tr.add_argument("--profile-id", required=True)
     tr.add_argument("--task", required=True)
+    tr.add_argument(
+        "--harness",
+        choices=["browser-use", "acpx"],
+        default="browser-use",
+        help="Managed worker backend",
+    )
+    tr.add_argument(
+        "--agent",
+        choices=["codex", "claude", "cursor", "grok-build", "opencode"],
+        help="ACPX adapter; valid only with --harness acpx",
+    )
     tr.add_argument(
         "--allowed-origin",
         action="append",
@@ -785,7 +822,7 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--model-alias")
     tr.set_defaults(func=cmd_tasks_run)
 
-    runs = sub.add_parser("runs", help="Inspect or cancel Browser-Use runs")
+    runs = sub.add_parser("runs", help="Inspect or cancel managed browser runs")
     rsub = runs.add_subparsers(dest="runs_command", required=True)
 
     rg = rsub.add_parser("get", help="Inspect one run")
@@ -795,6 +832,18 @@ def build_parser() -> argparse.ArgumentParser:
     rc = rsub.add_parser("cancel", help="Cancel one run")
     rc.add_argument("run_id")
     rc.set_defaults(func=cmd_runs_cancel)
+
+    rrh = rsub.add_parser("retry-health", help="Refresh the health gate for one blocked run")
+    rrh.add_argument("run_id")
+    rrh.set_defaults(func=cmd_runs_retry_health)
+
+    roh = rsub.add_parser(
+        "override-health",
+        help="Apply an explicit audited override to an overridable health block",
+    )
+    roh.add_argument("run_id")
+    roh.add_argument("--reason", required=True)
+    roh.set_defaults(func=cmd_runs_override_health)
 
     ro = rsub.add_parser("outputs", help="List typed outputs for a run")
     ro.add_argument("run_id")

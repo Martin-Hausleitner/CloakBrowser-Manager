@@ -417,8 +417,20 @@ def test_event_parser_enforces_envelope_version_and_size():
     assert event["seq"] == 4
     with pytest.raises(ValueError, match="eventVersion"):
         parse_acpx_event('{"eventVersion":2,"type":"assistant_message"}')
+    large_event = json.dumps(
+        {
+            "eventVersion": 1,
+            "sessionId": "session-1",
+            "requestId": "request-1",
+            "seq": 5,
+            "stream": "assistant",
+            "type": "assistant_message",
+            "text": "x" * 100_000,
+        }
+    )
+    assert parse_acpx_event(large_event)["seq"] == 5
     with pytest.raises(ValueError, match="too large"):
-        parse_acpx_event(" " * 70_000)
+        parse_acpx_event(" " * 1_048_577)
 
 
 @pytest.mark.parametrize(

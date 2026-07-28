@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_HARNESS = "acpx"
 CLAIM_PATH = "/internal/task-runs/claim"
 CLAIM_QUERY = urlencode({"harness": SUPPORTED_HARNESS})
-MAX_CONTROL_LINE_BYTES = 65_536
+MAX_CONTROL_LINE_BYTES = 1_048_576
 MAX_STDERR_BYTES = 16_384
 CONTROL_TERMINATE_TIMEOUT_SECONDS = 2.0
 CLOSE_SESSION_ATTEMPTS = 2
@@ -333,6 +333,7 @@ class AcpxRuntime:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=child_env,
+            limit=MAX_CONTROL_LINE_BYTES + 1,
         )
         if process.stdin is None or process.stdout is None:
             process.kill()
@@ -364,9 +365,12 @@ class AcpxRuntime:
         async def consume_stdout() -> None:
             nonlocal jsonrpc_seq, last_summary, prompt_request_id, protocol_error
             async for raw_line in process.stdout:
-                if len(raw_line) > MAX_CONTROL_LINE_BYTES:
+                frame_bytes = raw_line[:-1] if raw_line.endswith(b"\n") else raw_line
+                if frame_bytes.endswith(b"\r"):
+                    frame_bytes = frame_bytes[:-1]
+                if len(frame_bytes) > MAX_CONTROL_LINE_BYTES:
                     raise AcpxRuntimeError("ACPX output line exceeds size bound")
-                line = raw_line.decode("utf-8", errors="replace").strip()
+                line = frame_bytes.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
                 try:

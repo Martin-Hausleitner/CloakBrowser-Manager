@@ -225,6 +225,37 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
   });
 
+  it("detects and manually tests the selected managed harness", async () => {
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: harness !== "stagehand",
+      state: harness === "stagehand" ? "unavailable" : "polling",
+      last_seen_at: harness === "stagehand" ? null : "2026-07-27T00:00:00Z",
+      reason: harness === "stagehand" ? "No authenticated Stagehand worker has checked in" : null,
+    }));
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Show workspace settings" }));
+    fireEvent.change(screen.getByTestId("orca-agent-select"), { target: { value: "stagehand" } });
+    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything()));
+    apiMock.getTaskHarnessPresence.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Test selected harness" }));
+
+    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything()));
+    expect(screen.getByTestId("harness-readiness").textContent).toMatch(/stagehand.*unavailable/i);
+    expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
+  });
+
   it("renders a full-view grid of running browsers while keeping stopped profiles out", async () => {
     const alternate = {
       ...runningProfile,
@@ -911,6 +942,78 @@ describe("AgentBrowserWorkspace", () => {
     });
     expect(await screen.findByText("navigate")).toBeTruthy();
     expect(screen.getByTestId("browser-use-output")).toBeTruthy();
+  });
+
+  it("switches to a ready Unbrowse worker and queues an Unbrowse run", async () => {
+    const unbrowseProfile: Profile = { ...runningProfile, harness: "unbrowse" };
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: harness === "unbrowse",
+      state: harness === "unbrowse" ? "polling" : "unavailable",
+      last_seen_at: harness === "unbrowse" ? "2026-07-29T00:00:00Z" : null,
+      reason: harness === "unbrowse" ? null : "No worker",
+    }));
+    apiMock.createTaskSession.mockResolvedValue({
+      id: "task-unbrowse",
+      profile_id: unbrowseProfile.id,
+      sandbox_id: "default",
+      title: "Inspect example.com",
+      status: "active",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-29T00:00:00Z",
+      updated_at: "2026-07-29T00:00:00Z",
+      metadata: {},
+    });
+    apiMock.createTaskRun.mockResolvedValue({
+      id: "run-unbrowse",
+      task_session_id: "task-unbrowse",
+      task_message_id: "message-unbrowse",
+      profile_id: unbrowseProfile.id,
+      profile_id_snapshot: unbrowseProfile.id,
+      sandbox_id: "default",
+      harness: "unbrowse",
+      status: "queued",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: null,
+      deadline_at: "2026-07-29T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {},
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-29T00:00:00Z",
+      updated_at: "2026-07-29T00:00:00Z",
+    });
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[unbrowseProfile]}
+        selectedProfile={unbrowseProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("unbrowse", expect.anything()));
+    fireEvent.change(screen.getByTestId("orca-prompt"), {
+      target: { value: "Inspect https://example.com" },
+    });
+    fireEvent.click(screen.getByTestId("orca-launch"));
+
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+      "task-unbrowse",
+      expect.objectContaining({
+        harness: "unbrowse",
+        agent: null,
+        profile_id: unbrowseProfile.id,
+      }),
+    ));
   });
 
   it("switches compact Browser Terminal and ACP modes without remounting the live viewer", async () => {

@@ -4,6 +4,7 @@ import {
   Camera,
   MonitorSmartphone,
   Play,
+  RefreshCw,
   SendHorizontal,
   Settings2,
   Square,
@@ -32,7 +33,8 @@ import { ProfileViewer } from "../ProfileViewer";
 import { LiveDevPanel } from "../LiveDevPanel";
 import { AgentOutputTimeline } from "./AgentOutputTimeline";
 
-type AgentMode = "browser-use" | "acpx" | "antigravity" | OrcaAgentCli;
+type ManagedHarness = "browser-use" | "acpx" | "unbrowse" | "stagehand";
+type AgentMode = ManagedHarness | "antigravity" | OrcaAgentCli;
 type FullViewPanel = "view" | "viewport" | "sessions" | null;
 type FullViewFitMode = "fit" | "width" | "height";
 type FullViewMode = "single" | "grid";
@@ -42,6 +44,8 @@ const MAX_DESKTOP_GRID_STREAMS = 6;
 const AGENT_OPTIONS: AgentMode[] = [
   "browser-use",
   "acpx",
+  "unbrowse",
+  "stagehand",
   "antigravity",
   "agy",
   "grok",
@@ -57,8 +61,24 @@ const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
 function preferredAgent(profile: Profile | null): AgentMode {
   if (profile?.harness === "browser-use") return "browser-use";
   if (profile?.harness === "acpx") return "acpx";
+  if (profile?.harness === "unbrowse") return "unbrowse";
+  if (profile?.harness === "stagehand") return "stagehand";
   if (profile?.harness === "antigravity") return "antigravity";
   return "agy";
+}
+
+const MANAGED_HARNESSES: readonly ManagedHarness[] = [
+  "browser-use",
+  "acpx",
+  "unbrowse",
+  "stagehand",
+];
+
+function managedHarnessLabel(harness: ManagedHarness): string {
+  if (harness === "browser-use") return "Browser Use";
+  if (harness === "acpx") return "ACPX";
+  if (harness === "unbrowse") return "Unbrowse";
+  return "Stagehand";
 }
 
 function allowedOrigins(task: string): string[] {
@@ -156,8 +176,9 @@ export function AgentBrowserWorkspace({
   const [session, setSession] = useState<OrcaSession | null>(null);
   const [taskSessionId, setTaskSessionId] = useState<string | null>(null);
   const [taskRun, setTaskRun] = useState<TaskRun | null>(null);
-  const [acpxPresence, setAcpxPresence] = useState<TaskHarnessPresence | null>(null);
+  const [harnessPresence, setHarnessPresence] = useState<Partial<Record<ManagedHarness, TaskHarnessPresence>>>({});
   const [acpxPreflights, setAcpxPreflights] = useState<TaskHarnessAgentPreflight[]>([]);
+  const [harnessCheckBusy, setHarnessCheckBusy] = useState(false);
   const [taskOutputs, setTaskOutputs] = useState<TaskOutput[]>([]);
   const [transcript, setTranscript] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -209,12 +230,28 @@ export function AgentBrowserWorkspace({
   const unavailable = caps != null && !caps.available;
   const browserUseMode = agent === "browser-use";
   const acpxMode = agent === "acpx";
+  const unbrowseMode = agent === "unbrowse";
+  const stagehandMode = agent === "stagehand";
   const antigravityMode = agent === "antigravity";
   const antigravitySupported = selectedProfile?.harness === "antigravity";
   const acpxBackedMode = acpxMode || antigravityMode;
   const selectedAcpxAgent: AcpxAgent = antigravityMode ? "grok-build" : acpxAgent;
   const selectedAcpxPreflight = acpxPreflights.find((item) => item.agent === selectedAcpxAgent);
-  const managedRunMode = browserUseMode || acpxBackedMode;
+  const managedRunMode = browserUseMode || acpxBackedMode || unbrowseMode || stagehandMode;
+  const managedHarness: ManagedHarness = acpxBackedMode
+    ? "acpx"
+    : unbrowseMode
+      ? "unbrowse"
+      : stagehandMode
+        ? "stagehand"
+        : "browser-use";
+  const selectedHarnessPresence = managedRunMode ? harnessPresence[managedHarness] ?? null : null;
+  const selectedCliReady = !managedRunMode && caps?.available === true && caps.agents.includes(agent as OrcaAgentCli);
+  const selectedHarnessReady = managedRunMode
+    ? selectedHarnessPresence?.worker_seen_recently === true && (
+      !acpxBackedMode || selectedAcpxPreflight?.ready === true
+    )
+    : selectedCliReady;
   const managedRunActive = Boolean(taskRun && ACTIVE_TASK_RUN_STATES.has(taskRun.status));
   const orcaSessionActive = session?.status === "running" || session?.status === "starting";
   const sessionActive = managedRunMode ? managedRunActive : orcaSessionActive;
@@ -235,9 +272,7 @@ export function AgentBrowserWorkspace({
     selectedProfile?.status === "running" &&
     hasModePermissions &&
     (managedRunMode ? Boolean(prompt.trim()) && originList.length > 0 : !unavailable) &&
-    (!acpxBackedMode || (
-      acpxPresence?.worker_seen_recently === true && selectedAcpxPreflight?.ready === true
-    )) &&
+    selectedHarnessReady &&
     !sessionActive &&
     !busy;
   const canSend = Boolean(!managedRunMode && sessionActive && canInteract && prompt.trim() && !busy);
@@ -313,34 +348,38 @@ export function AgentBrowserWorkspace({
     };
   }, []);
 
-  useEffect(() => {
-    if (!acpxBackedMode) {
-      setAcpxPresence(null);
-      setAcpxPreflights([]);
+  const refreshSelectedHarness = useCallback(async (signal?: AbortSignal) => {
+    if (!managedRunMode) {
+      setCaps(await api.getOrcaCapabilities());
       return;
     }
+    const presence = await api.getTaskHarnessPresence(managedHarness, { signal });
+    setHarnessPresence((current) => ({ ...current, [managedHarness]: presence }));
+    if (acpxBackedMode) {
+      const preflights = await api.getTaskHarnessPreflights("acpx", { signal });
+      setAcpxPreflights(preflights.agents);
+    } else {
+      setAcpxPreflights([]);
+    }
+  }, [acpxBackedMode, managedHarness, managedRunMode]);
+
+  useEffect(() => {
+    if (!managedRunMode) return;
     const controller = new AbortController();
     let cancelled = false;
     const refresh = async () => {
       try {
-        const [presence, preflights] = await Promise.all([
-          api.getTaskHarnessPresence("acpx", { signal: controller.signal }),
-          api.getTaskHarnessPreflights("acpx", { signal: controller.signal }),
-        ]);
-        if (!cancelled) {
-          setAcpxPresence(presence);
-          setAcpxPreflights(preflights.agents);
-        }
+        await refreshSelectedHarness(controller.signal);
       } catch (err) {
         if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
-        setAcpxPresence({
-          harness: "acpx",
+        setHarnessPresence((current) => ({ ...current, [managedHarness]: {
+          harness: managedHarness,
           worker_seen_recently: false,
           state: "unavailable",
           last_seen_at: null,
-          reason: "ACPX worker readiness could not be verified",
-        });
-        setAcpxPreflights([]);
+          reason: `${managedHarnessLabel(managedHarness)} readiness could not be verified`,
+        } }));
+        if (acpxBackedMode) setAcpxPreflights([]);
       }
     };
     void refresh();
@@ -350,7 +389,31 @@ export function AgentBrowserWorkspace({
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [acpxBackedMode]);
+  }, [acpxBackedMode, managedHarness, managedRunMode, refreshSelectedHarness]);
+
+  const handleHarnessCheck = useCallback(async () => {
+    if (harnessCheckBusy) return;
+    setHarnessCheckBusy(true);
+    setError(null);
+    try {
+      if (!managedRunMode) {
+        setCaps(await api.getOrcaCapabilities());
+        return;
+      }
+      const presences = await Promise.all(
+        MANAGED_HARNESSES.map((harness) => api.getTaskHarnessPresence(harness, {})),
+      );
+      setHarnessPresence(Object.fromEntries(
+        presences.map((presence) => [presence.harness, presence]),
+      ) as Partial<Record<ManagedHarness, TaskHarnessPresence>>);
+      const preflights = await api.getTaskHarnessPreflights("acpx", {});
+      setAcpxPreflights(preflights.agents);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Harness readiness check failed");
+    } finally {
+      setHarnessCheckBusy(false);
+    }
+  }, [harnessCheckBusy, managedRunMode]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current != null) {
@@ -592,7 +655,6 @@ export function AgentBrowserWorkspace({
         if (!origins.length) {
           throw new Error("Managed browser tasks must include an explicit http(s) URL.");
         }
-        const managedHarness = acpxBackedMode ? "acpx" : "browser-use";
         let sessionId = taskSessionId;
         if (!sessionId) {
           const created = await api.createTaskSession({
@@ -640,7 +702,7 @@ export function AgentBrowserWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [acpxBackedMode, agent, antigravityMode, browserUseMode, canStart, managedRunMode, prompt, selectedAcpxAgent, selectedProfile, taskSessionId]);
+  }, [acpxBackedMode, agent, antigravityMode, browserUseMode, canStart, managedHarness, managedRunMode, prompt, selectedAcpxAgent, selectedProfile, taskSessionId]);
 
   const handleSend = useCallback(async () => {
     if (!session || !canSend) return;
@@ -852,6 +914,33 @@ export function AgentBrowserWorkspace({
               ))}
             </div>
             <div className="flex items-center gap-1">
+              <span
+                className={`max-w-[6.5rem] truncate rounded px-1.5 py-1 text-[9px] font-medium ${
+                  selectedHarnessReady
+                    ? "bg-emerald-950/70 text-emerald-300"
+                    : "bg-amber-950/60 text-amber-300"
+                }`}
+                data-testid="harness-readiness"
+                title={managedRunMode
+                  ? selectedHarnessPresence?.reason || `${managedHarnessLabel(managedHarness)} readiness`
+                  : `${agent} readiness`}
+              >
+                {managedRunMode ? managedHarnessLabel(managedHarness) : agent} · {harnessCheckBusy
+                  ? "Checking"
+                  : selectedHarnessReady
+                    ? "Ready"
+                    : "Unavailable"}
+              </span>
+              <button
+                type="button"
+                className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#3c3c43] bg-[#18181b] text-[#d4d4d8] hover:border-[#60606b] hover:bg-[#232329] disabled:opacity-40"
+                onClick={() => void handleHarnessCheck()}
+                disabled={harnessCheckBusy || sessionActive}
+                aria-label="Test selected harness"
+                title="Refresh local harness readiness"
+              >
+                <RefreshCw className={`h-3 w-3 ${harnessCheckBusy ? "animate-spin" : ""}`} aria-hidden="true" />
+              </button>
               <button
                 type="button"
                 className="btn btn-primary inline-flex h-7 items-center gap-1 px-2 text-[10px]"
@@ -881,13 +970,13 @@ export function AgentBrowserWorkspace({
               {managedRunMode
                 ? taskRun
                   ? `Managed worker · ${taskRun.id}`
-                  : acpxBackedMode
-                    ? acpxPresence?.worker_seen_recently
+                  : selectedHarnessPresence?.worker_seen_recently
+                    ? acpxBackedMode
                       ? selectedAcpxPreflight?.ready
                         ? `Managed run · ${selectedAcpxAgent} · ACP ready`
                         : `Managed run · ${selectedAcpxAgent} · ${selectedAcpxPreflight?.state ?? "checking"}`
-                      : `Managed run · ${selectedAcpxAgent} · ${acpxPresence?.state ?? "checking"}`
-                    : "Managed VCVM worker"
+                      : `Managed run · ${managedHarnessLabel(managedHarness)} · ready`
+                    : `Managed run · ${managedHarnessLabel(managedHarness)} · ${selectedHarnessPresence?.state ?? "checking"}`
                 : statusLabel(session, caps)}
               {!managedRunMode && session ? ` · ${session.terminal_handle}` : ""}
             </div>
@@ -927,7 +1016,7 @@ export function AgentBrowserWorkspace({
             >
               {visibleAgentOptions.map((option) => (
                 <option key={option} value={option}>
-                  {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option === "antigravity" ? "Antigravity · ACPX/Grok" : option === "agy" ? "AGY · Live CLI" : option === "grok" ? "Grok · Live CLI" : option}
+                  {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option === "unbrowse" ? "Unbrowse" : option === "stagehand" ? "Stagehand" : option === "antigravity" ? "Antigravity · ACPX/Grok" : option === "agy" ? "AGY · Live CLI" : option === "grok" ? "Grok · Live CLI" : option}
                 </option>
               ))}
             </select>
@@ -969,16 +1058,16 @@ export function AgentBrowserWorkspace({
           </div>
         ) : null}
 
-        {acpxBackedMode && acpxPresence && !acpxPresence.worker_seen_recently ? (
+        {managedRunMode && selectedHarnessPresence && !selectedHarnessPresence.worker_seen_recently ? (
           <div
             className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1.5 text-[11px] text-amber-200"
-            data-testid="acpx-unavailable"
+            data-testid={acpxBackedMode ? "acpx-unavailable" : "managed-harness-unavailable"}
           >
-            {acpxPresence.reason || "ACPX worker unavailable"}
+            {selectedHarnessPresence.reason || `${managedHarnessLabel(managedHarness)} worker unavailable`}
           </div>
         ) : null}
 
-        {acpxBackedMode && acpxPresence?.worker_seen_recently && !selectedAcpxPreflight?.ready ? (
+        {acpxBackedMode && selectedHarnessPresence?.worker_seen_recently && !selectedAcpxPreflight?.ready ? (
           <div
             className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1.5 text-[11px] text-amber-200"
             data-testid="acpx-agent-unavailable"
@@ -1054,7 +1143,7 @@ export function AgentBrowserWorkspace({
                   ? "Antigravity · ACPX/Grok"
                   : acpxMode
                     ? `ACPX with ${selectedAcpxAgent}`
-                    : "Browser Use"}. Actions, screenshots, data and the
+                    : managedHarnessLabel(managedHarness)}. Actions, screenshots, data and the
                 final summary appear here as typed cards.
               </p>
             )}

@@ -1135,6 +1135,81 @@ else:
     assert outputs[0]["kind"] == "summary"
 
 
+def test_real_runtime_accepts_a_bounded_large_acpx_frame(tmp_path: Path):
+    executable = tmp_path / "fake-acpx-large-frame"
+    executable.write_text(
+        """#!/usr/bin/env python3
+import json, sys
+if '--version' in sys.argv:
+    print('0.12.1')
+elif 'ensure' in sys.argv:
+    print(json.dumps({'acpxRecordId': 'record-1', 'acpxSessionId': 'session-1'}))
+else:
+    sys.stdin.read()
+    print(json.dumps({'eventVersion': 1, 'sessionId': 'session-1', 'requestId': 'r1', 'seq': 1, 'stream': 'prompt', 'type': 'assistant_message', 'text': 'x' * 100000}))
+""",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(replace(make_config(tmp_path), acpx_executable=str(executable)))
+
+    async def scenario():
+        return await runtime.run_prompt(
+            cwd=tmp_path,
+            agent="grok-build",
+            session_name="cbm-0123456789abcdef0123456789abcdef",
+            prompt="Inspect",
+            timeout_seconds=5,
+            environment={},
+            emit=lambda output: _append_async([], output),
+            cancel_event=asyncio.Event(),
+        )
+
+    summary = asyncio.run(scenario())
+    assert summary == "x" * 500
+
+
+def test_real_runtime_accepts_exact_frame_bound_with_ndjson_newline(tmp_path: Path):
+    event = {
+        "eventVersion": 1,
+        "sessionId": "session-1",
+        "requestId": "r1",
+        "seq": 1,
+        "stream": "prompt",
+        "type": "assistant_message",
+        "text": "",
+    }
+    compact = json.dumps(event, separators=(",", ":"))
+    event["text"] = "x" * (1_048_576 - len(compact.encode("utf-8")))
+    frame = json.dumps(event, separators=(",", ":")).encode("utf-8")
+    assert len(frame) == 1_048_576
+
+    executable = tmp_path / "fake-acpx-exact-frame-bound"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stdin.read()\n"
+        f"sys.stdout.buffer.write({frame!r} + b'\\n')\n",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(replace(make_config(tmp_path), acpx_executable=str(executable)))
+
+    async def scenario():
+        return await runtime.run_prompt(
+            cwd=tmp_path,
+            agent="grok-build",
+            session_name="cbm-0123456789abcdef0123456789abcdef",
+            prompt="Inspect",
+            timeout_seconds=5,
+            environment={},
+            emit=lambda output: _append_async([], output),
+            cancel_event=asyncio.Event(),
+        )
+
+    assert asyncio.run(scenario()) == "x" * 500
+
+
 def test_real_runtime_converts_raw_jsonrpc_auth_error_without_leaking_secret(tmp_path: Path):
     executable = tmp_path / "fake-acpx-error"
     executable.write_text(

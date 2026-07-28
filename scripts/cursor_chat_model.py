@@ -349,7 +349,7 @@ class CursorAgentChatModel:
             raise CursorAgentError("workspace must not be a symlink")
         return root
 
-    def _argv(self, workspace: Path) -> list[str]:
+    def _argv(self, workspace: Path, *, schema: type[BaseModel] | None = None) -> list[str]:
         argv = [
             "cursor-agent",
             "--print",
@@ -364,6 +364,12 @@ class CursorAgentChatModel:
         if self._model_alias:
             argv.extend(["--model", self._model_alias])
         return argv
+
+    def _process_label(self) -> str:
+        return str(self.provider or "cursor-agent")
+
+    def _extract_stdout_payload(self, stdout: str) -> Any:
+        return _extract_result_payload(stdout)
 
     def _drain_runner_done(self, done: threading.Event) -> None:
         """Block until runner thread finishes (cancel-safe, bounded).
@@ -399,7 +405,8 @@ class CursorAgentChatModel:
                 start_new_session=True,
             )
         except OSError as exc:
-            raise CursorAgentError(f"failed to start cursor-agent: {exc}") from exc
+            label = self._process_label()
+            raise CursorAgentError(f"failed to start {label}: {exc}") from exc
 
         box: dict[str, Any] = {}
 
@@ -442,12 +449,13 @@ class CursorAgentChatModel:
             except subprocess.TimeoutExpired:
                 pass
             if timed_out:
-                raise CursorAgentTimeout("cursor-agent timed out", pid=pid)
-            raise CursorAgentError("cursor-agent cancelled")
+                raise CursorAgentTimeout(f"{self._process_label()} timed out", pid=pid)
+            raise CursorAgentError(f"{self._process_label()} cancelled")
 
+        label = self._process_label()
         thread.join(2)
         if "error" in box:
-            raise CursorAgentError(f"cursor-agent I/O failed: {box['error']}")
+            raise CursorAgentError(f"{label} I/O failed: {box['error']}")
         completed = subprocess.CompletedProcess(
             args=list(argv),
             returncode=int(box.get("returncode") or 0),
@@ -456,7 +464,7 @@ class CursorAgentChatModel:
         )
         if completed.returncode != 0:
             raise CursorAgentError(
-                f"cursor-agent exited {completed.returncode}: {completed.stderr or completed.stdout}"
+                f"{label} exited {completed.returncode}: {completed.stderr or completed.stdout}"
             )
         return completed
 
@@ -502,7 +510,7 @@ class CursorAgentChatModel:
         try:
             try:
                 serialized, temps = serialize_messages(messages, workspace)
-                argv = self._argv(workspace)
+                argv = self._argv(workspace, schema=schema)
                 last_error: Exception | None = None
                 prior_error: str | None = None
                 loop = asyncio.get_running_loop()
@@ -513,7 +521,7 @@ class CursorAgentChatModel:
                     )
                     runner_done = threading.Event()
 
-                    def _run_invoke(p: str = prompt) -> Any:
+                    def _run_invoke(p: str = prompt, done: threading.Event = runner_done) -> Any:
                         try:
                             return self._call_runner(
                                 argv,
@@ -522,7 +530,7 @@ class CursorAgentChatModel:
                                 input_text=p,
                             )
                         finally:
-                            runner_done.set()
+                            done.set()
 
                     runner_fut: asyncio.Future[Any] = loop.run_in_executor(
                         None, _run_invoke
@@ -536,7 +544,7 @@ class CursorAgentChatModel:
                             invoke_cancel.set()
                             self._drain_runner_done(runner_done)
                             raise
-                        payload = _extract_result_payload(completed.stdout)
+                        payload = self._extract_stdout_payload(completed.stdout)
                         return schema.model_validate(payload)
                     except CursorAgentTimeout as exc:
                         # run_cursor already killed the process group via getpgid.

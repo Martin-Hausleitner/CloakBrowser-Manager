@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlencode, urljoin, urlparse
 
+from scripts.claude_cli_chat_model import ClaudeCLIChatModel
 from scripts.cursor_chat_model import CursorAgentChatModel, redact_text
 
 logger = logging.getLogger(__name__)
@@ -54,12 +55,24 @@ ALLOWLISTED_FAIL_CODES = frozenset(
 MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024
 MAX_HEARTBEAT_TRANSIENT_FAILURES = 3
 ACTION_PAYLOAD_KEYS = frozenset({"name", "url", "selector", "text", "step", "target"})
+DEFAULT_LLM_PROVIDER = "cursor-agent"
+SUPPORTED_LLM_PROVIDERS = frozenset({DEFAULT_LLM_PROVIDER, "claude-cli"})
 
 # Browser Use per-call LLM wait must leave a cleanup margin under the run budget.
 # Formula: llm_timeout = run_timeout - clamp(run_timeout // 6, 15, 60),
 # then clamped to [1, run_timeout - 1]. For timeout_seconds=180 → margin 30 → 150.
 LLM_TIMEOUT_MARGIN_MIN = 15
 LLM_TIMEOUT_MARGIN_MAX = 60
+
+
+def select_llm_provider(provider: str | None) -> str:
+    """Normalize worker LLM provider, preserving cursor-agent as default."""
+    value = str(provider or "").strip()
+    if not value or value == "default":
+        return DEFAULT_LLM_PROVIDER
+    if value not in SUPPORTED_LLM_PROVIDERS:
+        raise ValueError("LLM provider must be cursor-agent or claude-cli")
+    return value
 
 
 def derive_browser_use_llm_timeout(run_timeout_seconds: float) -> int:
@@ -325,6 +338,7 @@ class WorkerConfig:
     default_max_steps: int = 20
     token: str | None = None
     token_file: str | None = None
+    llm_provider: str = DEFAULT_LLM_PROVIDER
 
 
 class ManagerHTTPError(RuntimeError):
@@ -626,6 +640,12 @@ async def _capture_screenshot_bytes(session: Any) -> bytes | None:
     return None
 
 
+def _llm_factory_for_provider(provider: str) -> Callable[..., Any]:
+    if select_llm_provider(provider) == "claude-cli":
+        return ClaudeCLIChatModel
+    return CursorAgentChatModel
+
+
 async def _disconnect_session(session: Any) -> None:
     """Disconnect CDP client without killing the Manager-owned browser."""
     if session is None:
@@ -897,6 +917,7 @@ class BrowserUseWorker:
             max_steps = int(claim.get("max_steps") or self.config.default_max_steps)
             raw_alias = claim.get("model_alias")
             model_alias = None if raw_alias in (None, "", "default") else str(raw_alias)
+            llm_provider = select_llm_provider(claim.get("llm_provider") or self.config.llm_provider)
 
             bu = _import_browser_use()
             session = bu.BrowserSession(
@@ -905,7 +926,11 @@ class BrowserUseWorker:
                 allowed_domains=allowed_domains,
                 keep_alive=True,
             )
-            llm = self._llm_factory(
+            llm_factory = self._llm_factory
+            if llm_factory is CursorAgentChatModel:
+                llm_factory = _llm_factory_for_provider(llm_provider)
+
+            llm = llm_factory(
                 model_alias=model_alias,
                 timeout_seconds=timeout_seconds,
             )
@@ -1065,6 +1090,11 @@ def build_worker_config(argv: list[str] | None = None) -> WorkerConfig:
         type=float,
         default=float(os.environ.get("CBM_WORKER_POLL_INTERVAL") or 2.0),
     )
+    parser.add_argument(
+        "--llm-provider",
+        choices=sorted(SUPPORTED_LLM_PROVIDERS),
+        default=os.environ.get("CBM_BROWSER_USE_LLM_PROVIDER") or DEFAULT_LLM_PROVIDER,
+    )
     args = parser.parse_args(argv)
     manager_url = str(args.manager_url or "").strip().rstrip("/")
     if not manager_url:
@@ -1084,6 +1114,7 @@ def build_worker_config(argv: list[str] | None = None) -> WorkerConfig:
         poll_interval_seconds=float(args.poll_interval),
         token=token,
         token_file=token_file,
+        llm_provider=select_llm_provider(args.llm_provider),
     )
 
 

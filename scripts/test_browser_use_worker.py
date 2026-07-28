@@ -16,13 +16,14 @@ from scripts.browser_use_worker import (
     WorkerConfig,
     build_worker_config,
     decode_screenshot_payload,
-    detect_image_media_type,
     derive_browser_use_llm_timeout,
+    detect_image_media_type,
     extract_screenshot_from_history,
     flatten_action_payload,
     main,
     sanitize_manager_error_message,
     sanitize_output_payload,
+    select_llm_provider,
     validate_worker_token,
 )
 
@@ -173,6 +174,36 @@ def test_build_worker_config_requires_url_and_valid_token(monkeypatch, tmp_path)
     assert cfg.worker_id == "w1"
     assert cfg.poll_interval_seconds == 0.05
     assert cfg.token == "cbm_worker_valid_token"
+    assert cfg.llm_provider == "cursor-agent"
+
+
+def test_build_worker_config_accepts_explicit_llm_provider(monkeypatch, tmp_path):
+    monkeypatch.delenv("CBM_BROWSER_USE_LLM_PROVIDER", raising=False)
+    token_file = tmp_path / "tok"
+    token_file.write_text("cbm_worker_valid_token\n", encoding="utf-8")
+
+    cfg = build_worker_config(
+        [
+            "--manager-url",
+            "https://manager.local",
+            "--token-file",
+            str(token_file),
+            "--llm-provider",
+            "claude-cli",
+        ]
+    )
+
+    assert cfg.llm_provider == "claude-cli"
+
+
+def test_select_llm_provider_defaults_to_cursor_and_rejects_unknown():
+    assert select_llm_provider(None) == "cursor-agent"
+    assert select_llm_provider("") == "cursor-agent"
+    assert select_llm_provider("default") == "cursor-agent"
+    assert select_llm_provider("cursor-agent") == "cursor-agent"
+    assert select_llm_provider("claude-cli") == "claude-cli"
+    with pytest.raises(ValueError):
+        select_llm_provider("openai")
 
 
 def test_capability_headers_and_allowed_origins_are_passed_to_browser_use(monkeypatch):

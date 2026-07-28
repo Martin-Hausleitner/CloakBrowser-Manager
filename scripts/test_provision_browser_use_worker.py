@@ -6,6 +6,7 @@ import importlib.util
 import io
 import os
 import re
+import shlex
 import stat
 import sys
 from pathlib import Path
@@ -192,7 +193,7 @@ def test_render_unit_uses_cli_flags_no_inline_token(tmp_path: Path):
     )
     assert str(paths["repo"]) in unit
     assert f"{paths['venv']}/bin/python" in unit
-    exec_line = [ln for ln in unit.splitlines() if ln.startswith("ExecStart=")][0]
+    exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
     assert " -m scripts.browser_use_worker " in f" {exec_line} " or (
         " -m " in exec_line and "scripts.browser_use_worker" in exec_line
     )
@@ -237,7 +238,7 @@ def test_render_unit_invokes_worker_as_module_from_repo_root(tmp_path: Path):
         template_path=TEMPLATE,
     )
     wd = [ln for ln in unit.splitlines() if ln.startswith("WorkingDirectory=")][0]
-    exec_line = [ln for ln in unit.splitlines() if ln.startswith("ExecStart=")][0]
+    exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
     assert str(paths["repo"].resolve()) in wd or str(paths["repo"]) in wd
     assert "-m" in exec_line
     assert "scripts.browser_use_worker" in exec_line
@@ -245,6 +246,81 @@ def test_render_unit_invokes_worker_as_module_from_repo_root(tmp_path: Path):
     # Module form keeps argv flags after -m module.
     assert "--manager-url" in exec_line
     assert "--token-file" in exec_line
+
+
+def test_validate_llm_provider_allowlist_and_rejection():
+    mod = _load()
+    assert mod.DEFAULT_LLM_PROVIDER == "cursor-agent"
+    assert mod.validate_llm_provider(None) == "cursor-agent"
+    assert mod.validate_llm_provider("cursor-agent") == "cursor-agent"
+    assert mod.validate_llm_provider("claude-cli") == "claude-cli"
+    for bad in ("", "cursor", "claude", "grok", "codex", "cursor-agent ", "claude-cli\n--token pwned"):
+        with pytest.raises(ValueError, match="llm provider"):
+            mod.validate_llm_provider(bad)
+
+
+def test_render_unit_defaults_to_cursor_agent_provider_and_exact_argv(tmp_path: Path):
+    mod = _load()
+    paths = _paths(tmp_path)
+    (paths["venv"] / "bin").mkdir(parents=True)
+    (paths["venv"] / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    key = paths["worker_key_file"]
+    key.parent.mkdir(parents=True)
+    token = "cbm_worker_" + ("88" * 32)
+    key.write_text(token + "\n", encoding="utf-8")
+    key.chmod(0o600)
+
+    unit = mod.render_systemd_unit(
+        repo=paths["repo"],
+        venv=paths["venv"],
+        manager_url=str(paths["manager_url"]),
+        worker_id="browser-use-worker",
+        worker_key_file=key,
+        template_path=TEMPLATE,
+    )
+
+    exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+    argv = shlex.split(exec_line.removeprefix("ExecStart="))
+    assert argv == [
+        str((paths["venv"] / "bin" / "python").resolve()),
+        "-m",
+        "scripts.browser_use_worker",
+        "--manager-url",
+        "http://127.0.0.1:18115",
+        "--worker-id",
+        "browser-use-worker",
+        "--token-file",
+        str(key.resolve()),
+        "--llm-provider",
+        "cursor-agent",
+    ]
+    assert token not in unit
+
+
+def test_render_unit_supports_explicit_claude_cli_provider(tmp_path: Path):
+    mod = _load()
+    paths = _paths(tmp_path)
+    (paths["venv"] / "bin").mkdir(parents=True)
+    (paths["venv"] / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    key = paths["worker_key_file"]
+    key.parent.mkdir(parents=True)
+    key.write_text("cbm_worker_" + ("99" * 32) + "\n", encoding="utf-8")
+    key.chmod(0o600)
+
+    unit = mod.render_systemd_unit(
+        repo=paths["repo"],
+        venv=paths["venv"],
+        manager_url=str(paths["manager_url"]),
+        worker_id="browser-use-worker",
+        worker_key_file=key,
+        template_path=TEMPLATE,
+        llm_provider="claude-cli",
+    )
+
+    exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+    argv = shlex.split(exec_line.removeprefix("ExecStart="))
+    assert argv[-2:] == ["--llm-provider", "claude-cli"]
+    assert argv.count("--llm-provider") == 1
 
 
 def test_provision_end_to_end_secret_safe_and_idempotent(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -299,6 +375,30 @@ def test_provision_end_to_end_secret_safe_and_idempotent(tmp_path: Path, capsys:
     assert LEAK_RE.search(captured2.out + captured2.err + str(result2)) is None
 
 
+def test_provision_rejects_unknown_llm_provider_before_writes(tmp_path: Path):
+    mod = _load()
+    paths = _paths(tmp_path)
+    (paths["venv"] / "bin").mkdir(parents=True)
+    (paths["venv"] / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="llm provider"):
+        mod.provision(
+            repo=paths["repo"],
+            manager_url=str(paths["manager_url"]),
+            worker_env_file=paths["worker_env_file"],
+            worker_key_file=paths["worker_key_file"],
+            venv=paths["venv"],
+            unit_output=paths["unit_output"],
+            worker_id="browser-use-worker",
+            template_path=TEMPLATE,
+            llm_provider="grok",
+        )
+
+    assert not paths["worker_env_file"].exists()
+    assert not paths["worker_key_file"].exists()
+    assert not paths["unit_output"].exists()
+
+
 def test_main_requires_explicit_paths_and_hides_secrets(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     mod = _load()
     paths = _paths(tmp_path)
@@ -331,6 +431,67 @@ def test_main_requires_explicit_paths_and_hides_secrets(tmp_path: Path, capsys: 
     assert _mode(paths["worker_env_file"]) == 0o600
 
 
+def test_main_parses_explicit_llm_provider_and_rejects_unknown_without_leaks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    mod = _load()
+    paths = _paths(tmp_path)
+    (paths["venv"] / "bin").mkdir(parents=True)
+    (paths["venv"] / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    argv = [
+        "--repo",
+        str(paths["repo"]),
+        "--manager-url",
+        str(paths["manager_url"]),
+        "--worker-env-file",
+        str(paths["worker_env_file"]),
+        "--worker-key-file",
+        str(paths["worker_key_file"]),
+        "--venv",
+        str(paths["venv"]),
+        "--unit-output",
+        str(paths["unit_output"]),
+        "--llm-provider",
+        "claude-cli",
+    ]
+
+    assert mod.main(argv) == 0
+    out = capsys.readouterr()
+    token = paths["worker_key_file"].read_text(encoding="utf-8").strip()
+    assert LEAK_RE.search(out.out + out.err) is None
+    assert token not in out.out
+    assert "llm_provider=claude-cli" in out.out
+    unit_text = paths["unit_output"].read_text(encoding="utf-8")
+    assert "--llm-provider claude-cli" in unit_text
+
+    bad_paths = _paths(tmp_path / "bad-provider")
+    (bad_paths["venv"] / "bin").mkdir(parents=True)
+    (bad_paths["venv"] / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    bad_argv = [
+        "--repo",
+        str(bad_paths["repo"]),
+        "--manager-url",
+        str(bad_paths["manager_url"]),
+        "--worker-env-file",
+        str(bad_paths["worker_env_file"]),
+        "--worker-key-file",
+        str(bad_paths["worker_key_file"]),
+        "--venv",
+        str(bad_paths["venv"]),
+        "--unit-output",
+        str(bad_paths["unit_output"]),
+        "--llm-provider",
+        "cursor-agent\n--token cbm_worker_" + ("aa" * 32),
+    ]
+    assert mod.main(bad_argv) != 0
+    err = capsys.readouterr().err
+    assert LEAK_RE.search(err) is None
+    assert not bad_paths["worker_env_file"].exists()
+    assert not bad_paths["worker_key_file"].exists()
+    assert not bad_paths["unit_output"].exists()
+
+
 def test_main_refuses_missing_required_args():
     mod = _load()
     with pytest.raises(SystemExit):
@@ -344,8 +505,10 @@ def test_template_file_exists_and_has_placeholders():
     assert "-m scripts.browser_use_worker" in text
     assert "@WORKER_SCRIPT@" not in text
     assert "@TOKEN_FILE@" in text
+    assert "@LLM_PROVIDER@" in text
     assert "@PATH_ENVIRONMENT@" in text
     assert "--token-file" in text
+    assert "--llm-provider" in text
     assert "Restart=on-failure" in text
     assert "UMask=0077" in text
     assert "cursor-agent" in text

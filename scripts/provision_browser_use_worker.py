@@ -24,6 +24,8 @@ from urllib.parse import urlparse
 WORKER_KEY_PREFIX = "cbm_worker_"
 WORKER_KEY_HEX_LEN = 64
 DEFAULT_WORKER_ID = "browser-use-worker"
+DEFAULT_LLM_PROVIDER = "cursor-agent"
+ALLOWED_LLM_PROVIDERS = frozenset({DEFAULT_LLM_PROVIDER, "claude-cli"})
 TOKEN_PATTERN = re.compile(rf"^{re.escape(WORKER_KEY_PREFIX)}[0-9a-f]{{{WORKER_KEY_HEX_LEN}}}$")
 WORKER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SECURE_MODE = 0o600
@@ -49,6 +51,14 @@ def validate_worker_id(worker_id: str | None) -> str:
     if any(ch.isspace() for ch in worker_id) or "=" in worker_id:
         raise ValueError("invalid worker id")
     return worker_id
+
+
+def validate_llm_provider(llm_provider: str | None) -> str:
+    """Accept only known Browser-Use worker provider identifiers."""
+    provider = DEFAULT_LLM_PROVIDER if llm_provider is None else llm_provider
+    if not isinstance(provider, str) or provider not in ALLOWED_LLM_PROVIDERS:
+        raise ValueError("invalid llm provider")
+    return provider
 
 
 def systemd_quote(value: str) -> str:
@@ -272,11 +282,13 @@ def render_systemd_unit(
     manager_url: str,
     worker_id: str,
     worker_key_file: Path | str,
+    llm_provider: str = DEFAULT_LLM_PROVIDER,
     template_path: Path | str | None = None,
     home: Path | str | None = None,
 ) -> str:
     """Render the systemd user unit from the checked-in template."""
     safe_id = validate_worker_id(worker_id)
+    safe_provider = validate_llm_provider(llm_provider)
     repo_path = Path(repo).expanduser().resolve()
     venv_path = Path(venv).expanduser().resolve()
     key_path = Path(worker_key_file).expanduser().resolve()
@@ -299,6 +311,7 @@ def render_systemd_unit(
         "@MANAGER_URL@": systemd_quote(url),
         "@WORKER_ID@": systemd_quote(safe_id),
         "@TOKEN_FILE@": systemd_quote(str(key_path)),
+        "@LLM_PROVIDER@": systemd_quote(safe_provider),
         "@PATH_ENVIRONMENT@": systemd_quote(path_assignment),
         # Legacy single-token placeholders (if present in older templates).
         "@REPO@": systemd_quote(str(repo_path)),
@@ -325,11 +338,13 @@ def provision(
     venv: Path | str,
     unit_output: Path | str,
     worker_id: str = DEFAULT_WORKER_ID,
+    llm_provider: str = DEFAULT_LLM_PROVIDER,
     template_path: Path | str | None = None,
     home: Path | str | None = None,
 ) -> dict[str, Any]:
     """Provision key file, worker env file, and systemd unit (no secrets)."""
     safe_id = validate_worker_id(worker_id)
+    safe_provider = validate_llm_provider(llm_provider)
     repo_path = Path(repo).expanduser().resolve()
     env_path = Path(worker_env_file).expanduser()
     key_path = Path(worker_key_file).expanduser()
@@ -355,6 +370,7 @@ def provision(
             manager_url=url,
             worker_id=safe_id,
             worker_key_file=key_path,
+            llm_provider=safe_provider,
             template_path=template_path,
             home=home,
         )
@@ -371,6 +387,7 @@ def provision(
         "venv": str(venv_path),
         "unit_output": str(unit_path),
         "worker_id": safe_id,
+        "llm_provider": safe_provider,
         "key_mode": oct(stat.S_IMODE(key_path.stat().st_mode)),
         "env_mode": oct(stat.S_IMODE(env_path.stat().st_mode)),
     }
@@ -416,6 +433,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Worker identity written to env and unit (default: {DEFAULT_WORKER_ID})",
     )
     parser.add_argument(
+        "--llm-provider",
+        default=DEFAULT_LLM_PROVIDER,
+        help=f"Browser-Use worker LLM provider (default: {DEFAULT_LLM_PROVIDER})",
+    )
+    parser.add_argument(
         "--template",
         default=None,
         help="Optional override for the systemd unit template path",
@@ -435,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
             venv=args.venv,
             unit_output=args.unit_output,
             worker_id=args.worker_id,
+            llm_provider=args.llm_provider,
             template_path=args.template,
         )
     except Exception as exc:  # noqa: BLE001 — keep errors free of secrets
@@ -450,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
         "venv",
         "unit_output",
         "worker_id",
+        "llm_provider",
         "key_mode",
         "env_mode",
     ):

@@ -885,7 +885,54 @@ def _preflight_acpx_with_adapter_probe(args: dict[str, object], adapter_probe: d
     return state
 
 
+def _validate_promoted_acpx_venv_path(release_id: str) -> Path:
+    release = require_existing_release_dir(release_id)
+    venv = release / "acpx-venv"
+    require(venv == release / "acpx-venv", "ACPX venv path is not allowlisted")
+    require(
+        venv.exists() and venv.is_dir() and not venv.is_symlink(),
+        "ACPX venv must be an existing non-symlink release venv",
+    )
+    return venv
+
+
+def _release_id_from_acpx_unit_working_directory(working_directory: object) -> str | None:
+    path = Path(str(working_directory or ""))
+    if not path.is_absolute():
+        return None
+    try:
+        relative = path.relative_to(RELEASES_PATH)
+    except ValueError:
+        return None
+    require(
+        len(relative.parts) == 2 and relative.parts[1] == "source",
+        "ACPX WorkingDirectory must be a release source",
+    )
+    return _release_id_for_release_source(path)
+
+
 def op_preflight_acpx(args: dict[str, object]) -> dict[str, object]:
+    unit = str(args.get("unit", ACPX_UNIT))
+    if unit == ACPX_UNIT:
+        _unit_state(unit)
+        show = _unit_show(unit)
+        release_id = _release_id_from_acpx_unit_working_directory(show.get("WorkingDirectory", ""))
+        if release_id is not None:
+            release = release_dir(release_id)
+            venv = _validate_promoted_acpx_venv_path(release_id)
+            acpx_executable = _validate_acpx_executable_path(
+                release_id,
+                release / "acpx-runtime" / ACPX_DIRECT_CLI,
+                kind="promoted",
+            )
+            release_args = dict(args)
+            release_args["venv"] = str(venv)
+            result = _preflight_acpx_with_adapter_probe(release_args, _acpx_adapter_probe_at(acpx_executable))
+            result["release_id"] = release_id
+            result["acpx_executable"] = str(acpx_executable)
+            result["working_directory"] = show.get("WorkingDirectory", "")
+            result["fragment_path"] = show.get("FragmentPath", "")
+            return result
     return _preflight_acpx_with_adapter_probe(args, _acpx_adapter_probe())
 
 

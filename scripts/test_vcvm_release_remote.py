@@ -3977,7 +3977,11 @@ def test_verify_acpx_still_uses_promoted_release_executable_when_global_acpx_is_
     monkeypatch.setattr(remote.shutil, "which", lambda name: None if name == "acpx" else None)
     monkeypatch.setattr(remote, "run", fake_run)
     monkeypatch.setattr(remote, "_unit_state", lambda unit: {"active_state": "active", "unit_sha256": "2" * 64})
-    monkeypatch.setattr(remote, "_unit_show", lambda unit: {"WorkingDirectory": str(release_source), "FragmentPath": "/unit"})
+    monkeypatch.setattr(
+        remote,
+        "_unit_show",
+        lambda unit: {"WorkingDirectory": str(release_source), "FragmentPath": "/unit"},
+    )
     monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
     monkeypatch.setattr(remote, "_manager_json_on_port", fake_manager_json, raising=False)
 
@@ -3997,6 +4001,133 @@ def test_verify_acpx_still_uses_promoted_release_executable_when_global_acpx_is_
     assert result["venv"] is True
     assert version_calls == [[str(acpx_executable), "--version"]]
     assert manager_calls == [(18115, "/api/task-harnesses/acpx/preflights")]
+
+
+@pytest.mark.parametrize(
+    ("venv_kind", "match"),
+    [("missing", "release venv"), ("symlink", "release venv")],
+)
+def test_preflight_acpx_requires_promoted_release_venv_before_global_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    venv_kind: str,
+    match: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    write_release_acpx_target(paths, promoted=True)
+    release_venv = paths["releases"] / "release-0000001" / "acpx-venv"
+    if venv_kind == "symlink":
+        outside = tmp_path / "outside-venv"
+        outside.mkdir()
+        release_venv.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(
+        remote.shutil,
+        "which",
+        lambda name: str(tmp_path / "global-acpx") if name == "acpx" else None,
+    )
+    monkeypatch.setattr(
+        remote,
+        "run",
+        lambda argv, **kwargs: (_ for _ in ()).throw(AssertionError("global ACPX probe must not run")),
+    )
+    monkeypatch.setattr(remote, "_unit_state", lambda unit: {"active_state": "active", "unit_sha256": "2" * 64})
+    monkeypatch.setattr(
+        remote,
+        "_unit_show",
+        lambda unit: {"WorkingDirectory": str(release_source), "FragmentPath": "/unit"},
+    )
+    monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
+
+    with pytest.raises(remote.HelperError, match=match):
+        remote.op_preflight_acpx({})
+
+
+@pytest.mark.parametrize("active_state", ["inactive", "failed"])
+def test_preflight_acpx_release_working_directory_uses_release_runtime_when_unit_not_active(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_state: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    acpx_executable = write_release_acpx_target(paths, promoted=True)
+    release_venv = paths["releases"] / "release-0000001" / "acpx-venv"
+    release_venv.mkdir()
+    version_calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv == [str(acpx_executable), "--version"]:
+            version_calls.append([str(item) for item in argv])
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(
+        remote.shutil,
+        "which",
+        lambda name: str(tmp_path / "global-acpx") if name == "acpx" else None,
+    )
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(
+        remote,
+        "_unit_state",
+        lambda unit: {"active_state": active_state, "unit_sha256": "2" * 64},
+    )
+    monkeypatch.setattr(
+        remote,
+        "_unit_show",
+        lambda unit: {"WorkingDirectory": str(release_source), "FragmentPath": "/unit"},
+    )
+    monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
+
+    result = remote.op_preflight_acpx({})
+
+    assert result["active"] is False
+    assert result["release_id"] == "release-0000001"
+    assert result["adapters_ready"] is True
+    assert result["adapter_reason_code"] == "ok"
+    assert result["venv"] is True
+    assert result["acpx_executable"] == str(acpx_executable)
+    assert version_calls == [[str(acpx_executable), "--version"]]
+
+
+def test_preflight_acpx_inactive_release_working_directory_missing_venv_fails_closed_before_global_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    write_release_acpx_target(paths, promoted=True)
+
+    monkeypatch.setattr(
+        remote.shutil,
+        "which",
+        lambda name: str(tmp_path / "global-acpx") if name == "acpx" else None,
+    )
+    monkeypatch.setattr(
+        remote,
+        "run",
+        lambda argv, **kwargs: (_ for _ in ()).throw(AssertionError("global ACPX probe must not run")),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_unit_state",
+        lambda unit: {"active_state": "inactive", "unit_sha256": "2" * 64},
+    )
+    monkeypatch.setattr(
+        remote,
+        "_unit_show",
+        lambda unit: {"WorkingDirectory": str(release_source), "FragmentPath": "/unit"},
+    )
+    monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
+
+    with pytest.raises(remote.HelperError, match="release venv"):
+        remote.op_preflight_acpx({})
 
 
 @pytest.mark.parametrize(
@@ -4047,6 +4178,99 @@ def test_verify_acpx_rejects_non_release_or_symlink_executable_before_manager_pr
     assert manager_calls == []
 
 
+def test_preflight_acpx_uses_promoted_release_runtime_from_unit_working_directory_when_global_acpx_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release_source = paths["releases"] / "release-0000001" / "source"
+    release_source.mkdir(parents=True)
+    acpx_executable = write_release_acpx_target(paths, promoted=True)
+    release_venv = paths["releases"] / "release-0000001" / "acpx-venv"
+    release_venv.mkdir()
+    version_calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv == [str(acpx_executable), "--version"]:
+            version_calls.append([str(item) for item in argv])
+            return subprocess.CompletedProcess(argv, 0, stdout="0.12.1\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote.shutil, "which", lambda name: None if name == "acpx" else None)
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.setattr(remote, "_unit_state", lambda unit: {"active_state": "active", "unit_sha256": "2" * 64})
+    monkeypatch.setattr(
+        remote,
+        "_unit_show",
+        lambda unit: {"WorkingDirectory": str(release_source), "FragmentPath": "/unit"},
+    )
+    monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
+
+    result = remote.op_preflight_acpx({})
+
+    assert result["active"] is True
+    assert result["release_id"] == "release-0000001"
+    assert result["adapters_ready"] is True
+    assert result["adapter_reason_code"] == "ok"
+    assert result["venv"] is True
+    assert result["acpx_executable"] == str(acpx_executable)
+    assert version_calls == [[str(acpx_executable), "--version"]]
+
+
+@pytest.mark.parametrize(
+    ("path_kind", "match"),
+    [
+        ("malformed", "release source"),
+        ("source_symlink", "non-symlink"),
+        ("release_symlink", "symlink"),
+    ],
+)
+def test_preflight_acpx_rejects_unsafe_release_working_directory_before_global_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    path_kind: str,
+    match: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release = paths["releases"] / "release-0000001"
+    if path_kind == "malformed":
+        working_directory = release / "not-source"
+        working_directory.mkdir(parents=True)
+    elif path_kind == "source_symlink":
+        release.mkdir(parents=True)
+        outside = tmp_path / "outside-source"
+        outside.mkdir()
+        working_directory = release / "source"
+        working_directory.symlink_to(outside, target_is_directory=True)
+    else:
+        sibling = paths["releases"] / "release-sibling-0001"
+        (sibling / "source").mkdir(parents=True)
+        release.symlink_to(sibling, target_is_directory=True)
+        working_directory = release / "source"
+
+    monkeypatch.setattr(
+        remote.shutil,
+        "which",
+        lambda name: str(tmp_path / "global-acpx") if name == "acpx" else None,
+    )
+    monkeypatch.setattr(
+        remote,
+        "run",
+        lambda argv, **kwargs: (_ for _ in ()).throw(AssertionError("global ACPX probe must not run")),
+    )
+    monkeypatch.setattr(remote, "_unit_state", lambda unit: {"active_state": "active", "unit_sha256": "2" * 64})
+    monkeypatch.setattr(
+        remote,
+        "_unit_show",
+        lambda unit: {"WorkingDirectory": str(working_directory), "FragmentPath": "/unit"},
+    )
+    monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
+
+    with pytest.raises(remote.HelperError, match=match):
+        remote.op_preflight_acpx({})
+
+
 def test_preflight_acpx_legacy_capture_still_uses_global_path_probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     global_acpx = tmp_path / "acpx"
     global_acpx.write_text("#!/usr/bin/env node\n", encoding="utf-8")
@@ -4063,6 +4287,11 @@ def test_preflight_acpx_legacy_capture_still_uses_global_path_probe(monkeypatch:
     monkeypatch.setattr(remote.shutil, "which", lambda name: str(global_acpx) if name == "acpx" else None)
     monkeypatch.setattr(remote, "run", fake_run)
     monkeypatch.setattr(remote, "_unit_state", lambda unit: {"active_state": "active", "unit_sha256": "2" * 64})
+    monkeypatch.setattr(
+        remote,
+        "_unit_show",
+        lambda unit: {"WorkingDirectory": "/home/coder/legacy-acpx", "FragmentPath": "/unit"},
+    )
     monkeypatch.setattr(remote, "_token_mode", lambda path: "600")
 
     result = remote.op_preflight_acpx({})

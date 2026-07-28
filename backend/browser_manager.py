@@ -436,6 +436,19 @@ class BrowserManager:
             }
         return {"status": "stopped", "vnc_ws_port": None, "display": None, "cdp_url": None}
 
+    async def capture_screenshot(self, profile_id: str) -> bytes:
+        """Capture the currently active page of a Manager-owned profile."""
+        running = self.running.get(profile_id)
+        if running is None:
+            raise RuntimeError("profile_not_running")
+        pages = list(getattr(running.context, "pages", []) or [])
+        if not pages:
+            raise RuntimeError("profile_page_unavailable")
+        screenshot = await pages[-1].screenshot(type="png", full_page=False)
+        if not isinstance(screenshot, bytes) or not screenshot.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError("profile_screenshot_invalid")
+        return screenshot
+
     def validate_running_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
         """Return redacted running-profile evidence or raise for stale/wrong bindings."""
         profile_id = str(profile.get("id") or "")

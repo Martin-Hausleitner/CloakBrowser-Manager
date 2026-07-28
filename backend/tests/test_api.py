@@ -427,6 +427,72 @@ def test_get_clipboard_from_page(app_client: TestClient):
     main.browser_mgr.running.pop(pid, None)
 
 
+def test_capture_profile_screenshot_returns_private_png(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "Screenshot"})
+    pid = create.json()["id"]
+    png = b"\x89PNG\r\n\x1a\nprofile-proof"
+
+    with patch.object(
+        main.browser_mgr,
+        "capture_screenshot",
+        new=AsyncMock(return_value=png),
+    ):
+        resp = app_client.post(f"/api/profiles/{pid}/screenshot")
+
+    assert resp.status_code == 200
+    assert resp.content == png
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.headers["cache-control"] == "private, no-store"
+    assert resp.headers["content-disposition"] == f'attachment; filename="cloakbrowser-{pid}.png"'
+
+
+def test_capture_profile_screenshot_rejects_oversized_png(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "Large Screenshot"})
+    pid = create.json()["id"]
+    oversized = b"\x89PNG\r\n\x1a\n" + (b"x" * (16 * 1024 * 1024))
+
+    with patch.object(
+        main.browser_mgr,
+        "capture_screenshot",
+        new=AsyncMock(return_value=oversized),
+    ):
+        resp = app_client.post(f"/api/profiles/{pid}/screenshot")
+
+    assert resp.status_code == 413
+    assert resp.json() == {"detail": "Profile screenshot is too large"}
+
+
+def test_capture_profile_screenshot_requires_a_running_profile(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "Stopped Screenshot"})
+    pid = create.json()["id"]
+
+    with patch.object(
+        main.browser_mgr,
+        "capture_screenshot",
+        new=AsyncMock(side_effect=RuntimeError("profile_not_running")),
+    ):
+        resp = app_client.post(f"/api/profiles/{pid}/screenshot")
+
+    assert resp.status_code == 409
+    assert resp.json() == {"detail": "Profile is not running"}
+
+
+def test_capture_profile_screenshot_hides_internal_capture_errors(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "Unavailable Screenshot"})
+    pid = create.json()["id"]
+
+    with patch.object(
+        main.browser_mgr,
+        "capture_screenshot",
+        new=AsyncMock(side_effect=RuntimeError("private_backend_path")),
+    ):
+        resp = app_client.post(f"/api/profiles/{pid}/screenshot")
+
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": "Profile screenshot is unavailable"}
+    assert "private_backend_path" not in resp.text
+
+
 # ── Response shape ───────────────────────────────────────────────────────────
 
 

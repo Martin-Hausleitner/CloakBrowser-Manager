@@ -629,6 +629,22 @@ async function request<T>(
   return res.json();
 }
 
+async function requestBlob(path: string, options?: RequestInit): Promise<Blob> {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!res.ok) {
+    if (res.status === 401 && _onUnauthorized) {
+      _onUnauthorized();
+      throw new ApiError(401, "Unauthorized");
+    }
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(res.status, body.detail || res.statusText);
+  }
+  return res.blob();
+}
+
 export const api = {
   authStatus: async () => normalizeAuthStatus(await request<Partial<AuthStatus>>("/api/auth/status", {
     cache: "no-store",
@@ -647,6 +663,9 @@ export const api = {
   listProfiles: () => request<Profile[]>("/api/profiles"),
 
   getProfile: (id: string) => request<Profile>(`/api/profiles/${id}`),
+
+  captureProfileScreenshot: (id: string) =>
+    requestBlob(`/api/profiles/${encodeURIComponent(id)}/screenshot`, { method: "POST" }),
 
   createProfile: (data: ProfileCreateData) =>
     request<Profile>("/api/profiles", {

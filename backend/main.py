@@ -4504,9 +4504,42 @@ async def get_latest_benchmark_report(request: Request) -> dict[str, Any]:
 # ── Clipboard Relay ──────────────────────────────────────────────────────────
 
 _CLIPBOARD_MAX_READ = 1_048_576  # 1MB cap on GET response
+_PROFILE_SCREENSHOT_MAX_BYTES = 16 * 1024 * 1024
 
 # Track xclip processes per display so we can kill the old one before spawning new
 _xclip_procs: dict[int, asyncio.subprocess.Process] = {}
+
+
+@app.post("/api/profiles/{profile_id}/screenshot")
+async def capture_profile_screenshot(profile_id: str, request: Request):
+    """Return a bounded, non-cacheable screenshot of the selected live page."""
+    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
+    try:
+        screenshot = await browser_mgr.capture_screenshot(profile_id)
+    except RuntimeError as exc:
+        code = str(exc)
+        if code == "profile_not_running":
+            raise HTTPException(status_code=409, detail="Profile is not running") from None
+        raise HTTPException(status_code=503, detail="Profile screenshot is unavailable") from None
+    if len(screenshot) > _PROFILE_SCREENSHOT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Profile screenshot is too large")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "profile.screenshot",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        profile_id,
+    )
+    return Response(
+        content=screenshot,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'attachment; filename="cloakbrowser-{profile_id}.png"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/api/profiles/{profile_id}/clipboard")

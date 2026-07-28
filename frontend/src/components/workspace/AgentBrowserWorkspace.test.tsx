@@ -19,6 +19,7 @@ const apiMock = vi.hoisted(() => ({
   cancelTaskRun: vi.fn(),
   retryTaskRunHealth: vi.fn(),
   overrideTaskRunHealth: vi.fn(),
+  captureProfileScreenshot: vi.fn(),
   taskOutputScreenshotUrl: vi.fn((id: string) => `/api/task-outputs/${id}/screenshot`),
 }));
 
@@ -63,6 +64,12 @@ vi.mock("../ProfileViewer", () => ({
     >
       viewer:{profileId}
     </div>
+  ),
+}));
+
+vi.mock("../LiveDevPanel", () => ({
+  LiveDevPanel: ({ profileId }: { profileId: string }) => (
+    <div data-testid="mock-full-view-live-metrics">metrics:{profileId}</div>
   ),
 }));
 
@@ -170,6 +177,7 @@ describe("AgentBrowserWorkspace", () => {
     apiMock.cancelTaskRun.mockReset();
     apiMock.retryTaskRunHealth.mockReset();
     apiMock.overrideTaskRunHealth.mockReset();
+    apiMock.captureProfileScreenshot.mockReset();
     apiMock.getOrcaCapabilities.mockResolvedValue(capsAvailable);
     apiMock.getTaskHarnessPresence.mockResolvedValue({
       harness: "acpx",
@@ -193,6 +201,7 @@ describe("AgentBrowserWorkspace", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("renders dense left/right layout with profile viewer when running", async () => {
@@ -469,6 +478,60 @@ describe("AgentBrowserWorkspace", () => {
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "Enter full view" })),
     );
     vi.unstubAllGlobals();
+  });
+
+  it("downloads a private screenshot from compact full-view View controls", async () => {
+    const createObjectUrl = vi.fn(() => "blob:profile-shot");
+    const revokeObjectUrl = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectUrl });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectUrl });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    apiMock.captureProfileScreenshot.mockResolvedValue(new Blob(["png"], { type: "image/png" }));
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Enter full view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view View controls" }));
+    fireEvent.click(screen.getByRole("button", { name: "Capture browser screenshot" }));
+
+    await waitFor(() => expect(apiMock.captureProfileScreenshot).toHaveBeenCalledWith(runningProfile.id));
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    expect(anchorClick).toHaveBeenCalledTimes(1);
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:profile-shot");
+  });
+
+  it("shows measured live metrics on demand inside full view", async () => {
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Enter full view" }));
+    expect(screen.queryByTestId("mock-full-view-live-metrics")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view View controls" }));
+    const metricsButton = screen.getByRole("button", { name: "Show live metrics" });
+    fireEvent.click(metricsButton);
+
+    expect(metricsButton.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTestId("mock-full-view-live-metrics").textContent).toContain(runningProfile.id);
+    expect(
+      screen.getByRole("dialog", { name: "Live CloakBrowser profile" }).contains(
+        screen.getByTestId("mock-full-view-live-metrics"),
+      ),
+    ).toBe(true);
   });
 
   it("moves focus into desktop full view, traps tab order, redirects background focus, and restores on Escape", async () => {

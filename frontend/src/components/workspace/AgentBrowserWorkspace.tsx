@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
+  Camera,
   MonitorSmartphone,
   Play,
   SendHorizontal,
@@ -27,6 +29,7 @@ import {
   rememberBrowserUseRun,
 } from "../../lib/managedTaskRunStorage";
 import { ProfileViewer } from "../ProfileViewer";
+import { LiveDevPanel } from "../LiveDevPanel";
 import { AgentOutputTimeline } from "./AgentOutputTimeline";
 
 type AgentMode = "browser-use" | "acpx" | "antigravity" | OrcaAgentCli;
@@ -168,6 +171,8 @@ export function AgentBrowserWorkspace({
   const [viewportWidth, setViewportWidth] = useState(selectedProfile?.screen_width ?? 1280);
   const [viewportHeight, setViewportHeight] = useState(selectedProfile?.screen_height ?? 720);
   const [viewportApplying, setViewportApplying] = useState(false);
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
+  const [fullViewMetricsOpen, setFullViewMetricsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
@@ -500,6 +505,7 @@ export function AgentBrowserWorkspace({
   useEffect(() => {
     if (!viewerFullscreen) {
       setFullViewPanel(null);
+      setFullViewMetricsOpen(false);
       if (restoreViewerFullscreenFocusRef.current) {
         viewerFullscreenButtonRef.current?.focus();
         restoreViewerFullscreenFocusRef.current = false;
@@ -744,6 +750,27 @@ export function AgentBrowserWorkspace({
     const viewport = currentPhoneFitViewport(viewportWidth, viewportHeight);
     await applyViewportSize(viewport.width, viewport.height);
   }, [applyViewportSize, viewportHeight, viewportWidth]);
+
+  const captureBrowserScreenshot = useCallback(async () => {
+    if (!selectedProfile || selectedProfile.status !== "running" || screenshotBusy) return;
+    setScreenshotBusy(true);
+    setError(null);
+    try {
+      const screenshot = await api.captureProfileScreenshot(selectedProfile.id);
+      const downloadUrl = URL.createObjectURL(screenshot);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = `cloakbrowser-${selectedProfile.id}.png`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(downloadUrl);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not capture browser screenshot");
+    } finally {
+      setScreenshotBusy(false);
+    }
+  }, [screenshotBusy, selectedProfile]);
 
   const fullViewButtonClass =
     "inline-flex min-h-11 min-w-11 items-center justify-center rounded border border-[#333] px-3 text-[11px] font-medium text-[#ddd] hover:bg-[#222] focus:outline-none focus:ring-2 focus:ring-accent/50";
@@ -1337,6 +1364,28 @@ export function AgentBrowserWorkspace({
                   +
                 </button>
               </div>
+              <div className="mt-2 grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  className={`${fullViewPanelButtonClass} gap-1.5`}
+                  onClick={() => void captureBrowserScreenshot()}
+                  disabled={!selectedProfile || selectedProfile.status !== "running" || screenshotBusy}
+                  aria-label="Capture browser screenshot"
+                >
+                  <Camera className="h-3.5 w-3.5" aria-hidden="true" />
+                  {screenshotBusy ? "Capturing…" : "Screenshot"}
+                </button>
+                <button
+                  type="button"
+                  className={`${fullViewPanelButtonClass} gap-1.5`}
+                  onClick={() => setFullViewMetricsOpen((open) => !open)}
+                  aria-label={fullViewMetricsOpen ? "Hide live metrics" : "Show live metrics"}
+                  aria-pressed={fullViewMetricsOpen}
+                >
+                  <Activity className="h-3.5 w-3.5" aria-hidden="true" />
+                  Metrics
+                </button>
+              </div>
             </div>
           ) : null}
           {viewerFullscreen && fullViewPanel === "viewport" ? (
@@ -1463,6 +1512,14 @@ export function AgentBrowserWorkspace({
             </div>
           ) : null}
         </header>
+        {viewerFullscreen && fullViewMetricsOpen && selectedProfile ? (
+          <div className="absolute left-3 top-[3.4rem] z-10 max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-md border border-[#333] bg-[#111113] shadow-xl">
+            <LiveDevPanel
+              profileId={selectedProfile.id}
+              running={selectedProfile.status === "running"}
+            />
+          </div>
+        ) : null}
         <div
           className="min-h-0 flex-1"
           data-ui-state={uiStateAttr(

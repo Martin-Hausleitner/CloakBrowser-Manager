@@ -43,7 +43,7 @@ Open [http://localhost:8080](http://localhost:8080) in your browser. Create a pr
 
 ## Fork development status
 
-Status date: **28 July 2026**. This section describes the active development branch `feature/browser-use-agent-workspace` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
+Status date: **29 July 2026**. This section describes the active development branch `feature/browser-use-agent-workspace` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
 
 > **Fresh VCVM checkpoint:** Browser Use is now live-proven through the scoped Web UI: visible health gate, explicit audited override, real Browser Use worker, typed action/observation/screenshot/summary output, authenticated 1920×1080 screenshot, and output restoration after reopening the workspace. See [the worker E2E report and screenshot](docs/BROWSER_USE_WORKER.md#verified-web-ui-e2e-evidence-vcvm-2026-07-26). Broader universal-harness, true-mobile-identity and fullscreen-parity work remains open.
 
@@ -55,6 +55,12 @@ Status date: **28 July 2026**. This section describes the active development bra
 
 <p align="center">
 <img src="docs/evidence/phonefit-mobile-live-2026-07-29.png" width="390" alt="Live VCVM CloakBrowser PhoneFit viewport rendering IANA at 390 by 844">
+</p>
+
+> **Full-view operator checkpoint:** the existing four-group desktop full view now exposes private, on-demand **Screenshot** and **Metrics** actions inside `View`, without adding persistent toolbar clutter. Screenshot capture is profile-scoped, permission-checked, audited, PNG-validated, bounded to 16 MiB and returned with `private, no-store` plus `nosniff`. The live VCVM acceptance run entered full view, opened the metrics overlay, downloaded the active `390 x 711` browser frame, and produced zero browser-console errors. Full suites: **850 backend** and **211 frontend tests**, production build and secret scan passed. Live UI proof:
+
+<p align="center">
+<img src="docs/evidence/full-view-screenshot-metrics-live-2026-07-29.png" width="960" alt="Live VCVM desktop full view with compact Screenshot and Metrics controls">
 </p>
 
 > **Central tables checkpoint:** the desktop workspace now keeps the high-density operational views in one AG Grid Community surface: **Profiles**, **Accounts & 2FA**, **Proxies**, and **Sessions**. All four tabs, quick filtering, row selection, pagination controls, redacted proxy data, and the mobile card fallback were tested through the authenticated Tailscale UI. AG Grid Enterprise-only features remain deliberately excluded.
@@ -105,8 +111,8 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Area | State | Fresh or historical evidence |
 | --- | --- | --- |
-| Profile schema, migration, API, organization, access, health, extension inventory, proxy pool, runs, outputs, artifacts, worker auth, claims, capabilities and PhoneFit mobile context launch | Implemented on the feature branch; full backend suite passed | **844/844 backend tests passed** on 29 July 2026. PhoneFit was also verified in the deployed VCVM browser with mobile viewport/touch measurements and a fresh 100/100 health scan. |
-| Desktop/mobile organization, Browser-Use shell, central AG Grid workspace, access dashboard, harness boundary and compact health UI | Implemented and live-proven on the current VCVM release | **192/192 frontend tests passed** and the production build passed. Authenticated browser acceptance verified Profiles, Accounts & 2FA, Proxies and Sessions, quick filtering, row selection, pagination, redaction and zero console errors. |
+| Profile schema, migration, API, organization, access, health, extension inventory, proxy pool, runs, outputs, artifacts, worker auth, claims, capabilities, PhoneFit mobile launch and private live screenshots | Implemented on the feature branch; full backend suite passed | **850/850 backend tests passed** on 29 July 2026. PhoneFit was verified with mobile viewport/touch measurements; the live screenshot API returned a bounded 390×711 PNG with private no-store headers. |
+| Desktop/mobile organization, Browser-Use shell, central AG Grid workspace, access dashboard, harness boundary, compact health UI and full-view operator tools | Implemented and live-proven on the current VCVM release | **211/211 frontend tests passed** and the production build passed. Authenticated browser acceptance verified the four compact full-view groups, on-demand live metrics, screenshot download and zero console errors. |
 | Release, mobile, streaming and deployment scripts | Full local script suite passed | **26/26 script tests passed**, including an explicit Python 3.11 compilation regression check. |
 | Compact mobile workspace and scoped live browser control | Proven on the current automated VCVM Chromium surface | The authenticated release run passed **316 checks** across five viewports plus the access dashboard and captured **31 screenshots**. |
 | Browser-path profile health | Proven on a live no-proxy VCVM profile | First-launch scheduling, manual rerun, refresh persistence, masked outbound IP, **100/100 fingerprint consistency**, **100/100 BrowserScan authenticity**, and a redacted desktop panel passed. The Manager container also reached the separately bound VCVM-local proxychecker health endpoint. |
@@ -132,6 +138,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 ### Development timeline
 
+- **29 July 2026 (full-view tools)** — added a permission-checked, audited and non-cacheable live-profile PNG endpoint plus compact Screenshot and Metrics actions inside the existing desktop `View` disclosure. The deployed VCVM browser completed the real download and displayed the Live Dev overlay with no console errors; 850 backend tests, 211 frontend tests, production build and gitleaks passed.
 - **29 July 2026** — PhoneFit was closed at the runtime boundary: portrait and landscape phone framebuffers now pass `screen`, `is_mobile`, `has_touch`, and a bounded device scale into the persistent CloakBrowser context. Live VCVM proof showed a real 390×844 responsive IANA view, coarse pointer/touch semantics, and unchanged 100/100 fingerprint and BrowserScan scores. The mobile User-Agent/device persona remains an explicit follow-up instead of a hidden heuristic.
 - **26 July 2026 (ACPX/ACP)** — added explicit per-run ACPX agent selection, SQLite migration, filtered worker claims, pinned ACPX worker lifecycle, strict NDJSON/error handling, private run-capability files, official FastMCP stdio server, five bounded browser tools, origin enforcement, systemd template, TypeScript parity, and local runtime/contract tests. A real Codex ACP initialize handshake succeeded but provider authentication remains deliberately unconfigured, so VCVM browser E2E is still open.
 - **26 July 2026** — managed Browser Use execution was exposed in the compact live workspace with typed action/observation/screenshot/summary cards. A real scoped-user VCVM run succeeded after a visible, explicit health override; the authenticated screenshot rendered at 1920×1080. Session-storage recovery now restores the last Browser Use run after a Manager reload/reopen. Full frontend suite: **149/149**; production build passed; independent code review approved.

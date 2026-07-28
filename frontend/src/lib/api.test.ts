@@ -96,6 +96,24 @@ describe("api.listProfiles", () => {
   });
 });
 
+describe("api.captureProfileScreenshot", () => {
+  it("requests a private PNG for the encoded profile id", async () => {
+    const png = new Blob(["profile-proof"], { type: "image/png" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      blob: () => Promise.resolve(png),
+    });
+
+    await expect(api.captureProfileScreenshot("profile/1")).resolves.toBe(png);
+    expect(mockFetch).toHaveBeenCalledWith("/api/profiles/profile%2F1/screenshot", {
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+  });
+});
+
 // ── createProfile ───────────────────────────────────────────────────────────
 
 describe("api.createProfile", () => {

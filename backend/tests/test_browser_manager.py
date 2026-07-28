@@ -20,6 +20,7 @@ from backend.browser_manager import (
     _normalize_proxy,
     _validate_proxy,
     BrowserManager,
+    RunningProfile,
 )
 
 
@@ -478,6 +479,46 @@ def test_validate_running_profile_hashes_manager_owned_path(tmp_path: Path):
 
     assert evidence["user_data_dir_digest"]
     assert str(profile_dir) not in str(evidence)
+
+
+@pytest.mark.asyncio
+async def test_capture_screenshot_returns_png_from_active_page():
+    mgr = BrowserManager()
+    page = AsyncMock()
+    page.screenshot = AsyncMock(return_value=b"\x89PNG\r\n\x1a\nproof")
+    context = MagicMock()
+    context.pages = [page]
+    mgr.running["profile-shot"] = RunningProfile(
+        profile_id="profile-shot",
+        context=context,
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+
+    screenshot = await mgr.capture_screenshot("profile-shot")
+
+    assert screenshot == b"\x89PNG\r\n\x1a\nproof"
+    page.screenshot.assert_awaited_once_with(type="png", full_page=False)
+
+
+@pytest.mark.asyncio
+async def test_capture_screenshot_rejects_a_non_png_result():
+    mgr = BrowserManager()
+    page = AsyncMock()
+    page.screenshot = AsyncMock(return_value=b"not-a-png")
+    context = MagicMock()
+    context.pages = [page]
+    mgr.running["profile-invalid-shot"] = RunningProfile(
+        profile_id="profile-invalid-shot",
+        context=context,
+        display=101,
+        ws_port=6101,
+        cdp_port=5101,
+    )
+
+    with pytest.raises(RuntimeError, match="^profile_screenshot_invalid$"):
+        await mgr.capture_screenshot("profile-invalid-shot")
 
 
 @pytest.mark.anyio

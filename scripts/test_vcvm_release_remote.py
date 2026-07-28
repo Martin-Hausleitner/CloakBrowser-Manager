@@ -197,6 +197,194 @@ def test_preflight_browser_use_uses_canonical_worker_unit_token_and_working_dire
     assert ("git", "-C", "/home/coder/vk-repos/CloakBrowser-Manager-browser-use", "rev-parse", "--short=12", "HEAD") not in calls
 
 
+def test_browser_use_release_source_commit_uses_marker_without_parent_git(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    marker_commit = "1" * 40
+    parent_head = "2" * 40
+    release = paths["releases"] / "release-0000001"
+    source = release / "source"
+    source.mkdir(parents=True)
+    (release / "COMMIT").write_text(marker_commit + "\n", encoding="utf-8")
+    git_calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if argv and argv[0] == "git":
+            git_calls.append([str(item) for item in argv])
+            return subprocess.CompletedProcess(argv, 0, stdout=parent_head + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    assert remote._browser_use_worktree_commit(str(source)) == marker_commit
+    assert git_calls == []
+
+
+@pytest.mark.parametrize(
+    ("marker_kind", "match"),
+    [
+        ("missing", "commit marker is missing"),
+        ("symlink", "commit marker must not be a symlink"),
+        ("malformed", "commit marker is malformed"),
+        ("too_large", "commit marker is too large"),
+    ],
+)
+def test_browser_use_release_source_commit_fails_closed_for_bad_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    marker_kind: str,
+    match: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release = paths["releases"] / "release-0000001"
+    source = release / "source"
+    source.mkdir(parents=True)
+    marker = release / "COMMIT"
+    if marker_kind == "symlink":
+        target = tmp_path / "commit-target"
+        target.write_text("1" * 40 + "\n", encoding="utf-8")
+        marker.symlink_to(target)
+    elif marker_kind == "malformed":
+        marker.write_text("not-a-commit\n", encoding="utf-8")
+    elif marker_kind == "too_large":
+        marker.write_text("1" * 40 + "\nextra", encoding="utf-8")
+
+    monkeypatch.setattr(
+        remote,
+        "run",
+        lambda argv, **kwargs: (_ for _ in ()).throw(AssertionError("release source must not fall back to git")),
+    )
+
+    with pytest.raises(remote.HelperError, match=match):
+        remote._browser_use_worktree_commit(str(source))
+
+
+@pytest.mark.parametrize(
+    ("swap_kind", "match"),
+    [
+        ("symlink", "commit marker could not be opened safely"),
+        ("regular", "commit marker changed while reading"),
+    ],
+)
+def test_browser_use_release_source_commit_fails_closed_when_marker_swapped_after_stat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    swap_kind: str,
+    match: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release = paths["releases"] / "release-0000001"
+    source = release / "source"
+    source.mkdir(parents=True)
+    marker = release / "COMMIT"
+    marker.write_text("1" * 40 + "\n", encoding="utf-8")
+    swapped_target = tmp_path / "swapped-commit"
+    swapped_target.write_text("2" * 40 + "\n", encoding="utf-8")
+    real_open = remote.os.open
+    real_read = remote.os.read
+    reads: list[int] = []
+    swapped = False
+
+    def fake_open(file: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        nonlocal swapped
+        if file == "COMMIT" and dir_fd is not None and not swapped:
+            swapped = True
+            marker.unlink()
+            if swap_kind == "symlink":
+                marker.symlink_to(swapped_target)
+            else:
+                swapped_target.replace(marker)
+        if dir_fd is None:
+            return real_open(file, flags, mode)
+        return real_open(file, flags, mode, dir_fd=dir_fd)
+
+    def fake_read(fd: int, limit: int) -> bytes:
+        reads.append(fd)
+        return real_read(fd, limit)
+
+    monkeypatch.setattr(remote.os, "open", fake_open)
+    monkeypatch.setattr(remote.os, "read", fake_read)
+    monkeypatch.setattr(
+        remote,
+        "run",
+        lambda argv, **kwargs: (_ for _ in ()).throw(AssertionError("release source must not fall back to git")),
+    )
+
+    with pytest.raises(remote.HelperError, match=match):
+        remote._browser_use_worktree_commit(str(source))
+
+    assert reads == []
+
+
+@pytest.mark.parametrize(
+    ("path_kind", "match"),
+    [
+        ("source_symlink", "WorkingDirectory must not be a symlink"),
+        ("release_symlink", "release directory must not be a symlink"),
+        ("malformed_release_path", "WorkingDirectory must be a release source"),
+    ],
+)
+def test_browser_use_release_source_commit_fails_closed_for_bad_release_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    path_kind: str,
+    match: str,
+) -> None:
+    paths = patch_remote_paths(monkeypatch, tmp_path)
+    release = paths["releases"] / "release-0000001"
+    if path_kind == "source_symlink":
+        release.mkdir(parents=True)
+        outside = tmp_path / "outside-source"
+        outside.mkdir()
+        (release / "COMMIT").write_text("1" * 40 + "\n", encoding="utf-8")
+        working_directory = release / "source"
+        working_directory.symlink_to(outside, target_is_directory=True)
+    elif path_kind == "release_symlink":
+        sibling = paths["releases"] / "release-0000002"
+        (sibling / "source").mkdir(parents=True)
+        (sibling / "COMMIT").write_text("1" * 40 + "\n", encoding="utf-8")
+        release.symlink_to(sibling, target_is_directory=True)
+        working_directory = release / "source"
+    else:
+        release.mkdir(parents=True)
+        working_directory = release / "not-source"
+        working_directory.mkdir()
+
+    monkeypatch.setattr(
+        remote,
+        "run",
+        lambda argv, **kwargs: (_ for _ in ()).throw(AssertionError("release-shaped path must not fall back to git")),
+    )
+
+    with pytest.raises(remote.HelperError, match=match):
+        remote._browser_use_worktree_commit(str(working_directory))
+
+
+def test_browser_use_worktree_commit_preserves_legacy_git_worktree_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    working_directory = "/home/coder/browser-use"
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append([str(item) for item in argv])
+        if argv == ["git", "-C", working_directory, "rev-parse", "--is-inside-work-tree"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="true\n", stderr="")
+        if argv == ["git", "-C", working_directory, "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=REVISION + "\n", stderr="")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(remote, "run", fake_run)
+
+    assert remote._browser_use_worktree_commit(working_directory) == REVISION
+    assert calls == [
+        ["git", "-C", working_directory, "rev-parse", "--is-inside-work-tree"],
+        ["git", "-C", working_directory, "rev-parse", "HEAD"],
+    ]
+
+
 def test_preflight_receipts_accepts_absent_first_rollout_layout_without_creating_unrelated_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

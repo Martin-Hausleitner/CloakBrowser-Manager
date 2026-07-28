@@ -842,14 +842,86 @@ def _read_canonical_worker_key() -> str:
     return token
 
 
+def _read_browser_use_release_commit_marker(release: Path) -> str:
+    try:
+        release_stat = release.lstat()
+    except FileNotFoundError as exc:
+        raise HelperError("Browser-Use release directory is missing") from exc
+    require(not stat.S_ISLNK(release_stat.st_mode), "release directory must not be a symlink")
+    require(stat.S_ISDIR(release_stat.st_mode), "release path must be a directory")
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    marker_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        release_fd = os.open(str(release), dir_flags)
+    except OSError as exc:
+        raise HelperError("Browser-Use release directory could not be opened safely") from exc
+    try:
+        opened_release_stat = os.fstat(release_fd)
+        require(
+            stat.S_ISDIR(opened_release_stat.st_mode)
+            and opened_release_stat.st_dev == release_stat.st_dev
+            and opened_release_stat.st_ino == release_stat.st_ino,
+            "Browser-Use release directory changed while reading commit marker",
+        )
+        try:
+            marker_stat = os.stat("COMMIT", dir_fd=release_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise HelperError("Browser-Use release commit marker is missing") from exc
+        require(not stat.S_ISLNK(marker_stat.st_mode), "Browser-Use release commit marker must not be a symlink")
+        require(stat.S_ISREG(marker_stat.st_mode), "Browser-Use release commit marker must be a regular file")
+        require(marker_stat.st_size <= 41, "Browser-Use release commit marker is too large")
+        try:
+            marker_fd = os.open("COMMIT", marker_flags, dir_fd=release_fd)
+        except OSError as exc:
+            raise HelperError("Browser-Use release commit marker could not be opened safely") from exc
+        try:
+            opened_marker_stat = os.fstat(marker_fd)
+            require(
+                stat.S_ISREG(opened_marker_stat.st_mode)
+                and opened_marker_stat.st_dev == marker_stat.st_dev
+                and opened_marker_stat.st_ino == marker_stat.st_ino,
+                "Browser-Use release commit marker changed while reading",
+            )
+            require(opened_marker_stat.st_size <= 41, "Browser-Use release commit marker is too large")
+            marker_bytes = os.read(marker_fd, 42)
+        finally:
+            os.close(marker_fd)
+    finally:
+        os.close(release_fd)
+    require(len(marker_bytes) <= 41, "Browser-Use release commit marker is too large")
+    try:
+        marker_text = marker_bytes.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise HelperError("Browser-Use release commit marker is malformed") from exc
+    commit = marker_text.removesuffix("\n")
+    require(marker_text in {commit, f"{commit}\n"}, "Browser-Use release commit marker is malformed")
+    require(COMMIT_RE.fullmatch(commit) is not None, "Browser-Use release commit marker is malformed")
+    return commit
+
+
 def _browser_use_worktree_commit(working_directory: str) -> str:
     path = Path(working_directory)
     require(path.is_absolute(), "Browser-Use WorkingDirectory must be absolute")
+    coder_home = Path.home()
     try:
-        path.relative_to("/home/coder")
+        path.relative_to(coder_home)
     except ValueError as exc:
         raise HelperError("Browser-Use WorkingDirectory must stay under /home/coder") from exc
     require(not path.is_symlink(), "Browser-Use WorkingDirectory must not be a symlink")
+
+    try:
+        relative = path.relative_to(RELEASES_PATH)
+    except ValueError:
+        relative = None
+    if relative is not None:
+        require(
+            len(relative.parts) == 2 and relative.parts[1] == "source",
+            "Browser-Use WorkingDirectory must be a release source",
+        )
+        release_id = _release_id_for_release_source(path)
+        release = require_existing_release_dir(release_id)
+        return _read_browser_use_release_commit_marker(release)
+
     inside = run(["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"], check=False).stdout.strip()
     require(inside == "true", "Browser-Use WorkingDirectory is not a git worktree")
     commit = run(["git", "-C", str(path), "rev-parse", "HEAD"], check=False).stdout.strip()

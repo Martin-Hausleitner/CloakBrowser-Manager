@@ -231,6 +231,17 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
+
+def _resolve_dev_auto_admin(flag: str | None, deployment_env: str | None) -> bool:
+    requested = str(flag or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not requested:
+        return False
+    environment = str(deployment_env or "production").strip().lower()
+    if environment not in {"dev", "development", "local", "test"}:
+        raise RuntimeError("CBM_DEV_AUTO_ADMIN is development-only")
+    return True
+
+
 # Optional authentication via AUTH_TOKEN env var. If not set, all routes are
 # open for local development. ``ACCESS_CONTROL_ENABLED=1`` adds named users and
 # scoped Paperclip-agent credentials, but intentionally requires AUTH_TOKEN as
@@ -238,6 +249,10 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 AUTH_TOKEN: str | None = os.environ.get("AUTH_TOKEN") or None
 ACCESS_CONTROL_ENABLED = bool(AUTH_TOKEN) and access.access_control_enabled(
     os.environ.get("ACCESS_CONTROL_ENABLED")
+)
+DEPLOYMENT_ENV = os.environ.get("CBM_DEPLOYMENT_ENV") or "production"
+DEV_AUTO_ADMIN = _resolve_dev_auto_admin(
+    os.environ.get("CBM_DEV_AUTO_ADMIN"), DEPLOYMENT_ENV
 )
 if os.environ.get("ACCESS_CONTROL_ENABLED") and not AUTH_TOKEN:
     logger.warning("ACCESS_CONTROL_ENABLED ignored because AUTH_TOKEN is not configured")
@@ -903,6 +918,16 @@ class AuthMiddleware:
         # Run capability may reach exact CDP discovery (HTTP GET) or CDP WS only.
         if access.is_run_capability_token(bearer) and _run_capability_path_allowed(scope):
             scope.setdefault("state", {})["run_capability_token"] = bearer
+            await self.app(scope, receive, send)
+            return
+
+        # Explicit development-only convenience mode. Internal worker APIs,
+        # worker keys, and run capabilities remain governed by their stricter
+        # branches above; every normal public request receives bootstrap admin.
+        if DEV_AUTO_ADMIN:
+            scope.setdefault("state", {})["access_identity"] = (
+                access.bootstrap_identity()
+            )
             await self.app(scope, receive, send)
             return
 
@@ -2349,7 +2374,9 @@ async def auth_status(
 
     Exempt from auth middleware so the frontend can always call it.
     """
-    if ACCESS_CONTROL_ENABLED:
+    if DEV_AUTO_ADMIN:
+        identity = access.bootstrap_identity()
+    elif ACCESS_CONTROL_ENABLED:
         identity = _access_identity(request.scope)
     elif AUTH_TOKEN and _check_auth(request.scope):
         identity = access.bootstrap_identity()
@@ -2357,7 +2384,7 @@ async def auth_status(
         identity = _access_identity(request.scope)
     else:
         identity = None
-    authenticated = (
+    authenticated = True if DEV_AUTO_ADMIN else (
         bool(identity)
         if ACCESS_CONTROL_ENABLED
         else _check_auth(request.scope)
@@ -2366,7 +2393,7 @@ async def auth_status(
     )
     response.headers["Cache-Control"] = "private, no-store"
     return {
-        "auth_required": AUTH_TOKEN is not None,
+        "auth_required": False if DEV_AUTO_ADMIN else AUTH_TOKEN is not None,
         "access_control_enabled": ACCESS_CONTROL_ENABLED,
         "authenticated": authenticated,
         "identity": identity.public() if identity else None,
@@ -2375,6 +2402,8 @@ async def auth_status(
 
 @app.post("/api/auth/login")
 async def auth_login(body: LoginRequest, request: Request, response: Response):
+    if DEV_AUTO_ADMIN:
+        return {"ok": True, "identity": access.bootstrap_identity().public()}
     if not AUTH_TOKEN:
         return {"ok": True}
 

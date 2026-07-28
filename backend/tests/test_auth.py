@@ -39,6 +39,22 @@ def client_auth(tmp_db, monkeypatch):
         yield client
 
 
+@pytest.fixture()
+def client_dev_auto_admin(tmp_db, monkeypatch):
+    """Development-only bypass authenticates every public request as admin."""
+    from backend import main
+
+    monkeypatch.setattr(main, "AUTH_TOKEN", "test-secret")
+    monkeypatch.setattr(main, "ACCESS_CONTROL_ENABLED", True)
+    monkeypatch.setattr(main, "DEV_AUTO_ADMIN", True)
+    monkeypatch.setattr(main.browser_mgr, "cleanup_stale", AsyncMock())
+    monkeypatch.setattr(main.browser_mgr, "cleanup_all", AsyncMock())
+    monkeypatch.setattr(main.browser_mgr.vnc, "cleanup_stale", AsyncMock())
+
+    with TestClient(main.app) as client:
+        yield client
+
+
 # ── Group A: AUTH_TOKEN not set ──────────────────────────────────────────────
 
 
@@ -60,6 +76,52 @@ def test_no_auth_login_noop(client_no_auth: TestClient):
     resp = client_no_auth.post("/api/auth/login", json={"token": "anything"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+# ── Group A2: explicit development auto-admin ────────────────────────────────
+
+
+def test_dev_auto_admin_environment_is_fail_closed_for_production():
+    from backend import main
+
+    assert main._resolve_dev_auto_admin("1", "development") is True
+    assert main._resolve_dev_auto_admin("true", "dev") is True
+    assert main._resolve_dev_auto_admin("0", "production") is False
+    with pytest.raises(RuntimeError, match="development-only"):
+        main._resolve_dev_auto_admin("1", "production")
+
+
+def test_dev_auto_admin_opens_public_api_as_bootstrap_admin(
+    client_dev_auto_admin: TestClient,
+):
+    profiles = client_dev_auto_admin.get("/api/profiles")
+    status = client_dev_auto_admin.get("/api/auth/status")
+
+    assert profiles.status_code == 200
+    assert status.status_code == 200
+    assert status.headers["cache-control"] == "private, no-store"
+    body = status.json()
+    assert body["auth_required"] is False
+    assert body["authenticated"] is True
+    assert body["access_control_enabled"] is True
+    assert body["identity"]["kind"] == "bootstrap"
+    assert body["identity"]["role"] == "admin"
+
+
+def test_dev_auto_admin_logout_cannot_reenable_login(
+    client_dev_auto_admin: TestClient,
+):
+    assert client_dev_auto_admin.post("/api/auth/logout").status_code == 200
+    status = client_dev_auto_admin.get("/api/auth/status").json()
+    assert status["authenticated"] is True
+    assert status["auth_required"] is False
+
+
+def test_dev_auto_admin_does_not_open_internal_worker_api(
+    client_dev_auto_admin: TestClient,
+):
+    response = client_dev_auto_admin.post("/internal/task-runs/claim")
+    assert response.status_code == 401
 
 
 # ── Group B: AUTH_TOKEN set ──────────────────────────────────────────────────

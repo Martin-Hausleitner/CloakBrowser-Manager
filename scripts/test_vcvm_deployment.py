@@ -210,6 +210,15 @@ def test_compose_attaches_optional_worker_env_file_without_interpolation() -> No
     assert_true("${CBM_WORKER_ID" not in compose_text, "no CBM_WORKER_ID interpolation defaults")
     assert_true("${CBM_WORKER_TOKEN" not in compose_text, "no CBM_WORKER_TOKEN interpolation defaults")
     assert_true("cbm_worker_" not in compose_text, "compose must not embed worker token material")
+    assert_true(
+        ".env.dev.vcvm" in compose_text,
+        "compose must support an optional local development environment file",
+    )
+    assert_true(
+        "CBM_DEV_AUTO_ADMIN:" not in compose_text
+        and "CBM_DEPLOYMENT_ENV:" not in compose_text,
+        "compose must not hard-code development auto-admin into production environment",
+    )
 
 
 def test_worker_env_absent_keeps_manager_valid_without_defaults(tmp_path: pathlib.Path) -> None:

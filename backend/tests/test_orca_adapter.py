@@ -134,6 +134,32 @@ def test_agy_restarts_fixed_wrapper_when_orca_opens_only_a_shell():
     assert runner.calls[5][0][1:4] == ["terminal", "send", "--json"]
 
 
+def test_agy_start_failure_keeps_handle_owned_when_terminal_close_fails():
+    runner = FakeRunner()
+    runner.queue(_ok({"terminal": {"handle": "term_owned-agy-cleanup"}}))
+    for _ in range(30):
+        runner.queue(_ok({"output": ""}))
+    runner.queue("", returncode=1)
+    adapter = oa.OrcaAdapter(
+        orca_bin="/bin/fake-orca",
+        runner=runner,
+        worktree_selector="path:/repo",
+        probe_runtime=True,
+        sleeper=lambda _seconds: None,
+    )
+
+    session = adapter.start_session(
+        profile_id="profile-agy",
+        sandbox_id="alpha",
+        agent="agy",
+        owner_key="agent:ops",
+    )
+
+    assert session.status == "error"
+    assert "cleanup must be retried" in (session.last_error or "")
+    assert adapter.assert_owned_handle(session.terminal_handle) == session.terminal_handle
+
+
 @pytest.mark.parametrize("agent", ["bash", "sh", "python", "cursor", "opencode"])
 def test_validate_agent_cli_rejects_non_allowlisted(agent: str):
     with pytest.raises(oa.OrcaAdapterError) as exc:
@@ -433,6 +459,13 @@ def test_build_agent_launch_command_uses_fixed_wrapper_only():
     assert exc.value.code == "wrapper_not_allowed"
     with pytest.raises(oa.OrcaAdapterError):
         oa.build_agent_launch_command("bash", wrapper="/repo/scripts/orca_agent_cli.sh")
+
+
+def test_build_agent_launch_command_shell_quotes_configured_wrapper_path():
+    wrapper = "/repo/space;touch-not-allowed/orca_agent_cli.sh"
+    command = oa.build_agent_launch_command("agy", wrapper=wrapper)
+    assert command != f"{wrapper} agy"
+    assert __import__("shlex").split(command) == [wrapper, "agy"]
 
 
 def test_default_runner_uses_shell_false(monkeypatch: pytest.MonkeyPatch):

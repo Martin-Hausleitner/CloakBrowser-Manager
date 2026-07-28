@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import threading
 import time
@@ -208,7 +209,7 @@ def build_agent_launch_command(agent: str, *, wrapper: str | Path | None = None)
     agent_cli = validate_agent_cli(agent)
     wrapper_path = resolve_agent_wrapper(str(wrapper) if wrapper is not None else None)
     # Absolute path preferred; still argv-safe when Orca splits the command text.
-    return f"{wrapper_path.as_posix()} {agent_cli}"
+    return f"{shlex.quote(wrapper_path.as_posix())} {shlex.quote(agent_cli)}"
 
 
 def validate_terminal_handle(handle: str) -> str:
@@ -632,16 +633,19 @@ class OrcaAdapter:
             except OrcaAdapterError as exc:
                 session.status = "error"
                 session.last_error = exc.message
+                closed = False
                 try:
                     self.invoke(
                         "terminal.close",
                         terminal=handle,
                         timeout=DEFAULT_TIMEOUT_SECONDS,
                     )
+                    closed = True
                 except OrcaAdapterError:
-                    pass
-                with self._lock:
-                    self._handles.discard(handle)
+                    session.last_error = f"{exc.message}; terminal cleanup must be retried"
+                if closed:
+                    with self._lock:
+                        self._handles.discard(handle)
                 return session
 
         context = build_initial_context(

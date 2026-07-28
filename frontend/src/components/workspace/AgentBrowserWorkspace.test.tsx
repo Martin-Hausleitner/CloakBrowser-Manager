@@ -791,6 +791,90 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("managed-agent-output")).toBeTruthy();
   });
 
+  it("starts Antigravity as the ACPX Claude preset with truthful labels", async () => {
+    const antigravityProfile: Profile = { ...runningProfile, harness: "antigravity" };
+    apiMock.createTaskSession.mockResolvedValue({
+      id: "task-antigravity",
+      profile_id: antigravityProfile.id,
+      sandbox_id: "default",
+      title: "Inspect example.com",
+      status: "active",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-27T00:00:00Z",
+      updated_at: "2026-07-27T00:00:00Z",
+      metadata: {},
+    });
+    apiMock.createTaskRun.mockResolvedValue({
+      id: "run-antigravity",
+      task_session_id: "task-antigravity",
+      task_message_id: "message-antigravity",
+      profile_id: antigravityProfile.id,
+      profile_id_snapshot: antigravityProfile.id,
+      sandbox_id: "default",
+      harness: "acpx",
+      agent: "claude",
+      status: "running",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: null,
+      deadline_at: "2026-07-27T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {},
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-27T00:00:00Z",
+      updated_at: "2026-07-27T00:00:00Z",
+    });
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[antigravityProfile]}
+        selectedProfile={antigravityProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("orca-launch");
+    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("antigravity");
+    expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
+    expect(screen.getAllByText("Antigravity · ACPX/Claude").length).toBeGreaterThanOrEqual(1);
+    fireEvent.change(screen.getByTestId("orca-prompt"), {
+      target: { value: "Inspect https://example.com" },
+    });
+    fireEvent.click(screen.getByTestId("orca-launch"));
+
+    await waitFor(() => {
+      expect(apiMock.createTaskSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: {
+            source: "agent-browser-workspace",
+            harness: "acpx",
+            agent: "claude",
+            mode: "antigravity",
+          },
+        }),
+      );
+      expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+        "task-antigravity",
+        expect.objectContaining({
+          harness: "acpx",
+          agent: "claude",
+          profile_id: antigravityProfile.id,
+          allowed_origins: ["https://example.com"],
+          model_alias: null,
+        }),
+      );
+    });
+    expect(screen.getByTestId("managed-agent-output")).toBeTruthy();
+  });
+
   it("keeps ACPX launch disabled when no fresh worker has checked in", async () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
     apiMock.getTaskHarnessPresence.mockResolvedValue({
@@ -905,6 +989,57 @@ describe("AgentBrowserWorkspace", () => {
     expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe(
       "browser-use",
     );
+    expect(screen.getByTestId("orca-run-status").textContent).toContain("succeeded");
+  });
+
+  it("restores an ACPX run on an Antigravity profile as Antigravity mode", async () => {
+    const antigravityProfile: Profile = { ...runningProfile, harness: "antigravity" };
+    const completedRun: TaskRun = {
+      id: "run-antigravity-restored",
+      task_session_id: "task-antigravity-restored",
+      task_message_id: "message-antigravity-restored",
+      profile_id: antigravityProfile.id,
+      profile_id_snapshot: antigravityProfile.id,
+      sandbox_id: "default",
+      harness: "acpx",
+      agent: "claude",
+      status: "succeeded",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: null,
+      deadline_at: "2026-07-27T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {},
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-27T00:00:00Z",
+      updated_at: "2026-07-27T00:01:00Z",
+    };
+    window.sessionStorage.setItem(
+      `cloakbrowser.browser-use.last-run:${antigravityProfile.id}`,
+      completedRun.id,
+    );
+    apiMock.getTaskRun.mockResolvedValue(completedRun);
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[antigravityProfile]}
+        selectedProfile={antigravityProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("antigravity");
+    });
+    expect(screen.getAllByText("Antigravity · ACPX/Claude").length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
     expect(screen.getByTestId("orca-run-status").textContent).toContain("succeeded");
   });
 

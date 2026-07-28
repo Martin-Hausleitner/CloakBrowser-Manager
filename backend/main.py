@@ -1891,6 +1891,7 @@ def _profile_harness_compatible(profile_harness: object, run_harness: object) ->
     run_value = str(run_harness or "")
     return (
         profile_value == run_value
+        or (profile_value == "antigravity" and run_value == "acpx")
         or profile_value in worker_runtime_mod.UNIVERSAL_PROFILE_HARNESSES
         or run_value in worker_runtime_mod.UNIVERSAL_PROFILE_HARNESSES
     )
@@ -3068,6 +3069,12 @@ async def create_task_run(session_id: str, body: TaskRunCreate, request: Request
 
     if not _profile_harness_compatible(profile.get("harness"), body.harness):
         raise HTTPException(status_code=422, detail="Profile harness is not compatible with run harness")
+    if (
+        str(profile.get("harness") or "codex") == "antigravity"
+        and body.harness == "acpx"
+        and body.agent != "claude"
+    ):
+        raise HTTPException(status_code=422, detail="Antigravity profiles require ACPX with Claude")
 
     if not body.allowed_origins and not _can_operate_task_sandbox(identity, sandbox_id):
         raise HTTPException(

@@ -58,6 +58,13 @@ describe("harnessOptions", () => {
     }
   });
 
+  it("describes Antigravity as the ACPX Claude managed workflow without making it callable", () => {
+    const antigravity = HARNESS_OPTIONS.find((option) => option.value === "antigravity");
+
+    expect(antigravity?.description).toBe("Managed ACPX/Claude workflow preset");
+    expect(CALLABLE_BROWSER_HARNESSES).not.toContain("antigravity");
+  });
+
   it("labels known harnesses", () => {
     expect(harnessLabel("unbrowse")).toBe("Unbrowse");
     expect(harnessLabel("stagehand")).toBe("Stagehand");

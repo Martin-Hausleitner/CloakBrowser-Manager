@@ -214,6 +214,68 @@ def test_create_run_allows_default_codex_profile_as_universal_binding(
     assert response.status_code == 201, response.text
 
 
+def test_create_run_allows_antigravity_profile_only_as_acpx_claude_preset(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Antigravity preset", sandbox_id="alpha", harness="antigravity")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    acpx_response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="acpx", agent="claude", model_alias=None),
+    )
+    assert acpx_response.status_code == 201, acpx_response.text
+
+    browser_use_response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="browser-use"),
+    )
+    assert browser_use_response.status_code == 422
+    assert browser_use_response.json()["detail"] == "Profile harness is not compatible with run harness"
+
+
+@pytest.mark.parametrize("agent", ["codex", "cursor", "grok-build", "opencode"])
+def test_create_run_rejects_antigravity_acpx_with_non_claude_agent(
+    client_access: TestClient,
+    agent: str,
+):
+    profile = db.create_profile("Antigravity preset", sandbox_id="alpha", harness="antigravity")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="acpx", agent=agent, model_alias=None),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Antigravity profiles require ACPX with Claude"
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude", "cursor", "grok-build", "opencode"])
+def test_create_run_allows_acpx_profile_with_any_acpx_agent(
+    client_access: TestClient,
+    agent: str,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="acpx", agent=agent, model_alias=None),
+    )
+
+    assert response.status_code == 201, response.text
+
+
 def test_initial_status_follows_health_decision(client_access: TestClient):
     profile = db.create_profile("Alpha browser", sandbox_id="alpha")
     session = create_session(profile["id"])

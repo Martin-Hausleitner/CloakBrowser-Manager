@@ -169,6 +169,34 @@ def test_capability_one_time_digest_and_manager_cdp_url(client_access: TestClien
     assert "cbm_run_" not in second.text
 
 
+def test_capability_allows_antigravity_profile_for_acpx_run(client_access: TestClient):
+    profile = db.create_profile("Antigravity ACPX", sandbox_id="alpha", harness="antigravity")
+    seed_passed_health(profile["id"])
+    session = db.create_task_session(profile["id"], "alpha", "bootstrap")
+    created = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        headers=bootstrap_headers(),
+        json={
+            "harness": "acpx",
+            "agent": "claude",
+            "task": "Navigate",
+            "profile_id": profile["id"],
+            "allowed_origins": ["https://example.com"],
+            "max_steps": 20,
+            "timeout_seconds": 300,
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    claimed = client_access.post("/internal/task-runs/claim?harness=acpx", headers=worker_headers())
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["id"] == created.json()["id"]
+
+    cap = issue_capability(client_access, created.json()["id"])
+    assert cap.status_code == 200, cap.text
+    assert cap.json()["headers"]["Authorization"].startswith("Bearer cbm_run_")
+
+
 def test_capability_waiting_health_no_token(client_access: TestClient):
     profile = db.create_profile("Waiting", sandbox_id="alpha")
     db.upsert_profile_health(

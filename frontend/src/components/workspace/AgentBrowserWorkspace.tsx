@@ -22,11 +22,18 @@ import {
 import { ProfileViewer } from "../ProfileViewer";
 import { AgentOutputTimeline } from "./AgentOutputTimeline";
 
-type AgentMode = "browser-use" | "acpx" | OrcaAgentCli;
+type AgentMode = "browser-use" | "acpx" | "antigravity" | OrcaAgentCli;
 type FullViewPanel = "view" | "viewport" | "sessions" | null;
 type FullViewFitMode = "fit" | "width" | "height";
 
-const AGENT_OPTIONS: AgentMode[] = ["browser-use", "acpx", "cursor-agent", "grok", "codex"];
+const AGENT_OPTIONS: AgentMode[] = [
+  "browser-use",
+  "acpx",
+  "antigravity",
+  "cursor-agent",
+  "grok",
+  "codex",
+];
 const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
   { value: "codex", label: "Codex" },
   { value: "claude", label: "Claude" },
@@ -37,6 +44,7 @@ const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
 function preferredAgent(profile: Profile | null): AgentMode {
   if (profile?.harness === "browser-use") return "browser-use";
   if (profile?.harness === "acpx") return "acpx";
+  if (profile?.harness === "antigravity") return "antigravity";
   return "cursor-agent";
 }
 
@@ -166,8 +174,11 @@ export function AgentBrowserWorkspace({
   const unavailable = caps != null && !caps.available;
   const browserUseMode = agent === "browser-use";
   const acpxMode = agent === "acpx";
-  const selectedAcpxPreflight = acpxPreflights.find((item) => item.agent === acpxAgent);
-  const managedRunMode = browserUseMode || acpxMode;
+  const antigravityMode = agent === "antigravity";
+  const acpxBackedMode = acpxMode || antigravityMode;
+  const selectedAcpxAgent: AcpxAgent = antigravityMode ? "claude" : acpxAgent;
+  const selectedAcpxPreflight = acpxPreflights.find((item) => item.agent === selectedAcpxAgent);
+  const managedRunMode = browserUseMode || acpxBackedMode;
   const managedRunActive = Boolean(taskRun && ACTIVE_TASK_RUN_STATES.has(taskRun.status));
   const orcaSessionActive = session?.status === "running" || session?.status === "starting";
   const sessionActive = managedRunMode ? managedRunActive : orcaSessionActive;
@@ -188,7 +199,7 @@ export function AgentBrowserWorkspace({
     selectedProfile?.status === "running" &&
     hasModePermissions &&
     (managedRunMode ? Boolean(prompt.trim()) && originList.length > 0 : !unavailable) &&
-    (!acpxMode || (
+    (!acpxBackedMode || (
       acpxPresence?.worker_seen_recently === true && selectedAcpxPreflight?.ready === true
     )) &&
     !sessionActive &&
@@ -234,7 +245,7 @@ export function AgentBrowserWorkspace({
   }, []);
 
   useEffect(() => {
-    if (!acpxMode) {
+    if (!acpxBackedMode) {
       setAcpxPresence(null);
       setAcpxPreflights([]);
       return;
@@ -270,7 +281,7 @@ export function AgentBrowserWorkspace({
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [acpxMode]);
+  }, [acpxBackedMode]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current != null) {
@@ -393,9 +404,13 @@ export function AgentBrowserWorkspace({
             setAgent(preferredAgent(selectedProfile));
             return;
           }
-          setAgent(rememberedRun.harness === "acpx" ? "acpx" : "browser-use");
-          if (rememberedRun.harness === "acpx" && rememberedRun.agent) {
-            setAcpxAgent(rememberedRun.agent);
+          if (rememberedRun.harness === "acpx") {
+            setAgent(selectedProfile?.harness === "antigravity" ? "antigravity" : "acpx");
+            if (rememberedRun.agent) {
+              setAcpxAgent(rememberedRun.agent);
+            }
+          } else {
+            setAgent("browser-use");
           }
           setTaskSessionId(rememberedRun.task_session_id);
           setTaskRun(rememberedRun);
@@ -507,7 +522,7 @@ export function AgentBrowserWorkspace({
         if (!origins.length) {
           throw new Error("Managed browser tasks must include an explicit http(s) URL.");
         }
-        const managedHarness = acpxMode ? "acpx" : "browser-use";
+        const managedHarness = acpxBackedMode ? "acpx" : "browser-use";
         let sessionId = taskSessionId;
         if (!sessionId) {
           const created = await api.createTaskSession({
@@ -516,7 +531,8 @@ export function AgentBrowserWorkspace({
             metadata: {
               source: "agent-browser-workspace",
               harness: managedHarness,
-              ...(acpxMode ? { agent: acpxAgent } : {}),
+              ...(acpxBackedMode ? { agent: selectedAcpxAgent } : {}),
+              ...(antigravityMode ? { mode: "antigravity" } : {}),
             },
           });
           sessionId = created.id;
@@ -524,7 +540,7 @@ export function AgentBrowserWorkspace({
         }
         const started = await api.createTaskRun(sessionId, {
           harness: managedHarness,
-          agent: acpxMode ? acpxAgent : null,
+          agent: acpxBackedMode ? selectedAcpxAgent : null,
           task,
           profile_id: selectedProfile.id,
           allowed_origins: origins,
@@ -554,7 +570,7 @@ export function AgentBrowserWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [acpxAgent, acpxMode, agent, browserUseMode, canStart, managedRunMode, prompt, selectedProfile, taskSessionId]);
+  }, [acpxBackedMode, agent, antigravityMode, browserUseMode, canStart, managedRunMode, prompt, selectedAcpxAgent, selectedProfile, taskSessionId]);
 
   const handleSend = useCallback(async () => {
     if (!session || !canSend) return;
@@ -687,20 +703,28 @@ export function AgentBrowserWorkspace({
           <TerminalSquare className="h-3.5 w-3.5 text-[#8b8b8b]" />
           <div className="min-w-0 flex-1">
             <div className="truncate text-[12px] font-semibold tracking-tight">
-              {browserUseMode ? "Browser Use" : acpxMode ? "ACPX / ACP" : "Orca CLI"}
+              {browserUseMode
+                ? "Browser Use"
+                : antigravityMode
+                  ? "Antigravity · ACPX/Claude"
+                  : acpxMode
+                    ? "ACPX / ACP"
+                    : "Orca CLI"}
             </div>
             <div className="truncate text-[10px] text-[#8b8b8b]" data-testid="orca-connection-status">
               {managedRunMode
                 ? taskRun
                   ? `Managed worker · ${taskRun.id}`
-                  : acpxMode
+                  : acpxBackedMode
                     ? acpxPresence?.worker_seen_recently
                       ? selectedAcpxPreflight?.ready
-                        ? `Managed run · ${acpxAgent} · ACP ready`
-                        : `Managed run · ${acpxAgent} · ${selectedAcpxPreflight?.state ?? "checking"}`
+                        ? antigravityMode
+                          ? "Managed run · Claude · ACP ready"
+                          : `Managed run · ${selectedAcpxAgent} · ACP ready`
+                        : `Managed run · ${selectedAcpxAgent} · ${selectedAcpxPreflight?.state ?? "checking"}`
                       : acpxPresence
-                        ? `Managed run · ${acpxAgent} · ${acpxPresence.state}`
-                        : `Managed run · ${acpxAgent} · checking worker`
+                        ? `Managed run · ${selectedAcpxAgent} · ${acpxPresence.state}`
+                        : `Managed run · ${selectedAcpxAgent} · checking worker`
                     : "Managed VCVM worker"
                 : statusLabel(session, caps)}
               {!managedRunMode && session ? ` · ${session.terminal_handle}` : ""}
@@ -751,7 +775,13 @@ export function AgentBrowserWorkspace({
           >
             {AGENT_OPTIONS.map((option) => (
               <option key={option} value={option}>
-                {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option}
+                {option === "browser-use"
+                  ? "Browser Use"
+                  : option === "acpx"
+                    ? "ACPX / ACP"
+                    : option === "antigravity"
+                      ? "Antigravity · ACPX/Claude"
+                      : option}
               </option>
             ))}
           </select>
@@ -794,7 +824,13 @@ export function AgentBrowserWorkspace({
                       ? "Requires automate"
                       : "Requires automate and interact"
                     : managedRunMode
-                      ? `Run ${acpxMode ? `ACPX with ${acpxAgent}` : "Browser Use"} on this live profile`
+                      ? `Run ${
+                          antigravityMode
+                            ? "Antigravity · ACPX/Claude"
+                            : acpxMode
+                              ? `ACPX with ${selectedAcpxAgent}`
+                              : "Browser Use"
+                        } on this live profile`
                       : "Launch Orca agent session"
               }
             >
@@ -820,7 +856,7 @@ export function AgentBrowserWorkspace({
           </span>
           <span>·</span>
           <span data-testid="orca-cap-resume">
-            {managedRunMode ? (acpxMode ? "session: ACP" : "worker: managed") : "resume: unavailable"}
+            {managedRunMode ? (acpxBackedMode ? "session: ACP" : "worker: managed") : "resume: unavailable"}
           </span>
           <span>·</span>
           <span>
@@ -834,7 +870,7 @@ export function AgentBrowserWorkspace({
           </div>
         ) : null}
 
-        {acpxMode && acpxPresence && !acpxPresence.worker_seen_recently ? (
+        {acpxBackedMode && acpxPresence && !acpxPresence.worker_seen_recently ? (
           <div
             className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1.5 text-[11px] text-amber-200"
             data-testid="acpx-unavailable"
@@ -843,7 +879,7 @@ export function AgentBrowserWorkspace({
           </div>
         ) : null}
 
-        {acpxMode && acpxPresence?.worker_seen_recently && !selectedAcpxPreflight?.ready ? (
+        {acpxBackedMode && acpxPresence?.worker_seen_recently && !selectedAcpxPreflight?.ready ? (
           <div
             className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1.5 text-[11px] text-amber-200"
             data-testid="acpx-agent-unavailable"
@@ -915,7 +951,11 @@ export function AgentBrowserWorkspace({
               <AgentOutputTimeline outputs={taskOutputs} />
             ) : (
               <p className="text-[11px] text-[#777]">
-                Add an explicit URL, then run {acpxMode ? `ACPX with ${acpxAgent}` : "Browser Use"}. Actions, screenshots, data and the
+                Add an explicit URL, then run {antigravityMode
+                  ? "Antigravity · ACPX/Claude"
+                  : acpxMode
+                    ? `ACPX with ${selectedAcpxAgent}`
+                    : "Browser Use"}. Actions, screenshots, data and the
                 final summary appear here as typed cards.
               </p>
             )}

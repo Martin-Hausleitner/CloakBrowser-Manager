@@ -878,6 +878,7 @@ class WorkerRuntimeService:
                 run_harness = str(row["harness"] or "")
                 if (
                     profile_harness != run_harness
+                    and not (profile_harness == "antigravity" and run_harness == "acpx")
                     and profile_harness not in UNIVERSAL_PROFILE_HARNESSES
                     and run_harness not in UNIVERSAL_PROFILE_HARNESSES
                 ):

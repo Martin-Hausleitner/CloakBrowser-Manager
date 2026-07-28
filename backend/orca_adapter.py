@@ -426,6 +426,7 @@ class OrcaAdapter:
         agent_key_file: str | None = None,
         probe_runtime: bool | None = None,
         clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         self._orca_bin_override = orca_bin
         self._runner = runner or default_runner
@@ -439,6 +440,7 @@ class OrcaAdapter:
         else:
             self._probe_runtime = probe_runtime
         self._clock = clock or time.time
+        self._sleep = sleeper or time.sleep
         self._lock = threading.RLock()
         self._sessions: dict[str, OrcaSession] = {}
         self._handles: set[str] = set()
@@ -624,6 +626,24 @@ class OrcaAdapter:
             self._sessions[session_id] = session
             self._handles.add(handle)
 
+        if agent_cli == "agy" and self._probe_runtime:
+            try:
+                self._ensure_agy_started(handle, launch_command)
+            except OrcaAdapterError as exc:
+                session.status = "error"
+                session.last_error = exc.message
+                try:
+                    self.invoke(
+                        "terminal.close",
+                        terminal=handle,
+                        timeout=DEFAULT_TIMEOUT_SECONDS,
+                    )
+                except OrcaAdapterError:
+                    pass
+                with self._lock:
+                    self._handles.discard(handle)
+                return session
+
         context = build_initial_context(
             profile_id=profile_id,
             agent=agent_cli,
@@ -653,6 +673,39 @@ class OrcaAdapter:
             session.status = "error"
             session.last_error = exc.message
         return session
+
+    def _ensure_agy_started(self, handle: str, launch_command: str) -> None:
+        """Verify Orca launched AGY, retrying the fixed wrapper from a bare shell once."""
+        fallback_sent = False
+        last_text = ""
+        for _attempt in range(30):
+            payload = self.invoke(
+                "terminal.read",
+                terminal=handle,
+                cursor=0,
+                limit=500,
+                timeout=5.0,
+            )
+            last_text, _next_cursor = _extract_output_text(payload)
+            if "Antigravity CLI" in last_text:
+                return
+            if not fallback_sent and (
+                "coder@vcvm:" in last_text or last_text.rstrip().endswith("$")
+            ):
+                self.invoke(
+                    "terminal.send",
+                    terminal=handle,
+                    text=launch_command,
+                    enter=True,
+                    timeout=DEFAULT_TIMEOUT_SECONDS,
+                )
+                fallback_sent = True
+            self._sleep(0.25)
+        raise OrcaAdapterError(
+            "agy_start_failed",
+            "AGY CLI did not start in the owned Orca terminal",
+            status_code=502,
+        )
 
     def get_session(self, session_id: str, *, owner_key: str | None = None) -> OrcaSession:
         with self._lock:

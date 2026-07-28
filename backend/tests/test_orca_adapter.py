@@ -101,6 +101,39 @@ def test_agy_commits_multiline_profile_context_after_the_tui_paste():
     assert submit_argv[-1] == "--enter"
 
 
+def test_agy_restarts_fixed_wrapper_when_orca_opens_only_a_shell():
+    runner = FakeRunner()
+    runner.queue(_ok({"terminal": {"handle": "term_owned-agy-fallback"}}))
+    runner.queue(_ok({"output": "coder@vcvm:~/repo$"}))
+    runner.queue(_ok({"ok": True}))
+    runner.queue(_ok({"output": "Antigravity CLI 1.1.8\n>"}))
+    runner.queue(_ok({"ok": True}))
+    runner.queue(_ok({"ok": True}))
+    adapter = oa.OrcaAdapter(
+        orca_bin="/bin/fake-orca",
+        runner=runner,
+        worktree_selector="path:/repo",
+        probe_runtime=True,
+        sleeper=lambda _seconds: None,
+    )
+
+    session = adapter.start_session(
+        profile_id="profile-agy",
+        sandbox_id="alpha",
+        agent="agy",
+        owner_key="agent:ops",
+    )
+
+    assert session.status == "running"
+    fallback_argv = runner.calls[2][0]
+    assert fallback_argv[1:4] == ["terminal", "send", "--json"]
+    assert fallback_argv[fallback_argv.index("--text") + 1].endswith(
+        "scripts/orca_agent_cli.sh agy"
+    )
+    assert runner.calls[4][0][1:4] == ["terminal", "send", "--json"]
+    assert runner.calls[5][0][1:4] == ["terminal", "send", "--json"]
+
+
 @pytest.mark.parametrize("agent", ["bash", "sh", "python", "cursor", "opencode"])
 def test_validate_agent_cli_rejects_non_allowlisted(agent: str):
     with pytest.raises(oa.OrcaAdapterError) as exc:

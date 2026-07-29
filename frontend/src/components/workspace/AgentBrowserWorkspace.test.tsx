@@ -683,6 +683,10 @@ describe("AgentBrowserWorkspace", () => {
     expect(banner.textContent).not.toContain("agent key file is missing");
     expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId("orca-send") as HTMLButtonElement).disabled).toBe(true);
+    const harnessSelect = screen.getByTestId("orca-agent-select") as HTMLSelectElement;
+    expect(harnessSelect.disabled).toBe(false);
+    fireEvent.change(harnessSelect, { target: { value: "unbrowse" } });
+    expect(harnessSelect.value).toBe("unbrowse");
   });
 
   it("disables launch without automate/interact permissions", async () => {

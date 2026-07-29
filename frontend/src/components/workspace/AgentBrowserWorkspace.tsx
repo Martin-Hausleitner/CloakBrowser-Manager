@@ -1051,7 +1051,7 @@ export function AgentBrowserWorkspace({
               className="input h-7 max-w-[9rem] bg-[#18181b] py-0.5 text-[10px]"
               value={agent}
               onChange={(event) => setAgent(event.target.value as AgentMode)}
-              disabled={sessionActive || (!managedRunMode && unavailable)}
+              disabled={sessionActive}
               data-testid="orca-agent-select"
             >
               {visibleAgentOptions.map((option) => (

@@ -4,7 +4,6 @@ import {
   Camera,
   ChevronDown,
   MonitorSmartphone,
-  Play,
   RefreshCw,
   SendHorizontal,
   Settings2,
@@ -1120,17 +1119,6 @@ export function AgentBrowserWorkspace({
               ) : null}
               <button
                 type="button"
-                className="sr-only"
-                onClick={() => void handleStart()}
-                disabled={!canStart}
-                data-testid="orca-launch"
-                title="Launch the selected mode"
-              >
-                <Play className="h-3 w-3" />
-                Launch
-              </button>
-              <button
-                type="button"
                 className={canStop
                   ? "inline-flex h-7 w-7 items-center justify-center rounded border border-[#493434] bg-[#211515] text-red-300 hover:bg-[#3b1919]"
                   : "sr-only"}
@@ -1383,7 +1371,7 @@ export function AgentBrowserWorkspace({
             type="submit"
             className="btn btn-primary inline-flex h-8 items-center gap-1 px-2 text-[10px]"
             disabled={submitStartsSession ? !canStart : !canSend}
-            data-testid="orca-send"
+            data-testid="orca-launch"
           >
             <SendHorizontal className="h-3.5 w-3.5" />
             {managedRunMode ? "Run" : submitStartsSession ? "Launch" : "Send"}

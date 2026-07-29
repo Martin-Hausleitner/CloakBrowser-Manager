@@ -710,13 +710,10 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             <BrowserUseHome
               projects={projects}
               projectId={projectId}
-              harness={harness}
               profiles={profiles}
               task={taskDraft}
-              canManage={canManageProfiles}
               selectedProfile={selected}
               onProjectChange={setProjectId}
-              onHarnessChange={setHarness}
               onTaskChange={setTaskDraft}
               onSelectProfile={(profileId) => {
                 setSelectedId(profileId);
@@ -724,10 +721,6 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                 if (profile?.project_id) setProjectId(profile.project_id);
                 if (profile?.harness) setHarness(profile.harness);
               }}
-              onOpenProxies={() => setView("proxies")}
-              onOpenProfiles={() => setView("profiles")}
-              onOpenAccounts={() => setView("accounts")}
-              onCreateProjectProfile={handleNew}
               onOpenSettings={(profileId) => {
                 if (!profileId) {
                   handleNew();

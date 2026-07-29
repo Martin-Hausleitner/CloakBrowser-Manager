@@ -222,7 +222,8 @@ describe("AgentBrowserWorkspace", () => {
     expectUiState(document.body, UI_STATE.profileViewer);
     expect(screen.getByTestId("mock-profile-viewer").textContent).toContain("viewer:profile-live");
     expect(screen.getByTestId("workspace-run-bar")).toBeTruthy();
-    expect(screen.getByTestId("orca-launch").className).toContain("sr-only");
+    expect(screen.getAllByTestId("orca-launch")).toHaveLength(1);
+    expect(screen.getByTestId("orca-launch").className).not.toContain("sr-only");
     expect(screen.getByTestId("orca-cap-pause").textContent).toMatch(/unavailable/i);
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
   });
@@ -295,7 +296,7 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     await waitFor(() => expect(apiMock.getTaskHarnessPreflights).toHaveBeenCalledWith("acpx", expect.anything()));
-    expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).toBe("cursor");
+    await waitFor(() => expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).toBe("cursor"));
     expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).not.toBe("claude");
   });
 
@@ -725,7 +726,7 @@ describe("AgentBrowserWorkspace", () => {
     expect(banner.textContent).toContain("1 more check");
     expect(banner.textContent).not.toContain("agent key file is missing");
     expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByTestId("orca-send") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(true);
     const harnessSelect = screen.getByTestId("orca-agent-select") as HTMLSelectElement;
     expect(harnessSelect.disabled).toBe(false);
     fireEvent.change(harnessSelect, { target: { value: "unbrowse" } });
@@ -804,7 +805,7 @@ describe("AgentBrowserWorkspace", () => {
     expect((await screen.findByTestId("orca-transcript")).textContent).toContain("boot");
 
     fireEvent.change(screen.getByTestId("orca-prompt"), { target: { value: "continue" } });
-    fireEvent.click(screen.getByTestId("orca-send"));
+    fireEvent.click(screen.getByTestId("orca-launch"));
     await waitFor(() => {
       expect(apiMock.sendOrcaSessionInput).toHaveBeenCalledWith("orca_abc", {
         text: "continue",

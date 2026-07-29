@@ -49,28 +49,26 @@ describe("BrowserUseHome", () => {
       <BrowserUseHome
         projects={["default"]}
         projectId="default"
-        harness="browser-use"
         profiles={[runningProfile]}
         task=""
-        canManage
         selectedProfile={runningProfile}
         onProjectChange={vi.fn()}
-        onHarnessChange={vi.fn()}
         onTaskChange={vi.fn()}
         onSelectProfile={vi.fn()}
         onOpenSettings={vi.fn()}
-        onOpenProxies={vi.fn()}
-        onOpenProfiles={vi.fn()}
-        onOpenAccounts={vi.fn()}
-        onCreateProjectProfile={vi.fn()}
         onLaunchSelected={vi.fn()}
       />,
     );
 
     expect(screen.queryByText("Callable browser backends")).toBeNull();
     expect(screen.queryByText("Viewport")).toBeNull();
+    expect(screen.getByRole("combobox", { name: "Project" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Run with browser profile" })).toBeTruthy();
+    expect(screen.queryByRole("combobox", { name: "Browser harness" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Attachments" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open profile settings" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Toggle harness and settings panel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Browser settings" }));
 
     expect(screen.getByText("Live Demo")).toBeTruthy();
     expect(screen.getByText("1280×720")).toBeTruthy();
@@ -88,20 +86,13 @@ describe("BrowserUseHome", () => {
       <BrowserUseHome
         projects={["default"]}
         projectId="default"
-        harness="browser-use"
         profiles={[runningProfile]}
         task=""
-        canManage
         selectedProfile={null}
         onProjectChange={vi.fn()}
-        onHarnessChange={vi.fn()}
         onTaskChange={vi.fn()}
         onSelectProfile={onSelectProfile}
         onOpenSettings={onOpenSettings}
-        onOpenProxies={vi.fn()}
-        onOpenProfiles={vi.fn()}
-        onOpenAccounts={vi.fn()}
-        onCreateProjectProfile={vi.fn()}
         onLaunchSelected={vi.fn()}
       />,
     );
@@ -123,25 +114,18 @@ describe("BrowserUseHome", () => {
       <BrowserUseHome
         projects={["default"]}
         projectId="default"
-        harness="browser-use"
         profiles={[{ ...runningProfile, proxy: null, proxy_display: "http://proxy.test:8080" }]}
         task=""
-        canManage
         selectedProfile={{ ...runningProfile, proxy: null, proxy_display: "http://proxy.test:8080" }}
         onProjectChange={vi.fn()}
-        onHarnessChange={vi.fn()}
         onTaskChange={vi.fn()}
         onSelectProfile={vi.fn()}
         onOpenSettings={vi.fn()}
-        onOpenProxies={vi.fn()}
-        onOpenProfiles={vi.fn()}
-        onOpenAccounts={vi.fn()}
-        onCreateProjectProfile={vi.fn()}
         onLaunchSelected={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Toggle harness and settings panel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Browser settings" }));
 
     expect(screen.getByText("Proxy ready")).toBeTruthy();
     expect(document.body.textContent).not.toContain("proxy-user");

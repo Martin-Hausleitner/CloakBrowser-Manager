@@ -1,24 +1,17 @@
-import { useMemo, useState } from "react";
-import { Paperclip, Settings2, ArrowUp, SlidersHorizontal } from "lucide-react";
-import type { Profile, ProfileHarness } from "../lib/api";
-import { HARNESS_OPTIONS, harnessLabel } from "../lib/harnessOptions";
+import { useState } from "react";
+import { ArrowUp, SlidersHorizontal } from "lucide-react";
+import type { Profile } from "../lib/api";
+import { harnessLabel } from "../lib/harnessOptions";
 
 interface BrowserUseHomeProps {
   projects: string[];
   projectId: string;
-  harness: ProfileHarness;
   profiles: Profile[];
   task: string;
-  canManage: boolean;
   onProjectChange: (projectId: string) => void;
-  onHarnessChange: (harness: ProfileHarness) => void;
   onTaskChange: (task: string) => void;
   onSelectProfile: (profileId: string | null) => void;
   onOpenSettings: (profileId: string | null) => void;
-  onOpenProxies: () => void;
-  onOpenProfiles: () => void;
-  onOpenAccounts: () => void;
-  onCreateProjectProfile: () => void;
   onLaunchSelected: () => void;
   selectedProfile: Profile | null;
 }
@@ -26,11 +19,9 @@ interface BrowserUseHomeProps {
 export function BrowserUseHome({
   projects,
   projectId,
-  harness,
   profiles,
   task,
   onProjectChange,
-  onHarnessChange,
   onTaskChange,
   onSelectProfile,
   onOpenSettings,
@@ -41,103 +32,39 @@ export function BrowserUseHome({
   const projectProfiles = profiles.filter(
     (profile) => (profile.project_id || "default") === projectId,
   );
-  const selectedOption = useMemo(
-    () => HARNESS_OPTIONS.find((option) => option.value === harness),
-    [harness],
-  );
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-        <div className="flex min-w-0 items-center gap-2">
-          <label className="sr-only" htmlFor="home-project">
-            Project
-          </label>
-          <select
-            id="home-project"
-            className="input max-w-[14rem] py-1.5 text-xs"
-            value={projectId}
-            onChange={(event) => onProjectChange(event.target.value)}
-          >
-            {projects.map((project) => (
-              <option key={project} value={project}>
-                {project}
-              </option>
-            ))}
-            {!projects.includes(projectId) ? (
-              <option value={projectId}>{projectId}</option>
-            ) : null}
-          </select>
-          <span className="hidden text-xs text-gray-600 sm:inline">/</span>
-          <label className="sr-only" htmlFor="home-harness">
-            Browser harness
-          </label>
-          <select
-            id="home-harness"
-            className="input max-w-[14rem] py-1.5 text-xs"
-            value={harness}
-            onChange={(event) => onHarnessChange(event.target.value as ProfileHarness)}
-            title="Preferred harness metadata; host actions still require Codex Computer Use"
-          >
-            {HARNESS_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      <div className="flex flex-1 flex-col items-center justify-center px-4 pb-16">
-        <div className="mb-8 text-center">
+      <div className="flex flex-1 flex-col items-center justify-center px-4 pb-12">
+        <div className="mb-5 text-center">
           <div className="text-2xl font-semibold tracking-tight text-gray-100">Browser Use</div>
-          <p className="mt-1 text-xs text-gray-500">
-            Compact CloakBrowser workspace · preference: {harnessLabel(harness)}
-            {selectedOption ? ` · ${selectedOption.approach}` : ""}
-          </p>
+          <p className="mt-1 text-xs text-gray-500">Choose a browser and describe the task.</p>
         </div>
 
         <div className="w-full max-w-2xl rounded-2xl border border-border bg-surface-1 p-3 shadow-sm">
           <textarea
             value={task}
             onChange={(event) => onTaskChange(event.target.value)}
-            rows={3}
+            rows={2}
             placeholder="Give the agent a task, e.g. open BrowserScan and report the authenticity score."
             className="w-full resize-none bg-transparent px-2 py-2 text-sm text-gray-100 outline-none placeholder:text-gray-600"
           />
           <div className="mt-2 flex items-center justify-between gap-2 px-1">
-            <div className="flex items-center gap-1.5 text-gray-500">
-              <button
-                type="button"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-lg hover:bg-surface-2"
-                title="Attachments are not required for this MVP shell"
-                aria-label="Attachments"
-              >
-                <Paperclip className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-lg hover:bg-surface-2"
-                title="Open profile settings"
-                aria-label="Open profile settings"
-                onClick={() => onOpenSettings(selectedProfile?.id ?? projectProfiles[0]?.id ?? null)}
-              >
-                <Settings2 className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                className={`inline-flex h-9 w-9 items-center justify-center rounded-lg hover:bg-surface-2 ${
-                  settingsOpen ? "bg-surface-2 text-gray-200" : ""
-                }`}
-                title="Toggle harness & settings panel"
-                aria-label="Toggle harness and settings panel"
-                aria-pressed={settingsOpen}
-                onClick={() => setSettingsOpen((open) => !open)}
-              >
-                <SlidersHorizontal className="h-4 w-4" />
-              </button>
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 text-gray-500">
+              <label className="sr-only" htmlFor="home-project">Project</label>
               <select
-                className="input py-1 text-xs"
+                id="home-project"
+                className="input h-9 max-w-[9rem] py-1 text-xs"
+                value={projectId}
+                onChange={(event) => onProjectChange(event.target.value)}
+              >
+                {projects.map((project) => (
+                  <option key={project} value={project}>{project}</option>
+                ))}
+                {!projects.includes(projectId) ? <option value={projectId}>{projectId}</option> : null}
+              </select>
+              <select
+                className="input h-9 min-w-0 flex-1 py-1 text-xs"
                 value={selectedProfile?.id ?? ""}
                 onChange={(event) => onSelectProfile(event.target.value || null)}
                 aria-label="Run with browser profile"
@@ -150,6 +77,19 @@ export function BrowserUseHome({
                   </option>
                 ))}
               </select>
+              <button
+                type="button"
+                className={`inline-flex h-9 w-9 items-center justify-center rounded-lg hover:bg-surface-2 ${
+                  settingsOpen ? "bg-surface-2 text-gray-200" : ""
+                }`}
+                title="Browser settings"
+                aria-label="Browser settings"
+                aria-pressed={settingsOpen}
+                aria-expanded={settingsOpen}
+                onClick={() => setSettingsOpen((open) => !open)}
+              >
+                <SlidersHorizontal className="h-4 w-4" />
+              </button>
             </div>
             <button
               type="button"

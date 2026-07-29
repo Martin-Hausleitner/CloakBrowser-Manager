@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Paperclip, Settings2, ArrowUp, SlidersHorizontal } from "lucide-react";
 import type { Profile, ProfileHarness } from "../lib/api";
-import { CALLABLE_BROWSER_HARNESSES, HARNESS_OPTIONS, harnessLabel } from "../lib/harnessOptions";
+import { HARNESS_OPTIONS, harnessLabel } from "../lib/harnessOptions";
 
 interface BrowserUseHomeProps {
   projects: string[];
@@ -37,7 +37,7 @@ export function BrowserUseHome({
   onLaunchSelected,
   selectedProfile,
 }: BrowserUseHomeProps) {
-  const [settingsOpen, setSettingsOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const projectProfiles = profiles.filter(
     (profile) => (profile.project_id || "default") === projectId,
   );
@@ -166,8 +166,6 @@ export function BrowserUseHome({
 
         {settingsOpen ? (
           <HarnessSettingsPanel
-            harness={harness}
-            onHarnessChange={onHarnessChange}
             selectedProfile={selectedProfile}
             onEditProfile={() =>
               onOpenSettings(selectedProfile?.id ?? projectProfiles[0]?.id ?? null)
@@ -180,61 +178,19 @@ export function BrowserUseHome({
 }
 
 function HarnessSettingsPanel({
-  harness,
-  onHarnessChange,
   selectedProfile,
   onEditProfile,
 }: {
-  harness: ProfileHarness;
-  onHarnessChange: (harness: ProfileHarness) => void;
   selectedProfile: Profile | null;
   onEditProfile: () => void;
 }) {
   return (
-    <div className="mt-6 w-full max-w-2xl space-y-3">
-      <div className="rounded-xl border border-border bg-surface-1/80 p-4">
-        <div className="mb-3 flex items-center justify-between gap-2">
-          <div>
-            <p className="text-sm font-medium text-gray-100">Callable browser backends</p>
-            <p className="text-[11px] text-gray-500">
-              One-to-one with Browser Use excerpts · preference only until a verified bridge runs
-            </p>
-          </div>
-        </div>
-        <div className="grid gap-2 sm:grid-cols-2">
-          {HARNESS_OPTIONS.filter((option) =>
-            CALLABLE_BROWSER_HARNESSES.includes(option.value),
-          ).map((option) => {
-            const active = option.value === harness;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => onHarnessChange(option.value)}
-                className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${
-                  active
-                    ? "border-accent/50 bg-accent/10"
-                    : "border-border bg-surface-2 hover:bg-surface-3"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-gray-100">{option.label}</span>
-                  <span className="rounded-full bg-surface-3 px-1.5 py-0.5 text-[10px] text-gray-400">
-                    {option.short}
-                  </span>
-                </div>
-                <p className="mt-1 text-[11px] leading-snug text-gray-500">{option.description}</p>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
+    <div className="mt-3 w-full max-w-2xl">
       {selectedProfile ? (
         <CompactSettingsCard profile={selectedProfile} onEdit={onEditProfile} />
       ) : (
-        <div className="rounded-xl border border-dashed border-border bg-surface-1/50 px-4 py-6 text-center text-xs text-gray-500">
-          Choose a profile to edit viewport, proxy, geo, humanize, and more settings.
+        <div className="rounded-lg border border-dashed border-border bg-surface-1/50 px-3 py-2 text-center text-[11px] text-gray-500">
+          Choose a browser to inspect its essential settings.
         </div>
       )}
     </div>
@@ -249,40 +205,34 @@ function CompactSettingsCard({
   onEdit: () => void;
 }) {
   const proxyDisplay = profile.proxy_display ?? profile.proxy;
-  const rows = [
-    ["Viewport", `${profile.screen_width}×${profile.screen_height}`],
-    ["Platform", profile.platform],
-    ["Timezone", profile.timezone || "auto"],
-    ["Locale", profile.locale || "auto"],
-    ["Harness", harnessLabel(profile.harness)],
-    ["GeoIP", profile.geoip ? "on" : "off"],
-    ["Humanize", profile.humanize ? profile.human_preset : "off"],
-    ["Clipboard", profile.clipboard_sync ? "sync" : "off"],
-    ["Color", profile.color_scheme || "default"],
-    ["Search", profile.search_engine || "default"],
-    ["Proxy", proxyDisplay ? "configured" : "none"],
-    ["Headless", profile.headless ? "on" : "off"],
-  ] as const;
 
   return (
-    <div className="rounded-xl border border-border bg-surface-1/80 p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          <p className="text-sm font-medium text-gray-100">{profile.name}</p>
-          <p className="text-[11px] text-gray-500">Expanded settings overview</p>
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface-1/80 px-3 py-2">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-xs font-medium text-gray-100">{profile.name}</p>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-gray-400">
+          <span className="rounded bg-surface-2 px-1.5 py-0.5">
+            {profile.screen_width}×{profile.screen_height}
+          </span>
+          <span className="rounded bg-surface-2 px-1.5 py-0.5">
+            {harnessLabel(profile.harness)}
+          </span>
+          <span className={`rounded px-1.5 py-0.5 ${proxyDisplay ? "bg-emerald-950/70 text-emerald-300" : "bg-surface-2"}`}>
+            {proxyDisplay ? "Proxy ready" : "No proxy"}
+          </span>
+          <span className="rounded bg-surface-2 px-1.5 py-0.5">
+            {profile.status === "running" ? "Live" : "Stopped"}
+          </span>
         </div>
-        <button type="button" className="btn btn-secondary text-xs" onClick={onEdit}>
-          Edit settings
-        </button>
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {rows.map(([label, value]) => (
-          <div key={label} className="rounded-lg bg-surface-2 px-2.5 py-2">
-            <div className="text-[10px] uppercase tracking-wide text-gray-500">{label}</div>
-            <div className="truncate text-xs text-gray-200">{value}</div>
-          </div>
-        ))}
-      </div>
+      <button
+        type="button"
+        className="btn btn-secondary h-7 px-2 text-[10px]"
+        onClick={onEdit}
+        aria-label="Edit profile settings"
+      >
+        Edit
+      </button>
     </div>
   );
 }

@@ -44,6 +44,42 @@ const runningProfile: Profile = {
 };
 
 describe("BrowserUseHome", () => {
+  it("keeps advanced profile details collapsed and avoids duplicate harness cards", () => {
+    render(
+      <BrowserUseHome
+        projects={["default"]}
+        projectId="default"
+        harness="browser-use"
+        profiles={[runningProfile]}
+        task=""
+        canManage
+        selectedProfile={runningProfile}
+        onProjectChange={vi.fn()}
+        onHarnessChange={vi.fn()}
+        onTaskChange={vi.fn()}
+        onSelectProfile={vi.fn()}
+        onOpenSettings={vi.fn()}
+        onOpenProxies={vi.fn()}
+        onOpenProfiles={vi.fn()}
+        onOpenAccounts={vi.fn()}
+        onCreateProjectProfile={vi.fn()}
+        onLaunchSelected={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Callable browser backends")).toBeNull();
+    expect(screen.queryByText("Viewport")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle harness and settings panel" }));
+
+    expect(screen.getByText("Live Demo")).toBeTruthy();
+    expect(screen.getByText("1280×720")).toBeTruthy();
+    expect(screen.getByText("No proxy")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit profile settings" })).toBeTruthy();
+    expect(screen.queryByText("Callable browser backends")).toBeNull();
+    expect(screen.queryByText("Expanded settings overview")).toBeNull();
+  });
+
   it("selects a profile without opening its settings", () => {
     const onSelectProfile = vi.fn();
     const onOpenSettings = vi.fn();
@@ -105,7 +141,9 @@ describe("BrowserUseHome", () => {
       />,
     );
 
-    expect(screen.getByText("Proxy").nextElementSibling?.textContent).toBe("configured");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle harness and settings panel" }));
+
+    expect(screen.getByText("Proxy ready")).toBeTruthy();
     expect(document.body.textContent).not.toContain("proxy-user");
     expect(document.body.textContent).not.toContain("top-secret");
   });

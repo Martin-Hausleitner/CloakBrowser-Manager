@@ -32,6 +32,18 @@ export interface BrowserToolSelection {
   enabled: boolean;
 }
 
+export interface BrowserToolReadinessTarget {
+  id: BrowserToolId;
+  ready: boolean;
+  state: "ready" | "failed" | "stale" | "unavailable";
+  reason_code: "ready" | "auth_required" | "adapter_unavailable" | "timeout" | "protocol_error" | "internal_error" | "not_checked" | "stale";
+  checked_at: string | null;
+}
+
+export interface BrowserToolReadiness {
+  tools: BrowserToolReadinessTarget[];
+}
+
 export interface ProviderReadinessProvider {
   provider: ProviderId;
   transport: ProviderTransport;
@@ -1156,6 +1168,9 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
 
   getProviderReadiness: (options?: { signal?: AbortSignal }) =>
     request<ProviderReadiness>("/api/providers/readiness", { signal: options?.signal }),
+
+  getBrowserToolReadiness: (options?: { signal?: AbortSignal }) =>
+    request<BrowserToolReadiness>("/api/browser-tools/readiness", { signal: options?.signal }),
 
   getTaskRun: (runId: string, options?: { signal?: AbortSignal }) =>
     request<TaskRun>(

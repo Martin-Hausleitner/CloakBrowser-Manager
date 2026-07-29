@@ -44,7 +44,7 @@ const runningProfile: Profile = {
 };
 
 describe("BrowserUseHome", () => {
-  it("keeps advanced profile details collapsed and avoids duplicate harness cards", () => {
+  it("keeps Browser Use home free of an inline settings popover", () => {
     render(
       <BrowserUseHome
         projects={["default"]}
@@ -60,22 +60,13 @@ describe("BrowserUseHome", () => {
       />,
     );
 
-    expect(screen.queryByText("Callable browser backends")).toBeNull();
-    expect(screen.queryByText("Viewport")).toBeNull();
     expect(screen.getByRole("combobox", { name: "Project" })).toBeTruthy();
     expect(screen.getByRole("combobox", { name: "Run with browser profile" })).toBeTruthy();
-    expect(screen.queryByRole("combobox", { name: "Browser harness" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Attachments" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Open profile settings" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "Browser settings" }));
-
-    expect(screen.getByText("Live Demo")).toBeTruthy();
-    expect(screen.getByText("1280×720")).toBeTruthy();
-    expect(screen.getByText("No proxy")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Edit profile settings" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Browser settings" })).toBeNull();
+    expect(screen.queryByText("1280x720")).toBeNull();
+    expect(screen.queryByText("No proxy")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit profile settings" })).toBeNull();
     expect(screen.queryByText("Callable browser backends")).toBeNull();
-    expect(screen.queryByText("Expanded settings overview")).toBeNull();
   });
 
   it("selects a profile without opening its settings", () => {
@@ -109,7 +100,7 @@ describe("BrowserUseHome", () => {
     expect(screen.queryByRole("button", { name: "New in project" })).toBeNull();
   });
 
-  it("shows configured proxy status from proxy_display when raw proxy is redacted", () => {
+  it("does not reveal redacted proxy details in removed inline settings", () => {
     render(
       <BrowserUseHome
         projects={["default"]}
@@ -125,9 +116,7 @@ describe("BrowserUseHome", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Browser settings" }));
-
-    expect(screen.getByText("Proxy ready")).toBeTruthy();
+    expect(screen.queryByText("Proxy ready")).toBeNull();
     expect(document.body.textContent).not.toContain("proxy-user");
     expect(document.body.textContent).not.toContain("top-secret");
   });

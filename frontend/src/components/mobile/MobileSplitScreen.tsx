@@ -18,6 +18,7 @@ import {
   RotateCcw,
   Send,
   ShieldCheck,
+  Settings2,
   SlidersHorizontal,
   Shrink,
   Square,
@@ -65,6 +66,7 @@ interface MobileSplitScreenProps {
   onBrowserZoomChange: (zoom: number) => void;
   onAccessControls: () => void;
   onLogout: () => void;
+  onOpenSettings: () => void;
 }
 
 interface ChatMessage {
@@ -257,6 +259,7 @@ export function MobileSplitScreen({
   onBrowserZoomChange,
   onAccessControls,
   onLogout,
+  onOpenSettings,
 }: MobileSplitScreenProps) {
   const [viewport, setViewport] = useState({
     width: selected?.screen_width ?? presets[0].width,
@@ -1579,6 +1582,19 @@ export function MobileSplitScreen({
               title="Browser tools (Ctrl+K)"
             >
               <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                closeTools();
+                setChatCollapsed(true);
+                onOpenSettings();
+              }}
+              className="mobile-command-button"
+              aria-label="Open Settings"
+              title="Settings"
+            >
+              <Settings2 className="h-4 w-4" aria-hidden="true" />
             </button>
             <button
               type="button"

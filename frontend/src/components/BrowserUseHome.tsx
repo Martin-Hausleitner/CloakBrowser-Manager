@@ -1,7 +1,5 @@
-import { useState } from "react";
-import { ArrowUp, SlidersHorizontal } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 import type { Profile } from "../lib/api";
-import { harnessLabel } from "../lib/harnessOptions";
 
 interface BrowserUseHomeProps {
   projects: string[];
@@ -24,11 +22,9 @@ export function BrowserUseHome({
   onProjectChange,
   onTaskChange,
   onSelectProfile,
-  onOpenSettings,
   onLaunchSelected,
   selectedProfile,
 }: BrowserUseHomeProps) {
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const projectProfiles = profiles.filter(
     (profile) => (profile.project_id || "default") === projectId,
   );
@@ -77,19 +73,6 @@ export function BrowserUseHome({
                   </option>
                 ))}
               </select>
-              <button
-                type="button"
-                className={`inline-flex h-9 w-9 items-center justify-center rounded-lg hover:bg-surface-2 ${
-                  settingsOpen ? "bg-surface-2 text-gray-200" : ""
-                }`}
-                title="Browser settings"
-                aria-label="Browser settings"
-                aria-pressed={settingsOpen}
-                aria-expanded={settingsOpen}
-                onClick={() => setSettingsOpen((open) => !open)}
-              >
-                <SlidersHorizontal className="h-4 w-4" />
-              </button>
             </div>
             <button
               type="button"
@@ -104,75 +87,7 @@ export function BrowserUseHome({
           </div>
         </div>
 
-        {settingsOpen ? (
-          <HarnessSettingsPanel
-            selectedProfile={selectedProfile}
-            onEditProfile={() =>
-              onOpenSettings(selectedProfile?.id ?? projectProfiles[0]?.id ?? null)
-            }
-          />
-        ) : null}
       </div>
-    </div>
-  );
-}
-
-function HarnessSettingsPanel({
-  selectedProfile,
-  onEditProfile,
-}: {
-  selectedProfile: Profile | null;
-  onEditProfile: () => void;
-}) {
-  return (
-    <div className="mt-3 w-full max-w-2xl">
-      {selectedProfile ? (
-        <CompactSettingsCard profile={selectedProfile} onEdit={onEditProfile} />
-      ) : (
-        <div className="rounded-lg border border-dashed border-border bg-surface-1/50 px-3 py-2 text-center text-[11px] text-gray-500">
-          Choose a browser to inspect its essential settings.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CompactSettingsCard({
-  profile,
-  onEdit,
-}: {
-  profile: Profile;
-  onEdit: () => void;
-}) {
-  const proxyDisplay = profile.proxy_display ?? profile.proxy;
-
-  return (
-    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface-1/80 px-3 py-2">
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-xs font-medium text-gray-100">{profile.name}</p>
-        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-gray-400">
-          <span className="rounded bg-surface-2 px-1.5 py-0.5">
-            {profile.screen_width}×{profile.screen_height}
-          </span>
-          <span className="rounded bg-surface-2 px-1.5 py-0.5">
-            {harnessLabel(profile.harness)}
-          </span>
-          <span className={`rounded px-1.5 py-0.5 ${proxyDisplay ? "bg-emerald-950/70 text-emerald-300" : "bg-surface-2"}`}>
-            {proxyDisplay ? "Proxy ready" : "No proxy"}
-          </span>
-          <span className="rounded bg-surface-2 px-1.5 py-0.5">
-            {profile.status === "running" ? "Live" : "Stopped"}
-          </span>
-        </div>
-      </div>
-      <button
-        type="button"
-        className="btn btn-secondary h-7 px-2 text-[10px]"
-        onClick={onEdit}
-        aria-label="Edit profile settings"
-      >
-        Edit
-      </button>
     </div>
   );
 }

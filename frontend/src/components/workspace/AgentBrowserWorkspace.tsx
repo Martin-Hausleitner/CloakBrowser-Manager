@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SetStateAction } from "react";
 import {
   Activity,
   Camera,
-  ChevronDown,
   MonitorSmartphone,
-  RefreshCw,
   SendHorizontal,
-  Settings2,
   Square,
+  Settings2,
   TerminalSquare,
 } from "lucide-react";
 import {
@@ -36,27 +35,21 @@ import { ProfileViewer } from "../ProfileViewer";
 import { LiveDevPanel } from "../LiveDevPanel";
 import { AgentOutputTimeline } from "./AgentOutputTimeline";
 import {
-  DEFAULT_BROWSER_TOOLS,
-  ProviderToolControl,
   providerInfo,
   providerLaunchBlockReason,
   type ProviderRoutingState,
 } from "./ProviderToolControl";
+import {
+  useWorkspaceRuntimeConfig,
+  type AgentMode,
+  type ManagedHarness,
+} from "./WorkspaceRuntimeConfig";
 
-type ManagedHarness = "browser-use" | "acpx" | "unbrowse" | "stagehand";
-type AgentMode = ManagedHarness | "antigravity" | OrcaAgentCli;
-type FullViewPanel = "view" | "viewport" | "sessions" | "provider" | null;
+type FullViewPanel = "view" | "viewport" | "sessions" | null;
 type FullViewFitMode = "fit" | "width" | "height";
 type FullViewMode = "single" | "grid";
 
 const MAX_DESKTOP_GRID_STREAMS = 6;
-const DEFAULT_PROVIDER_ROUTING: ProviderRoutingState = {
-  providerId: "grok",
-  transport: "acp",
-  modelAlias: "",
-  browserTools: DEFAULT_BROWSER_TOOLS,
-  routingPolicy: "ordered-fallback",
-};
 
 function acpAgentForProvider(providerId: ProviderId): AcpxAgent | null {
   if (!isSafeProviderId(providerId)) return null;
@@ -68,17 +61,18 @@ function acpxAgentLabel(agent: AcpxAgent): string {
   return agent;
 }
 
-const AGENT_OPTIONS: AgentMode[] = [
-  "browser-use",
-  "acpx",
-  "unbrowse",
-  "stagehand",
-  "antigravity",
-  "agy",
-  "grok",
-  "cursor-agent",
-  "codex",
-];
+function providerLabel(providerId: ProviderId): string {
+  const labels: Partial<Record<ProviderId, string>> = {
+    antigravity: "Antigravity",
+    codex: "Codex",
+    claude: "Claude",
+    cursor: "Cursor",
+    grok: "Grok",
+    opencode: "OpenCode",
+  };
+  return labels[providerId] ?? providerId;
+}
+
 const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
   { value: "claude", label: "Claude" },
   { value: "grok-build", label: "Grok Build" },
@@ -94,13 +88,6 @@ function preferredAgent(profile: Profile | null): AgentMode {
   if (profile?.harness === "antigravity") return "antigravity";
   return "agy";
 }
-
-const MANAGED_HARNESSES: readonly ManagedHarness[] = [
-  "browser-use",
-  "acpx",
-  "unbrowse",
-  "stagehand",
-];
 
 function managedHarnessLabel(harness: ManagedHarness): string {
   if (harness === "browser-use") return "Browser Use";
@@ -175,6 +162,8 @@ export interface AgentBrowserWorkspaceProps {
     status: "connecting" | "connected" | "reconnecting" | "failed",
   ) => void;
   onViewerDisconnect?: () => void;
+  onOpenSettings?: () => void;
+  onRunActivityChange?: (active: boolean) => void;
 }
 
 function statusLabel(session: OrcaSession | null, caps: OrcaCapabilities | null): string {
@@ -208,23 +197,40 @@ export function AgentBrowserWorkspace({
   onSelectProfile,
   onConnectionStatusChange,
   onViewerDisconnect,
+  onOpenSettings,
+  onRunActivityChange,
 }: AgentBrowserWorkspaceProps) {
-  const [agent, setAgent] = useState<AgentMode>(() => preferredAgent(selectedProfile));
-  const [acpxAgent, setAcpxAgent] = useState<AcpxAgent>("grok-build");
+  const { config: runtimeConfig, setConfig: setRuntimeConfig } = useWorkspaceRuntimeConfig();
+  const agent = runtimeConfig.agent;
+  const runtimeMode = runtimeConfig.mode === "cli" && agent === "acpx" ? "acp" : runtimeConfig.mode;
+  const acpxAgent = runtimeConfig.acpxAgent;
+  const providerRouting = runtimeConfig.providerRouting;
+  const setAgent = useCallback((next: SetStateAction<AgentMode>) => {
+    setRuntimeConfig((current) => ({
+      ...current,
+      agent: typeof next === "function" ? next(current.agent) : next,
+    }));
+  }, [setRuntimeConfig]);
+  const setAcpxAgent = useCallback((next: SetStateAction<AcpxAgent>) => {
+    setRuntimeConfig((current) => ({
+      ...current,
+      acpxAgent: typeof next === "function" ? next(current.acpxAgent) : next,
+    }));
+  }, [setRuntimeConfig]);
+  const setProviderRouting = useCallback((next: SetStateAction<ProviderRoutingState>) => {
+    setRuntimeConfig((current) => ({
+      ...current,
+      providerRouting: typeof next === "function" ? next(current.providerRouting) : next,
+    }));
+  }, [setRuntimeConfig]);
   const [prompt, setPrompt] = useState("");
   const [caps, setCaps] = useState<OrcaCapabilities | null>(null);
   const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness | null>(null);
-  const [providerRouting, setProviderRouting] = useState<ProviderRoutingState>(DEFAULT_PROVIDER_ROUTING);
   const [session, setSession] = useState<OrcaSession | null>(null);
   const [taskSessionId, setTaskSessionId] = useState<string | null>(null);
   const [taskRun, setTaskRun] = useState<TaskRun | null>(null);
   const [harnessPresence, setHarnessPresence] = useState<Partial<Record<ManagedHarness, TaskHarnessPresence>>>({});
   const [acpxPreflights, setAcpxPreflights] = useState<TaskHarnessAgentPreflight[]>([]);
-  const [harnessCheckBusy, setHarnessCheckBusy] = useState(false);
-  const [harnessCheckTarget, setHarnessCheckTarget] = useState<ManagedHarness | "orca" | "all" | null>(null);
-  const [smokeTestTarget, setSmokeTestTarget] = useState<ManagedHarness | null>(null);
-  const [localOpenTarget, setLocalOpenTarget] = useState<OrcaAgentCli | null>(null);
-  const [harnessMenuOpen, setHarnessMenuOpen] = useState(false);
   const [taskOutputs, setTaskOutputs] = useState<TaskOutput[]>([]);
   const [transcript, setTranscript] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -240,7 +246,6 @@ export function AgentBrowserWorkspace({
   const [viewportApplying, setViewportApplying] = useState(false);
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [fullViewMetricsOpen, setFullViewMetricsOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const runPollRef = useRef<number | null>(null);
@@ -249,11 +254,9 @@ export function AgentBrowserWorkspace({
   const viewerPaneRef = useRef<HTMLElement | null>(null);
   const viewerFullscreenButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreViewerFullscreenFocusRef = useRef(false);
-  const harnessMenuRef = useRef<HTMLDivElement | null>(null);
-  const harnessMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const smokeTestBusyRef = useRef(false);
   const selectedProfileIdRef = useRef<string | null>(selectedProfile?.id ?? null);
   selectedProfileIdRef.current = selectedProfile?.id ?? null;
+  const runtimeProfileIdRef = useRef<string | null>(null);
 
   const runningProfiles = useMemo(
     () => profiles.filter((profile) => profile.status === "running"),
@@ -278,36 +281,6 @@ export function AgentBrowserWorkspace({
     }
   }, [desktopGridAvailable, fullViewMode]);
 
-  useEffect(() => {
-    if (!harnessMenuOpen) return;
-    const focusTimer = window.setTimeout(() => {
-      harnessMenuRef.current
-        ?.querySelector<HTMLButtonElement>("[data-harness-option]")
-        ?.focus({ preventScroll: true });
-    }, 0);
-    const closeMenu = () => {
-      setHarnessMenuOpen(false);
-      window.setTimeout(() => harnessMenuTriggerRef.current?.focus({ preventScroll: true }), 0);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      closeMenu();
-    };
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!(event.target instanceof Node)) return;
-      if (harnessMenuRef.current?.contains(event.target)) return;
-      if (harnessMenuTriggerRef.current?.contains(event.target)) return;
-      closeMenu();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    document.addEventListener("pointerdown", handlePointerDown);
-    return () => {
-      window.clearTimeout(focusTimer);
-      window.removeEventListener("keydown", handleKeyDown);
-      document.removeEventListener("pointerdown", handlePointerDown);
-    };
-  }, [harnessMenuOpen]);
 
   const unavailable = caps != null && !caps.available;
   const browserUseMode = agent === "browser-use";
@@ -318,7 +291,7 @@ export function AgentBrowserWorkspace({
   const antigravitySupported = selectedProfile?.harness === "antigravity";
   const acpxBackedMode = acpxMode || antigravityMode;
   const selectedProviderAgent = acpAgentForProvider(providerRouting.providerId);
-  const normalizedAcpProviderMode = acpxMode && providerRouting.transport === "acp" && selectedProviderAgent !== null;
+  const normalizedAcpProviderMode = acpxMode && selectedProviderAgent !== null;
   const selectedAcpxAgent: AcpxAgent = antigravityMode
     ? "grok-build"
     : normalizedAcpProviderMode
@@ -387,58 +360,59 @@ export function AgentBrowserWorkspace({
       ? taskRun && ACTIVE_TASK_RUN_STATES.has(taskRun.status)
       : session && session.status !== "closed"),
   );
+
+  useEffect(() => {
+    onRunActivityChange?.(sessionActive);
+  }, [onRunActivityChange, sessionActive]);
+
+  useEffect(() => {
+    return () => onRunActivityChange?.(false);
+  }, [onRunActivityChange]);
+  useEffect(() => {
+    const profileId = selectedProfile?.id ?? null;
+    if (runtimeProfileIdRef.current === profileId || sessionActive) return;
+    runtimeProfileIdRef.current = profileId;
+    setRuntimeConfig((current) => {
+      const nextAgent = preferredAgent(selectedProfile);
+      return {
+        ...current,
+        mode: nextAgent === "acpx" ? "acp" : nextAgent === "antigravity" ? "acpx" : "cli",
+        agent: nextAgent,
+      };
+    });
+  }, [selectedProfile, sessionActive, setRuntimeConfig]);
+
   const terminalMode = !managedRunMode;
   const compactWorkspaceMode = terminalMode
     ? "cli"
     : antigravityMode
       ? "acpx"
       : acpxMode
-        ? "acp"
+        ? runtimeMode
         : browserUseMode
           ? "browser"
           : "cli";
-  const visibleAgentOptions = useMemo(
-    () => antigravitySupported ? AGENT_OPTIONS : AGENT_OPTIONS.filter((option) => option !== "antigravity"),
-    [antigravitySupported],
-  );
-  const localOrcaAgents = useMemo(
-    () => (caps?.agents ?? []).filter((candidate): candidate is OrcaAgentCli =>
-      AGENT_OPTIONS.includes(candidate as AgentMode),
-    ),
-    [caps?.agents],
-  );
-  const managedHarnessIsReady = useCallback((candidate: ManagedHarness) => {
-    const presence = harnessPresence[candidate];
-    if (!presence?.worker_seen_recently) return false;
-    if (candidate !== "acpx") return true;
-    if (selectedProfile?.harness === "antigravity") {
-      return acpxPreflights.some((preflight) => preflight.agent === "grok-build" && preflight.ready);
-    }
-    return Boolean(readyAcpxAgent);
-  }, [acpxPreflights, harnessPresence, readyAcpxAgent, selectedProfile?.harness]);
-  const chooseAgent = useCallback((nextAgent: AgentMode) => {
-    if (sessionActive) return;
-    setAgent(nextAgent);
-    if (nextAgent === "acpx" && readyAcpxAgent) setAcpxAgent(readyAcpxAgent);
-    setHarnessMenuOpen(false);
-  }, [readyAcpxAgent, sessionActive]);
   const chooseCompactWorkspaceMode = (mode: "cli" | "acp" | "acpx") => {
     if (sessionActive) return;
     if (mode === "cli") {
-      setAgent((current) => managedRunMode ? "agy" : current);
+      setRuntimeConfig((current) => ({ ...current, mode: "cli", agent: managedRunMode ? "agy" : current.agent }));
       return;
     }
     if (mode === "acp") {
-      setAgent("acpx");
-      setAcpxAgent("grok-build");
+      setRuntimeConfig((current) => ({
+        ...current,
+        mode: "acp",
+        agent: "acpx",
+        acpxAgent: acpAgentForProvider(current.providerRouting.providerId) ?? current.acpxAgent,
+      }));
       return;
     }
-    if (antigravitySupported) {
-      setAgent("antigravity");
-      return;
-    }
-    setAgent("acpx");
-    setAcpxAgent("grok-build");
+    setRuntimeConfig((current) => ({
+      ...current,
+      mode: "acpx",
+      agent: antigravitySupported ? "antigravity" : "acpx",
+      acpxAgent: current.acpxAgent,
+    }));
   };
 
   useEffect(() => {
@@ -601,231 +575,6 @@ export function AgentBrowserWorkspace({
     };
   }, [acpxBackedMode, managedHarness, managedRunMode, refreshSelectedHarness]);
 
-  const handleHarnessCheck = useCallback(async (target: ManagedHarness | "orca" | "all" = "all") => {
-    if (harnessCheckBusy) return;
-    setHarnessCheckBusy(true);
-    setHarnessCheckTarget(target);
-    setError(null);
-    try {
-      if (target === "orca") {
-        setCaps(await api.getOrcaCapabilities());
-        return;
-      }
-      if (target !== "all") {
-        const presence = await api.getTaskHarnessPresence(target, {});
-        setHarnessPresence((current) => ({ ...current, [target]: presence }));
-        if (target === "acpx") {
-          const preflights = await api.getTaskHarnessPreflights("acpx", {});
-          setAcpxPreflights(preflights.agents);
-        }
-        return;
-      }
-      const [capsResult, presenceResults, preflightResult] = await Promise.all([
-        api.getOrcaCapabilities().then(
-          (value) => ({ ok: true as const, value }),
-          () => ({ ok: false as const }),
-        ),
-        Promise.all(MANAGED_HARNESSES.map(async (harness) => {
-          try {
-            return { harness, presence: await api.getTaskHarnessPresence(harness, {}) };
-          } catch {
-            return { harness, presence: null };
-          }
-        })),
-        api.getTaskHarnessPreflights("acpx", {}).then(
-          (value) => ({ ok: true as const, value }),
-          () => ({ ok: false as const }),
-        ),
-      ]);
-      const failedChecks: string[] = [];
-      if (capsResult.ok) {
-        setCaps(capsResult.value);
-      } else {
-        failedChecks.push("Local CLI");
-      }
-      const nextPresences: Partial<Record<ManagedHarness, TaskHarnessPresence>> = {};
-      for (const result of presenceResults) {
-        nextPresences[result.harness] = result.presence ?? {
-          harness: result.harness,
-          worker_seen_recently: false,
-          state: "unavailable",
-          last_seen_at: null,
-          reason: `${managedHarnessLabel(result.harness)} readiness could not be verified`,
-        };
-        if (!result.presence) failedChecks.push(managedHarnessLabel(result.harness));
-      }
-      setHarnessPresence((current) => ({ ...current, ...nextPresences }));
-      if (preflightResult.ok) {
-        setAcpxPreflights(preflightResult.value.agents);
-      } else {
-        setAcpxPreflights([]);
-        failedChecks.push("ACPX adapters");
-      }
-      if (failedChecks.length) {
-        setError(`Could not check: ${failedChecks.join(", ")}`);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Harness readiness check failed");
-    } finally {
-      setHarnessCheckBusy(false);
-      setHarnessCheckTarget(null);
-    }
-  }, [harnessCheckBusy]);
-
-  const handleHarnessSmokeTest = useCallback(async (candidate: ManagedHarness) => {
-    if (
-      smokeTestBusyRef.current ||
-      busy ||
-      sessionActive ||
-      !canAutomate ||
-      !selectedProfile ||
-      selectedProfile.status !== "running"
-    ) {
-      return;
-    }
-    smokeTestBusyRef.current = true;
-    setBusy(true);
-    setSmokeTestTarget(candidate);
-    setError(null);
-    const smokeProfileId = selectedProfile.id;
-    try {
-      const presence = await api.getTaskHarnessPresence(candidate, {});
-      if (selectedProfileIdRef.current !== smokeProfileId) return;
-      setHarnessPresence((current) => ({ ...current, [candidate]: presence }));
-      if (!presence.worker_seen_recently) {
-        throw new Error(presence.reason || `${managedHarnessLabel(candidate)} worker unavailable`);
-      }
-
-      let candidateAgent: AcpxAgent | null = null;
-      const antigravitySmoke = candidate === "acpx" && selectedProfile.harness === "antigravity";
-      if (candidate === "acpx") {
-        const preflights = await api.getTaskHarnessPreflights("acpx", {});
-        if (selectedProfileIdRef.current !== smokeProfileId) return;
-        setAcpxPreflights(preflights.agents);
-        candidateAgent = antigravitySmoke
-          ? preflights.agents.find((preflight) => preflight.agent === "grok-build" && preflight.ready)?.agent ?? null
-          : ACPX_AGENT_OPTIONS.find((option) =>
-            preflights.agents.some((preflight) => preflight.agent === option.value && preflight.ready),
-          )?.value ?? null;
-        if (!candidateAgent) {
-          throw new Error(antigravitySmoke
-            ? "Antigravity requires a ready Grok Build ACPX adapter on VCVM"
-            : "No ready ACPX adapter is available on the VCVM worker");
-        }
-      }
-
-      let health = await api.runProfileHealth(smokeProfileId);
-      for (let attempt = 0; health.state === "pending" || health.state === "running"; attempt += 1) {
-        if (selectedProfileIdRef.current !== smokeProfileId) return;
-        if (attempt >= 60) {
-          throw new Error("Profile health check timed out before the harness test could start");
-        }
-        health = await api.getProfileHealth(smokeProfileId);
-        if (health.state === "pending" || health.state === "running") {
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
-        }
-      }
-      if (selectedProfileIdRef.current !== smokeProfileId) return;
-      if (health.state !== "passed" && health.state !== "warning") {
-        throw new Error(`Profile health check ${health.state}; the harness test was not started`);
-      }
-
-      const label = managedHarnessLabel(candidate);
-      const created = await api.createTaskSession({
-        profile_id: smokeProfileId,
-        title: `${label} smoke test`,
-        metadata: {
-          source: "harness-smoke-test",
-          harness: candidate,
-          smoke_test: true,
-          ...(candidateAgent ? { agent: candidateAgent } : {}),
-          ...(antigravitySmoke ? { mode: "antigravity" } : {}),
-        },
-      });
-      if (selectedProfileIdRef.current !== smokeProfileId) return;
-      const started = await api.createTaskRun(created.id, {
-        harness: candidate,
-        agent: candidateAgent,
-        task: "Open https://example.com/ and report the page title.",
-        profile_id: smokeProfileId,
-        allowed_origins: ["https://example.com"],
-        max_steps: 8,
-        timeout_seconds: 180,
-        model_alias: null,
-      });
-      const cancelStaleRun = async () => {
-        rememberBrowserUseRun(smokeProfileId, started.id);
-        try {
-          await api.cancelTaskRun(started.id);
-          forgetBrowserUseRun(smokeProfileId);
-        } catch {
-          // Keep the remembered run recoverable on the original profile if cancellation fails.
-        }
-      };
-      if (selectedProfileIdRef.current !== smokeProfileId) {
-        await cancelStaleRun();
-        return;
-      }
-      const outputs = await api.listTaskRunOutputs(started.id);
-      if (selectedProfileIdRef.current !== smokeProfileId) {
-        await cancelStaleRun();
-        return;
-      }
-
-      setAgent(antigravitySmoke ? "antigravity" : candidate);
-      if (candidateAgent) setAcpxAgent(candidateAgent);
-      setTaskSessionId(created.id);
-      rememberBrowserUseRun(smokeProfileId, started.id);
-      setTaskRun(started);
-      setTaskOutputs(outputs);
-      setHarnessMenuOpen(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Harness smoke test failed");
-    } finally {
-      smokeTestBusyRef.current = false;
-      setBusy(false);
-      setSmokeTestTarget(null);
-    }
-  }, [busy, canAutomate, selectedProfile, sessionActive]);
-
-  const handleLocalHarnessOpen = useCallback(async (candidate: OrcaAgentCli) => {
-    if (
-      busy ||
-      sessionActive ||
-      !canAutomate ||
-      !canInteract ||
-      !selectedProfile ||
-      selectedProfile.status !== "running" ||
-      caps?.available !== true ||
-      caps.actions.start !== true ||
-      !caps.agents.includes(candidate)
-    ) {
-      return;
-    }
-    setBusy(true);
-    setLocalOpenTarget(candidate);
-    setError(null);
-    try {
-      const started = await api.startOrcaSession({
-        profile_id: selectedProfile.id,
-        agent: candidate,
-      });
-      setAgent(candidate);
-      setSession(started);
-      setTranscript("");
-      setCursor(0);
-      setHarnessMenuOpen(false);
-      const first = await api.readOrcaSessionOutput(started.id, { cursor: 0 });
-      if (first.output) setTranscript(first.output);
-      setCursor(first.next_cursor);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to open the local CLI harness");
-    } finally {
-      setBusy(false);
-      setLocalOpenTarget(null);
-    }
-  }, [busy, canAutomate, canInteract, caps, selectedProfile, sessionActive]);
-
   const stopPolling = useCallback(() => {
     if (pollRef.current != null) {
       window.clearInterval(pollRef.current);
@@ -924,7 +673,12 @@ export function AgentBrowserWorkspace({
     let cancelled = false;
     stopPolling();
     stopRunPolling();
-    setAgent(preferredAgent(selectedProfile));
+    const nextAgent = preferredAgent(selectedProfile);
+    setRuntimeConfig((current) => ({
+      ...current,
+      mode: nextAgent === "acpx" ? "acp" : nextAgent === "antigravity" ? "acpx" : "cli",
+      agent: nextAgent,
+    }));
     setSession(null);
     setTaskSessionId(null);
     setTaskRun(null);
@@ -944,7 +698,12 @@ export function AgentBrowserWorkspace({
           if (cancelled) return;
           if (rememberedRun.profile_id_snapshot !== profileId) {
             forgetBrowserUseRun(profileId);
-            setAgent(preferredAgent(selectedProfile));
+            const nextAgent = preferredAgent(selectedProfile);
+    setRuntimeConfig((current) => ({
+      ...current,
+      mode: nextAgent === "acpx" ? "acp" : nextAgent === "antigravity" ? "acpx" : "cli",
+      agent: nextAgent,
+    }));
             return;
           }
           if (rememberedRun.harness === "acpx") {
@@ -968,7 +727,12 @@ export function AgentBrowserWorkspace({
         .catch(() => {
           if (cancelled) return;
           forgetBrowserUseRun(profileId);
-          setAgent(preferredAgent(selectedProfile));
+          const nextAgent = preferredAgent(selectedProfile);
+    setRuntimeConfig((current) => ({
+      ...current,
+      mode: nextAgent === "acpx" ? "acp" : nextAgent === "antigravity" ? "acpx" : "cli",
+      agent: nextAgent,
+    }));
         });
     }
 
@@ -1063,6 +827,8 @@ export function AgentBrowserWorkspace({
 
   const handleStart = useCallback(async () => {
     if (!selectedProfile || !canStart) return;
+    const profileAtStart = selectedProfile;
+    const isStartProfileCurrent = () => selectedProfileIdRef.current === profileAtStart.id;
     setBusy(true);
     setError(null);
     try {
@@ -1096,7 +862,7 @@ export function AgentBrowserWorkspace({
         let sessionId = taskSessionId;
         if (!sessionId) {
           const created = await api.createTaskSession({
-            profile_id: selectedProfile.id,
+            profile_id: profileAtStart.id,
             title: task.slice(0, 120),
             metadata: {
               source: "agent-browser-workspace",
@@ -1107,7 +873,9 @@ export function AgentBrowserWorkspace({
             },
           });
           sessionId = created.id;
-          setTaskSessionId(created.id);
+          if (isStartProfileCurrent()) {
+            setTaskSessionId(created.id);
+          }
         }
         const started = await api.createTaskRun(sessionId, {
           harness: managedHarness,
@@ -1117,7 +885,7 @@ export function AgentBrowserWorkspace({
               ? selectedAcpxAgent
               : null,
           task,
-          profile_id: selectedProfile.id,
+          profile_id: profileAtStart.id,
           allowed_origins: origins,
           timeout_seconds: 360,
           model_alias: normalizedAcpRunAgent ? selectedModelAlias : null,
@@ -1127,9 +895,12 @@ export function AgentBrowserWorkspace({
             routing_policy: normalizedAcpRoutingPolicy!,
           } : {}),
         });
-        rememberBrowserUseRun(selectedProfile.id, started.id);
+        rememberBrowserUseRun(profileAtStart.id, started.id);
+        if (!isStartProfileCurrent()) return;
         setTaskRun(started);
-        setTaskOutputs(await api.listTaskRunOutputs(started.id));
+        const outputs = await api.listTaskRunOutputs(started.id);
+        if (!isStartProfileCurrent()) return;
+        setTaskOutputs(outputs);
         setPrompt("");
         return;
       }
@@ -1305,6 +1076,33 @@ export function AgentBrowserWorkspace({
       setScreenshotBusy(false);
     }
   }, [screenshotBusy, selectedProfile]);
+  const activeRouteSummary = useMemo(() => {
+    if (!managedRunMode) {
+      const cliLabel = agent === "agy" ? "AGY" : agent === "grok" ? "Grok" : agent;
+      return `${cliLabel} · Live terminal`;
+    }
+    const readiness = selectedHarnessPresence
+      ? selectedHarnessReady
+        ? "Ready"
+        : "Unavailable"
+      : "Checking";
+    if (acpxBackedMode) {
+      const modeLabel = antigravityMode ? "Antigravity" : "ACPX";
+      return `${modeLabel} · ${acpxAgentLabel(selectedAcpxAgent)} · ${providerLabel(providerRouting.providerId)} · ${readiness}`;
+    }
+    return `${managedHarnessLabel(managedHarness)} · ${readiness}`;
+  }, [
+    acpxBackedMode,
+    agent,
+    antigravityMode,
+    managedHarness,
+    managedRunMode,
+    providerRouting.providerId,
+    selectedAcpxAgent,
+    selectedHarnessPresence,
+    selectedHarnessReady,
+  ]);
+
 
   const fullViewButtonClass =
     "inline-flex min-h-11 min-w-11 items-center justify-center rounded border border-[#333] px-3 text-[11px] font-medium text-[#ddd] hover:bg-[#222] focus:outline-none focus:ring-2 focus:ring-accent/50";
@@ -1338,17 +1136,17 @@ export function AgentBrowserWorkspace({
             >
               {managedRunMode ? taskRun?.status ?? "idle" : session?.status ?? "idle"}
             </span>
-            <button
-              type="button"
-              className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#3c3c43] bg-[#18181b] text-[#d4d4d8] hover:border-[#60606b] hover:bg-[#232329]"
-              onClick={() => setSettingsOpen((open) => !open)}
-              aria-label={settingsOpen ? "Hide workspace settings" : "Show workspace settings"}
-              aria-expanded={settingsOpen}
-              data-testid="workspace-settings-toggle"
-              title="Profiles and harness settings"
-            >
-              <Settings2 className="h-3.5 w-3.5" />
-            </button>
+            {onOpenSettings ? (
+              <button
+                type="button"
+                className="inline-flex h-6 w-6 items-center justify-center rounded border border-[#333] text-[#a1a1aa] hover:bg-[#202024] hover:text-white"
+                onClick={onOpenSettings}
+                aria-label="Open Settings"
+                title="Settings"
+              >
+                <Settings2 className="h-3 w-3" />
+              </button>
+            ) : null}
           </div>
           <div
             className="mt-1.5 flex min-w-0 items-center gap-1"
@@ -1388,179 +1186,29 @@ export function AgentBrowserWorkspace({
                 </button>
               ))}
             </div>
-            <div className="relative flex min-w-0 flex-1 items-center justify-end gap-1">
-              <button
-                type="button"
-                ref={harnessMenuTriggerRef}
-                className={`inline-flex h-7 min-w-0 flex-1 items-center gap-1 rounded border px-1.5 text-[9px] font-medium transition-colors ${
-                  selectedHarnessReady
-                    ? "border-emerald-900/70 bg-emerald-950/60 text-emerald-300"
-                    : "border-amber-900/60 bg-amber-950/50 text-amber-300"
-                }`}
-                onClick={() => {
-                  const nextOpen = !harnessMenuOpen;
-                  setHarnessMenuOpen(nextOpen);
-                  if (nextOpen) void handleHarnessCheck("all");
-                }}
-                disabled={sessionActive}
-                aria-label="Open harness menu"
-                aria-expanded={harnessMenuOpen}
-                aria-controls="harness-menu"
-                title="Switch and check installed VCVM harnesses"
-              >
-                <span
-                  className="min-w-0 flex-1 truncate text-left"
-                  data-testid="harness-readiness"
-                  title={managedRunMode
-                    ? selectedHarnessPresence?.reason || `${managedHarnessLabel(managedHarness)} readiness`
-                    : `${agent} readiness`}
-                >
-                  {managedRunMode ? managedHarnessLabel(managedHarness) : agent} · {harnessCheckTarget === "all"
-                    ? "Checking"
-                    : selectedHarnessReady
-                      ? (managedRunMode ? "Ready" : "Detected")
-                      : "Unavailable"}
-                </span>
-                <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${harnessMenuOpen ? "rotate-180" : ""}`} aria-hidden="true" />
-              </button>
-              {harnessMenuOpen ? (
-                <div
-                  ref={harnessMenuRef}
-                  id="harness-menu"
-                  role="dialog"
-                  aria-label="Harnesses on VCVM"
-                  className="absolute right-0 top-8 z-40 w-[17rem] rounded-lg border border-[#3b3b43] bg-[#111114] p-1.5 shadow-2xl"
-                  data-testid="harness-menu"
-                >
-                  <div className="flex items-center justify-between gap-2 px-1 pb-1.5">
-                    <div className="text-[10px] font-semibold text-white">Harnesses on VCVM</div>
-                    <button
-                      type="button"
-                      className="inline-flex h-7 items-center gap-1 rounded border border-[#3c3c43] px-2 text-[9px] text-[#d4d4d8] hover:bg-[#25252a] disabled:opacity-40"
-                      onClick={() => void handleHarnessCheck("all")}
-                      disabled={harnessCheckBusy}
-                      aria-label="Recheck all harnesses"
-                    >
-                      <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === "all" ? "animate-spin" : ""}`} aria-hidden="true" />
-                      Refresh
-                    </button>
-                  </div>
-                  <div className="space-y-0.5" aria-label="Managed browser harnesses">
-                    {MANAGED_HARNESSES.map((candidate) => {
-                      const ready = managedHarnessIsReady(candidate);
-                      const presence = harnessPresence[candidate];
-                      const label = managedHarnessLabel(candidate);
-                      const smokeKnownUnavailable = Boolean(presence && !ready);
-                      return (
-                        <div key={candidate} className="flex items-center gap-1 rounded-md hover:bg-[#1d1d21]">
-                          <button
-                            type="button"
-                            data-harness-option
-                            className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left"
-                            onClick={() => chooseAgent(candidate)}
-                            disabled={sessionActive}
-                            aria-label={`Use ${label}`}
-                            aria-pressed={agent === candidate}
-                          >
-                            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${ready ? "bg-emerald-400" : "bg-amber-400"}`} aria-hidden="true" />
-                            <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-[#ededf0]">{label}</span>
-                            <span className={`text-[9px] ${ready ? "text-emerald-300" : "text-amber-300"}`}>
-                              {ready ? "Ready" : presence ? "Unavailable" : "Not checked"}
-                            </span>
-                          </button>
-                          <button
-                            type="button"
-                            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#3f3f48] px-1.5 text-[9px] font-medium text-[#e4e4e7] hover:border-[#6366f1] hover:bg-[#29293b] disabled:opacity-40"
-                            onClick={() => void handleHarnessSmokeTest(candidate)}
-                            disabled={
-                              harnessCheckBusy ||
-                              smokeTestTarget !== null ||
-                              busy ||
-                              sessionActive ||
-                              !canAutomate ||
-                              !selectedProfile ||
-                              selectedProfile.status !== "running" ||
-                              smokeKnownUnavailable
-                            }
-                            aria-label={`Run ${label} smoke test`}
-                            aria-busy={smokeTestTarget === candidate}
-                            title={smokeKnownUnavailable
-                              ? presence?.reason || `${label} is unavailable on VCVM`
-                              : `Run ${label} on example.com with the selected profile`}
-                          >
-                            <Activity className={`h-3 w-3 ${smokeTestTarget === candidate ? "animate-pulse" : ""}`} aria-hidden="true" />
-                            {smokeTestTarget === candidate ? "Starting" : "Test"}
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div className="my-1 border-t border-[#2d2d33]" />
-                  <div className="px-2 pb-0.5 text-[8px] font-semibold uppercase tracking-[0.12em] text-[#6f6f78]">Local CLI</div>
-                  <div className="space-y-0.5" aria-label="Detected local CLI agents">
-                    {localOrcaAgents.length ? localOrcaAgents.map((candidate) => (
-                      <div key={candidate} className="flex items-center gap-1 rounded-md hover:bg-[#1d1d21]">
-                        <button
-                          type="button"
-                          data-harness-option
-                          className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left"
-                          onClick={() => chooseAgent(candidate)}
-                          disabled={sessionActive}
-                          aria-label={`Use ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}`}
-                          aria-pressed={agent === candidate}
-                        >
-                          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden="true" />
-                          <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-[#ededf0]">
-                            {candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}
-                          </span>
-                          <span className="text-[9px] text-emerald-300">Detected</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#34343b] px-1.5 text-[9px] text-[#c4c4cc] hover:bg-[#29292e] hover:text-white disabled:opacity-40"
-                          onClick={() => void handleLocalHarnessOpen(candidate)}
-                          disabled={
-                            busy ||
-                            sessionActive ||
-                            !canAutomate ||
-                            !canInteract ||
-                            !selectedProfile ||
-                            selectedProfile.status !== "running"
-                          }
-                          aria-label={`Open ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate} terminal`}
-                          title="Open the detected CLI in the live terminal"
-                        >
-                          <TerminalSquare className={`h-3 w-3 ${localOpenTarget === candidate ? "animate-pulse" : ""}`} aria-hidden="true" />
-                          {localOpenTarget === candidate ? "Opening" : "Open"}
-                        </button>
-                      </div>
-                    )) : (
-                      <div className="rounded px-2 py-1.5 text-[9px] text-amber-300">No local CLI runtime detected.</div>
-                    )}
-                  </div>
-                </div>
-              ) : null}
-              <button
-                type="button"
-                className={canStop
-                  ? "inline-flex h-7 w-7 items-center justify-center rounded border border-[#493434] bg-[#211515] text-red-300 hover:bg-[#3b1919]"
-                  : "sr-only"}
-                onClick={() => void handleStop()}
-                disabled={!canStop}
-                data-testid="orca-stop"
-                aria-label="Stop active run"
-              >
-                <Square className="h-3 w-3" />
-              </button>
+            <div
+              className={`inline-flex h-7 min-w-0 flex-1 items-center rounded border px-1.5 text-[9px] font-medium ${
+                selectedHarnessReady || terminalMode
+                  ? "border-emerald-900/70 bg-emerald-950/60 text-emerald-300"
+                  : "border-amber-900/60 bg-amber-950/50 text-amber-300"
+              }`}
+              data-testid="workspace-active-route"
+              title={activeRouteSummary}
+            >
+              <span className="min-w-0 truncate">{activeRouteSummary}</span>
             </div>
-          </div>
-          <div className="mt-1.5">
-            <ProviderToolControl
-              state={providerRouting}
-              readiness={providerReadiness}
-              disabled={sessionActive}
-              onChange={setProviderRouting}
-            />
+            <button
+              type="button"
+              className={canStop
+                ? "inline-flex h-7 w-7 items-center justify-center rounded border border-[#493434] bg-[#211515] text-red-300 hover:bg-[#3b1919]"
+                : "sr-only"}
+              onClick={() => void handleStop()}
+              disabled={!canStop}
+              data-testid="orca-stop"
+              aria-label="Stop active run"
+            >
+              <Square className="h-3 w-3" />
+            </button>
           </div>
           <details className="mt-1 text-[9px] text-[#a1a1aa]">
             <summary className="w-fit cursor-pointer select-none hover:text-white">Session details</summary>
@@ -1580,79 +1228,6 @@ export function AgentBrowserWorkspace({
             </div>
           </details>
         </header>
-
-        <div className="flex items-center gap-1.5 border-b border-[#35353b] bg-[#111113] px-2.5 py-1.5">
-          <div
-            className={`${settingsOpen ? "flex" : "hidden"} min-w-0 flex-1 items-center gap-1.5`}
-            data-testid="workspace-settings"
-          >
-            <label className="sr-only" htmlFor="orca-profile">Profile</label>
-            <select
-              id="orca-profile"
-              className="input h-7 max-w-[10rem] bg-[#18181b] py-0.5 text-[10px]"
-              value={selectedProfile?.id ?? ""}
-              onChange={(event) => onSelectProfile(event.target.value)}
-              data-testid="orca-profile-select"
-            >
-              <option value="" disabled>Select profile</option>
-              {profiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name}{profile.status === "running" ? " · live" : ""}
-                </option>
-              ))}
-            </select>
-
-            <label className="sr-only" htmlFor="orca-agent">Harness</label>
-            <select
-              id="orca-agent"
-              className="input h-7 max-w-[9rem] bg-[#18181b] py-0.5 text-[10px]"
-              value={agent}
-              onChange={(event) => setAgent(event.target.value as AgentMode)}
-              disabled={sessionActive}
-              data-testid="orca-agent-select"
-            >
-              {visibleAgentOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option === "unbrowse" ? "Unbrowse" : option === "stagehand" ? "Stagehand" : option === "antigravity" ? "Antigravity CLI" : option === "agy" ? "AGY · Live CLI" : option === "grok" ? "Grok · Live CLI" : option}
-                </option>
-              ))}
-            </select>
-
-            {acpxMode ? (
-              normalizedAcpProviderMode ? (
-                <span
-                  className="inline-flex h-7 max-w-[9rem] items-center rounded border border-[#33343a] bg-[#18181b] px-2 text-[10px] text-[#d4d4d8]"
-                  data-testid="acpx-agent-fixed"
-                  title={`${selectedAcpxAgent} is selected by the normalized ACP provider route`}
-                >
-                  {acpxAgentLabel(selectedAcpxAgent)}
-                </span>
-              ) : (
-                <>
-                  <label className="sr-only" htmlFor="acpx-agent">ACP agent</label>
-                  <select
-                    id="acpx-agent"
-                    className="input h-7 max-w-[8rem] bg-[#18181b] py-0.5 text-[10px]"
-                    value={acpxAgent}
-                    onChange={(event) => setAcpxAgent(event.target.value as AcpxAgent)}
-                    disabled={sessionActive}
-                    data-testid="acpx-agent-select"
-                    aria-label="ACP agent"
-                  >
-                    {ACPX_AGENT_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </>
-              )
-            ) : null}
-          </div>
-          {!settingsOpen ? (
-            <span className="truncate text-[9px] text-[#a1a1aa]">
-              {managedRunMode ? "Typed output" : `${agent === "agy" ? "AGY" : agent === "grok" ? "Grok" : agent} · Live terminal`} · {runningProfiles.length}/{profiles.length} live
-            </span>
-          ) : null}
-        </div>
 
         <div className="sr-only" aria-live="polite">
           <span data-testid="orca-cap-pause">{managedRunMode ? "outputs: typed" : "pause: unavailable"}</span>
@@ -1911,17 +1486,6 @@ export function AgentBrowserWorkspace({
                 data-testid="desktop-full-view-group"
               >
                 Sessions
-              </button>
-              <button
-                type="button"
-                className={fullViewButtonClass}
-                onClick={() => setFullViewPanel((panel) => (panel === "provider" ? null : "provider"))}
-                aria-label="Open desktop full-view Provider controls"
-                aria-expanded={fullViewPanel === "provider"}
-                aria-controls="desktop-full-view-provider-panel"
-                data-testid="desktop-full-view-group"
-              >
-                Provider
               </button>
               <button
                 ref={viewerFullscreenButtonRef}
@@ -2239,20 +1803,6 @@ export function AgentBrowserWorkspace({
               )}
             </div>
           ) : null}
-          {viewerFullscreen && fullViewPanel === "provider" ? (
-            <div
-              id="desktop-full-view-provider-panel"
-              className="absolute right-3 top-[3.4rem] z-20 w-72 rounded-md border border-[#333] bg-[#171717] p-2 text-[10px] text-[#bbb]"
-            >
-              <ProviderToolControl
-                state={providerRouting}
-                readiness={providerReadiness}
-                disabled={sessionActive}
-                compactId="full"
-                onChange={setProviderRouting}
-              />
-            </div>
-          ) : null}
         </header>
         {viewerFullscreen && fullViewMetricsOpen && selectedProfile ? (
           <div className="absolute left-3 top-[3.4rem] z-10 max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-md border border-[#333] bg-[#111113] shadow-xl">
@@ -2328,7 +1878,6 @@ export function AgentBrowserWorkspace({
             </div>
           ) : selectedProfile && selectedProfile.status === "running" ? (
             <ProfileViewer
-              key={selectedProfile.id}
               profileId={selectedProfile.id}
               cdpUrl={selectedProfile.cdp_url}
               clipboardSync={selectedProfile.clipboard_sync}

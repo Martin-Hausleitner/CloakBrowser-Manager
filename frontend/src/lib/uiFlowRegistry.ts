@@ -8,6 +8,7 @@ export const UI_STATE = {
   appDesktopProfiles: "app.desktop.profiles",
   appDesktopAccounts: "app.desktop.accounts",
   appDesktopSessions: "app.desktop.sessions",
+  appDesktopSettings: "app.desktop.settings",
   appDesktopEmpty: "app.desktop.empty",
   appDesktopCreate: "app.desktop.create",
   appDesktopEdit: "app.desktop.edit",
@@ -79,6 +80,16 @@ export const UI_TRANSITIONS = [
     expectedVisible: [
       UI_STATE.appDesktopShell,
       UI_STATE.appDesktopProfiles,
+    ],
+  },
+  {
+    id: "desktop-home-to-settings",
+    from: UI_STATE.appDesktopHome,
+    action: "sidebar.settings",
+    to: UI_STATE.appDesktopSettings,
+    expectedVisible: [
+      UI_STATE.appDesktopShell,
+      UI_STATE.appDesktopSettings,
     ],
   },
   {

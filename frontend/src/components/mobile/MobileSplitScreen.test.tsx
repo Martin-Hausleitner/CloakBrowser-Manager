@@ -126,6 +126,7 @@ function renderMobileSplit(overrides: Partial<Parameters<typeof MobileSplitScree
     onBrowserZoomChange: vi.fn(),
     onAccessControls: vi.fn(),
     onLogout: vi.fn(),
+    onOpenSettings: vi.fn(),
     ...overrides,
   };
 
@@ -187,6 +188,21 @@ afterEach(() => {
 });
 
 describe("MobileSplitScreen", () => {
+  it("exposes one compact Settings action without rendering settings matrices in mobile chat", async () => {
+    const onOpenSettings = vi.fn();
+    renderMobileSplit({ onOpenSettings });
+
+    const settingsButtons = await screen.findAllByRole("button", { name: "Open Settings" });
+    expect(settingsButtons).toHaveLength(1);
+    expect(screen.queryByText("Task chat")).toBeNull();
+    expect(screen.queryByTestId("provider-tool-control")).toBeNull();
+    expect(screen.queryByLabelText("Model alias")).toBeNull();
+
+    fireEvent.click(settingsButtons[0]);
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Task chat")).toBeNull();
+  });
+
   it("renders the default Codex Computer Use composer with browser tools and chat collapsed", async () => {
     renderMobileSplit();
 
@@ -675,13 +691,15 @@ describe("MobileSplitScreen", () => {
     const dock = container.querySelector(".mobile-command-dock");
     expect(dock).toBeTruthy();
     expect(dock?.closest("form")).toBe(screen.getByRole("textbox", { name: "Browser task" }).closest("form"));
-    expect(dock?.querySelectorAll("button")).toHaveLength(3);
+    expect(dock?.querySelectorAll("button")).toHaveLength(4);
     expect(within(dock as HTMLElement).getByTitle("Fullscreen browser (Ctrl+B)")).toBeTruthy();
     expect(within(dock as HTMLElement).getByTitle("Browser tools (Ctrl+K)")).toBeTruthy();
+    expect(within(dock as HTMLElement).getByTitle("Settings")).toBeTruthy();
     expect(within(dock as HTMLElement).getByTitle("Toggle chat (Ctrl+J)")).toBeTruthy();
     expect(within(dock as HTMLElement).queryByText("Full")).toBeNull();
     expect(within(dock as HTMLElement).queryByText("Tools")).toBeNull();
     expect(within(dock as HTMLElement).queryByText("Chat")).toBeNull();
+    expect(within(dock as HTMLElement).queryByText("Settings")).toBeNull();
     expect(screen.getByLabelText("Run task")).toBeTruthy();
     expect(screen.queryByText("Task chat")).toBeNull();
     expect(screen.queryByText("Benchmarks")).toBeNull();
@@ -729,7 +747,7 @@ describe("MobileSplitScreen", () => {
     );
     expect(within(outputRegion).getByText("Checkout is ready for review.")).toBeTruthy();
     expect(screen.getAllByText("VNC stream")).toHaveLength(1);
-    expect(container.querySelectorAll(".mobile-command-button")).toHaveLength(3);
+    expect(container.querySelectorAll(".mobile-command-button")).toHaveLength(4);
   });
 
   it("lets the browser consume unused workspace until chat or tools are opened", () => {

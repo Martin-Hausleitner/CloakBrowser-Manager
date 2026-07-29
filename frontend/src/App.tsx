@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Users, KeyRound, History } from "lucide-react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Users, KeyRound, History, Settings2 } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import {
   api,
@@ -37,9 +37,11 @@ import { SessionsOverview } from "./components/SessionsOverview";
 import { LiveDevPanel } from "./components/LiveDevPanel";
 import { SessionStreamButtons } from "./components/SessionStreamButtons";
 import { AgentBrowserWorkspace } from "./components/workspace/AgentBrowserWorkspace";
+import { HarnessSettingsWorkspace } from "./components/HarnessSettingsWorkspace";
+import { WorkspaceRuntimeConfigProvider } from "./components/workspace/WorkspaceRuntimeConfig";
 
 type AuthState = "checking" | "required" | "ok" | "error";
-type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies" | "profiles" | "accounts" | "sessions";
+type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies" | "profiles" | "accounts" | "sessions" | "settings";
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 type MobileConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
 const FIXED_PROJECTS = ["default", "proxied", "mobile", "research"] as const;
@@ -163,16 +165,18 @@ export default function App() {
   }
 
   return (
-    <AppContent
-      authRequired={authRequired}
-      accessControlEnabled={accessControlEnabled}
-      identity={identity}
-      onLogout={async () => {
-        await api.logout();
-        setIdentity(null);
-        setAuthState(authRequired ? "required" : "ok");
-      }}
-    />
+    <WorkspaceRuntimeConfigProvider>
+      <AppContent
+        authRequired={authRequired}
+        accessControlEnabled={accessControlEnabled}
+        identity={identity}
+        onLogout={async () => {
+          await api.logout();
+          setIdentity(null);
+          setAuthState(authRequired ? "required" : "ok");
+        }}
+      />
+    </WorkspaceRuntimeConfigProvider>
   );
 }
 
@@ -196,6 +200,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
   const [mobileRemoteToolsOpen, setMobileRemoteToolsOpen] = useState(false);
   const [mobileConnectionStatus, setMobileConnectionStatus] = useState<MobileConnectionStatus>("connecting");
   const [mobileTaskOutputs, setMobileTaskOutputs] = useState<TaskOutput[]>([]);
+  const [workspaceRunActive, setWorkspaceRunActive] = useState(false);
   const [projectId, setProjectId] = useState<string>("default");
   const [harness, setHarness] = useState<ProfileHarness>("browser-use");
   const [taskDraft, setTaskDraft] = useState("");
@@ -256,6 +261,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
 
   useEffect(() => {
     setMobileTaskOutputs([]);
+    setWorkspaceRunActive(false);
 
     if (!isMobile || !selected) return;
 
@@ -283,11 +289,14 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
         if (run.profile_id_snapshot !== selected.id) {
           forgetBrowserUseRun(selected.id);
           setMobileTaskOutputs([]);
+          setWorkspaceRunActive(false);
           stopPolling();
           return;
         }
         setMobileTaskOutputs(outputs);
-        if (!ACTIVE_TASK_RUN_STATES.has(run.status)) {
+        const runActive = ACTIVE_TASK_RUN_STATES.has(run.status);
+        setWorkspaceRunActive(runActive);
+        if (!runActive) {
           stopPolling();
         }
       } catch (err) {
@@ -295,6 +304,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
         console.warn("[mobile-task-output] remembered run restore failed:", err);
         forgetBrowserUseRun(selected.id);
         setMobileTaskOutputs([]);
+        setWorkspaceRunActive(false);
         stopPolling();
       }
     };
@@ -305,6 +315,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     return () => {
       cancelled = true;
       controller.abort();
+      setWorkspaceRunActive(false);
       stopPolling();
     };
   }, [isMobile, selected?.id, selected?.screen_height, selected?.screen_width]);
@@ -411,6 +422,10 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     });
   }, [canManageProfiles, canOperateSelected, launch, selected, stop, update]);
 
+  const handleWorkspaceRunActivityChange = useCallback((active: boolean) => {
+    setWorkspaceRunActive(active);
+  }, []);
+
 
   const handleTogglePin = useCallback(async (id: string) => {
     const profile = profiles.find((candidate) => candidate.id === id) ?? null;
@@ -483,6 +498,25 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
       );
     }
 
+
+    if (view === "settings") {
+      return (
+        <HarnessSettingsWorkspace
+          mobile
+          profiles={profiles}
+          selectedProfile={selected}
+          onBack={() => setView(selected ? "view" : "home")}
+          runActive={workspaceRunActive}
+          onSelectProfile={(profileId) => {
+            setSelectedId(profileId);
+            const profile = profiles.find((item) => item.id === profileId);
+            if (profile?.project_id) setProjectId(profile.project_id);
+            if (profile?.harness) setHarness(profile.harness);
+          }}
+        />
+      );
+    }
+
     const browserView =
       selected && selected.status === "running" ? (
         <ProfileViewer
@@ -541,6 +575,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           onBrowserZoomChange={setMobileBrowserZoom}
           onAccessControls={() => setView("access")}
           onLogout={onLogout}
+          onOpenSettings={() => setView("settings")}
         />
       </>
     );
@@ -606,6 +641,16 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                 <History className="h-3 w-3" />
                 Sessions
               </button>
+              <button
+                type="button"
+                onClick={() => setView("settings")}
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                  view === "settings" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <Settings2 className="h-3 w-3" />
+                Settings
+              </button>
             </div>
           </div>
           <div className="min-h-0 flex-1">
@@ -635,7 +680,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             >
               {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
             </button>
-            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && view !== "sessions" && (
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && view !== "sessions" && view !== "settings" && (
               <div className="flex items-center gap-2">
                 <StatusIndicator status={selected.status} size="md" />
                 <span className="text-sm font-medium">{selected.name}</span>
@@ -652,7 +697,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             {selected && selected.status === "running" ? (
               <SessionStreamButtons profileId={selected.id} running />
             ) : null}
-            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && view !== "sessions" && (
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && view !== "sessions" && view !== "settings" && (
               canOperateSelected && (
               <LaunchButton
                 status={selected.status}
@@ -837,6 +882,20 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             />
           )}
 
+          {view === "settings" && (
+            <HarnessSettingsWorkspace
+              profiles={profiles}
+              selectedProfile={selected}
+              runActive={workspaceRunActive}
+              onSelectProfile={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+              }}
+            />
+          )}
+
           {view === "empty" && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
@@ -871,30 +930,39 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             />
           )}
 
-          {view === "view" && selected && (
-            <AgentBrowserWorkspace
-              profiles={profiles}
-              selectedProfile={selected}
-              canAutomate={canAutomateSelected}
-              canInteract={canInteractSelected}
-              canManageViewport={canManageProfiles && canOperateSelected}
-              onViewportApply={handleViewportApply}
-              onSelectProfile={(profileId) => {
-                setSelectedId(profileId);
-                const profile = profiles.find((item) => item.id === profileId);
-                if (profile?.project_id) setProjectId(profile.project_id);
-                if (profile?.harness) setHarness(profile.harness);
-              }}
-              onConnectionStatusChange={setMobileConnectionStatus}
-              initialPromptDraft={
-                initialPromptDraft?.profileId === selected.id ? initialPromptDraft : null
-              }
-              onInitialPromptDraftApplied={(draftId) => {
-                setInitialPromptDraft((current) => (
-                  current?.id === draftId ? null : current
-                ));
-              }}
-            />
+          {selected && (
+            <div
+              data-testid="desktop-agent-workspace-host"
+              className={view === "view" ? "h-full" : "hidden h-full"}
+              aria-hidden={view === "view" ? undefined : true}
+              inert={view === "view" ? undefined : true}
+            >
+              <AgentBrowserWorkspace
+                profiles={profiles}
+                selectedProfile={selected}
+                canAutomate={canAutomateSelected}
+                canInteract={canInteractSelected}
+                canManageViewport={canManageProfiles && canOperateSelected}
+                onViewportApply={handleViewportApply}
+                onSelectProfile={(profileId) => {
+                  setSelectedId(profileId);
+                  const profile = profiles.find((item) => item.id === profileId);
+                  if (profile?.project_id) setProjectId(profile.project_id);
+                  if (profile?.harness) setHarness(profile.harness);
+                }}
+                onConnectionStatusChange={setMobileConnectionStatus}
+                onOpenSettings={() => setView("settings")}
+                onRunActivityChange={handleWorkspaceRunActivityChange}
+                initialPromptDraft={
+                  initialPromptDraft?.profileId === selected.id ? initialPromptDraft : null
+                }
+                onInitialPromptDraftApplied={(draftId) => {
+                  setInitialPromptDraft((current) => (
+                    current?.id === draftId ? null : current
+                  ));
+                }}
+              />
+            </div>
           )}
         </div>
       </div>
@@ -928,6 +996,7 @@ function desktopViewState(view: View): UIStateId {
     profiles: UI_STATE.appDesktopProfiles,
     accounts: UI_STATE.appDesktopAccounts,
     sessions: UI_STATE.appDesktopSessions,
+    settings: UI_STATE.appDesktopSettings,
   };
   return states[view];
 }

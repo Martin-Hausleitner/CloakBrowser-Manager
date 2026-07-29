@@ -899,6 +899,42 @@ describe("api.taskRuns", () => {
       },
     });
   });
+
+  it("reads canonical browser tool readiness without deriving Browser Harness from Browser Use", async () => {
+    const toolReadiness = {
+      tools: [
+        {
+          id: "unbrowse",
+          ready: true,
+          state: "ready",
+          reason_code: "ready",
+          checked_at: "2026-07-29T00:00:00Z",
+        },
+        {
+          id: "stagehand",
+          ready: false,
+          state: "failed",
+          reason_code: "auth_required",
+          checked_at: "2026-07-29T00:00:01Z",
+        },
+        {
+          id: "browser-harness",
+          ready: false,
+          state: "unavailable",
+          reason_code: "not_checked",
+          checked_at: null,
+        },
+      ],
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse(toolReadiness));
+
+    await expect(api.getBrowserToolReadiness()).resolves.toEqual(toolReadiness);
+    expect(mockFetch).toHaveBeenCalledWith("/api/browser-tools/readiness", {
+      headers: { "Content-Type": "application/json" },
+      signal: undefined,
+    });
+  });
+
 });
 
 // ── Error handling ──────────────────────────────────────────────────────────

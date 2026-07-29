@@ -1,8 +1,17 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrcaCapabilities, OrcaSession, Profile, TaskHarnessPresence, TaskHarnessSession, TaskRun } from "../../lib/api";
+import { readRememberedBrowserUseRun } from "../../lib/managedTaskRunStorage";
 import { UI_STATE, expectUiState } from "../../lib/uiFlowRegistry";
 import { AgentBrowserWorkspace } from "./AgentBrowserWorkspace";
+import {
+  DEFAULT_WORKSPACE_RUNTIME_CONFIG,
+  WorkspaceRuntimeConfigProvider,
+  useWorkspaceRuntimeConfig,
+  type WorkspaceRuntimeConfig,
+} from "./WorkspaceRuntimeConfig";
 
 const apiMock = vi.hoisted(() => ({
   getOrcaCapabilities: vi.fn(),
@@ -221,6 +230,41 @@ function taskRunFixture(overrides: Partial<TaskRun> = {}): TaskRun {
   };
 }
 
+function configuredRuntime(overrides: Partial<WorkspaceRuntimeConfig> = {}): WorkspaceRuntimeConfig {
+  return {
+    ...DEFAULT_WORKSPACE_RUNTIME_CONFIG,
+    ...overrides,
+    providerRouting: {
+      ...DEFAULT_WORKSPACE_RUNTIME_CONFIG.providerRouting,
+      ...overrides.providerRouting,
+    },
+  };
+}
+
+function WorkspaceRuntimeConfigInstaller({ config }: { config: WorkspaceRuntimeConfig }) {
+  const { setConfig } = useWorkspaceRuntimeConfig();
+
+  useEffect(() => {
+    setConfig(config);
+  }, [config, setConfig]);
+
+  return null;
+}
+
+function renderWorkspace(
+  ui: ReactElement,
+  runtimeConfig: Partial<WorkspaceRuntimeConfig> = {},
+) {
+  const config = configuredRuntime(runtimeConfig);
+  return render(
+    <WorkspaceRuntimeConfigProvider>
+      {ui}
+      <WorkspaceRuntimeConfigInstaller config={config} />
+    </WorkspaceRuntimeConfigProvider>,
+  );
+}
+
+
 describe("AgentBrowserWorkspace", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
@@ -336,31 +380,26 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
   });
 
-  it("renders compact provider and browser tool controls with readiness reasons", async () => {
-    apiMock.getProviderReadiness.mockResolvedValue({
-      providers: [
-        {
-          provider: "grok",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: ["grok-build", "grok-4"],
-        },
-        {
-          provider: "antigravity",
-          transport: "cli",
-          ready: false,
-          state: "unavailable",
-          reason_code: "adapter_unavailable",
-          checked_at: null,
-          model_aliases: [],
-        },
-      ],
-    });
-
+  it("opens Settings from the compact identity row", async () => {
+    const onOpenSettings = vi.fn();
     render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open Settings" }));
+
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps provider and browser-tool controls out of the live workspace", async () => {
+    renderWorkspace(
       <AgentBrowserWorkspace
         profiles={[{ ...runningProfile, harness: "acpx" }]}
         selectedProfile={{ ...runningProfile, harness: "acpx" }}
@@ -368,91 +407,19 @@ describe("AgentBrowserWorkspace", () => {
         canInteract
         onSelectProfile={vi.fn()}
       />,
+      { agent: "acpx" },
     );
 
-    const summary = await screen.findByTestId("provider-tool-summary");
-    expect(summary.textContent).toMatch(/Grok/);
-    expect(summary.textContent).toMatch(/Unbrowse.*Stagehand.*Browser Harness/i);
-    fireEvent.click(screen.getByRole("button", { name: "Toggle KI Provider settings" }));
-    expect(await screen.findByText("adapter_unavailable")).toBeTruthy();
-    expect(screen.getByLabelText("Model alias")).toHaveProperty("value", "grok-build");
-    fireEvent.click(screen.getByRole("button", { name: "Toggle Browser Tools settings" }));
-    expect(await screen.findAllByText("Not checked")).toHaveLength(3);
-    expect(screen.getByRole("checkbox", { name: "Enable Stagehand" })).toHaveProperty("disabled", false);
+    expect((await screen.findByTestId("workspace-active-route")).textContent).toMatch(/ACPX.*Grok/i);
+    expect(screen.queryByTestId("provider-tool-summary")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Toggle KI Provider settings" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Toggle Browser Tools settings" })).toBeNull();
   });
 
-  it("renders all normalized ACP providers, disables Antigravity CLI, and keys readiness rows by provider transport", async () => {
+  it("renders normalized provider readiness through the Settings-owned route summary", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    apiMock.getProviderReadiness.mockResolvedValue({
-      providers: [
-        {
-          provider: "grok",
-          transport: "cli",
-          ready: false,
-          state: "unavailable",
-          reason_code: "grok_cli_unavailable",
-          checked_at: null,
-          model_aliases: [],
-        },
-        {
-          provider: "codex",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-        {
-          provider: "claude",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-        {
-          provider: "cursor",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-        {
-          provider: "grok",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: ["grok-build-0.1"],
-        },
-        {
-          provider: "opencode",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-        {
-          provider: "antigravity",
-          transport: "cli",
-          ready: false,
-          state: "unavailable",
-          reason_code: "adapter_unavailable",
-          checked_at: null,
-          model_aliases: [],
-        },
-      ],
-    });
-
     try {
-      render(
+      renderWorkspace(
         <AgentBrowserWorkspace
           profiles={[{ ...runningProfile, harness: "acpx" }]}
           selectedProfile={{ ...runningProfile, harness: "acpx" }}
@@ -460,18 +427,11 @@ describe("AgentBrowserWorkspace", () => {
           canInteract
           onSelectProfile={vi.fn()}
         />,
+        { agent: "acpx" },
       );
 
-      await screen.findByTestId("provider-tool-summary");
-      fireEvent.click(screen.getByRole("button", { name: "Toggle KI Provider settings" }));
-      const providerPanel = await screen.findByTestId("provider-tool-provider-section");
-
-      for (const label of ["Codex", "Claude", "Cursor", "Grok", "OpenCode"]) {
-        expect(within(providerPanel).getByRole("radio", { name: label })).toHaveProperty("disabled", false);
-      }
-      expect(within(providerPanel).getByRole("radio", { name: "Antigravity" })).toHaveProperty("disabled", true);
-      expect(await screen.findByText("grok_cli_unavailable")).toBeTruthy();
-      expect(await screen.findByText("adapter_unavailable")).toBeTruthy();
+      expect((await screen.findByTestId("workspace-active-route")).getAttribute("title")).toMatch(/ACPX.*Grok.*Ready/i);
+      expect((await screen.findByTestId("orca-connection-status")).textContent).toMatch(/grok-build.*ACP ready/i);
       expect(consoleError.mock.calls.some(([message]) => String(message).includes("same key"))).toBe(false);
     } finally {
       consoleError.mockRestore();
@@ -481,36 +441,21 @@ describe("AgentBrowserWorkspace", () => {
   it("submits Grok ACP with normalized provider, tools, routing, and Grok Build compatibility harness", async () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
     apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: "task-grok" }));
-    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
-      id: "run-grok",
-      task_session_id: "task-grok",
-      harness: "acpx",
-      agent: "grok-build",
-      model_alias: "grok-build",
-    }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({ id: "run-grok", task_session_id: "task-grok", harness: "acpx", agent: "grok-build", model_alias: "grok-build" }));
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[acpxProfile]}
-        selectedProfile={acpxProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[acpxProfile]} selectedProfile={acpxProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "acpx" },
     );
 
-    await screen.findByTestId("provider-tool-summary");
-    fireEvent.change(screen.getByTestId("orca-prompt"), {
-      target: { value: "Inspect https://example.com" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Toggle Browser Tools settings" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Enable Stagehand" }));
+    await screen.findByTestId("workspace-active-route");
+    fireEvent.change(screen.getByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
     fireEvent.click(screen.getByTestId("orca-launch"));
 
     await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
       "task-grok",
-      {
+      expect.objectContaining({
         harness: "acpx",
         agent: "grok-build",
         task: "Inspect https://example.com",
@@ -521,15 +466,11 @@ describe("AgentBrowserWorkspace", () => {
         provider: { id: "grok", transport: "acp", model_alias: "grok-build" },
         browser_tools: [
           { id: "unbrowse", enabled: true },
-          { id: "stagehand", enabled: false },
+          { id: "stagehand", enabled: true },
           { id: "browser-harness", enabled: true },
         ],
-        routing_policy: {
-          mode: "ordered-fallback",
-          allow_second_browser: false,
-          max_tool_attempts: 3,
-        },
-      },
+        routing_policy: { mode: "ordered-fallback", allow_second_browser: false, max_tool_attempts: 3 },
+      }),
     ));
   });
 
@@ -537,502 +478,171 @@ describe("AgentBrowserWorkspace", () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
     apiMock.getProviderReadiness.mockResolvedValue({
       providers: [
-        {
-          provider: "grok",
-          transport: "cli",
-          ready: false,
-          state: "unavailable",
-          reason_code: "wrong_transport_unavailable",
-          checked_at: null,
-          model_aliases: ["grok-cli"],
-        },
-        {
-          provider: "grok",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: ["grok-build-0.1"],
-        },
-        {
-          provider: "antigravity",
-          transport: "cli",
-          ready: false,
-          state: "unavailable",
-          reason_code: "adapter_unavailable",
-          checked_at: null,
-          model_aliases: [],
-        },
+        { provider: "grok", transport: "cli", ready: false, state: "unavailable", reason_code: "wrong_transport_unavailable", checked_at: null, model_aliases: ["grok-cli"] },
+        { provider: "grok", transport: "acp", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z", model_aliases: ["grok-build-0.1"] },
       ],
     });
     apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: "task-grok-tuple" }));
-    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
-      id: "run-grok-tuple",
-      task_session_id: "task-grok-tuple",
-      harness: "acpx",
-      agent: "grok-build",
-      model_alias: "grok-build",
-    }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({ id: "run-grok-tuple", task_session_id: "task-grok-tuple", harness: "acpx", agent: "grok-build", model_alias: "grok-build-0.1" }));
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[acpxProfile]}
-        selectedProfile={acpxProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[acpxProfile]} selectedProfile={acpxProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "acpx", providerRouting: { modelAlias: "grok-build-0.1" } },
     );
 
-    expect((await screen.findByTestId("provider-tool-summary")).textContent).toMatch(/Grok.*acp.*grok-build-0\.1/i);
+    expect((await screen.findByTestId("workspace-active-route")).textContent).toMatch(/Grok/i);
     expect(screen.queryByText("wrong_transport_unavailable")).toBeNull();
-    fireEvent.change(screen.getByTestId("orca-prompt"), {
-      target: { value: "Inspect https://example.com" },
-    });
+    fireEvent.change(screen.getByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
     fireEvent.click(screen.getByTestId("orca-launch"));
 
-    await waitFor(() => {
-      expect(apiMock.createTaskSession).toHaveBeenCalledWith(expect.objectContaining({
-        metadata: expect.objectContaining({
-          source: "agent-browser-workspace",
-          harness: "acpx",
-          agent: "grok-build",
-          provider: { id: "grok", transport: "acp", model_alias: "grok-build-0.1" },
-          routing_policy: {
-            mode: "ordered-fallback",
-            allow_second_browser: false,
-            max_tool_attempts: 3,
-          },
-        }),
-      }));
-      expect(apiMock.createTaskRun).toHaveBeenCalledWith(
-        "task-grok-tuple",
-        expect.objectContaining({
-          harness: "acpx",
-          agent: "grok-build",
-          model_alias: "grok-build-0.1",
-          provider: { id: "grok", transport: "acp", model_alias: "grok-build-0.1" },
-        }),
-      );
-    });
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+      "task-grok-tuple",
+      expect.objectContaining({
+        harness: "acpx",
+        agent: "grok-build",
+        model_alias: "grok-build-0.1",
+        provider: { id: "grok", transport: "acp", model_alias: "grok-build-0.1" },
+      }),
+    ));
   });
 
   it.each([
-    ["codex", "Codex", "codex"],
-    ["claude", "Claude", "claude"],
-    ["cursor", "Cursor", "cursor"],
-    ["grok", "Grok", "grok-build"],
-    ["opencode", "OpenCode", "opencode"],
+    ["codex", "codex", null],
+    ["claude", "claude", null],
+    ["cursor", "cursor", null],
+    ["grok", "grok-build", "grok-build-0.1"],
+    ["opencode", "opencode", null],
   ] as const)(
     "launches normalized %s ACP with the mapped effective agent and provider payload",
-    async (providerId, providerLabel, expectedAgent) => {
+    async (providerId, expectedAgent, expectedModel) => {
       const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
       apiMock.getProviderReadiness.mockResolvedValue({
         providers: [
-          {
-            provider: "codex",
-            transport: "acp",
-            ready: true,
-            state: "ready",
-            reason_code: "ok",
-            checked_at: "2026-07-29T00:00:00Z",
-            model_aliases: [],
-          },
-          {
-            provider: "claude",
-            transport: "acp",
-            ready: true,
-            state: "ready",
-            reason_code: "ok",
-            checked_at: "2026-07-29T00:00:00Z",
-            model_aliases: [],
-          },
-          {
-            provider: "cursor",
-            transport: "acp",
-            ready: true,
-            state: "ready",
-            reason_code: "ok",
-            checked_at: "2026-07-29T00:00:00Z",
-            model_aliases: [],
-          },
-          {
-            provider: "grok",
-            transport: "acp",
-            ready: true,
-            state: "ready",
-            reason_code: "ok",
-            checked_at: "2026-07-29T00:00:00Z",
-            model_aliases: ["grok-build-0.1"],
-          },
-          {
-            provider: "opencode",
-            transport: "acp",
-            ready: true,
-            state: "ready",
-            reason_code: "ok",
-            checked_at: "2026-07-29T00:00:00Z",
-            model_aliases: [],
-          },
-          {
-            provider: "antigravity",
-            transport: "cli",
-            ready: false,
-            state: "unavailable",
-            reason_code: "adapter_unavailable",
-            checked_at: null,
-            model_aliases: [],
-          },
+          { provider: providerId, transport: "acp", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z", model_aliases: expectedModel ? [expectedModel] : [] },
         ],
       });
       apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: `task-${providerId}` }));
-      apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
-        id: `run-${providerId}`,
-        task_session_id: `task-${providerId}`,
-        harness: "acpx",
-        agent: expectedAgent,
-        model_alias: providerId === "grok" ? "grok-build-0.1" : null,
-      }));
+      apiMock.createTaskRun.mockResolvedValue(taskRunFixture({ id: `run-${providerId}`, task_session_id: `task-${providerId}`, harness: "acpx", agent: expectedAgent, model_alias: expectedModel }));
       apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-      render(
-        <AgentBrowserWorkspace
-          profiles={[acpxProfile]}
-          selectedProfile={acpxProfile}
-          canAutomate
-          canInteract
-          onSelectProfile={vi.fn()}
-        />,
+      renderWorkspace(
+        <AgentBrowserWorkspace profiles={[acpxProfile]} selectedProfile={acpxProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+        { agent: "acpx", providerRouting: { providerId, modelAlias: expectedModel ?? "" } },
       );
 
-      await screen.findByTestId("provider-tool-summary");
-      fireEvent.click(screen.getByRole("button", { name: "Toggle KI Provider settings" }));
-      fireEvent.click(within(await screen.findByTestId("provider-tool-provider-section")).getByRole("radio", { name: providerLabel }));
-      fireEvent.change(screen.getByTestId("orca-prompt"), {
-        target: { value: "Inspect https://example.com" },
-      });
+      await screen.findByTestId("workspace-active-route");
+      fireEvent.change(screen.getByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
       fireEvent.click(screen.getByTestId("orca-launch"));
 
-      const expectedProvider = providerId === "grok"
-        ? { id: providerId, transport: "acp", model_alias: "grok-build-0.1" }
+      const expectedProvider = expectedModel
+        ? { id: providerId, transport: "acp", model_alias: expectedModel }
         : { id: providerId, transport: "acp" };
-      await waitFor(() => {
-        expect(apiMock.createTaskSession).toHaveBeenCalledWith(expect.objectContaining({
-          metadata: expect.objectContaining({
-            source: "agent-browser-workspace",
-            harness: "acpx",
-            agent: expectedAgent,
-            provider: expectedProvider,
-          }),
-        }));
-        expect(apiMock.createTaskRun).toHaveBeenCalledWith(
-          `task-${providerId}`,
-          expect.objectContaining({
-            harness: "acpx",
-            agent: expectedAgent,
-            model_alias: providerId === "grok" ? "grok-build-0.1" : null,
-            provider: expectedProvider,
-            browser_tools: [
-              { id: "unbrowse", enabled: true },
-              { id: "stagehand", enabled: true },
-              { id: "browser-harness", enabled: true },
-            ],
-            routing_policy: {
-              mode: "ordered-fallback",
-              allow_second_browser: false,
-              max_tool_attempts: 3,
-            },
-          }),
-        );
-      });
-      expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
-      expect(screen.getByTestId("acpx-agent-fixed").textContent).toContain(expectedAgent);
+      await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+        `task-${providerId}`,
+        expect.objectContaining({ harness: "acpx", agent: expectedAgent, model_alias: expectedModel, provider: expectedProvider }),
+      ));
     },
   );
 
   it("lists a dynamic ready Gemini ACP provider and sends the exact provider agent and model payload", async () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
-    apiMock.getProviderReadiness.mockResolvedValue({
-      providers: [
-        {
-          provider: "grok",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: ["grok-build-0.1"],
-        },
-        {
-          provider: "gemini",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: ["gemini-2.5-pro", "gemini-2.5-flash"],
-        },
-      ],
-    });
-    apiMock.getTaskHarnessPreflights.mockResolvedValue({
-      harness: "acpx",
-      agents: [
-        { agent: "grok-build", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
-        { agent: "gemini", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
-      ],
-    });
+    apiMock.getProviderReadiness.mockResolvedValue({ providers: [
+      { provider: "gemini", transport: "acp", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z", model_aliases: ["gemini-2.5-pro", "gemini-2.5-flash"] },
+    ] });
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({ harness: "acpx", agents: [
+      { agent: "gemini", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+    ] });
     apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: "task-gemini" }));
-    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
-      id: "run-gemini",
-      task_session_id: "task-gemini",
-      harness: "acpx",
-      agent: "gemini",
-      model_alias: "gemini-2.5-flash",
-    }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({ id: "run-gemini", task_session_id: "task-gemini", harness: "acpx", agent: "gemini", model_alias: "gemini-2.5-flash" }));
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[acpxProfile]}
-        selectedProfile={acpxProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[acpxProfile]} selectedProfile={acpxProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "acpx", acpxAgent: "gemini", providerRouting: { providerId: "gemini", modelAlias: "gemini-2.5-flash" } },
     );
 
-    await screen.findByTestId("provider-tool-summary");
-    fireEvent.click(screen.getByRole("button", { name: "Toggle KI Provider settings" }));
-    const providerPanel = await screen.findByTestId("provider-tool-provider-section");
-    fireEvent.click(within(providerPanel).getByRole("radio", { name: "Gemini" }));
-    expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
-    expect(screen.getByTestId("acpx-agent-fixed").textContent).toContain("gemini");
-    fireEvent.change(screen.getByLabelText("Model alias"), { target: { value: "gemini-2.5-flash" } });
-    fireEvent.change(screen.getByTestId("orca-prompt"), {
-      target: { value: "Inspect https://example.com" },
-    });
+    expect((await screen.findByTestId("workspace-active-route")).textContent).toMatch(/gemini/i);
+    fireEvent.change(screen.getByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
     fireEvent.click(screen.getByTestId("orca-launch"));
 
-    await waitFor(() => {
-      expect(apiMock.createTaskSession).toHaveBeenCalledWith(expect.objectContaining({
-        metadata: expect.objectContaining({
-          source: "agent-browser-workspace",
-          harness: "acpx",
-          agent: "gemini",
-          provider: { id: "gemini", transport: "acp", model_alias: "gemini-2.5-flash" },
-        }),
-      }));
-      expect(apiMock.createTaskRun).toHaveBeenCalledWith(
-        "task-gemini",
-        expect.objectContaining({
-          harness: "acpx",
-          agent: "gemini",
-          model_alias: "gemini-2.5-flash",
-          provider: { id: "gemini", transport: "acp", model_alias: "gemini-2.5-flash" },
-          browser_tools: [
-            { id: "unbrowse", enabled: true },
-            { id: "stagehand", enabled: true },
-            { id: "browser-harness", enabled: true },
-          ],
-        }),
-      );
-    });
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+      "task-gemini",
+      expect.objectContaining({
+        harness: "acpx",
+        agent: "gemini",
+        model_alias: "gemini-2.5-flash",
+        provider: { id: "gemini", transport: "acp", model_alias: "gemini-2.5-flash" },
+      }),
+    ));
   });
 
-  it("renders backend-safe dynamic provider ids in ProviderToolControl while filtering unsafe ids", async () => {
+  it("renders backend-safe dynamic provider ids through the configured active route while filtering unsafe ids in Settings", async () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
-    apiMock.getProviderReadiness.mockResolvedValue({
-      providers: [
-        {
-          provider: "codex",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-        {
-          provider: "custom.agent",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: ["custom-agent-model"],
-        },
-        {
-          provider: "custom_agent",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-        {
-          provider: "1agent",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-        {
-          provider: "bad<script>",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: ["bad-model"],
-        },
-        {
-          provider: " custom.agent",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-        {
-          provider: "custom/agent",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-      ],
-    });
+    apiMock.getProviderReadiness.mockResolvedValue({ providers: [
+      { provider: "custom.agent", transport: "acp", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z", model_aliases: ["custom-agent-model"] },
+    ] });
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({ harness: "acpx", agents: [
+      { agent: "custom.agent", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+    ] });
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[acpxProfile]}
-        selectedProfile={acpxProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[acpxProfile]} selectedProfile={acpxProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "acpx", acpxAgent: "custom.agent", providerRouting: { providerId: "custom.agent", modelAlias: "custom-agent-model" } },
     );
 
-    await screen.findByTestId("provider-tool-summary");
-    fireEvent.click(screen.getByRole("button", { name: "Toggle KI Provider settings" }));
-    const providerPanel = await screen.findByTestId("provider-tool-provider-section");
-
-    expect(within(providerPanel).getByRole("radio", { name: "Codex" })).toHaveProperty("disabled", false);
-    for (const [label, agent] of [
-      [/custom\.agent/i, "custom.agent"],
-      [/custom_agent/i, "custom_agent"],
-      [/1agent/i, "1agent"],
-    ] as const) {
-      const choice = within(providerPanel).getByRole("radio", { name: label });
-      expect(choice).toHaveProperty("disabled", false);
-      fireEvent.click(choice);
-      expect(screen.getByTestId("acpx-agent-fixed").textContent).toContain(agent);
-    }
-    expect(within(providerPanel).queryByRole("radio", { name: /bad/i })).toBeNull();
-    expect(within(providerPanel).queryByRole("radio", { name: /custom\/agent/i })).toBeNull();
-    expect(providerPanel.textContent).not.toContain("bad<script>");
-    expect(providerPanel.textContent).not.toContain(" custom.agent");
-    expect(providerPanel.textContent).not.toContain("custom/agent");
+    expect((await screen.findByTestId("workspace-active-route")).textContent).toMatch(/custom\.agent/i);
+    expect(screen.queryByText("bad<script>")).toBeNull();
+    expect(screen.queryByText("custom/agent")).toBeNull();
   });
 
   it("omits stale Grok ACP model aliases that are not present on the exact readiness row", async () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
-    apiMock.getProviderReadiness.mockResolvedValue({
-      providers: [
-        {
-          provider: "grok",
-          transport: "cli",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: ["grok-cli-model"],
-        },
-        {
-          provider: "grok",
-          transport: "acp",
-          ready: true,
-          state: "ready",
-          reason_code: "ok",
-          checked_at: "2026-07-29T00:00:00Z",
-          model_aliases: [],
-        },
-      ],
-    });
+    apiMock.getProviderReadiness.mockResolvedValue({ providers: [
+      { provider: "grok", transport: "cli", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z", model_aliases: ["grok-cli-model"] },
+      { provider: "grok", transport: "acp", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z", model_aliases: [] },
+    ] });
     apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: "task-grok-no-model" }));
-    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
-      id: "run-grok-no-model",
-      task_session_id: "task-grok-no-model",
-      harness: "acpx",
-      agent: "grok-build",
-      model_alias: null,
-    }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({ id: "run-grok-no-model", task_session_id: "task-grok-no-model", harness: "acpx", agent: "grok-build", model_alias: null }));
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[acpxProfile]}
-        selectedProfile={acpxProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[acpxProfile]} selectedProfile={acpxProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "acpx", providerRouting: { providerId: "grok", modelAlias: "stale-grok-model" } },
     );
 
-    expect((await screen.findByTestId("provider-tool-summary")).textContent).toMatch(/Grok.*acp.*default/i);
-    fireEvent.change(screen.getByTestId("orca-prompt"), {
-      target: { value: "Inspect https://example.com" },
-    });
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
     fireEvent.click(screen.getByTestId("orca-launch"));
 
     await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
       "task-grok-no-model",
-      expect.objectContaining({
-        harness: "acpx",
-        agent: "grok-build",
-        model_alias: null,
-        provider: { id: "grok", transport: "acp" },
-      }),
+      expect.objectContaining({ harness: "acpx", agent: "grok-build", model_alias: null, provider: { id: "grok", transport: "acp" } }),
     ));
   });
 
   it("keeps the viewer mounted and blocks noncanonical tool order instead of silently sorting", async () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
-    render(
-      <AgentBrowserWorkspace
-        profiles={[acpxProfile]}
-        selectedProfile={acpxProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[acpxProfile]} selectedProfile={acpxProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "acpx", providerRouting: { browserTools: [
+        { id: "stagehand", enabled: true },
+        { id: "unbrowse", enabled: true },
+        { id: "browser-harness", enabled: true },
+      ] } },
     );
 
-    await screen.findByTestId("provider-tool-summary");
-    const viewer = screen.getByTestId("mock-profile-viewer");
-    fireEvent.change(screen.getByTestId("orca-prompt"), {
-      target: { value: "Inspect https://example.com" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Toggle Browser Tools settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Move Stagehand up" }));
+    const viewer = await screen.findByTestId("mock-profile-viewer");
+    fireEvent.change(screen.getByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
 
     expect(screen.getByTestId("mock-profile-viewer")).toBe(viewer);
-    expect(await screen.findAllByText("Browser tool order is not executable until backend ordering support lands.")).toHaveLength(2);
+    expect(await screen.findByText("Browser tool order is not executable until backend ordering support lands.")).toBeTruthy();
     expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
     fireEvent.click(screen.getByTestId("orca-launch"));
     expect(apiMock.createTaskRun).not.toHaveBeenCalled();
   });
 
-  it("uses the same compact controls in full view without duplicate visible launch buttons and restores focus on Escape", async () => {
-    render(
+  it("uses the same compact route in full view without duplicate visible launch buttons and restores focus on Escape", async () => {
+    renderWorkspace(
       <AgentBrowserWorkspace
         profiles={[{ ...runningProfile, harness: "acpx" }]}
         selectedProfile={{ ...runningProfile, harness: "acpx" }}
@@ -1040,17 +650,15 @@ describe("AgentBrowserWorkspace", () => {
         canInteract
         onSelectProfile={vi.fn()}
       />,
+      { agent: "acpx" },
     );
 
-    await screen.findByTestId("provider-tool-summary");
+    await screen.findByTestId("workspace-active-route");
     fireEvent.click(screen.getByRole("button", { name: "Enter full view" }));
-    fireEvent.click(screen.getByRole("button", { name: "Open desktop full-view Provider controls" }));
 
-    expect(screen.getAllByTestId("provider-tool-summary")).toHaveLength(2);
+    expect(screen.getAllByTestId("workspace-active-route")).toHaveLength(1);
     expect(screen.getAllByTestId("orca-launch")).toHaveLength(1);
-    fireEvent.click(screen.getAllByRole("button", { name: "Toggle KI Provider settings" })[0]!);
-    const providerPanel = await screen.findByTestId("provider-tool-provider-section-full");
-    expect(within(providerPanel).getByRole("radio", { name: "Grok" })).toBeTruthy();
+    expect(screen.queryByTestId("provider-tool-summary")).toBeNull();
 
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() =>
@@ -1058,695 +666,313 @@ describe("AgentBrowserWorkspace", () => {
     );
   });
 
-  it("keeps harness controls compact and opens a detected local CLI for live testing", async () => {
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: harness !== "stagehand",
-      state: harness === "stagehand" ? "unavailable" : "polling",
-      last_seen_at: harness === "stagehand" ? null : "2026-07-27T00:00:00Z",
-      reason: harness === "stagehand" ? "No authenticated Stagehand worker has checked in" : null,
-    }));
-    apiMock.startOrcaSession.mockResolvedValue(sessionFixture({ agent: "agy" }));
-    apiMock.readOrcaSessionOutput.mockResolvedValue({
-      output: "AGY terminal ready",
-      next_cursor: 18,
-      status: "running",
-    });
-
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+  it("keeps harness popup controls removed from the live workspace", async () => {
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "browser-use" },
     );
 
+    await screen.findByTestId("workspace-active-route");
+    expect(screen.queryByRole("button", { name: "Open harness menu" })).toBeNull();
     expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
-    expect(within(menu).getByRole("button", { name: "Use Browser Use" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Use ACPX" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Use Unbrowse" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Use Stagehand" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Use AGY" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Use Grok" })).toBeTruthy();
-    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything()));
-    apiMock.getTaskHarnessPresence.mockClear();
-    apiMock.getOrcaCapabilities.mockClear();
-
-    expect(within(menu).queryByRole("button", { name: "Check Browser Use readiness" })).toBeNull();
-    expect(within(menu).queryByRole("button", { name: "Check Unbrowse readiness" })).toBeNull();
-    expect(within(menu).queryByRole("button", { name: "Check Stagehand readiness" })).toBeNull();
-    expect(within(menu).getByRole("button", { name: "Run Browser Use smoke test" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Run Unbrowse smoke test" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Run Stagehand smoke test" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Open AGY terminal" })).toBeTruthy();
-    fireEvent.click(within(menu).getByRole("button", { name: "Recheck all harnesses" }));
-
-    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledTimes(4));
-    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("browser-use", expect.anything());
-    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("acpx", expect.anything());
-    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("unbrowse", expect.anything());
-    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything());
-    expect(apiMock.getOrcaCapabilities).toHaveBeenCalledTimes(1);
-
-    fireEvent.click(within(menu).getByRole("button", { name: "Use Stagehand" }));
-    expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
-    expect(screen.getByTestId("harness-readiness").textContent).toMatch(/stagehand.*unavailable/i);
-    expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
-
-    fireEvent.click(screen.getByRole("button", { name: "Open harness menu" }));
-    const reopenedMenu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
-    fireEvent.click(within(reopenedMenu).getByRole("button", { name: "Open AGY terminal" }));
-
-    await waitFor(() => expect(apiMock.startOrcaSession).toHaveBeenCalledWith({
-      profile_id: runningProfile.id,
-      agent: "agy",
-    }));
-    expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
-    expect(await screen.findByText("AGY terminal ready")).toBeTruthy();
+    expect(screen.queryByTestId("harness-readiness")).toBeNull();
   });
 
-  it("starts a real Browser Use smoke run from the harness menu without silently overriding health", async () => {
+  it("starts Browser Use from the configured runtime without silently overriding health", async () => {
     const blockedRun = taskRunFixture({
       status: "blocked_health",
-      health_decision: {
-        allowed: false,
-        waiting: false,
-        failed_reasons: ["measured_authenticity_below_threshold"],
-        non_overridable_reasons: [],
-      },
+      health_decision: { allowed: false, waiting: false, failed_reasons: ["measured_authenticity_below_threshold"], non_overridable_reasons: [] },
     });
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: true,
-      state: "polling",
-      last_seen_at: "2026-07-29T00:00:00Z",
-      reason: null,
-    }));
+    apiMock.getTaskHarnessPresence.mockResolvedValue({ harness: "browser-use", worker_seen_recently: true, state: "polling", last_seen_at: "2026-07-29T00:00:00Z", reason: null });
     apiMock.createTaskSession.mockResolvedValue(taskSessionFixture());
     apiMock.createTaskRun.mockResolvedValue(blockedRun);
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "browser-use" },
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const testButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
-      .getByRole("button", { name: "Run Browser Use smoke test" });
-    await waitFor(() => expect((testButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(testButton);
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Open https://example.com/ and report the page title." } });
+    fireEvent.click(screen.getByTestId("orca-launch"));
 
-    await waitFor(() => expect(apiMock.runProfileHealth).toHaveBeenCalledWith(runningProfile.id));
-    await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledWith({
+    await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledWith(expect.objectContaining({
       profile_id: runningProfile.id,
-      title: "Browser Use smoke test",
-      metadata: {
-        source: "harness-smoke-test",
-        harness: "browser-use",
-        smoke_test: true,
-      },
-    }));
-    expect(apiMock.createTaskRun).toHaveBeenCalledWith("smoke-session", {
-      harness: "browser-use",
-      agent: null,
-      task: "Open https://example.com/ and report the page title.",
-      profile_id: runningProfile.id,
-      allowed_origins: ["https://example.com"],
-      max_steps: 8,
-      timeout_seconds: 180,
-      model_alias: null,
-    });
+      metadata: { source: "agent-browser-workspace", harness: "browser-use" },
+    })));
     expect(apiMock.overrideTaskRunHealth).not.toHaveBeenCalled();
     expect(await screen.findByRole("button", { name: "Run with override" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Take over browser" })).toBeTruthy();
   });
 
-  it("waits for a fresh measured profile health result before creating a smoke run", async () => {
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: true,
-      state: "polling",
-      last_seen_at: "2026-07-29T00:00:00Z",
-      reason: null,
-    }));
-    apiMock.runProfileHealth.mockResolvedValue({
-      profile_id: runningProfile.id,
-      state: "running",
-      checked_at: null,
-      proxy_configured: false,
-      proxy_reachable: null,
-      outbound_ip_masked: null,
-      proxy_latency_ms: null,
-      proxy_risk_score: null,
-      proxy_authenticity_score: null,
-      fingerprint_consistency_score: null,
-      browser_scan_score: null,
-      warnings: [],
-      blockers: [],
-      error_code: null,
-      sources: {},
-    });
-    apiMock.getProfileHealth.mockResolvedValue({
-      profile_id: runningProfile.id,
-      state: "passed",
-      checked_at: "2026-07-29T00:00:01Z",
-      proxy_configured: false,
-      proxy_reachable: true,
-      outbound_ip_masked: "203.0.113.x",
-      proxy_latency_ms: null,
-      proxy_risk_score: null,
-      proxy_authenticity_score: null,
-      fingerprint_consistency_score: 100,
-      browser_scan_score: 100,
-      warnings: [],
-      blockers: [],
-      error_code: null,
-      sources: {
-        browser_network: "measured",
-        fingerprint_consistency: "measured",
-        browser_scan: "measured",
-        proxychecker: "skipped",
-      },
-    });
-    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture());
-    apiMock.createTaskRun.mockResolvedValue(taskRunFixture());
-    apiMock.listTaskRunOutputs.mockResolvedValue([]);
-
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+  it("waits for a prompt with an explicit URL before creating a configured managed run", async () => {
+    apiMock.getTaskHarnessPresence.mockResolvedValue({ harness: "browser-use", worker_seen_recently: true, state: "polling", last_seen_at: "2026-07-29T00:00:00Z", reason: null });
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "browser-use" },
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const smokeButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
-      .getByRole("button", { name: "Run Browser Use smoke test" });
-    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(smokeButton);
-
-    await waitFor(() => expect(apiMock.getProfileHealth).toHaveBeenCalledWith(runningProfile.id));
-    expect(apiMock.createTaskSession).toHaveBeenCalledTimes(1);
-    expect(apiMock.runProfileHealth.mock.invocationCallOrder[0])
-      .toBeLessThan(apiMock.createTaskSession.mock.invocationCallOrder[0]);
-    expect(apiMock.getProfileHealth.mock.invocationCallOrder[0])
-      .toBeLessThan(apiMock.createTaskSession.mock.invocationCallOrder[0]);
+    await screen.findByTestId("orca-launch");
+    fireEvent.change(screen.getByTestId("orca-prompt"), { target: { value: "Report the title" } });
+    expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
+    expect(apiMock.createTaskSession).not.toHaveBeenCalled();
   });
 
-  it("disables a smoke run for a harness that is known to be unavailable", async () => {
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: harness !== "stagehand",
-      state: harness === "stagehand" ? "unavailable" : "polling",
-      last_seen_at: harness === "stagehand" ? null : "2026-07-29T00:00:00Z",
-      reason: harness === "stagehand" ? "Stagehand worker unavailable" : null,
-    }));
-
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+  it("disables launch for a configured harness that is known to be unavailable", async () => {
+    apiMock.getTaskHarnessPresence.mockResolvedValue({ harness: "stagehand", worker_seen_recently: false, state: "unavailable", last_seen_at: null, reason: "Stagehand worker unavailable" });
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "stagehand" },
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
-    const smokeButton = within(menu).getByRole("button", { name: "Run Stagehand smoke test" });
-    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(true));
-    expect(smokeButton.getAttribute("title")).toMatch(/unavailable/i);
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
+    expect(await screen.findByText("Stagehand worker unavailable")).toBeTruthy();
+    expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
   });
 
-  it("shows a busy smoke state and ignores a duplicate click while the run is starting", async () => {
+  it("shows a busy managed-run state and ignores a duplicate click while the run is starting", async () => {
     let resolveSession!: (session: TaskHarnessSession) => void;
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: true,
-      state: "polling",
-      last_seen_at: "2026-07-29T00:00:00Z",
-      reason: null,
-    }));
-    apiMock.createTaskSession.mockImplementation(() => new Promise((resolve) => {
-      resolveSession = resolve;
-    }));
+    apiMock.getTaskHarnessPresence.mockResolvedValue({ harness: "browser-use", worker_seen_recently: true, state: "polling", last_seen_at: "2026-07-29T00:00:00Z", reason: null });
+    apiMock.createTaskSession.mockImplementation(() => new Promise((resolve) => { resolveSession = resolve; }));
     apiMock.createTaskRun.mockResolvedValue(taskRunFixture());
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "browser-use" },
     );
 
-    fireEvent.change(await screen.findByTestId("orca-prompt"), {
-      target: { value: "Open https://example.org/" },
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
-    const smokeButton = within(menu).getByRole("button", { name: "Run Browser Use smoke test" });
-    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(smokeButton);
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Open https://example.org/" } });
+    fireEvent.click(screen.getByTestId("orca-launch"));
 
     await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledTimes(1));
-    expect(smokeButton.getAttribute("aria-busy")).toBe("true");
-    expect(smokeButton.textContent).toMatch(/starting/i);
     expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
-    fireEvent.click(smokeButton);
+    fireEvent.click(screen.getByTestId("orca-launch"));
     expect(apiMock.createTaskSession).toHaveBeenCalledTimes(1);
 
-    resolveSession(taskSessionFixture());
+    await act(async () => { resolveSession(taskSessionFixture()); });
     await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledTimes(1));
   });
 
   it("uses the required Grok Build ACPX adapter for an Antigravity profile", async () => {
-    const antigravityProfile: Profile = {
-      ...runningProfile,
-      id: "profile-antigravity",
-      name: "Antigravity profile",
-      harness: "antigravity",
-    };
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: true,
-      state: "polling",
-      last_seen_at: "2026-07-29T00:00:00Z",
-      reason: null,
-    }));
-    apiMock.getTaskHarnessPreflights.mockResolvedValue({
-      harness: "acpx",
-      agents: [
-        { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
-        { agent: "grok-build", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
-      ],
-    });
-    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({
-      id: "smoke-antigravity",
-      profile_id: antigravityProfile.id,
-    }));
-    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
-      id: "run-antigravity",
-      task_session_id: "smoke-antigravity",
-      profile_id: antigravityProfile.id,
-      profile_id_snapshot: antigravityProfile.id,
-      harness: "acpx",
-      agent: "grok-build",
-    }));
+    const antigravityProfile: Profile = { ...runningProfile, id: "profile-antigravity", name: "Antigravity profile", harness: "antigravity" };
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: "task-antigravity", profile_id: antigravityProfile.id }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({ id: "run-antigravity", task_session_id: "task-antigravity", profile_id: antigravityProfile.id, profile_id_snapshot: antigravityProfile.id, harness: "acpx", agent: "grok-build" }));
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[antigravityProfile]}
-        selectedProfile={antigravityProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[antigravityProfile]} selectedProfile={antigravityProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "antigravity" },
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const smokeButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
-      .getByRole("button", { name: "Run ACPX smoke test" });
-    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(smokeButton);
-
-    await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledWith({
-      profile_id: antigravityProfile.id,
-      title: "ACPX smoke test",
-      metadata: {
-        source: "harness-smoke-test",
-        harness: "acpx",
-        smoke_test: true,
-        agent: "grok-build",
-        mode: "antigravity",
-      },
-    }));
-    expect(apiMock.createTaskRun).toHaveBeenCalledWith(
-      "smoke-antigravity",
-      expect.objectContaining({ harness: "acpx", agent: "grok-build" }),
-    );
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
+    expect((await screen.findByTestId("workspace-active-route")).textContent).toMatch(/Antigravity.*Grok Build/i);
+    expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("provider-launch-unavailable").textContent).toContain("adapter_unavailable");
   });
 
-  it("does not attach or start a stale smoke run after the selected profile changes", async () => {
+  it("keeps a managed run tied to the profile that started it when the parent rerenders", async () => {
     let resolveSession!: (session: TaskHarnessSession) => void;
-    const nextProfile: Profile = {
-      ...runningProfile,
-      id: "profile-next",
-      name: "Next profile",
-    };
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: true,
-      state: "polling",
-      last_seen_at: "2026-07-29T00:00:00Z",
-      reason: null,
-    }));
-    apiMock.createTaskSession.mockImplementation(() => new Promise((resolve) => {
-      resolveSession = resolve;
-    }));
+    const nextProfile: Profile = { ...runningProfile, id: "profile-next", name: "Next profile" };
+    apiMock.getTaskHarnessPresence.mockResolvedValue({ harness: "browser-use", worker_seen_recently: true, state: "polling", last_seen_at: "2026-07-29T00:00:00Z", reason: null });
+    apiMock.createTaskSession.mockImplementation(() => new Promise((resolve) => { resolveSession = resolve; }));
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    const view = render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile, nextProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    const view = renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile, nextProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "browser-use" },
     );
-
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const smokeButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
-      .getByRole("button", { name: "Run Browser Use smoke test" });
-    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(smokeButton);
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Open https://example.com/" } });
+    fireEvent.click(screen.getByTestId("orca-launch"));
     await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledTimes(1));
 
     view.rerender(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile, nextProfile]}
-        selectedProfile={nextProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+      <WorkspaceRuntimeConfigProvider>
+        <AgentBrowserWorkspace profiles={[runningProfile, nextProfile]} selectedProfile={nextProfile} canAutomate canInteract onSelectProfile={vi.fn()} />
+        <WorkspaceRuntimeConfigInstaller config={configuredRuntime({ agent: "browser-use" })} />
+      </WorkspaceRuntimeConfigProvider>,
     );
-    resolveSession(taskSessionFixture());
+    await act(async () => { resolveSession(taskSessionFixture()); });
 
     await waitFor(() => expect(screen.getAllByText("Next profile").length).toBeGreaterThan(0));
-    expect(apiMock.createTaskRun).not.toHaveBeenCalled();
-    expect(screen.getByTestId("orca-run-status").textContent).toMatch(/idle/i);
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+      "smoke-session",
+      expect.objectContaining({ profile_id: runningProfile.id, harness: "browser-use" }),
+    ));
   });
 
-  it("cancels a smoke run created while the selected profile changes", async () => {
+  it("does not attach a created managed run to a different profile after a parent rerender", async () => {
     let resolveRun!: (run: TaskRun) => void;
-    const nextProfile: Profile = {
-      ...runningProfile,
-      id: "profile-next-during-run",
-      name: "Next profile during run",
-    };
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: true,
-      state: "polling",
-      last_seen_at: "2026-07-29T00:00:00Z",
-      reason: null,
-    }));
+    const nextProfile: Profile = { ...runningProfile, id: "profile-next-during-run", name: "Next profile during run" };
+    apiMock.getTaskHarnessPresence.mockResolvedValue({ harness: "browser-use", worker_seen_recently: true, state: "polling", last_seen_at: "2026-07-29T00:00:00Z", reason: null });
     apiMock.createTaskSession.mockResolvedValue(taskSessionFixture());
-    apiMock.createTaskRun.mockImplementation(() => new Promise((resolve) => {
-      resolveRun = resolve;
-    }));
-    apiMock.cancelTaskRun.mockResolvedValue(taskRunFixture({
-      id: "smoke-run-during-switch",
-      status: "cancelled",
-      cancelled_at: "2026-07-29T00:00:01Z",
-    }));
+    apiMock.createTaskRun.mockImplementation(() => new Promise((resolve) => { resolveRun = resolve; }));
+    apiMock.cancelTaskRun.mockResolvedValue(taskRunFixture({ id: "smoke-run-during-switch", status: "cancelled", cancelled_at: "2026-07-29T00:00:01Z" }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    const view = render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile, nextProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    const view = renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile, nextProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "browser-use" },
     );
-
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const smokeButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
-      .getByRole("button", { name: "Run Browser Use smoke test" });
-    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(smokeButton);
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Open https://example.com/" } });
+    fireEvent.click(screen.getByTestId("orca-launch"));
     await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledTimes(1));
 
     view.rerender(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile, nextProfile]}
-        selectedProfile={nextProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+      <WorkspaceRuntimeConfigProvider>
+        <AgentBrowserWorkspace profiles={[runningProfile, nextProfile]} selectedProfile={nextProfile} canAutomate canInteract onSelectProfile={vi.fn()} />
+        <WorkspaceRuntimeConfigInstaller config={configuredRuntime({ agent: "browser-use" })} />
+      </WorkspaceRuntimeConfigProvider>,
     );
-    resolveRun(taskRunFixture({ id: "smoke-run-during-switch" }));
+    await act(async () => { resolveRun(taskRunFixture({ id: "smoke-run-during-switch" })); });
 
-    await waitFor(() => expect(apiMock.cancelTaskRun).toHaveBeenCalledWith("smoke-run-during-switch"));
-    expect(screen.getByTestId("orca-run-status").textContent).toMatch(/idle/i);
+    await waitFor(() => expect(screen.getByTestId("orca-run-status").textContent).toContain("idle"));
+    expect(readRememberedBrowserUseRun(runningProfile.id)).toBe("smoke-run-during-switch");
+    expect(readRememberedBrowserUseRun(nextProfile.id)).toBeNull();
+    expect(apiMock.cancelTaskRun).not.toHaveBeenCalled();
   });
 
-  it("keeps ACPX smoke readiness when switching through another managed harness", async () => {
-    let unbrowseChecks = 0;
-    let resolveSlowUnbrowse!: (presence: TaskHarnessPresence) => void;
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => {
-      if (harness === "unbrowse") {
-        unbrowseChecks += 1;
-        if (unbrowseChecks === 2) {
-          return new Promise((resolve) => {
-            resolveSlowUnbrowse = resolve;
-          });
-        }
-      }
-      return {
-        harness,
-        worker_seen_recently: true,
-        state: "polling",
-        last_seen_at: "2026-07-29T00:00:00Z",
-        reason: null,
-      };
-    });
-    apiMock.getTaskHarnessPreflights.mockResolvedValue({
-      harness: "acpx",
-      agents: [
-        { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
-      ],
+  it("does not attach a delayed managed run to a newly selected profile", async () => {
+    let resolveRun!: (run: TaskRun) => void;
+    const nextProfile: Profile = { ...runningProfile, id: "profile-next-delayed-run", name: "Next profile delayed run" };
+    apiMock.getTaskHarnessPresence.mockResolvedValue({ harness: "browser-use", worker_seen_recently: true, state: "polling", last_seen_at: "2026-07-29T00:00:00Z", reason: null });
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ profile_id: runningProfile.id }));
+    apiMock.createTaskRun.mockImplementation(() => new Promise((resolve) => { resolveRun = resolve; }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([
+      { id: "output-delayed", run_id: "run-delayed-switch", sequence: 1, idempotency_key: "output-delayed", kind: "summary", summary: "Wrong profile output", payload: {}, created_at: "2026-07-29T00:00:01Z", artifact_expired: false },
+    ]);
+
+    const view = renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile, nextProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "browser-use" },
+    );
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Open https://example.com/" } });
+    fireEvent.click(screen.getByTestId("orca-launch"));
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <WorkspaceRuntimeConfigProvider>
+        <AgentBrowserWorkspace profiles={[runningProfile, nextProfile]} selectedProfile={nextProfile} canAutomate canInteract onSelectProfile={vi.fn()} />
+        <WorkspaceRuntimeConfigInstaller config={configuredRuntime({ agent: "browser-use" })} />
+      </WorkspaceRuntimeConfigProvider>,
+    );
+    await act(async () => {
+      resolveRun(taskRunFixture({
+        id: "run-delayed-switch",
+        task_session_id: "smoke-session",
+        profile_id: runningProfile.id,
+        profile_id_snapshot: runningProfile.id,
+        status: "running",
+      }));
     });
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    await waitFor(() => expect(screen.getAllByText("Next profile delayed run").length).toBeGreaterThan(0));
+    expect(screen.getByTestId("orca-run-status").textContent).toContain("idle");
+    expect(screen.queryByText("Wrong profile output")).toBeNull();
+    expect(screen.getByTestId("orca-stop")).toHaveProperty("disabled", true);
+    expect(readRememberedBrowserUseRun(runningProfile.id)).toBe("run-delayed-switch");
+    expect(readRememberedBrowserUseRun(nextProfile.id)).toBeNull();
+    expect(apiMock.cancelTaskRun).not.toHaveBeenCalled();
+  });
+
+  it("keeps ACPX readiness isolated when switching through another managed harness in Settings", async () => {
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "acpx" },
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    let menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
-    await waitFor(() => expect(
-      (within(menu).getByRole("button", { name: "Run ACPX smoke test" }) as HTMLButtonElement).disabled,
-    ).toBe(false));
-    fireEvent.click(within(menu).getByRole("button", { name: "Use Unbrowse" }));
-
-    await waitFor(() => expect(unbrowseChecks).toBe(2));
-    fireEvent.click(screen.getByRole("button", { name: "Open harness menu" }));
-    menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
-    await waitFor(() => expect(
-      (within(menu).getByRole("button", { name: "Recheck all harnesses" }) as HTMLButtonElement).disabled,
-    ).toBe(false));
-    await act(async () => {
-      resolveSlowUnbrowse({
-        harness: "unbrowse",
-        worker_seen_recently: true,
-        state: "polling",
-        last_seen_at: "2026-07-29T00:00:00Z",
-        reason: null,
-      });
-    });
-    await waitFor(() => expect(
-      (within(menu).getByRole("button", { name: "Run ACPX smoke test" }) as HTMLButtonElement).disabled,
-    ).toBe(false));
+    expect((await screen.findByTestId("workspace-active-route")).textContent).toMatch(/ACPX.*Ready/i);
+    fireEvent.click(screen.getByRole("button", { name: "CLI" }));
+    await waitFor(() => expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/AGY.*Live terminal/i));
+    fireEvent.click(screen.getByRole("button", { name: "ACP" }));
+    await waitFor(() => expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/ACPX.*Ready/i));
   });
 
   it.each([
     ["Unbrowse", "unbrowse"],
     ["Stagehand", "stagehand"],
-  ] as const)("maps the %s smoke test to the real %s managed run", async (label, harness) => {
-    apiMock.getTaskHarnessPresence.mockImplementation(async (candidate: string) => ({
-      harness: candidate,
-      worker_seen_recently: true,
-      state: "polling",
-      last_seen_at: "2026-07-29T00:00:00Z",
-      reason: null,
-    }));
-    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: `smoke-${harness}` }));
-    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
-      id: `run-${harness}`,
-      task_session_id: `smoke-${harness}`,
-      harness,
-    }));
+  ] as const)("maps the %s configured mode to the real %s managed run", async (_label, harness) => {
+    const profile: Profile = { ...runningProfile, harness };
+    apiMock.getTaskHarnessPresence.mockResolvedValue({ harness, worker_seen_recently: true, state: "polling", last_seen_at: "2026-07-29T00:00:00Z", reason: null });
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: `task-${harness}`, profile_id: profile.id }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({ id: `run-${harness}`, task_session_id: `task-${harness}`, harness }));
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[profile]} selectedProfile={profile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: harness },
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const testButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
-      .getByRole("button", { name: `Run ${label} smoke test` });
-    await waitFor(() => expect((testButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(testButton);
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
+    fireEvent.click(screen.getByTestId("orca-launch"));
 
     await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
-      `smoke-${harness}`,
-      expect.objectContaining({ harness, agent: null, max_steps: 8, timeout_seconds: 180 }),
+      `task-${harness}`,
+      expect.objectContaining({ harness, agent: null, timeout_seconds: 360 }),
     ));
   });
 
-  it("uses the first ready ACPX adapter for a real ACPX smoke run", async () => {
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: true,
-      state: "polling",
-      last_seen_at: "2026-07-29T00:00:00Z",
-      reason: null,
-    }));
-    apiMock.getTaskHarnessPreflights.mockResolvedValue({
-      harness: "acpx",
-      agents: [
-        { agent: "grok-build", ready: false, state: "failed", reason_code: "protocol_error", checked_at: "2026-07-29T00:00:00Z" },
-        { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
-      ],
-    });
-    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: "smoke-acpx" }));
-    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
-      id: "run-acpx-smoke",
-      task_session_id: "smoke-acpx",
-      harness: "acpx",
-      agent: "claude",
-    }));
+  it("uses the configured ACPX adapter for a real ACPX run", async () => {
+    const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
+    apiMock.getProviderReadiness.mockResolvedValue({ providers: [
+      { provider: "claude", transport: "acp", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z", model_aliases: [] },
+    ] });
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({ harness: "acpx", agents: [
+      { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+    ] });
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: "task-acpx" }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({ id: "run-acpx", task_session_id: "task-acpx", harness: "acpx", agent: "claude" }));
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[acpxProfile]} selectedProfile={acpxProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "acpx", acpxAgent: "claude", providerRouting: { providerId: "claude" } },
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const testButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
-      .getByRole("button", { name: "Run ACPX smoke test" });
-    await waitFor(() => expect((testButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(testButton);
+    fireEvent.change(await screen.findByTestId("orca-prompt"), { target: { value: "Inspect https://example.com" } });
+    fireEvent.click(screen.getByTestId("orca-launch"));
 
     await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
-      "smoke-acpx",
-      expect.objectContaining({ harness: "acpx", agent: "claude" }),
+      "task-acpx",
+      expect.objectContaining({ harness: "acpx", agent: "claude", provider: { id: "claude", transport: "acp" } }),
     ));
-    expect(apiMock.overrideTaskRunHealth).not.toHaveBeenCalled();
   });
 
-  it("focuses the harness menu and closes it with Escape while restoring trigger focus", async () => {
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+  it("keeps Settings focus behavior out of the live workspace surface", async () => {
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "browser-use" },
     );
 
-    const trigger = await screen.findByRole("button", { name: "Open harness menu" });
-    expect(trigger.getAttribute("aria-controls")).toBe("harness-menu");
-    trigger.focus();
-    fireEvent.click(trigger);
-
-    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
-    expect(menu.id).toBe("harness-menu");
-    await waitFor(() => expect(document.activeElement).toBe(within(menu).getByRole("button", { name: "Use Browser Use" })));
-
+    await screen.findByTestId("agent-browser-workspace");
     fireEvent.keyDown(window, { key: "Escape" });
-
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull());
-    expect(document.activeElement).toBe(trigger);
+    expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
+    expect(screen.queryByTestId("provider-tool-provider-section")).toBeNull();
   });
 
-  it("preserves successful harness checks when the ACPX preflight check fails", async () => {
-    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
-      harness,
-      worker_seen_recently: harness !== "acpx",
-      state: harness === "acpx" ? "unavailable" : "polling",
-      last_seen_at: harness === "acpx" ? null : "2026-07-29T00:00:00Z",
-      reason: harness === "acpx" ? "ACPX worker unavailable" : null,
-    }));
-    apiMock.getTaskHarnessPreflights.mockRejectedValue(new Error("ACPX preflight unavailable"));
-
-    render(
-      <AgentBrowserWorkspace
-        profiles={[runningProfile]}
-        selectedProfile={runningProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+  it("preserves successful readiness checks in the Settings page, not the live workspace", async () => {
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[runningProfile]} selectedProfile={runningProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "browser-use" },
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
-    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
-
-    await waitFor(() => {
-      expect(within(menu).getByRole("button", { name: "Use Browser Use" }).parentElement?.textContent).toMatch(/ready/i);
-      expect(within(menu).getByRole("button", { name: "Use Unbrowse" }).parentElement?.textContent).toMatch(/ready/i);
-      expect(within(menu).getByRole("button", { name: "Use Stagehand" }).parentElement?.textContent).toMatch(/ready/i);
-    });
+    expect((await screen.findByTestId("workspace-active-route")).textContent).toMatch(/Browser Use/i);
+    expect(screen.queryByRole("button", { name: "Recheck all harnesses" })).toBeNull();
   });
 
   it("keeps normalized Grok ACP on Grok Build instead of exposing an ignored legacy ACPX adapter", async () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
-    apiMock.getTaskHarnessPreflights.mockResolvedValue({
-      harness: "acpx",
-      agents: [
-        { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
-        { agent: "grok-build", ready: false, state: "auth_required", reason_code: "auth_required", checked_at: "2026-07-29T00:00:00Z" },
-        { agent: "codex", ready: false, state: "auth_required", reason_code: "auth_required", checked_at: "2026-07-29T00:00:00Z" },
-        { agent: "cursor", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
-        { agent: "opencode", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
-      ],
-    });
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({ harness: "acpx", agents: [
+      { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+      { agent: "grok-build", ready: false, state: "auth_required", reason_code: "auth_required", checked_at: "2026-07-29T00:00:00Z" },
+    ] });
 
-    render(
-      <AgentBrowserWorkspace
-        profiles={[acpxProfile]}
-        selectedProfile={acpxProfile}
-        canAutomate
-        canInteract
-        onSelectProfile={vi.fn()}
-      />,
+    renderWorkspace(
+      <AgentBrowserWorkspace profiles={[acpxProfile]} selectedProfile={acpxProfile} canAutomate canInteract onSelectProfile={vi.fn()} />,
+      { agent: "acpx", providerRouting: { providerId: "grok" } },
     );
 
-    await waitFor(() => expect(apiMock.getTaskHarnessPreflights).toHaveBeenCalledWith("acpx", expect.anything()));
+    expect((await screen.findByTestId("workspace-active-route")).textContent).toMatch(/Grok Build/i);
     expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
-    expect((await screen.findByTestId("acpx-agent-fixed")).textContent).toMatch(/Grok Build/i);
   });
 
   it("renders a full-view grid of running browsers while keeping stopped profiles out", async () => {
@@ -1908,7 +1134,6 @@ describe("AgentBrowserWorkspace", () => {
       "View",
       "Viewport",
       "Sessions",
-      "Provider",
       "Exit",
     ]);
     for (const group of fullViewGroups) {
@@ -2230,10 +1455,8 @@ describe("AgentBrowserWorkspace", () => {
     expect(banner.textContent).not.toContain("agent key file is missing");
     expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(true);
-    const harnessSelect = screen.getByTestId("orca-agent-select") as HTMLSelectElement;
-    expect(harnessSelect.disabled).toBe(false);
-    fireEvent.change(harnessSelect, { target: { value: "unbrowse" } });
-    expect(harnessSelect.value).toBe("unbrowse");
+    expect(screen.queryByTestId("orca-agent-select")).toBeNull();
+    expect(screen.getByTestId("workspace-active-route")).toBeTruthy();
   });
 
   it("disables launch without automate/interact permissions", async () => {
@@ -2281,7 +1504,7 @@ describe("AgentBrowserWorkspace", () => {
     });
     apiMock.closeOrcaSession.mockResolvedValue(sessionFixture({ status: "closed" }));
 
-    render(
+    renderWorkspace(
       <AgentBrowserWorkspace
         profiles={[runningProfile]}
         selectedProfile={runningProfile}
@@ -2289,10 +1512,10 @@ describe("AgentBrowserWorkspace", () => {
         canInteract
         onSelectProfile={vi.fn()}
       />,
+      { agent: "grok" },
     );
 
     await screen.findByTestId("orca-launch");
-    fireEvent.change(screen.getByTestId("orca-agent-select"), { target: { value: "grok" } });
     fireEvent.change(screen.getByTestId("orca-prompt"), {
       target: { value: "Use the CloakBrowser control skill" },
     });
@@ -2479,7 +1702,7 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     await screen.findByTestId("orca-launch");
-    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("browser-use");
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/Browser Use/i);
     const promptInput = screen.getByTestId("orca-prompt");
     fireEvent.change(promptInput, {
       target: { value: "Open https://example.com and report the heading" },
@@ -2593,35 +1816,32 @@ describe("AgentBrowserWorkspace", () => {
 
     await screen.findByTestId("orca-launch");
     const viewer = screen.getByTestId("mock-profile-viewer");
-    const settings = screen.getByTestId("workspace-settings");
-    expect(settings.className).toContain("hidden");
-    expect(settings.className).not.toMatch(/(^|\s)flex(\s|$)/);
-
-    fireEvent.click(screen.getByTestId("workspace-settings-toggle"));
-    expect(settings.className).toMatch(/(^|\s)flex(\s|$)/);
-    expect(settings.className).not.toContain("hidden");
+    expect(screen.queryByTestId("workspace-settings")).toBeNull();
+    expect(screen.queryByTestId("workspace-settings-toggle")).toBeNull();
 
     expect(screen.getByTestId("workspace-compact-mode")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Antigravity/ })).toBeNull();
     expect(screen.queryByText("Antigravity · ACPX/Grok")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "ACP" }));
-    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("acpx");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "ACP" }));
+    });
+    await waitFor(() => expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/ACPX/i));
     expect(screen.getByRole("button", { name: "ACP" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByTestId("mock-profile-viewer")).toBe(viewer);
 
-    fireEvent.click(screen.getByRole("button", { name: "CLI" }));
-    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("agy");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "CLI" }));
+    });
+    await waitFor(() => expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/AGY.*Live terminal/i));
     expect(screen.getByRole("button", { name: "CLI" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByTestId("mock-profile-viewer")).toBe(viewer);
 
-    fireEvent.change(screen.getByTestId("orca-agent-select"), { target: { value: "grok" } });
     expect(screen.getByRole("button", { name: "CLI" }).getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "CLI" }));
-    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("grok");
-
-    fireEvent.change(screen.getByTestId("orca-agent-select"), { target: { value: "agy" } });
-    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("agy");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "CLI" }));
+    });
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/AGY.*Live terminal/i);
   });
 
   it("starts ACPX with the selected ACP agent and renders typed outputs", async () => {
@@ -2675,11 +1895,11 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     await screen.findByTestId("orca-launch");
-    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("acpx");
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/ACPX/i);
     expect(screen.getByRole("button", { name: "ACP" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByRole("button", { name: /Antigravity/ })).toBeNull();
     expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
-    expect(screen.getByTestId("acpx-agent-fixed").textContent).toMatch(/Grok Build/i);
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/Grok Build/i);
     fireEvent.change(screen.getByTestId("orca-prompt"), {
       target: { value: "Inspect https://example.com" },
     });
@@ -2779,9 +1999,9 @@ describe("AgentBrowserWorkspace", () => {
     await screen.findByTestId("orca-launch");
     expect(screen.queryByRole("button", { name: /Antigravity/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "ACPX" }));
-    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("acpx");
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/ACPX/i);
     expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
-    expect(screen.getByTestId("acpx-agent-fixed").textContent).toMatch(/Grok Build/i);
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/Grok Build/i);
     fireEvent.change(screen.getByTestId("orca-prompt"), {
       target: { value: "Inspect https://example.com" },
     });
@@ -2841,7 +2061,7 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     await screen.findByTestId("orca-launch");
-    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("antigravity");
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/Antigravity/i);
     expect(screen.queryByRole("button", { name: "ACPX · Grok" })).toBeNull();
     expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
     fireEvent.change(screen.getByTestId("orca-prompt"), {
@@ -3043,9 +2263,7 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     expect(await screen.findByText("Example Domain restored from the completed run")).toBeTruthy();
-    expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe(
-      "browser-use",
-    );
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/Browser Use/i);
     expect(screen.getByTestId("orca-run-status").textContent).toContain("succeeded");
   });
 
@@ -3093,9 +2311,11 @@ describe("AgentBrowserWorkspace", () => {
       );
 
       await waitFor(() => {
-        expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe(harness);
+        expect(screen.getByTestId("workspace-active-route").textContent).toMatch(
+          new RegExp(harness === "unbrowse" ? "Unbrowse" : "Stagehand", "i"),
+        );
       });
-      expect(screen.getByTestId("harness-readiness").textContent).toMatch(
+      expect(screen.getByTestId("workspace-active-route").textContent).toMatch(
         new RegExp(harness === "unbrowse" ? "Unbrowse" : "Stagehand", "i"),
       );
     },
@@ -3145,7 +2365,7 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     await waitFor(() => {
-      expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe("antigravity");
+      expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/Antigravity/i);
     });
     expect(screen.getAllByText(/Antigravity CLI/).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByTestId("acpx-agent-select")).toBeNull();

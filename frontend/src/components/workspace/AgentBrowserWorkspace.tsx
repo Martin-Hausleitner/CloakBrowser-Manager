@@ -553,6 +553,12 @@ export function AgentBrowserWorkspace({
             if (rememberedRun.agent) {
               setAcpxAgent(rememberedRun.agent);
             }
+          } else if (
+            rememberedRun.harness === "browser-use"
+            || rememberedRun.harness === "unbrowse"
+            || rememberedRun.harness === "stagehand"
+          ) {
+            setAgent(rememberedRun.harness);
           } else {
             setAgent("browser-use");
           }
@@ -874,7 +880,7 @@ export function AgentBrowserWorkspace({
       data-ui-state={UI_STATE.agentWorkspace}
     >
       <section
-        className="flex min-w-[22rem] w-[36%] max-w-[30rem] flex-col border-r border-[#35353b] bg-[#0d0d0f]"
+        className="flex min-w-[20rem] w-[34%] max-w-[26rem] flex-col border-r border-[#35353b] bg-[#0d0d0f]"
         aria-label="Orca agent session"
         aria-hidden={viewerFullscreen || undefined}
         inert={viewerFullscreen || undefined}
@@ -906,9 +912,12 @@ export function AgentBrowserWorkspace({
               <Settings2 className="h-3.5 w-3.5" />
             </button>
           </div>
-          <div className="mt-1.5 flex items-center gap-1">
+          <div
+            className="mt-1.5 flex min-w-0 items-center gap-1"
+            data-testid="workspace-run-bar"
+          >
             <div
-              className="grid min-w-0 flex-1 grid-cols-3 rounded-md border border-[#35353b] bg-[#0b0b0d] p-0.5"
+              className="grid w-[8.25rem] shrink-0 grid-cols-3 rounded-md border border-[#35353b] bg-[#0b0b0d] p-0.5"
               role="group"
               aria-label="CLI ACP ACPX mode"
               data-testid="workspace-compact-mode"
@@ -941,9 +950,9 @@ export function AgentBrowserWorkspace({
                 </button>
               ))}
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
               <span
-                className={`max-w-[6.5rem] truncate rounded px-1.5 py-1 text-[9px] font-medium ${
+                className={`min-w-0 flex-1 truncate rounded px-1.5 py-1 text-[9px] font-medium ${
                   selectedHarnessReady
                     ? "bg-emerald-950/70 text-emerald-300"
                     : "bg-amber-950/60 text-amber-300"
@@ -971,7 +980,7 @@ export function AgentBrowserWorkspace({
               </button>
               <button
                 type="button"
-                className="btn btn-primary inline-flex h-7 items-center gap-1 px-2 text-[10px]"
+                className="sr-only"
                 onClick={() => void handleStart()}
                 disabled={!canStart}
                 data-testid="orca-launch"
@@ -982,7 +991,9 @@ export function AgentBrowserWorkspace({
               </button>
               <button
                 type="button"
-                className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#493434] bg-[#211515] text-red-300 hover:bg-[#3b1919] disabled:opacity-40"
+                className={canStop
+                  ? "inline-flex h-7 w-7 items-center justify-center rounded border border-[#493434] bg-[#211515] text-red-300 hover:bg-[#3b1919]"
+                  : "sr-only"}
                 onClick={() => void handleStop()}
                 disabled={!canStop}
                 data-testid="orca-stop"
@@ -990,18 +1001,6 @@ export function AgentBrowserWorkspace({
               >
                 <Square className="h-3 w-3" />
               </button>
-              {managedRunActive && canInteract ? (
-                <button
-                  type="button"
-                  className="inline-flex h-7 items-center rounded border border-emerald-800/70 bg-emerald-950/50 px-2 text-[10px] font-medium text-emerald-200 hover:bg-emerald-900/60 disabled:opacity-40"
-                  onClick={() => void handleTakeControl()}
-                  disabled={busy || !canAutomate}
-                  aria-label="Take over browser"
-                  title="Cancel the agent run and open the live browser for direct control"
-                >
-                  Take over
-                </button>
-              ) : null}
             </div>
           </div>
           <details className="mt-1 text-[9px] text-[#a1a1aa]">
@@ -1025,9 +1024,8 @@ export function AgentBrowserWorkspace({
 
         <div className="flex items-center gap-1.5 border-b border-[#35353b] bg-[#111113] px-2.5 py-1.5">
           <div
-            className="flex min-w-0 flex-1 items-center gap-1.5"
+            className={`${settingsOpen ? "flex" : "hidden"} min-w-0 flex-1 items-center gap-1.5`}
             data-testid="workspace-settings"
-            hidden={!settingsOpen}
           >
             <label className="sr-only" htmlFor="orca-profile">Profile</label>
             <select
@@ -1283,6 +1281,18 @@ export function AgentBrowserWorkspace({
               ? `${desktopGridProfiles.length}/${runningProfiles.length} live`
               : selectedProfile?.status ?? "none"}
           </span>
+          {managedRunActive && canInteract ? (
+            <button
+              type="button"
+              className="inline-flex h-7 items-center rounded border border-emerald-700/80 bg-emerald-950/70 px-2 text-[10px] font-semibold text-emerald-100 hover:bg-emerald-900/70 disabled:opacity-40"
+              onClick={() => void handleTakeControl()}
+              disabled={busy || !canAutomate}
+              aria-label="Take over browser"
+              title="Stop the agent and continue directly in this browser"
+            >
+              Take over
+            </button>
+          ) : null}
           {viewerFullscreen ? (
             <div
               className="flex items-center gap-1 text-[10px]"

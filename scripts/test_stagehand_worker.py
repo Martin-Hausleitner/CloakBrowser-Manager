@@ -5,16 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.unbrowse_worker import (
-    UnbrowseClient,
-    UnbrowseMCPClient,
-    UnbrowseMCPError,
-    UnbrowseWorker,
-    _snapshot_title,
-    _validated_browser_endpoint,
-    select_task_target,
-    start_unbrowse_gateway,
-)
+from scripts.stagehand_worker import StagehandClient, StagehandWorker, select_task_target
 
 
 class FakeResponse:
@@ -39,22 +30,26 @@ class FakeHTTP:
 
 def claim_fixture() -> dict:
     return {
-        "id": "run-unbrowse-1",
-        "harness": "unbrowse",
+        "id": "run-stagehand-1",
+        "harness": "stagehand",
         "task": "Open https://example.com and return the title.",
         "allowed_origins": ["https://example.com"],
         "timeout_seconds": 90,
     }
 
 
-def test_client_claims_only_unbrowse_harness():
+def test_client_claims_only_stagehand_harness():
     http = FakeHTTP(FakeResponse(204))
-    client = UnbrowseClient("https://manager.local", token="cbm_worker_" + "1" * 64, http=http)
+    client = StagehandClient(
+        "https://manager.local",
+        token="cbm_worker_" + "1" * 64,
+        http=http,
+    )
 
     assert client.claim() is None
     method, url, _kwargs = http.calls[0]
     assert method == "POST"
-    assert url == "https://manager.local/internal/task-runs/claim?harness=unbrowse"
+    assert url == "https://manager.local/internal/task-runs/claim?harness=stagehand"
 
 
 def test_select_task_target_requires_explicit_allowed_url():
@@ -65,83 +60,8 @@ def test_select_task_target_requires_explicit_allowed_url():
     with pytest.raises(ValueError, match="allowed origin"):
         select_task_target(cross_origin)
 
-    missing_url = claim_fixture()
-    missing_url["task"] = "Open the homepage."
-    with pytest.raises(ValueError, match="explicit URL"):
-        select_task_target(missing_url)
 
-
-def test_snapshot_title_reads_unbrowse_page_title_shape():
-    assert _snapshot_title({"page_title": "Example Domain"}) == "Example Domain"
-
-
-def test_validated_browser_endpoint_requires_same_nonce_gateway():
-    gateway = "ws://127.0.0.1:45678/nonce"
-    endpoint = "ws://127.0.0.1:45678/nonce/devtools/browser/browser-id"
-    assert _validated_browser_endpoint(
-        gateway,
-        {"webSocketDebuggerUrl": endpoint},
-    ) == endpoint
-
-    with pytest.raises(ValueError, match="gateway"):
-        _validated_browser_endpoint(
-            gateway,
-            {"webSocketDebuggerUrl": "ws://127.0.0.1:49999/devtools/browser/other"},
-        )
-
-
-def test_unbrowse_gateway_fails_closed_when_kuri_port_9222_is_busy():
-    calls = []
-
-    async def starter(*, upstream_http, headers, bind_port):
-        calls.append((upstream_http, headers, bind_port))
-        raise OSError("busy")
-
-    with pytest.raises(RuntimeError, match="9222"):
-        asyncio.run(
-            start_unbrowse_gateway(
-                upstream_http="http://manager/internal/cdp",
-                headers={"X-CBM-Run": "opaque"},
-                gateway_starter=starter,
-            )
-        )
-
-    assert [call[2] for call in calls] == [9222]
-
-
-def test_mcp_start_closes_spawned_process_when_handshake_fails(monkeypatch):
-    process = SimpleNamespace()
-    closed = []
-
-    async def fake_exec(*_args, **_kwargs):
-        return process
-
-    async def failing_request(self, *_args, **_kwargs):
-        raise UnbrowseMCPError("handshake failed")
-
-    async def endpoint_reader(_browser_ws):
-        return "ws://127.0.0.1:45678/nonce/devtools/browser/browser-id"
-
-    async def close(self):
-        closed.append(self.process)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    monkeypatch.setattr("scripts.unbrowse_worker.read_browser_endpoint", endpoint_reader)
-    monkeypatch.setattr(UnbrowseMCPClient, "_request", failing_request)
-    monkeypatch.setattr(UnbrowseMCPClient, "close", close)
-
-    with pytest.raises(UnbrowseMCPError, match="handshake failed"):
-        asyncio.run(
-            UnbrowseMCPClient.start(
-                binary="unbrowse",
-                browser_ws="ws://127.0.0.1:45678/nonce",
-            )
-        )
-
-    assert closed == [process]
-
-
-def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():
+def test_execute_claim_attaches_stagehand_to_manager_browser_and_cleans_up():
     class FakeClient:
         def __init__(self):
             self.base_url = "https://manager.local"
@@ -175,50 +95,47 @@ def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():
         async def cleanup(self):
             cleanup.append("gateway")
 
-    class FakeMCP:
-        async def navigate(self, url):
-            assert url == "https://example.com"
-            return {"session_id": "unbrowse-session-1"}
-
-        async def snap(self, session_id):
-            assert session_id == "unbrowse-session-1"
-            return {"page_title": "", "current_url": "https://example.com"}
+    class FakeRunner:
+        async def run(self):
+            return {"url": "https://example.com/", "title": "Example Domain"}
 
         async def close(self):
-            cleanup.append("mcp")
-
-    async def mcp_factory(*, binary, browser_ws):
-        assert binary == "unbrowse"
-        assert browser_ws == "ws://127.0.0.1:45678/nonce"
-        return FakeMCP()
+            cleanup.append("runner")
 
     async def gateway_factory(**_kwargs):
         return FakeGateway(), "ws://127.0.0.1:45678/nonce"
 
+    async def endpoint_reader(browser_ws):
+        assert browser_ws == "ws://127.0.0.1:45678/nonce"
+        return "ws://127.0.0.1:45678/nonce/devtools/browser/browser-id"
+
+    async def runner_factory(*, node_bin, script_path, browser_ws, target_url):
+        assert node_bin == "node"
+        assert script_path == "/runtime/stagehand_runner.mjs"
+        assert browser_ws.endswith("/devtools/browser/browser-id")
+        assert target_url == "https://example.com/"
+        return FakeRunner()
+
     page_reads = []
 
     async def page_reader(browser_ws, expected_url):
-        assert browser_ws == "ws://127.0.0.1:45678/nonce"
-        assert expected_url == "https://example.com/"
         page_reads.append((browser_ws, expected_url))
-        return (
-            {"url": "https://example.com/", "title": "Example Domain"}
-            if len(page_reads) > 1
-            else {}
-        )
+        return {"url": expected_url, "title": "Example Domain"}
 
     client = FakeClient()
-    worker = UnbrowseWorker(
+    worker = StagehandWorker(
         client=client,
-        unbrowse_bin="unbrowse",
-        mcp_factory=mcp_factory,
+        node_bin="node",
+        script_path="/runtime/stagehand_runner.mjs",
         gateway_factory=gateway_factory,
+        endpoint_reader=endpoint_reader,
+        runner_factory=runner_factory,
         page_reader=page_reader,
     )
 
     result = asyncio.run(worker.execute_claim(claim_fixture()))
 
-    assert result["status"] == "succeeded"
+    assert result == {"status": "succeeded", "title": "Example Domain"}
     assert [item[1]["kind"] for item in client.outputs] == [
         "action",
         "status",
@@ -230,18 +147,14 @@ def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():
         "url": "https://example.com/",
         "step": 1,
     }
-    assert client.outputs[2][1]["payload"] == {
-        "title": "Example Domain",
-        "url": "https://example.com/",
-    }
-    assert client.completed == ["run-unbrowse-1"]
+    assert client.completed == ["run-stagehand-1"]
     assert client.failed == []
-    assert client.revoked == ["run-unbrowse-1"]
-    assert cleanup == ["mcp", "gateway"]
-    assert len(page_reads) == 2
+    assert client.revoked == ["run-stagehand-1"]
+    assert cleanup == ["runner", "gateway"]
+    assert len(page_reads) == 1
 
 
-def test_execute_claim_fails_closed_and_revokes_capability():
+def test_execute_claim_fails_closed_and_redacts_manager_error():
     calls = SimpleNamespace(failed=[], revoked=[], completed=[])
 
     class FakeClient:
@@ -265,20 +178,19 @@ def test_execute_claim_fails_closed_and_revokes_capability():
         def revoke_capability(self, run_id):
             calls.revoked.append(run_id)
 
-    async def bad_mcp(**_kwargs):
+    async def bad_gateway(**_kwargs):
         raise RuntimeError("Bearer cbm_worker_secret failed")
 
-    worker = UnbrowseWorker(client=FakeClient(), mcp_factory=bad_mcp)
+    worker = StagehandWorker(client=FakeClient(), gateway_factory=bad_gateway)
     result = asyncio.run(worker.execute_claim(claim_fixture()))
 
     assert result == {"status": "failed", "error_code": "internal_error"}
     assert calls.completed == []
-    assert calls.revoked == ["run-unbrowse-1"]
-    assert len(calls.failed) == 1
+    assert calls.revoked == ["run-stagehand-1"]
     assert "cbm_worker_secret" not in calls.failed[0][1]["message"]
 
 
-def test_cleanup_revokes_capability_when_mcp_close_races_with_process_exit():
+def test_cleanup_revokes_capability_when_runner_close_races_with_process_exit():
     calls = SimpleNamespace(outputs=[], completed=[], revoked=[], gateway=[])
 
     class FakeClient:
@@ -307,35 +219,36 @@ def test_cleanup_revokes_capability_when_mcp_close_races_with_process_exit():
         async def cleanup(self):
             calls.gateway.append("cleaned")
 
-    class RacingMCP:
-        async def navigate(self, _url):
-            return {"session_id": "unbrowse-session-1"}
-
-        async def snap(self, _session_id):
-            return {"page_title": "Example Domain"}
+    class RacingRunner:
+        async def run(self):
+            return {"url": "https://example.com/", "title": "Example Domain"}
 
         async def close(self):
-            raise ProcessLookupError("MCP process already exited")
+            raise ProcessLookupError("runner already exited")
 
     async def gateway_factory(**_kwargs):
         return FakeGateway(), "ws://127.0.0.1:45678/nonce"
 
-    async def mcp_factory(**_kwargs):
-        return RacingMCP()
+    async def endpoint_reader(_browser_ws):
+        return "ws://127.0.0.1:45678/nonce/devtools/browser/browser-id"
+
+    async def runner_factory(**_kwargs):
+        return RacingRunner()
 
     async def page_reader(_browser_ws, expected_url):
         return {"url": expected_url, "title": "Example Domain"}
 
-    worker = UnbrowseWorker(
+    worker = StagehandWorker(
         client=FakeClient(),
-        mcp_factory=mcp_factory,
         gateway_factory=gateway_factory,
+        endpoint_reader=endpoint_reader,
+        runner_factory=runner_factory,
         page_reader=page_reader,
     )
 
     result = asyncio.run(worker.execute_claim(claim_fixture()))
 
     assert result == {"status": "succeeded", "title": "Example Domain"}
-    assert calls.completed == ["run-unbrowse-1"]
+    assert calls.completed == ["run-stagehand-1"]
     assert calls.gateway == ["cleaned"]
-    assert calls.revoked == ["run-unbrowse-1"]
+    assert calls.revoked == ["run-stagehand-1"]

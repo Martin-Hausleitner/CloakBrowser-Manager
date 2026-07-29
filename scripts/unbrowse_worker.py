@@ -246,20 +246,23 @@ class UnbrowseMCPClient:
             start_new_session=True,
         )
         client = cls(process)
-        response = await client._request(
-            "initialize",
-            {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "cloakbrowser-unbrowse-worker", "version": "1"},
-            },
-            timeout=15,
-        )
-        negotiated = str((response.get("result") or {}).get("protocolVersion") or "")
-        if negotiated != MCP_PROTOCOL_VERSION:
+        try:
+            response = await client._request(
+                "initialize",
+                {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "cloakbrowser-unbrowse-worker", "version": "1"},
+                },
+                timeout=15,
+            )
+            negotiated = str((response.get("result") or {}).get("protocolVersion") or "")
+            if negotiated != MCP_PROTOCOL_VERSION:
+                raise UnbrowseMCPError("Unbrowse MCP protocol version mismatch")
+            await client._notify("notifications/initialized", {})
+        except BaseException:
             await client.close()
-            raise UnbrowseMCPError("Unbrowse MCP protocol version mismatch")
-        await client._notify("notifications/initialized", {})
+            raise
         return client
 
     async def _write(self, payload: dict[str, Any]) -> None:
@@ -347,19 +350,29 @@ class UnbrowseMCPClient:
 
     async def close(self) -> None:
         if self.process.stdin is not None:
-            self.process.stdin.close()
+            try:
+                self.process.stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
         if self.process.returncode is None:
-            if os.name == "posix":
-                os.killpg(self.process.pid, signal.SIGTERM)
-            else:
-                self.process.terminate()
+            try:
+                if os.name == "posix":
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                else:
+                    self.process.terminate()
+            except ProcessLookupError:
+                await self.process.wait()
+                return
             try:
                 await asyncio.wait_for(self.process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                if os.name == "posix":
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                else:
-                    self.process.kill()
+                try:
+                    if os.name == "posix":
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    else:
+                        self.process.kill()
+                except ProcessLookupError:
+                    pass
                 await self.process.wait()
 
 
@@ -549,9 +562,15 @@ class UnbrowseWorker:
             if heartbeat is not None:
                 heartbeat.cancel()
             if mcp is not None:
-                await mcp.close()
+                try:
+                    await mcp.close()
+                except Exception:
+                    logger.warning("Unbrowse MCP cleanup failed")
             if gateway_runner is not None:
-                await gateway_runner.cleanup()
+                try:
+                    await gateway_runner.cleanup()
+                except Exception:
+                    logger.warning("Unbrowse CDP gateway cleanup failed")
             if heartbeat is not None:
                 await asyncio.gather(heartbeat, return_exceptions=True)
             if capability_issued:

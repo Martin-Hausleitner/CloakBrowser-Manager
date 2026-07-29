@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrcaCapabilities, OrcaSession, Profile, TaskRun } from "../../lib/api";
 import { UI_STATE, expectUiState } from "../../lib/uiFlowRegistry";
@@ -221,6 +221,8 @@ describe("AgentBrowserWorkspace", () => {
     expectUiState(document.body, UI_STATE.agentViewerPane);
     expectUiState(document.body, UI_STATE.profileViewer);
     expect(screen.getByTestId("mock-profile-viewer").textContent).toContain("viewer:profile-live");
+    expect(screen.getByTestId("workspace-run-bar")).toBeTruthy();
+    expect(screen.getByTestId("orca-launch").className).toContain("sr-only");
     expect(screen.getByTestId("orca-cap-pause").textContent).toMatch(/unavailable/i);
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
   });
@@ -660,7 +662,9 @@ describe("AgentBrowserWorkspace", () => {
     fireEvent.click(applyButton);
     expect(onViewportApply).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Take over browser" }));
+    const viewerPane = screen.getByTestId("agent-browser-viewer-pane");
+    const takeoverButton = within(viewerPane).getByRole("button", { name: "Take over browser" });
+    fireEvent.click(takeoverButton);
     await waitFor(() => expect(apiMock.cancelTaskRun).toHaveBeenCalledWith(activeRun.id));
     expect(screen.getByRole("button", { name: "Exit full view" })).toBeTruthy();
   });
@@ -1044,10 +1048,12 @@ describe("AgentBrowserWorkspace", () => {
     await screen.findByTestId("orca-launch");
     const viewer = screen.getByTestId("mock-profile-viewer");
     const settings = screen.getByTestId("workspace-settings");
-    expect(settings.hasAttribute("hidden")).toBe(true);
+    expect(settings.className).toContain("hidden");
+    expect(settings.className).not.toMatch(/(^|\s)flex(\s|$)/);
 
     fireEvent.click(screen.getByTestId("workspace-settings-toggle"));
-    expect(settings.hasAttribute("hidden")).toBe(false);
+    expect(settings.className).toMatch(/(^|\s)flex(\s|$)/);
+    expect(settings.className).not.toContain("hidden");
 
     expect(screen.getByTestId("workspace-compact-mode")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Antigravity/ })).toBeNull();
@@ -1429,6 +1435,58 @@ describe("AgentBrowserWorkspace", () => {
     );
     expect(screen.getByTestId("orca-run-status").textContent).toContain("succeeded");
   });
+
+  it.each(["unbrowse", "stagehand"] as const)(
+    "restores a remembered %s run without relabeling it as Browser Use",
+    async (harness) => {
+      const completedRun: TaskRun = {
+        id: `run-${harness}-restored`,
+        task_session_id: `task-${harness}-restored`,
+        task_message_id: `message-${harness}-restored`,
+        profile_id: runningProfile.id,
+        profile_id_snapshot: runningProfile.id,
+        sandbox_id: "default",
+        harness,
+        status: "succeeded",
+        launch_if_stopped: false,
+        allowed_origins: ["https://example.com"],
+        max_steps: 20,
+        timeout_seconds: 360,
+        model_alias: null,
+        deadline_at: "2026-07-29T00:06:00Z",
+        health_snapshot: {},
+        health_decision: {},
+        retry_count: 0,
+        created_by_kind: "user",
+        created_by_id: "user-1",
+        created_at: "2026-07-29T00:00:00Z",
+        updated_at: "2026-07-29T00:01:00Z",
+      };
+      window.sessionStorage.setItem(
+        `cloakbrowser.browser-use.last-run:${runningProfile.id}`,
+        completedRun.id,
+      );
+      apiMock.getTaskRun.mockResolvedValue(completedRun);
+      apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+      render(
+        <AgentBrowserWorkspace
+          profiles={[runningProfile]}
+          selectedProfile={runningProfile}
+          canAutomate
+          canInteract
+          onSelectProfile={vi.fn()}
+        />,
+      );
+
+      await waitFor(() => {
+        expect((screen.getByTestId("orca-agent-select") as HTMLSelectElement).value).toBe(harness);
+      });
+      expect(screen.getByTestId("harness-readiness").textContent).toMatch(
+        new RegExp(harness === "unbrowse" ? "Unbrowse" : "Stagehand", "i"),
+      );
+    },
+  );
 
   it("restores an ACPX run on an Antigravity profile as Antigravity mode", async () => {
     const antigravityProfile: Profile = { ...runningProfile, harness: "antigravity" };

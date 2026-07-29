@@ -194,6 +194,7 @@ export function AgentBrowserWorkspace({
   const [harnessCheckBusy, setHarnessCheckBusy] = useState(false);
   const [harnessCheckTarget, setHarnessCheckTarget] = useState<ManagedHarness | "orca" | "all" | null>(null);
   const [smokeTestTarget, setSmokeTestTarget] = useState<ManagedHarness | null>(null);
+  const [localOpenTarget, setLocalOpenTarget] = useState<OrcaAgentCli | null>(null);
   const [harnessMenuOpen, setHarnessMenuOpen] = useState(false);
   const [taskOutputs, setTaskOutputs] = useState<TaskOutput[]>([]);
   const [transcript, setTranscript] = useState("");
@@ -659,6 +660,44 @@ export function AgentBrowserWorkspace({
       setSmokeTestTarget(null);
     }
   }, [busy, canAutomate, selectedProfile, sessionActive]);
+
+  const handleLocalHarnessOpen = useCallback(async (candidate: OrcaAgentCli) => {
+    if (
+      busy ||
+      sessionActive ||
+      !canAutomate ||
+      !canInteract ||
+      !selectedProfile ||
+      selectedProfile.status !== "running" ||
+      caps?.available !== true ||
+      caps.actions.start !== true ||
+      !caps.agents.includes(candidate)
+    ) {
+      return;
+    }
+    setBusy(true);
+    setLocalOpenTarget(candidate);
+    setError(null);
+    try {
+      const started = await api.startOrcaSession({
+        profile_id: selectedProfile.id,
+        agent: candidate,
+      });
+      setAgent(candidate);
+      setSession(started);
+      setTranscript("");
+      setCursor(0);
+      setHarnessMenuOpen(false);
+      const first = await api.readOrcaSessionOutput(started.id, { cursor: 0 });
+      if (first.output) setTranscript(first.output);
+      setCursor(first.next_cursor);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to open the local CLI harness");
+    } finally {
+      setBusy(false);
+      setLocalOpenTarget(null);
+    }
+  }, [busy, canAutomate, canInteract, caps, selectedProfile, sessionActive]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current != null) {
@@ -1221,7 +1260,7 @@ export function AgentBrowserWorkspace({
                   {managedRunMode ? managedHarnessLabel(managedHarness) : agent} · {harnessCheckTarget === "all"
                     ? "Checking"
                     : selectedHarnessReady
-                      ? "Ready"
+                      ? (managedRunMode ? "Ready" : "Detected")
                       : "Unavailable"}
                 </span>
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${harnessMenuOpen ? "rotate-180" : ""}`} aria-hidden="true" />
@@ -1232,14 +1271,11 @@ export function AgentBrowserWorkspace({
                   id="harness-menu"
                   role="dialog"
                   aria-label="Harnesses on VCVM"
-                  className="absolute right-0 top-8 z-40 w-[18.5rem] rounded-lg border border-[#3b3b43] bg-[#111114] p-1.5 shadow-2xl"
+                  className="absolute right-0 top-8 z-40 w-[17rem] rounded-lg border border-[#3b3b43] bg-[#111114] p-1.5 shadow-2xl"
                   data-testid="harness-menu"
                 >
                   <div className="flex items-center justify-between gap-2 px-1 pb-1.5">
-                    <div>
-                      <div className="text-[10px] font-semibold text-white">Harnesses on VCVM</div>
-                      <div className="text-[9px] text-[#888892]">Switch, check, or run a safe E2E test.</div>
-                    </div>
+                    <div className="text-[10px] font-semibold text-white">Harnesses on VCVM</div>
                     <button
                       type="button"
                       className="inline-flex h-7 items-center gap-1 rounded border border-[#3c3c43] px-2 text-[9px] text-[#d4d4d8] hover:bg-[#25252a] disabled:opacity-40"
@@ -1248,7 +1284,7 @@ export function AgentBrowserWorkspace({
                       aria-label="Recheck all harnesses"
                     >
                       <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === "all" ? "animate-spin" : ""}`} aria-hidden="true" />
-                      Check all
+                      Refresh
                     </button>
                   </div>
                   <div className="space-y-0.5" aria-label="Managed browser harnesses">
@@ -1276,16 +1312,6 @@ export function AgentBrowserWorkspace({
                           </button>
                           <button
                             type="button"
-                            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-[#34343b] text-[#a1a1aa] hover:bg-[#29292e] hover:text-white disabled:opacity-40"
-                            onClick={() => void handleHarnessCheck(candidate)}
-                            disabled={harnessCheckBusy || smokeTestTarget !== null}
-                            aria-label={`Check ${label} readiness`}
-                            title={`Check ${label} readiness on VCVM`}
-                          >
-                            <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === candidate ? "animate-spin" : ""}`} aria-hidden="true" />
-                          </button>
-                          <button
-                            type="button"
                             className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#3f3f48] px-1.5 text-[9px] font-medium text-[#e4e4e7] hover:border-[#6366f1] hover:bg-[#29293b] disabled:opacity-40"
                             onClick={() => void handleHarnessSmokeTest(candidate)}
                             disabled={
@@ -1305,7 +1331,7 @@ export function AgentBrowserWorkspace({
                               : `Run ${label} on example.com with the selected profile`}
                           >
                             <Activity className={`h-3 w-3 ${smokeTestTarget === candidate ? "animate-pulse" : ""}`} aria-hidden="true" />
-                            {smokeTestTarget === candidate ? "Starting" : "Run"}
+                            {smokeTestTarget === candidate ? "Starting" : "Test"}
                           </button>
                         </div>
                       );
@@ -1330,19 +1356,26 @@ export function AgentBrowserWorkspace({
                             {candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}
                           </span>
                           <span className="text-[9px] text-emerald-300">Detected</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#34343b] px-1.5 text-[9px] text-[#c4c4cc] hover:bg-[#29292e] hover:text-white disabled:opacity-40"
-                            onClick={() => void handleHarnessCheck("orca")}
-                            disabled={harnessCheckBusy}
-                            aria-label={`Check ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate} readiness`}
-                            title="Refresh installed local CLI detection"
-                          >
-                            <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === "orca" ? "animate-spin" : ""}`} aria-hidden="true" />
-                            Check
-                          </button>
-                        </div>
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#34343b] px-1.5 text-[9px] text-[#c4c4cc] hover:bg-[#29292e] hover:text-white disabled:opacity-40"
+                          onClick={() => void handleLocalHarnessOpen(candidate)}
+                          disabled={
+                            busy ||
+                            sessionActive ||
+                            !canAutomate ||
+                            !canInteract ||
+                            !selectedProfile ||
+                            selectedProfile.status !== "running"
+                          }
+                          aria-label={`Open ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate} terminal`}
+                          title="Open the detected CLI in the live terminal"
+                        >
+                          <TerminalSquare className={`h-3 w-3 ${localOpenTarget === candidate ? "animate-pulse" : ""}`} aria-hidden="true" />
+                          {localOpenTarget === candidate ? "Opening" : "Open"}
+                        </button>
+                      </div>
                     )) : (
                       <div className="rounded px-2 py-1.5 text-[9px] text-amber-300">No local CLI runtime detected.</div>
                     )}

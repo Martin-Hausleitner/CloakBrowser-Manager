@@ -312,7 +312,7 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
   });
 
-  it("detects and manually tests all locally available harnesses", async () => {
+  it("keeps harness controls compact and opens a detected local CLI for live testing", async () => {
     apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
       harness,
       worker_seen_recently: harness !== "stagehand",
@@ -320,6 +320,12 @@ describe("AgentBrowserWorkspace", () => {
       last_seen_at: harness === "stagehand" ? null : "2026-07-27T00:00:00Z",
       reason: harness === "stagehand" ? "No authenticated Stagehand worker has checked in" : null,
     }));
+    apiMock.startOrcaSession.mockResolvedValue(sessionFixture({ agent: "agy" }));
+    apiMock.readOrcaSessionOutput.mockResolvedValue({
+      output: "AGY terminal ready",
+      next_cursor: 18,
+      status: "running",
+    });
 
     render(
       <AgentBrowserWorkspace
@@ -344,17 +350,13 @@ describe("AgentBrowserWorkspace", () => {
     apiMock.getTaskHarnessPresence.mockClear();
     apiMock.getOrcaCapabilities.mockClear();
 
-    expect(within(menu).getByRole("button", { name: "Check Browser Use readiness" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Check Unbrowse readiness" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Check Stagehand readiness" })).toBeTruthy();
+    expect(within(menu).queryByRole("button", { name: "Check Browser Use readiness" })).toBeNull();
+    expect(within(menu).queryByRole("button", { name: "Check Unbrowse readiness" })).toBeNull();
+    expect(within(menu).queryByRole("button", { name: "Check Stagehand readiness" })).toBeNull();
     expect(within(menu).getByRole("button", { name: "Run Browser Use smoke test" })).toBeTruthy();
     expect(within(menu).getByRole("button", { name: "Run Unbrowse smoke test" })).toBeTruthy();
     expect(within(menu).getByRole("button", { name: "Run Stagehand smoke test" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Check AGY readiness" })).toBeTruthy();
-    fireEvent.click(within(menu).getByRole("button", { name: "Check Stagehand readiness" }));
-    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledTimes(1));
-    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything());
-    apiMock.getTaskHarnessPresence.mockClear();
+    expect(within(menu).getByRole("button", { name: "Open AGY terminal" })).toBeTruthy();
     fireEvent.click(within(menu).getByRole("button", { name: "Recheck all harnesses" }));
 
     await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledTimes(4));
@@ -368,6 +370,17 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
     expect(screen.getByTestId("harness-readiness").textContent).toMatch(/stagehand.*unavailable/i);
     expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open harness menu" }));
+    const reopenedMenu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
+    fireEvent.click(within(reopenedMenu).getByRole("button", { name: "Open AGY terminal" }));
+
+    await waitFor(() => expect(apiMock.startOrcaSession).toHaveBeenCalledWith({
+      profile_id: runningProfile.id,
+      agent: "agy",
+    }));
+    expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
+    expect(await screen.findByText("AGY terminal ready")).toBeTruthy();
   });
 
   it("starts a real Browser Use smoke run from the harness menu without silently overriding health", async () => {

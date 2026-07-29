@@ -821,6 +821,15 @@ class WorkerRuntimeService:
                     """,
                     (_iso(new_exp), _iso(now), run_id, worker_id),
                 )
+                conn.execute(
+                    """
+                    INSERT INTO worker_harness_presence (worker_id, harness, last_seen_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(worker_id, harness) DO UPDATE SET
+                        last_seen_at = excluded.last_seen_at
+                    """,
+                    (worker_id, str(row["harness"]), _iso(now)),
+                )
                 cancel_requested = row["cancelled_at"] is not None or row["status"] == "cancelled"
                 conn.commit()
             except WorkerNotFound:

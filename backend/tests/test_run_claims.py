@@ -712,6 +712,49 @@ def test_heartbeat_renews_and_wrong_worker_404(client_access: TestClient):
     assert missing.json() == {"detail": "Not found"}
 
 
+def test_run_heartbeat_keeps_harness_presence_fresh_while_worker_is_busy(
+    client_access: TestClient,
+):
+    from backend import main
+
+    profile = db.create_profile("Busy ACPX", sandbox_id="alpha")
+    create_run(
+        client_access,
+        profile_id=profile["id"],
+        harness="acpx",
+        agent="cursor",
+    )
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+        params={"harness": "acpx"},
+    ).json()
+
+    initial_presence = client_access.get(
+        "/api/task-harnesses/acpx/presence",
+        headers=bootstrap_headers(),
+    ).json()
+    first_seen = datetime.fromisoformat(initial_presence["last_seen_at"])
+
+    for elapsed_seconds in (20, 40, 60):
+        heartbeat_at = first_seen + timedelta(seconds=elapsed_seconds)
+        main.worker_runtime_service._clock = lambda now=heartbeat_at: now
+        heartbeat = client_access.post(
+            f"/internal/task-runs/{claimed['id']}/heartbeat",
+            headers=worker_headers(),
+        )
+        assert heartbeat.status_code == 200, heartbeat.text
+
+    busy_presence = client_access.get(
+        "/api/task-harnesses/acpx/presence",
+        headers=bootstrap_headers(),
+    )
+    assert busy_presence.status_code == 200
+    assert busy_presence.json()["worker_seen_recently"] is True
+    assert busy_presence.json()["state"] == "polling"
+    assert datetime.fromisoformat(busy_presence.json()["last_seen_at"]) == heartbeat_at
+
+
 def test_one_pre_action_retry_then_worker_lost(client_access: TestClient):
     from backend import main
 

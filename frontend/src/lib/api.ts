@@ -205,6 +205,80 @@ export interface Profile {
   cdp_url: string | null;
 }
 
+export type AccountAuthState = "unknown" | "signed_in" | "needs_2fa" | "signed_out" | "locked";
+export type AccountFactorState = "unknown" | "off" | "enrolled" | "required";
+export type AccountEventType =
+  | "created"
+  | "observed"
+  | "signed_in"
+  | "signed_out"
+  | "auth_state_changed"
+  | "two_factor_required"
+  | "two_factor_enrolled"
+  | "passkey_enrolled"
+  | "secret_reference_changed";
+
+export interface Account {
+  id: string;
+  profile_id: string | null;
+  profile_id_snapshot: string;
+  sandbox_id: string;
+  project_id: string;
+  provider: string;
+  subject_label: string;
+  display_name: string | null;
+  origin: string | null;
+  auth_state: AccountAuthState;
+  second_factor_state: AccountFactorState;
+  passkey_state: AccountFactorState;
+  has_secret_reference: boolean;
+  has_totp_reference: boolean;
+  last_seen_at: string | null;
+  row_version: number;
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccountCreateData {
+  profile_id: string;
+  provider: string;
+  subject_label: string;
+  display_name?: string | null;
+  origin?: string | null;
+  auth_state?: AccountAuthState;
+  second_factor_state?: AccountFactorState;
+  passkey_state?: AccountFactorState;
+  secret_ref?: string | null;
+  totp_ref?: string | null;
+  last_seen_at?: string | null;
+}
+
+export interface AccountUpdateData {
+  display_name?: string | null;
+  origin?: string | null;
+  auth_state?: AccountAuthState;
+  second_factor_state?: AccountFactorState;
+  passkey_state?: AccountFactorState;
+  secret_ref?: string | null;
+  totp_ref?: string | null;
+  last_seen_at?: string | null;
+}
+
+export interface AccountAuthEvent {
+  id: string;
+  account_id_snapshot: string;
+  profile_id_snapshot: string;
+  sandbox_id: string;
+  event_type: AccountEventType;
+  auth_state: AccountAuthState | null;
+  actor_kind: string;
+  actor_id: string | null;
+  occurred_at: string;
+  created_at: string;
+}
+
 export interface ProfileCreateData {
   name: string;
   sandbox_id?: string;
@@ -661,6 +735,59 @@ export const api = {
     request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
 
   listProfiles: () => request<Profile[]>("/api/profiles"),
+
+  listAccounts: (options?: {
+    profileId?: string;
+    provider?: string;
+    authState?: AccountAuthState;
+  }) => {
+    const params = new URLSearchParams();
+    if (options?.profileId) params.set("profile_id", options.profileId);
+    if (options?.provider) params.set("provider", options.provider);
+    if (options?.authState) params.set("auth_state", options.authState);
+    const query = params.toString();
+    return request<Account[]>(`/api/accounts${query ? `?${query}` : ""}`);
+  },
+
+  getAccount: (id: string) =>
+    request<Account>(`/api/accounts/${encodeURIComponent(id)}`),
+
+  createAccount: (data: AccountCreateData) =>
+    request<Account>("/api/accounts", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateAccount: (id: string, data: AccountUpdateData) =>
+    request<Account>(`/api/accounts/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  listAccountEvents: (id: string, options?: { limit?: number }) => {
+    const query = options?.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
+    return request<AccountAuthEvent[]>(
+      `/api/accounts/${encodeURIComponent(id)}/events${query}`,
+    );
+  },
+
+  appendAccountEvent: (
+    id: string,
+    data: {
+      event_type: Exclude<AccountEventType, "created">;
+      auth_state?: AccountAuthState | null;
+      occurred_at?: string | null;
+    },
+  ) =>
+    request<AccountAuthEvent>(`/api/accounts/${encodeURIComponent(id)}/events`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  deleteAccount: (id: string) =>
+    request<{ ok: boolean }>(`/api/accounts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
 
   getProfile: (id: string) => request<Profile>(`/api/profiles/${id}`),
 

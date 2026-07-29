@@ -146,7 +146,7 @@ def _strip_sensitive(value: Any) -> Any:
 
 
 def _resource_id(payload: dict[str, Any]) -> str:
-    for key in ("id", "profile_id", "session_id", "run_id", "proxy_id"):
+    for key in ("id", "account_id", "profile_id", "session_id", "run_id", "proxy_id"):
         value = payload.get(key)
         if isinstance(value, str) and value:
             return value
@@ -496,6 +496,114 @@ def cmd_profiles_open_links(args: argparse.Namespace) -> None:
     _print(payload, args.json)
 
 
+def cmd_accounts_list(args: argparse.Namespace) -> None:
+    query = {
+        key: value
+        for key, value in {
+            "profile_id": args.profile_id,
+            "provider": args.provider,
+            "auth_state": args.auth_state,
+        }.items()
+        if value is not None
+    }
+    _print(_request("GET", "/api/accounts", query=query or None), args.json)
+
+
+def cmd_accounts_get(args: argparse.Namespace) -> None:
+    _print(_request("GET", f"/api/accounts/{args.account_id}"), args.json)
+
+
+def cmd_accounts_create(args: argparse.Namespace) -> None:
+    body = {
+        key: value
+        for key, value in {
+            "profile_id": args.profile_id,
+            "provider": args.provider,
+            "subject_label": args.subject_label,
+            "display_name": args.display_name,
+            "origin": args.origin,
+            "auth_state": args.auth_state,
+            "second_factor_state": args.second_factor_state,
+            "passkey_state": args.passkey_state,
+            "secret_ref": args.secret_ref,
+            "totp_ref": args.totp_ref,
+            "last_seen_at": args.last_seen_at,
+        }.items()
+        if value is not None
+    }
+    _print(
+        _request("POST", "/api/accounts", body=body, **_request_options(args)),
+        args.json,
+    )
+
+
+def cmd_accounts_update(args: argparse.Namespace) -> None:
+    body = {
+        key: value
+        for key, value in {
+            "display_name": args.display_name,
+            "origin": args.origin,
+            "auth_state": args.auth_state,
+            "second_factor_state": args.second_factor_state,
+            "passkey_state": args.passkey_state,
+            "secret_ref": args.secret_ref,
+            "totp_ref": args.totp_ref,
+            "last_seen_at": args.last_seen_at,
+        }.items()
+        if value is not None
+    }
+    if not body:
+        raise SystemExit("No update fields provided")
+    _print(
+        _request(
+            "PUT",
+            f"/api/accounts/{args.account_id}",
+            body=body,
+            **_request_options(args),
+        ),
+        args.json,
+    )
+
+
+def cmd_accounts_history(args: argparse.Namespace) -> None:
+    _print(
+        _request(
+            "GET",
+            f"/api/accounts/{args.account_id}/events",
+            query={"limit": str(args.limit)},
+        ),
+        args.json,
+    )
+
+
+def cmd_accounts_event(args: argparse.Namespace) -> None:
+    body: dict[str, Any] = {"event_type": args.event_type}
+    if args.auth_state is not None:
+        body["auth_state"] = args.auth_state
+    if args.occurred_at is not None:
+        body["occurred_at"] = args.occurred_at
+    _print(
+        _request(
+            "POST",
+            f"/api/accounts/{args.account_id}/events",
+            body=body,
+            **_request_options(args),
+        ),
+        args.json,
+    )
+
+
+def cmd_accounts_delete(args: argparse.Namespace) -> None:
+    _print(
+        _request(
+            "DELETE",
+            f"/api/accounts/{args.account_id}",
+            **_request_options(args),
+        ),
+        args.json,
+    )
+
+
 def cmd_open_session(args: argparse.Namespace) -> None:
     body = {
         "profile_id": args.profile_id,
@@ -780,6 +888,79 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print one field only (cdp_fullscreen_url, vnc_fullscreen_url, websocket_url, cdp_url, …)",
     )
     po.set_defaults(func=cmd_profiles_open_links)
+
+    accounts = sub.add_parser("accounts", help="Profile-linked account metadata and auth history")
+    asub = accounts.add_subparsers(dest="accounts_command", required=True)
+
+    account_auth_states = ["unknown", "signed_in", "needs_2fa", "signed_out", "locked"]
+    account_factor_states = ["unknown", "off", "enrolled", "required"]
+
+    al = asub.add_parser("list", help="List visible account metadata")
+    al.add_argument("--profile-id")
+    al.add_argument("--provider")
+    al.add_argument("--auth-state", choices=account_auth_states)
+    al.set_defaults(func=cmd_accounts_list)
+
+    ag = asub.add_parser("get", help="Get one account metadata record")
+    ag.add_argument("account_id")
+    ag.set_defaults(func=cmd_accounts_get)
+
+    ac = asub.add_parser("create", help="Create metadata-only account linkage")
+    ac.add_argument("--profile-id", required=True)
+    ac.add_argument("--provider", required=True)
+    ac.add_argument("--subject-label", required=True)
+    ac.add_argument("--display-name")
+    ac.add_argument("--origin")
+    ac.add_argument("--auth-state", choices=account_auth_states)
+    ac.add_argument("--second-factor-state", choices=account_factor_states)
+    ac.add_argument("--passkey-state", choices=account_factor_states)
+    ac.add_argument("--secret-ref", help="Opaque secret reference id; never a secret value")
+    ac.add_argument("--totp-ref", help="Opaque TOTP reference id; never a seed or code")
+    ac.add_argument("--last-seen-at")
+    ac.set_defaults(func=cmd_accounts_create)
+
+    au = asub.add_parser("update", help="Update metadata-only account state")
+    au.add_argument("account_id")
+    au.add_argument("--display-name")
+    au.add_argument("--origin")
+    au.add_argument("--auth-state", choices=account_auth_states)
+    au.add_argument("--second-factor-state", choices=account_factor_states)
+    au.add_argument("--passkey-state", choices=account_factor_states)
+    au.add_argument("--secret-ref", help="Opaque secret reference id; never a secret value")
+    au.add_argument("--totp-ref", help="Opaque TOTP reference id; never a seed or code")
+    au.add_argument("--last-seen-at")
+    au.set_defaults(func=cmd_accounts_update)
+
+    ah = asub.add_parser("history", help="List append-only account auth history")
+    ah.add_argument("account_id")
+    ah.add_argument("--limit", type=int, default=100)
+    ah.set_defaults(func=cmd_accounts_history)
+
+    ae = asub.add_parser("event", help="Append one typed auth history event")
+    ae.add_argument("account_id")
+    ae.add_argument(
+        "--type",
+        "--event-type",
+        dest="event_type",
+        choices=[
+            "observed",
+            "signed_in",
+            "signed_out",
+            "auth_state_changed",
+            "two_factor_required",
+            "two_factor_enrolled",
+            "passkey_enrolled",
+            "secret_reference_changed",
+        ],
+        required=True,
+    )
+    ae.add_argument("--auth-state", choices=account_auth_states)
+    ae.add_argument("--occurred-at")
+    ae.set_defaults(func=cmd_accounts_event)
+
+    ad = asub.add_parser("delete", help="Delete account metadata while preserving history")
+    ad.add_argument("account_id")
+    ad.set_defaults(func=cmd_accounts_delete)
 
     p_open = sub.add_parser("open-session", help="Launch (optional) + return open links")
     p_open.add_argument("profile_id")

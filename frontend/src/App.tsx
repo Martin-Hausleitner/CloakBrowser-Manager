@@ -4,6 +4,7 @@ import { useProfiles } from "./hooks/useProfiles";
 import {
   api,
   setOnUnauthorized,
+  type Account,
   type AccessIdentity,
   type AccessPermission,
   type Profile,
@@ -185,6 +186,9 @@ interface AppContentProps {
 function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: AppContentProps) {
   const { profiles, loading, error, refresh, create, update, remove, launch, stop } = useProfiles();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
   const [view, setView] = useState<View>("home");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileFullscreenOpen, setMobileFullscreenOpen] = useState(false);
@@ -210,6 +214,30 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
       ...profiles.map((profile) => profile.project_id || "default"),
     ]),
   );
+
+  useEffect(() => {
+    if (view !== "accounts") return;
+
+    let cancelled = false;
+    setAccountsLoading(true);
+    setAccountsError(null);
+    api.listAccounts()
+      .then((items) => {
+        if (!cancelled) setAccounts(items);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setAccountsError(err instanceof Error ? err.message : "Unable to load accounts");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAccountsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [view]);
 
   useEffect(() => {
     if (!isMobile || loading || profiles.length === 0) return;
@@ -781,13 +809,16 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           {view === "accounts" && (
             <AccountsOverview
               profiles={profiles}
+              accounts={accounts}
+              loading={accountsLoading}
+              error={accountsError}
               selectedId={selectedId}
               onSelect={(profileId) => {
                 setSelectedId(profileId);
                 const profile = profiles.find((item) => item.id === profileId);
                 if (profile?.project_id) setProjectId(profile.project_id);
                 if (profile?.harness) setHarness(profile.harness);
-                setView(canManageProfiles ? "edit" : "accounts");
+                setView("view");
               }}
             />
           )}

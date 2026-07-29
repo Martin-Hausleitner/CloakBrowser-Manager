@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -252,7 +253,15 @@ def control_plane_capabilities_payload(*, local_mac_available: bool = False) -> 
             "skill_operations": [],
             "mcp_note": "discovery_schema_only",
         },
-        "accounts": {"available": unavailable, "reason_code": "metadata_model_pending"},
+        "accounts": {
+            "available": _channel(True, True, False, True),
+            "rest_operations": ["list", "get", "create", "update", "history", "event", "delete"],
+            "cli_operations": ["list", "get", "create", "update", "history", "event", "delete"],
+            "mcp_operations": [],
+            "skill_operations": ["list", "get", "create", "update", "history", "event", "delete"],
+            "secrets": "reference-digest-only",
+            "mcp_note": "discovery_schema_only",
+        },
         "secret-references": {"available": unavailable, "reason_code": "secret_broker_not_implemented"},
         "approvals": {"available": unavailable, "reason_code": "approval_queue_pending"},
         "operations": {"available": unavailable, "reason_code": "operation_store_pending"},
@@ -613,6 +622,185 @@ class ProfileHealthResponse(BaseModel):
     blockers: list[str] = Field(default_factory=list)
     error_code: str | None = Field(default=None, max_length=64)
     sources: dict[str, ProfileHealthSourceState] = Field(default_factory=dict)
+
+
+AccountAuthState = Literal["unknown", "signed_in", "needs_2fa", "signed_out", "locked"]
+AccountFactorState = Literal["unknown", "off", "enrolled", "required"]
+AccountEventType = Literal[
+    "observed",
+    "signed_in",
+    "signed_out",
+    "auth_state_changed",
+    "two_factor_required",
+    "two_factor_enrolled",
+    "passkey_enrolled",
+    "secret_reference_changed",
+]
+_ACCOUNT_REFERENCE_PATTERN = r"^secretref-[A-Za-z0-9][A-Za-z0-9._-]{2,143}$"
+
+
+def _validate_account_text(value: str, *, field_name: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    if any(ord(char) < 32 for char in cleaned):
+        raise ValueError(f"{field_name} contains control characters")
+    if (
+        _AUTH_BEARER_RE.search(cleaned)
+        or _SENSITIVE_ASSIGNMENT_RE.search(cleaned)
+        or _PROXY_CREDENTIAL_RE.search(cleaned)
+        or _HTML_DOM_TAG_RE.search(cleaned)
+    ):
+        raise ValueError(f"{field_name} contains forbidden secret-like content")
+    return cleaned
+
+
+def _validate_account_timestamp(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp must be ISO-8601") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include a timezone")
+    return parsed.isoformat()
+
+
+class AccountCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: str = Field(min_length=1, max_length=120)
+    provider: str = Field(min_length=1, max_length=80, pattern=SLUG_PATTERN)
+    subject_label: str = Field(min_length=1, max_length=254)
+    display_name: str | None = Field(default=None, max_length=160)
+    origin: str | None = Field(default=None, max_length=500)
+    auth_state: AccountAuthState = "unknown"
+    second_factor_state: AccountFactorState = "unknown"
+    passkey_state: AccountFactorState = "unknown"
+    secret_ref: str | None = Field(default=None, pattern=_ACCOUNT_REFERENCE_PATTERN)
+    totp_ref: str | None = Field(default=None, pattern=_ACCOUNT_REFERENCE_PATTERN)
+    last_seen_at: str | None = None
+
+    @field_validator("provider")
+    @classmethod
+    def normalize_provider(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("subject_label")
+    @classmethod
+    def validate_subject_label(cls, value: str) -> str:
+        return _validate_account_text(value, field_name="subject_label")
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_account_text(value, field_name="display_name")
+
+    @field_validator("origin")
+    @classmethod
+    def normalize_origin(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            from .origin_policy import normalize_origin
+        except ImportError:  # pragma: no cover
+            from origin_policy import normalize_origin
+        return normalize_origin(value)
+
+    @field_validator("last_seen_at")
+    @classmethod
+    def validate_last_seen_at(cls, value: str | None) -> str | None:
+        return _validate_account_timestamp(value)
+
+
+class AccountUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, max_length=160)
+    origin: str | None = Field(default=None, max_length=500)
+    auth_state: AccountAuthState | None = None
+    second_factor_state: AccountFactorState | None = None
+    passkey_state: AccountFactorState | None = None
+    secret_ref: str | None = Field(default=None, pattern=_ACCOUNT_REFERENCE_PATTERN)
+    totp_ref: str | None = Field(default=None, pattern=_ACCOUNT_REFERENCE_PATTERN)
+    last_seen_at: str | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_account_text(value, field_name="display_name")
+
+    @field_validator("origin")
+    @classmethod
+    def normalize_origin(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            from .origin_policy import normalize_origin
+        except ImportError:  # pragma: no cover
+            from origin_policy import normalize_origin
+        return normalize_origin(value)
+
+    @field_validator("last_seen_at")
+    @classmethod
+    def validate_last_seen_at(cls, value: str | None) -> str | None:
+        return _validate_account_timestamp(value)
+
+    @model_validator(mode="after")
+    def require_update_field(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one account field is required")
+        return self
+
+
+class AccountResponse(BaseModel):
+    id: str
+    profile_id: str | None = None
+    profile_id_snapshot: str
+    sandbox_id: str
+    project_id: str
+    provider: str
+    subject_label: str
+    display_name: str | None = None
+    origin: str | None = None
+    auth_state: AccountAuthState
+    second_factor_state: AccountFactorState
+    passkey_state: AccountFactorState
+    has_secret_reference: bool = False
+    has_totp_reference: bool = False
+    last_seen_at: str | None = None
+    row_version: int = 1
+    created_by_kind: str
+    created_by_id: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class AccountAuthEventCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_type: AccountEventType
+    auth_state: AccountAuthState | None = None
+    occurred_at: str | None = None
+
+    @field_validator("occurred_at")
+    @classmethod
+    def validate_occurred_at(cls, value: str | None) -> str | None:
+        return _validate_account_timestamp(value)
+
+
+class AccountAuthEventResponse(BaseModel):
+    id: str
+    account_id_snapshot: str
+    profile_id_snapshot: str
+    sandbox_id: str
+    event_type: Literal["created"] | AccountEventType
+    auth_state: AccountAuthState | None = None
+    actor_kind: str
+    actor_id: str | None = None
+    occurred_at: str
+    created_at: str
 
 
 class ClipboardRequest(BaseModel):

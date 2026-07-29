@@ -1221,6 +1221,7 @@ def test_candidate_verify_requires_task_artifacts_migration(monkeypatch: pytest.
         "worker_harness_presence_v1",
         "worker_harness_preflights_v1",
         "task_run_binding_v1",
+        "account_metadata_v1",
     ]
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:

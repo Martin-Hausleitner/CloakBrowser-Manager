@@ -96,6 +96,54 @@ describe("api.listProfiles", () => {
   });
 });
 
+describe("account metadata API", () => {
+  it("lists, creates, updates, reads history, records events, and deletes accounts", async () => {
+    const account = { id: "account-1", profile_id: "profile-1", auth_state: "unknown" };
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse([account]))
+      .mockResolvedValueOnce(jsonResponse(account, 201))
+      .mockResolvedValueOnce(jsonResponse({ ...account, auth_state: "signed_in" }))
+      .mockResolvedValueOnce(jsonResponse([{ id: "event-1", event_type: "created" }]))
+      .mockResolvedValueOnce(jsonResponse({ id: "event-2", event_type: "observed" }, 201))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+    await api.listAccounts({ profileId: "profile/1", authState: "needs_2fa" });
+    await api.createAccount({
+      profile_id: "profile-1",
+      provider: "github",
+      subject_label: "agent@example.invalid",
+      secret_ref: "secretref-login-1",
+    });
+    await api.updateAccount("account/1", { auth_state: "signed_in" });
+    await api.listAccountEvents("account/1", { limit: 25 });
+    await api.appendAccountEvent("account/1", { event_type: "observed" });
+    await api.deleteAccount("account/1");
+
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/accounts?profile_id=profile%2F1&auth_state=needs_2fa",
+      "/api/accounts",
+      "/api/accounts/account%2F1",
+      "/api/accounts/account%2F1/events?limit=25",
+      "/api/accounts/account%2F1/events",
+      "/api/accounts/account%2F1",
+    ]);
+    expect(JSON.parse(String(mockFetch.mock.calls[1][1]?.body))).toEqual({
+      profile_id: "profile-1",
+      provider: "github",
+      subject_label: "agent@example.invalid",
+      secret_ref: "secretref-login-1",
+    });
+    expect(mockFetch.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual([
+      "GET",
+      "POST",
+      "PUT",
+      "GET",
+      "POST",
+      "DELETE",
+    ]);
+  });
+});
+
 describe("api.captureProfileScreenshot", () => {
   it("requests a private PNG for the encoded profile id", async () => {
     const png = new Blob(["profile-proof"], { type: "image/png" });

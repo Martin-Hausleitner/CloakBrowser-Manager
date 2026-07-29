@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Profile } from "../lib/api";
-import { AccountsOverview, deriveAccountRows } from "./AccountsOverview";
+import type { Account, Profile } from "../lib/api";
+import { AccountsOverview } from "./AccountsOverview";
 
 const baseProfile: Profile = {
   id: "profile-1",
@@ -47,6 +47,33 @@ function profile(overrides: Partial<Profile>): Profile {
   return { ...baseProfile, ...overrides };
 }
 
+const baseAccount: Account = {
+  id: "account-1",
+  profile_id: "profile-1",
+  profile_id_snapshot: "profile-1",
+  sandbox_id: "default",
+  project_id: "commerce",
+  provider: "github",
+  subject_label: "agent@example.invalid",
+  display_name: "Checkout agent",
+  origin: "https://github.com",
+  auth_state: "unknown",
+  second_factor_state: "unknown",
+  passkey_state: "off",
+  has_secret_reference: false,
+  has_totp_reference: false,
+  last_seen_at: null,
+  row_version: 1,
+  created_by_kind: "user",
+  created_by_id: "user-1",
+  created_at: "2026-07-29T00:00:00Z",
+  updated_at: "2026-07-29T00:00:00Z",
+};
+
+function account(overrides: Partial<Account>): Account {
+  return { ...baseAccount, ...overrides };
+}
+
 function setAccountsMedia(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
     writable: true,
@@ -78,8 +105,12 @@ describe("AccountsOverview", () => {
     render(
       <AccountsOverview
         profiles={[
-          profile({ id: "checkout", name: "Checkout Ops", status: "running", notes: "signed-in account" }),
-          profile({ id: "billing", name: "Billing Admin", tags: [{ tag: "needs-2fa", color: null }] }),
+          profile({ id: "checkout", name: "Checkout Ops", status: "running" }),
+          profile({ id: "billing", name: "Billing Admin" }),
+        ]}
+        accounts={[
+          account({ id: "account-checkout", profile_id: "checkout", profile_id_snapshot: "checkout", auth_state: "signed_in" }),
+          account({ id: "account-billing", profile_id: "billing", profile_id_snapshot: "billing", auth_state: "needs_2fa", second_factor_state: "required" }),
         ]}
         selectedId="checkout"
         onSelect={vi.fn()}
@@ -92,7 +123,7 @@ describe("AccountsOverview", () => {
 
 
     const grid = screen.getByTestId("accounts-desktop-grid");
-    for (const header of ["Profile", "Project", "Harness", "Session", "Auth", "Bitwarden", "Keypad", "Notes", "Actions"]) {
+    for (const header of ["Profile", "Account", "Provider", "Project", "Session", "Auth", "2FA", "Passkey", "Vault", "Last seen", "Actions"]) {
       expect(await within(grid).findByText(header)).toBeTruthy();
     }
     expect(await within(grid).findByText("Checkout Ops")).toBeTruthy();
@@ -108,6 +139,10 @@ describe("AccountsOverview", () => {
         profiles={[
           profile({ id: "checkout", name: "Checkout Ops" }),
           profile({ id: "billing", name: "Billing Admin" }),
+        ]}
+        accounts={[
+          account({ id: "account-checkout", profile_id: "checkout", profile_id_snapshot: "checkout" }),
+          account({ id: "account-billing", profile_id: "billing", profile_id_snapshot: "billing" }),
         ]}
         selectedId="billing"
         onSelect={onSelect}
@@ -126,22 +161,33 @@ describe("AccountsOverview", () => {
     render(
       <AccountsOverview
         profiles={[
-          profile({
-            id: "checkout",
-            name: "Checkout Ops",
-            notes: "signed-in account password=supersecret cookie=session-token",
+          profile({ id: "checkout", name: "Checkout Ops", notes: "password=profile-secret" }),
+          profile({ id: "billing", name: "Billing Admin" }),
+        ]}
+        accounts={[
+          {
+            ...account({
+              id: "account-checkout",
+              profile_id: "checkout",
+              profile_id_snapshot: "checkout",
+              auth_state: "signed_in",
+            }),
+            password: "supersecret",
+            cookie: "session-token",
+          } as Account,
+          account({
+            id: "account-billing",
+            profile_id: "billing",
+            profile_id_snapshot: "billing",
+            auth_state: "needs_2fa",
           }),
-          profile({ id: "billing", name: "Billing Admin", tags: [{ tag: "needs-2fa", color: null }] }),
         ]}
         selectedId={null}
         onSelect={vi.fn()}
       />,
     );
 
-    expect(JSON.stringify(deriveAccountRows([profile({ notes: "password=supersecret cookie=session-token" })]))).not.toMatch(
-      /supersecret|session-token/i,
-    );
-    expect(screen.queryByText(/supersecret|session-token/i)).toBeNull();
+    expect(screen.queryByText(/supersecret|session-token|profile-secret/i)).toBeNull();
 
     fireEvent.change(screen.getByLabelText("Search accounts grid"), { target: { value: "billing" } });
     const grid = screen.getByTestId("accounts-desktop-grid");
@@ -161,7 +207,15 @@ describe("AccountsOverview", () => {
 
     render(
       <AccountsOverview
-        profiles={[profile({ id: "mobile", name: "Mobile Account", tags: [{ tag: "needs-2fa", color: null }] })]}
+        profiles={[profile({ id: "mobile", name: "Mobile Account" })]}
+        accounts={[
+          account({
+            id: "account-mobile",
+            profile_id: "mobile",
+            profile_id_snapshot: "mobile",
+            auth_state: "needs_2fa",
+          }),
+        ]}
         selectedId={null}
         onSelect={onSelect}
       />,

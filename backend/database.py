@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import random
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -661,6 +663,116 @@ def _migrate_task_run_binding_v1(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_account_metadata_v1(conn: sqlite3.Connection) -> None:
+    """Add profile-linked account metadata and immutable auth history."""
+    migration_version = "account_metadata_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS accounts (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+                profile_id_snapshot TEXT NOT NULL,
+                sandbox_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'default',
+                provider TEXT NOT NULL,
+                subject_label TEXT NOT NULL,
+                display_name TEXT,
+                origin TEXT,
+                auth_state TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (auth_state IN ('unknown', 'signed_in', 'needs_2fa', 'signed_out', 'locked')),
+                second_factor_state TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (second_factor_state IN ('unknown', 'off', 'enrolled', 'required')),
+                passkey_state TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (passkey_state IN ('unknown', 'off', 'enrolled', 'required')),
+                secret_ref_digest TEXT,
+                totp_ref_digest TEXT,
+                last_seen_at TEXT,
+                row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+                created_by_kind TEXT NOT NULL,
+                created_by_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (profile_id, provider, subject_label)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_accounts_profile
+                ON accounts(profile_id, updated_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_accounts_sandbox
+                ON accounts(sandbox_id, updated_at DESC)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS account_auth_events (
+                id TEXT PRIMARY KEY,
+                account_id_snapshot TEXT NOT NULL,
+                profile_id_snapshot TEXT NOT NULL,
+                sandbox_id TEXT NOT NULL,
+                event_type TEXT NOT NULL CHECK (
+                    event_type IN (
+                        'created', 'observed', 'signed_in', 'signed_out',
+                        'auth_state_changed', 'two_factor_required',
+                        'two_factor_enrolled', 'passkey_enrolled',
+                        'secret_reference_changed'
+                    )
+                ),
+                auth_state TEXT CHECK (
+                    auth_state IS NULL OR auth_state IN (
+                        'unknown', 'signed_in', 'needs_2fa', 'signed_out', 'locked'
+                    )
+                ),
+                actor_kind TEXT NOT NULL,
+                actor_id TEXT,
+                occurred_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_account_auth_events_account
+                ON account_auth_events(account_id_snapshot, occurred_at ASC, created_at ASC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_account_auth_events_sandbox
+                ON account_auth_events(sandbox_id, created_at DESC)
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS account_auth_events_no_update
+            BEFORE UPDATE ON account_auth_events
+            BEGIN
+                SELECT RAISE(ABORT, 'account auth events are append-only');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS account_auth_events_no_delete
+            BEFORE DELETE ON account_auth_events
+            BEGIN
+                SELECT RAISE(ABORT, 'account auth events are append-only');
+            END
+            """,
+        )
+        for statement in statements:
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
@@ -934,6 +1046,7 @@ def init_db():
         _migrate_worker_harness_presence_v1(conn)
         _migrate_worker_harness_preflights_v1(conn)
         _migrate_task_run_binding_v1(conn)
+        _migrate_account_metadata_v1(conn)
 
 
 def _now() -> str:
@@ -1304,6 +1417,288 @@ def bulk_organize_profiles(
 def delete_profile(profile_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def _reference_digest(value: str | None) -> str | None:
+    if value is None:
+        return None
+    salt = secrets.token_bytes(16)
+    digest = hashlib.sha256(salt + value.encode("utf-8")).hexdigest()
+    return f"{salt.hex()}:{digest}"
+
+
+def _account_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    data = dict(row)
+    data["has_secret_reference"] = bool(data.pop("secret_ref_digest", None))
+    data["has_totp_reference"] = bool(data.pop("totp_ref_digest", None))
+    return data
+
+
+def _account_event_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+def _insert_account_auth_event(
+    conn: sqlite3.Connection,
+    account: dict[str, Any],
+    *,
+    event_type: str,
+    auth_state: str | None,
+    actor_kind: str,
+    actor_id: str | None,
+    occurred_at: str | None = None,
+) -> dict[str, Any]:
+    event_id = str(uuid.uuid4())
+    now = _now()
+    conn.execute(
+        """INSERT INTO account_auth_events (
+            id, account_id_snapshot, profile_id_snapshot, sandbox_id,
+            event_type, auth_state, actor_kind, actor_id, occurred_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            event_id,
+            account["id"],
+            account["profile_id_snapshot"],
+            account["sandbox_id"],
+            event_type,
+            auth_state,
+            actor_kind,
+            actor_id,
+            occurred_at or now,
+            now,
+        ),
+    )
+    row = conn.execute(
+        "SELECT * FROM account_auth_events WHERE id = ?", (event_id,)
+    ).fetchone()
+    event = _account_event_from_row(row)
+    if event is None:  # pragma: no cover
+        raise RuntimeError("account auth event insert failed")
+    return event
+
+
+def create_account_metadata(
+    *,
+    profile_id: str,
+    provider: str,
+    subject_label: str,
+    actor_kind: str,
+    actor_id: str | None = None,
+    display_name: str | None = None,
+    origin: str | None = None,
+    auth_state: str = "unknown",
+    second_factor_state: str = "unknown",
+    passkey_state: str = "unknown",
+    secret_ref: str | None = None,
+    totp_ref: str | None = None,
+    last_seen_at: str | None = None,
+) -> dict[str, Any]:
+    profile = get_profile(profile_id)
+    if profile is None:
+        raise ValueError("Profile not found")
+    account_id = str(uuid.uuid4())
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """INSERT INTO accounts (
+                    id, profile_id, profile_id_snapshot, sandbox_id, project_id,
+                    provider, subject_label, display_name, origin, auth_state,
+                    second_factor_state, passkey_state, secret_ref_digest,
+                    totp_ref_digest, last_seen_at, row_version, created_by_kind,
+                    created_by_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                (
+                    account_id,
+                    profile_id,
+                    profile_id,
+                    str(profile.get("sandbox_id") or "default"),
+                    str(profile.get("project_id") or "default"),
+                    provider,
+                    subject_label,
+                    display_name,
+                    origin,
+                    auth_state,
+                    second_factor_state,
+                    passkey_state,
+                    _reference_digest(secret_ref),
+                    _reference_digest(totp_ref),
+                    last_seen_at,
+                    actor_kind,
+                    actor_id,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            raw_account = dict(row) if row is not None else None
+            if raw_account is None:  # pragma: no cover
+                raise RuntimeError("account metadata insert failed")
+            _insert_account_auth_event(
+                conn,
+                raw_account,
+                event_type="created",
+                auth_state=auth_state,
+                actor_kind=actor_kind,
+                actor_id=actor_id,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    account = get_account_metadata(account_id)
+    if account is None:  # pragma: no cover
+        raise RuntimeError("account metadata insert failed")
+    return account
+
+
+def get_account_metadata(account_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    return _account_from_row(row)
+
+
+def list_account_metadata(
+    *, profile_id: str | None = None, sandbox_id: str | None = None
+) -> list[dict[str, Any]]:
+    where: list[str] = ["profile_id IS NOT NULL"]
+    values: list[Any] = []
+    if profile_id is not None:
+        where.append("profile_id = ?")
+        values.append(profile_id)
+    if sandbox_id is not None:
+        where.append("sandbox_id = ?")
+        values.append(sandbox_id)
+    sql = "SELECT * FROM accounts"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY updated_at DESC, provider ASC, subject_label ASC, id ASC"
+    with get_db() as conn:
+        rows = conn.execute(sql, values).fetchall()
+    return [account for row in rows if (account := _account_from_row(row)) is not None]
+
+
+def update_account_metadata(
+    account_id: str,
+    *,
+    actor_kind: str,
+    actor_id: str | None = None,
+    **fields: Any,
+) -> dict[str, Any] | None:
+    existing = get_account_metadata(account_id)
+    if existing is None:
+        return None
+    updates: dict[str, Any] = {}
+    for name in (
+        "display_name",
+        "origin",
+        "auth_state",
+        "second_factor_state",
+        "passkey_state",
+        "last_seen_at",
+    ):
+        if name in fields:
+            updates[name] = fields[name]
+    if "secret_ref" in fields:
+        updates["secret_ref_digest"] = _reference_digest(fields["secret_ref"])
+    if "totp_ref" in fields:
+        updates["totp_ref_digest"] = _reference_digest(fields["totp_ref"])
+    if not updates:
+        return existing
+
+    auth_state_changed = (
+        "auth_state" in updates and updates["auth_state"] != existing.get("auth_state")
+    )
+    references_changed = "secret_ref_digest" in updates or "totp_ref_digest" in updates
+    updates["row_version"] = int(existing.get("row_version") or 1) + 1
+    updates["updated_at"] = _now()
+    columns = ", ".join(f"{name} = ?" for name in updates)
+    values = list(updates.values()) + [account_id]
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(f"UPDATE accounts SET {columns} WHERE id = ?", values)
+            row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            raw_account = dict(row) if row is not None else None
+            if raw_account is None:  # pragma: no cover
+                raise RuntimeError("account metadata update failed")
+            if auth_state_changed:
+                _insert_account_auth_event(
+                    conn,
+                    raw_account,
+                    event_type="auth_state_changed",
+                    auth_state=str(raw_account["auth_state"]),
+                    actor_kind=actor_kind,
+                    actor_id=actor_id,
+                )
+            if references_changed:
+                _insert_account_auth_event(
+                    conn,
+                    raw_account,
+                    event_type="secret_reference_changed",
+                    auth_state=str(raw_account["auth_state"]),
+                    actor_kind=actor_kind,
+                    actor_id=actor_id,
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return get_account_metadata(account_id)
+
+
+def append_account_auth_event(
+    account_id: str,
+    *,
+    event_type: str,
+    actor_kind: str,
+    actor_id: str | None = None,
+    auth_state: str | None = None,
+    occurred_at: str | None = None,
+) -> dict[str, Any]:
+    account = get_account_metadata(account_id)
+    if account is None:
+        raise ValueError("Account not found")
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            event = _insert_account_auth_event(
+                conn,
+                account,
+                event_type=event_type,
+                auth_state=auth_state,
+                actor_kind=actor_kind,
+                actor_id=actor_id,
+                occurred_at=occurred_at,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return event
+
+
+def list_account_auth_events(account_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    bounded_limit = max(1, min(int(limit), 500))
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM account_auth_events
+            WHERE account_id_snapshot = ?
+            ORDER BY occurred_at ASC, created_at ASC, id ASC
+            LIMIT ?""",
+            (account_id, bounded_limit),
+        ).fetchall()
+    return [event for row in rows if (event := _account_event_from_row(row)) is not None]
+
+
+def delete_account_metadata(account_id: str) -> bool:
+    with get_db() as conn:
+        cursor = conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         conn.commit()
         return cursor.rowcount > 0
 

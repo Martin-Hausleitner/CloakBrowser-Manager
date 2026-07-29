@@ -160,6 +160,7 @@ class FakeRemoteExecutor:
                 "worker_harness_presence_v1",
                 "worker_harness_preflights_v1",
                 "task_run_binding_v1",
+                "account_metadata_v1",
             ],
             "candidate_revision": None,
             "live_health": True,
@@ -1301,6 +1302,7 @@ def test_candidate_migrations_require_task_artifacts_v1(tmp_path: Path) -> None:
         "worker_harness_presence_v1",
         "worker_harness_preflights_v1",
         "task_run_binding_v1",
+        "account_metadata_v1",
     ]
     fake = FakeRemoteExecutor(candidate_migrations=old_required_migrations)
 
@@ -1310,7 +1312,7 @@ def test_candidate_migrations_require_task_artifacts_v1(tmp_path: Path) -> None:
     assert fake.candidate_removed is True
 
 
-def test_required_migration_set_is_exact_eight_with_task_artifacts() -> None:
+def test_required_migration_set_is_exact_nine_with_account_metadata() -> None:
     assert tx.REQUIRED_MIGRATIONS == (
         "agent_workspace_v1",
         "task_runs_v1",
@@ -1320,6 +1322,7 @@ def test_required_migration_set_is_exact_eight_with_task_artifacts() -> None:
         "worker_harness_presence_v1",
         "worker_harness_preflights_v1",
         "task_run_binding_v1",
+        "account_metadata_v1",
     )
 
 

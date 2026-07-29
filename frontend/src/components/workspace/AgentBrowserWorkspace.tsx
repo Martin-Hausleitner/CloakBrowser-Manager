@@ -53,6 +53,7 @@ const AGENT_OPTIONS: AgentMode[] = [
   "codex",
 ];
 const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
+  { value: "claude", label: "Claude" },
   { value: "grok-build", label: "Grok Build" },
   { value: "codex", label: "Codex" },
   { value: "cursor", label: "Cursor" },
@@ -1151,6 +1152,17 @@ export function AgentBrowserWorkspace({
                               {ready ? "Ready" : presence ? "Unavailable" : "Not checked"}
                             </span>
                           </button>
+                          <button
+                            type="button"
+                            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#34343b] px-1.5 text-[9px] text-[#c4c4cc] hover:bg-[#29292e] hover:text-white disabled:opacity-40"
+                            onClick={() => void handleHarnessCheck(candidate)}
+                            disabled={harnessCheckBusy}
+                            aria-label={`Test ${label}`}
+                            title={`Test ${label} on VCVM`}
+                          >
+                            <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === candidate ? "animate-spin" : ""}`} aria-hidden="true" />
+                            Test
+                          </button>
                         </div>
                       );
                     })}
@@ -1174,8 +1186,19 @@ export function AgentBrowserWorkspace({
                             {candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}
                           </span>
                           <span className="text-[9px] text-emerald-300">Detected</span>
-                        </button>
-                      </div>
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#34343b] px-1.5 text-[9px] text-[#c4c4cc] hover:bg-[#29292e] hover:text-white disabled:opacity-40"
+                            onClick={() => void handleHarnessCheck("orca")}
+                            disabled={harnessCheckBusy}
+                            aria-label={`Test ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}`}
+                            title="Refresh installed local CLI detection"
+                          >
+                            <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === "orca" ? "animate-spin" : ""}`} aria-hidden="true" />
+                            Test
+                          </button>
+                        </div>
                     )) : (
                       <div className="rounded px-2 py-1.5 text-[9px] text-amber-300">No local CLI runtime detected.</div>
                     )}

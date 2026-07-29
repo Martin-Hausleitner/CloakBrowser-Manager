@@ -267,6 +267,7 @@ def test_workspace_migration_preserves_history_and_snapshots_ownership(
         },
     ]
     assert [row["version"] for row in migrations] == [
+        "account_metadata_v1",
         "agent_workspace_v1",
         "task_run_binding_v1",
         "task_runs_acpx_v1",
@@ -323,11 +324,12 @@ def test_workspace_migration_is_idempotent(legacy_database: Path):
     db.init_db()
 
     with db.get_db() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 7
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 8
         assert {
             row["version"]
             for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
         } == {
+            "account_metadata_v1",
             "agent_workspace_v1",
             "task_run_binding_v1",
             "task_runs_acpx_v1",
@@ -455,11 +457,12 @@ def test_workspace_migration_serializes_concurrent_initialization(
             initialization.result(timeout=10)
 
     with db.get_db() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 7
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 8
         assert {
             row["version"]
             for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
         } == {
+            "account_metadata_v1",
             "agent_workspace_v1",
             "task_run_binding_v1",
             "task_runs_acpx_v1",

@@ -260,7 +260,14 @@ describe("AgentBrowserWorkspace", () => {
     apiMock.getTaskHarnessPresence.mockClear();
     apiMock.getOrcaCapabilities.mockClear();
 
-    expect(within(menu).queryByRole("button", { name: "Recheck Stagehand" })).toBeNull();
+    expect(within(menu).getByRole("button", { name: "Test Browser Use" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Test Unbrowse" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Test Stagehand" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Test AGY" })).toBeTruthy();
+    fireEvent.click(within(menu).getByRole("button", { name: "Test Stagehand" }));
+    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledTimes(1));
+    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything());
+    apiMock.getTaskHarnessPresence.mockClear();
     fireEvent.click(within(menu).getByRole("button", { name: "Recheck all harnesses" }));
 
     await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledTimes(4));
@@ -332,7 +339,7 @@ describe("AgentBrowserWorkspace", () => {
     });
   });
 
-  it("selects the first ready supported ACPX adapter without falling back to Claude", async () => {
+  it("selects the first ready ACPX adapter including the live Claude adapter", async () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
     apiMock.getTaskHarnessPreflights.mockResolvedValue({
       harness: "acpx",
@@ -356,8 +363,7 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     await waitFor(() => expect(apiMock.getTaskHarnessPreflights).toHaveBeenCalledWith("acpx", expect.anything()));
-    await waitFor(() => expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).toBe("cursor"));
-    expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).not.toBe("claude");
+    await waitFor(() => expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).toBe("claude"));
   });
 
   it("renders a full-view grid of running browsers while keeping stopped profiles out", async () => {

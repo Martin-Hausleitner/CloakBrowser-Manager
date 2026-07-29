@@ -13,6 +13,7 @@ const apiMock = vi.hoisted(() => ({
   setOnUnauthorized: vi.fn(),
   getOrcaCapabilities: vi.fn(),
   listProxies: vi.fn(),
+  listAccounts: vi.fn(),
   listTaskSessions: vi.fn(),
   getTaskRun: vi.fn(),
   listTaskRunOutputs: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("./lib/api", async () => {
       logout: apiMock.logout,
       getOrcaCapabilities: apiMock.getOrcaCapabilities,
       listProxies: apiMock.listProxies,
+      listAccounts: apiMock.listAccounts,
       listTaskSessions: apiMock.listTaskSessions,
       getTaskRun: apiMock.getTaskRun,
       listTaskRunOutputs: apiMock.listTaskRunOutputs,
@@ -172,6 +174,7 @@ beforeEach(() => {
     notes: [],
   });
   apiMock.listProxies.mockResolvedValue([]);
+  apiMock.listAccounts.mockResolvedValue([]);
   apiMock.listTaskSessions.mockResolvedValue([]);
   apiMock.getTaskRun.mockRejectedValue(new Error("unexpected getTaskRun call"));
   apiMock.listTaskRunOutputs.mockRejectedValue(new Error("unexpected listTaskRunOutputs call"));
@@ -461,6 +464,7 @@ describe("App Browser Use home handoff", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Accounts & 2FA" }));
     await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAccounts));
+    await waitFor(() => expect(apiMock.listAccounts).toHaveBeenCalledTimes(1));
     expect(screen.getByRole("tab", { name: "Accounts & 2FA" }).getAttribute("aria-selected")).toBe("true");
 
     fireEvent.click(screen.getByRole("tab", { name: "Proxies" }));

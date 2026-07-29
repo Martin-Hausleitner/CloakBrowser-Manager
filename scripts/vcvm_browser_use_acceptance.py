@@ -31,6 +31,7 @@ EXPECTED_MIGRATIONS = (
     "worker_harness_presence_v1",
     "worker_harness_preflights_v1",
     "task_run_binding_v1",
+    "account_metadata_v1",
 )
 EXPECTED_OUTPUT_KINDS = ("action", "observation", "observation", "screenshot", "summary")
 TERMINAL_SUCCESS = "succeeded"

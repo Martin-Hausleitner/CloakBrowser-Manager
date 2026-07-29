@@ -218,12 +218,35 @@ def test_v2_capabilities_and_resource_schema_are_bounded(client_access: TestClie
     assert body["resources"]["proxies"]["available"]["cli"] is False
     assert body["resources"]["extensions"]["available"]["rest"] is True
     assert body["resources"]["extensions"]["mcp_note"] == "discovery_schema_only"
+    assert body["resources"]["accounts"]["available"] == {
+        "rest": True,
+        "cli": True,
+        "mcp": False,
+        "skill": True,
+    }
+    assert body["resources"]["accounts"]["rest_operations"] == [
+        "list",
+        "get",
+        "create",
+        "update",
+        "history",
+        "event",
+        "delete",
+    ]
+    assert body["resources"]["accounts"]["cli_operations"] == [
+        "list",
+        "get",
+        "create",
+        "update",
+        "history",
+        "event",
+        "delete",
+    ]
     for unavailable in (
         "boxes",
         "runtimes",
         "local-mac",
         "orca-web",
-        "accounts",
         "secret-references",
         "approvals",
         "operations",

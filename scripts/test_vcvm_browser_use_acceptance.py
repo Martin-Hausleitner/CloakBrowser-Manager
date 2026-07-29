@@ -101,7 +101,7 @@ def test_acceptance_passes_only_with_complete_matching_evidence() -> None:
     assert result["summary"] == {"passed": 15, "failed": 0, "degraded": 0}
 
 
-def test_expected_migration_set_is_exact_eight_with_task_artifacts() -> None:
+def test_expected_migration_set_is_exact_nine_with_account_metadata() -> None:
     assert gate.EXPECTED_MIGRATIONS == (
         "agent_workspace_v1",
         "task_runs_v1",
@@ -111,6 +111,7 @@ def test_expected_migration_set_is_exact_eight_with_task_artifacts() -> None:
         "worker_harness_presence_v1",
         "worker_harness_preflights_v1",
         "task_run_binding_v1",
+        "account_metadata_v1",
     )
 
 
@@ -124,6 +125,7 @@ def test_acceptance_rejects_evidence_missing_task_artifacts_migration() -> None:
         "worker_harness_presence_v1",
         "worker_harness_preflights_v1",
         "task_run_binding_v1",
+        "account_metadata_v1",
     ]
     evidence["live"]["manager"]["migrations"] = old_required_migrations
 

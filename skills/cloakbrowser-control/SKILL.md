@@ -50,14 +50,25 @@ scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY profiles updat
 scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY profiles launch PROFILE_ID
 scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY profiles stop PROFILE_ID
 scripts/cbm_agent_ctl.py --json profiles open-links PROFILE_ID --mode vnc
+scripts/cbm_agent_ctl.py --json accounts list --profile-id PROFILE_ID
+scripts/cbm_agent_ctl.py --json accounts get ACCOUNT_ID
+scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY accounts create --profile-id PROFILE_ID --provider PROVIDER --subject-label LABEL
+scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY accounts update ACCOUNT_ID --auth-state signed_in
+scripts/cbm_agent_ctl.py --json accounts history ACCOUNT_ID
+scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY accounts event ACCOUNT_ID --event-type observed
+scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY accounts delete ACCOUNT_ID
 scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY tasks create --profile-id PROFILE_ID --title TITLE
 scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY tasks run TASK_ID --profile-id PROFILE_ID --task TASK --allowed-origin ORIGIN
+scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY tasks run TASK_ID --profile-id PROFILE_ID --harness browser-use --task TASK --allowed-origin ORIGIN
+scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY tasks run TASK_ID --profile-id PROFILE_ID --harness unbrowse --task TASK --allowed-origin ORIGIN
+scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY tasks run TASK_ID --profile-id PROFILE_ID --harness stagehand --task TASK --allowed-origin ORIGIN
+scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY tasks run TASK_ID --profile-id PROFILE_ID --harness acpx --agent grok-build --task TASK --allowed-origin ORIGIN
 scripts/cbm_agent_ctl.py --json runs get RUN_ID
 scripts/cbm_agent_ctl.py --json runs outputs RUN_ID
 scripts/cbm_agent_ctl.py --json --idempotency-key IDEMPOTENCY_KEY runs cancel RUN_ID
 ```
 
-Do not invent project, proxy, extension, account, approval, operation, box, runtime, local-Mac, or Orca-Web CLI commands when `api capabilities` reports `cli: false`.
+Do not invent project, proxy, extension, approval, operation, box, runtime, local-Mac, or Orca-Web CLI commands when `api capabilities` reports `cli: false`.
 
 ## MCP Scope
 
@@ -79,7 +90,9 @@ There are no general Manager resource MCP tools for profiles, projects, proxies,
 ## Limitations
 
 - `Idempotency-Key` and `If-Match` are client-supported headers only; server enforcement is pending unless the capability/schema response says otherwise.
-- Secret broker, account metadata, approvals, operations, box resources, runtime resources, local-Mac resource launch, and Orca-Web resource control are unavailable in this slice.
+- Account metadata is reference-only: account commands accept opaque `secretref-*` identifiers and never accept or return passwords, cookies, tokens, TOTP seeds, passkey material, or recovery codes.
+- Browser Use, Unbrowse, Stagehand, and ACPX runs use the same Manager-owned task/run/output contract. A detected worker heartbeat proves process presence; only a completed run with typed outputs proves end-to-end browser control.
+- Secret broker value access, approvals, operations, box resources, runtime resources, local-Mac resource launch, and Orca-Web resource control are unavailable in this slice.
 - The CLI must not print credentials, raw proxy URLs with userinfo, cookies, bearer tokens, vault values, OTP/TOTP seeds, provider locators, unrestricted CDP endpoints, or local secret paths.
 - The MCP server does not grant raw CDP, shell, credential, cookie, filesystem, or arbitrary Manager resource access.
 

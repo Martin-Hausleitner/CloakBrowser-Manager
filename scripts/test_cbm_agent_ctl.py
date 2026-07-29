@@ -35,6 +35,169 @@ def test_cli_help_lists_control_plane_commands():
     assert "worktree-audit" in text
     assert "tasks" in text
     assert "runs" in text
+    assert "accounts" in text
+
+
+def test_accounts_list_builds_filtered_request(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, query=None, **_options):
+        captured.update({"method": method, "path": path, "body": body, "query": query})
+        return []
+
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(
+        [
+            "accounts",
+            "list",
+            "--profile-id",
+            "profile-1",
+            "--provider",
+            "github",
+            "--auth-state",
+            "needs_2fa",
+        ]
+    )
+    args.func(args)
+
+    assert captured == {
+        "method": "GET",
+        "path": "/api/accounts",
+        "body": None,
+        "query": {
+            "profile_id": "profile-1",
+            "provider": "github",
+            "auth_state": "needs_2fa",
+        },
+    }
+
+
+def test_accounts_create_and_update_send_metadata_references_only(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    calls: list[dict] = []
+
+    def fake_request(method, path, *, body=None, query=None, **options):
+        calls.append({"method": method, "path": path, "body": body, "options": options})
+        return {"id": "account-1"}
+
+    monkeypatch.setattr(mod, "_request", fake_request)
+    create = mod.build_parser().parse_args(
+        [
+            "--idempotency-key",
+            "account-create-1",
+            "accounts",
+            "create",
+            "--profile-id",
+            "profile-1",
+            "--provider",
+            "github",
+            "--subject-label",
+            "agent@example.invalid",
+            "--origin",
+            "https://github.com",
+            "--secret-ref",
+            "secretref-login-1",
+            "--totp-ref",
+            "secretref-totp-1",
+        ]
+    )
+    create.func(create)
+    update = mod.build_parser().parse_args(
+        [
+            "--if-version",
+            "2",
+            "accounts",
+            "update",
+            "account-1",
+            "--auth-state",
+            "signed_in",
+        ]
+    )
+    update.func(update)
+
+    assert calls[0] == {
+        "method": "POST",
+        "path": "/api/accounts",
+        "body": {
+            "profile_id": "profile-1",
+            "provider": "github",
+            "subject_label": "agent@example.invalid",
+            "origin": "https://github.com",
+            "secret_ref": "secretref-login-1",
+            "totp_ref": "secretref-totp-1",
+        },
+        "options": {"idempotency_key": "account-create-1"},
+    }
+    assert calls[1] == {
+        "method": "PUT",
+        "path": "/api/accounts/account-1",
+        "body": {"auth_state": "signed_in"},
+        "options": {"if_version": 2},
+    }
+    assert all("password" not in json.dumps(call) for call in calls)
+
+
+def test_accounts_history_event_delete_and_secret_flags_contract(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_request(method, path, *, body=None, query=None, **_options):
+        calls.append((method, path, body if body is not None else query))
+        return [] if method == "GET" else {"ok": True}
+
+    monkeypatch.setattr(mod, "_request", fake_request)
+    for argv in (
+        ["accounts", "history", "account-1", "--limit", "25"],
+        ["accounts", "event", "account-1", "--type", "observed"],
+        ["accounts", "delete", "account-1"],
+    ):
+        args = mod.build_parser().parse_args(argv)
+        args.func(args)
+
+    assert calls == [
+        ("GET", "/api/accounts/account-1/events", {"limit": "25"}),
+        ("POST", "/api/accounts/account-1/events", {"event_type": "observed"}),
+        ("DELETE", "/api/accounts/account-1", None),
+    ]
+    alias_args = mod.build_parser().parse_args(
+        ["accounts", "event", "account-1", "--event-type", "observed"]
+    )
+    assert alias_args.event_type == "observed"
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args(
+            [
+                "accounts",
+                "create",
+                "--profile-id",
+                "profile-1",
+                "--provider",
+                "github",
+                "--subject-label",
+                "agent@example.invalid",
+                "--password",
+                "forbidden",
+            ]
+        )
 
 
 def test_auth_header_reads_key_file_when_env_key_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

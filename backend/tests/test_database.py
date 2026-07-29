@@ -54,6 +54,7 @@ def test_init_db_idempotent(tmp_db: Path):
 
 def test_list_applied_schema_migrations_returns_sorted_release_ids(tmp_db: Path):
     assert db.list_applied_schema_migrations() == [
+        "account_metadata_v1",
         "agent_workspace_v1",
         "task_run_binding_v1",
         "task_runs_acpx_v1",

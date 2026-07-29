@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import struct
 import shutil
 import time
@@ -26,6 +27,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import starlette.requests
@@ -46,6 +48,11 @@ if __package__:
     from .models import (
         AutomationLeaseAcquireResponse,
         AutomationLeaseHeartbeatResponse,
+        AccountAuthEventCreate,
+        AccountAuthEventResponse,
+        AccountCreate,
+        AccountResponse,
+        AccountUpdate,
         ClipboardRequest,
         control_plane_capabilities_payload,
         control_plane_resource_schema,
@@ -144,6 +151,11 @@ else:  # Support `uvicorn main:app` from the backend directory.
     from models import (
         AutomationLeaseAcquireResponse,
         AutomationLeaseHeartbeatResponse,
+        AccountAuthEventCreate,
+        AccountAuthEventResponse,
+        AccountCreate,
+        AccountResponse,
+        AccountUpdate,
         ClipboardRequest,
         control_plane_capabilities_payload,
         control_plane_resource_schema,
@@ -1730,6 +1742,20 @@ app = FastAPI(title="CloakBrowser Manager", lifespan=lifespan)
 app.add_middleware(AuthMiddleware)
 
 
+@app.exception_handler(RequestValidationError)
+async def sanitized_validation_error(_request: Request, exc: RequestValidationError):
+    """Return useful validation locations without reflecting submitted secrets."""
+    detail = [
+        {
+            key: value
+            for key, value in error.items()
+            if key not in {"input", "ctx", "url"}
+        }
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
 def _require_identity(scope: Scope) -> access.AccessIdentity:
     identity = _access_identity(scope)
     if identity is None:
@@ -1783,6 +1809,27 @@ def _require_profile_permission(
         # missing one. This applies equally to direct REST and WebSocket URLs.
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile, identity
+
+
+def _require_account_permission(
+    scope: Scope, account_id: str, permission: access.Permission
+) -> tuple[dict[str, object], access.AccessIdentity]:
+    account = db.get_account_metadata(account_id)
+    if not account or not account.get("profile_id"):
+        raise HTTPException(status_code=404, detail="Account not found")
+    identity = _require_identity(scope)
+    sandbox_id = str(account.get("sandbox_id") or "default")
+    if not access.has_permission(identity, sandbox_id, permission):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            f"account.permission.{permission}",
+            "denied",
+            sandbox_id,
+            str(account.get("profile_id") or ""),
+        )
+        raise HTTPException(status_code=404, detail="Account not found")
+    return account, identity
 
 
 def _can_read_task_sessions(identity: access.AccessIdentity, sandbox_id: str) -> bool:
@@ -3805,6 +3852,133 @@ async def create_profile_from_proxy(
         except Exception as exc:
             raise HTTPException(status_code=500, detail="Failed to launch profile") from exc
     return _profile_response(profile, identity)
+
+
+@app.get("/api/accounts", response_model=list[AccountResponse])
+async def list_accounts(
+    request: Request,
+    profile_id: str | None = Query(default=None),
+    provider: str | None = Query(default=None),
+    auth_state: str | None = Query(default=None),
+):
+    identity = _require_identity(request.scope)
+    accounts = db.list_account_metadata(profile_id=profile_id)
+    return [
+        account
+        for account in accounts
+        if access.has_permission(
+            identity, str(account.get("sandbox_id") or "default"), "view"
+        )
+        and (provider is None or account.get("provider") == provider)
+        and (auth_state is None or account.get("auth_state") == auth_state)
+    ]
+
+
+@app.post("/api/accounts", response_model=AccountResponse, status_code=201)
+async def create_account(req: AccountCreate, request: Request):
+    profile, identity = _require_profile_permission(request.scope, req.profile_id, "operate")
+    try:
+        account = db.create_account_metadata(
+            **req.model_dump(),
+            actor_kind=identity.kind,
+            actor_id=identity.id,
+        )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Account already exists") from exc
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "account.create",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        req.profile_id,
+    )
+    return account
+
+
+@app.get("/api/accounts/{account_id}", response_model=AccountResponse)
+async def get_account(account_id: str, request: Request):
+    account, _identity = _require_account_permission(request.scope, account_id, "view")
+    return account
+
+
+@app.put("/api/accounts/{account_id}", response_model=AccountResponse)
+async def update_account(account_id: str, req: AccountUpdate, request: Request):
+    account, identity = _require_account_permission(request.scope, account_id, "operate")
+    updated = db.update_account_metadata(
+        account_id,
+        actor_kind=identity.kind,
+        actor_id=identity.id,
+        **req.model_dump(exclude_unset=True),
+    )
+    if updated is None:  # pragma: no cover - protected by the permission lookup
+        raise HTTPException(status_code=404, detail="Account not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "account.update",
+        "allowed",
+        str(account.get("sandbox_id") or "default"),
+        str(account.get("profile_id") or ""),
+    )
+    return updated
+
+
+@app.delete("/api/accounts/{account_id}")
+async def delete_account(account_id: str, request: Request):
+    account, identity = _require_account_permission(request.scope, account_id, "operate")
+    if not db.delete_account_metadata(account_id):  # pragma: no cover
+        raise HTTPException(status_code=404, detail="Account not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "account.delete",
+        "allowed",
+        str(account.get("sandbox_id") or "default"),
+        str(account.get("profile_id") or ""),
+    )
+    return {"ok": True}
+
+
+@app.get(
+    "/api/accounts/{account_id}/events",
+    response_model=list[AccountAuthEventResponse],
+)
+async def list_account_events(
+    account_id: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    _account, _identity = _require_account_permission(request.scope, account_id, "view")
+    return db.list_account_auth_events(account_id, limit=limit)
+
+
+@app.post(
+    "/api/accounts/{account_id}/events",
+    response_model=AccountAuthEventResponse,
+    status_code=201,
+)
+async def append_account_event(
+    account_id: str,
+    req: AccountAuthEventCreate,
+    request: Request,
+):
+    account, identity = _require_account_permission(request.scope, account_id, "operate")
+    event = db.append_account_auth_event(
+        account_id,
+        **req.model_dump(),
+        actor_kind=identity.kind,
+        actor_id=identity.id,
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "account.event.create",
+        "allowed",
+        str(account.get("sandbox_id") or "default"),
+        str(account.get("profile_id") or ""),
+    )
+    return event
 
 
 @app.get("/api/profiles", response_model=list[ProfileResponse])

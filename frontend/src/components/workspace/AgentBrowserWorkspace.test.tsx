@@ -752,6 +752,197 @@ describe("AgentBrowserWorkspace", () => {
     },
   );
 
+  it("lists a dynamic ready Gemini ACP provider and sends the exact provider agent and model payload", async () => {
+    const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
+    apiMock.getProviderReadiness.mockResolvedValue({
+      providers: [
+        {
+          provider: "grok",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: ["grok-build-0.1"],
+        },
+        {
+          provider: "gemini",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: ["gemini-2.5-pro", "gemini-2.5-flash"],
+        },
+      ],
+    });
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({
+      harness: "acpx",
+      agents: [
+        { agent: "grok-build", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+        { agent: "gemini", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+      ],
+    });
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: "task-gemini" }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
+      id: "run-gemini",
+      task_session_id: "task-gemini",
+      harness: "acpx",
+      agent: "gemini",
+      model_alias: "gemini-2.5-flash",
+    }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[acpxProfile]}
+        selectedProfile={acpxProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("provider-tool-summary");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle KI Provider settings" }));
+    const providerPanel = await screen.findByTestId("provider-tool-provider-section");
+    fireEvent.click(within(providerPanel).getByRole("radio", { name: "Gemini" }));
+    expect(screen.queryByTestId("acpx-agent-select")).toBeNull();
+    expect(screen.getByTestId("acpx-agent-fixed").textContent).toContain("gemini");
+    fireEvent.change(screen.getByLabelText("Model alias"), { target: { value: "gemini-2.5-flash" } });
+    fireEvent.change(screen.getByTestId("orca-prompt"), {
+      target: { value: "Inspect https://example.com" },
+    });
+    fireEvent.click(screen.getByTestId("orca-launch"));
+
+    await waitFor(() => {
+      expect(apiMock.createTaskSession).toHaveBeenCalledWith(expect.objectContaining({
+        metadata: expect.objectContaining({
+          source: "agent-browser-workspace",
+          harness: "acpx",
+          agent: "gemini",
+          provider: { id: "gemini", transport: "acp", model_alias: "gemini-2.5-flash" },
+        }),
+      }));
+      expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+        "task-gemini",
+        expect.objectContaining({
+          harness: "acpx",
+          agent: "gemini",
+          model_alias: "gemini-2.5-flash",
+          provider: { id: "gemini", transport: "acp", model_alias: "gemini-2.5-flash" },
+          browser_tools: [
+            { id: "unbrowse", enabled: true },
+            { id: "stagehand", enabled: true },
+            { id: "browser-harness", enabled: true },
+          ],
+        }),
+      );
+    });
+  });
+
+  it("renders backend-safe dynamic provider ids in ProviderToolControl while filtering unsafe ids", async () => {
+    const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
+    apiMock.getProviderReadiness.mockResolvedValue({
+      providers: [
+        {
+          provider: "codex",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: [],
+        },
+        {
+          provider: "custom.agent",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: ["custom-agent-model"],
+        },
+        {
+          provider: "custom_agent",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: [],
+        },
+        {
+          provider: "1agent",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: [],
+        },
+        {
+          provider: "bad<script>",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: ["bad-model"],
+        },
+        {
+          provider: " custom.agent",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: [],
+        },
+        {
+          provider: "custom/agent",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: [],
+        },
+      ],
+    });
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[acpxProfile]}
+        selectedProfile={acpxProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("provider-tool-summary");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle KI Provider settings" }));
+    const providerPanel = await screen.findByTestId("provider-tool-provider-section");
+
+    expect(within(providerPanel).getByRole("radio", { name: "Codex" })).toHaveProperty("disabled", false);
+    for (const [label, agent] of [
+      [/custom\.agent/i, "custom.agent"],
+      [/custom_agent/i, "custom_agent"],
+      [/1agent/i, "1agent"],
+    ] as const) {
+      const choice = within(providerPanel).getByRole("radio", { name: label });
+      expect(choice).toHaveProperty("disabled", false);
+      fireEvent.click(choice);
+      expect(screen.getByTestId("acpx-agent-fixed").textContent).toContain(agent);
+    }
+    expect(within(providerPanel).queryByRole("radio", { name: /bad/i })).toBeNull();
+    expect(within(providerPanel).queryByRole("radio", { name: /custom\/agent/i })).toBeNull();
+    expect(providerPanel.textContent).not.toContain("bad<script>");
+    expect(providerPanel.textContent).not.toContain(" custom.agent");
+    expect(providerPanel.textContent).not.toContain("custom/agent");
+  });
+
   it("omits stale Grok ACP model aliases that are not present on the exact readiness row", async () => {
     const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
     apiMock.getProviderReadiness.mockResolvedValue({

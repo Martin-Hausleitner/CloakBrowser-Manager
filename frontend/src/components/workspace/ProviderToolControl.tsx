@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, GripVertical } from "lucide-react";
+import { isSafeProviderId } from "../../lib/api";
 import type {
   BrowserToolId,
   BrowserToolSelection,
@@ -32,7 +33,7 @@ interface ProviderToolControlProps {
   onChange: (next: ProviderRoutingState) => void;
 }
 
-const PROVIDER_LABELS: Record<ProviderId, string> = {
+const PROVIDER_LABELS: Partial<Record<ProviderId, string>> = {
   antigravity: "Antigravity",
   codex: "Codex",
   claude: "Claude",
@@ -41,7 +42,7 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
   opencode: "OpenCode",
 };
 
-const PROVIDER_CHOICES: ProviderId[] = ["codex", "claude", "cursor", "grok", "opencode", "antigravity"];
+const PROVIDER_CHOICE_ORDER: ProviderId[] = ["codex", "claude", "cursor", "grok", "opencode", "antigravity"];
 
 function providerDefaultTransport(id: ProviderId): ProviderTransport {
   return id === "antigravity" ? "cli" : "acp";
@@ -63,6 +64,46 @@ export function providerInfo(
   ) ?? null;
 }
 
+function providerReadinessIsDisplayable(provider: ProviderReadinessProvider): boolean {
+  return isSafeProviderId(provider.provider);
+}
+
+function providerReadinessIsChoice(provider: ProviderReadinessProvider): boolean {
+  if (!providerReadinessIsDisplayable(provider)) return false;
+  return provider.provider === "antigravity"
+    ? provider.transport === "cli"
+    : provider.transport === "acp";
+}
+
+function providerChoiceSortValue(id: ProviderId): number {
+  const index = PROVIDER_CHOICE_ORDER.indexOf(id);
+  return index === -1 ? PROVIDER_CHOICE_ORDER.length : index;
+}
+
+function providerChoices(readiness: ProviderReadiness | null): ProviderId[] {
+  if (!readiness) return PROVIDER_CHOICE_ORDER;
+  const seen = new Set<string>();
+  return readiness.providers
+    .filter(providerReadinessIsChoice)
+    .map((provider) => provider.provider)
+    .filter((id) => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    })
+    .sort((left, right) => providerChoiceSortValue(left) - providerChoiceSortValue(right));
+}
+
+function providerLabel(id: ProviderId): string {
+  const knownLabel = PROVIDER_LABELS[id];
+  if (knownLabel) return knownLabel;
+  return id
+    .split("-")
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(" ") || id;
+}
+
 function toolReadinessLabel(tool: { ready: boolean; reason: string | null; test?: string } | null): string {
   if (!tool) return "Not checked";
   if (tool.ready) return tool.test === "passed" ? "Ready · test passed" : `Ready · ${tool.test}`;
@@ -82,7 +123,8 @@ export function providerLaunchBlockReason(
 ): string | null {
   if (!readiness) return "Provider readiness is still loading.";
   const provider = providerInfo(readiness, state.providerId, state.transport);
-  if (provider && !provider.ready) return provider.reason_code || `${PROVIDER_LABELS[state.providerId]} is unavailable`;
+  if (!provider) return `${providerLabel(state.providerId)} is not ready.`;
+  if (!provider.ready) return provider.reason_code || `${providerLabel(state.providerId)} is unavailable`;
   if (!providerToolOrderIsCanonical(state.browserTools)) {
     return "Browser tool order is not executable until backend ordering support lands.";
   }
@@ -106,6 +148,7 @@ export function ProviderToolControl({
     .filter((tool) => tool.enabled)
     .map((tool) => TOOL_LABELS[tool.id]);
   const modelOptions = provider?.model_aliases ?? [];
+  const choices = useMemo(() => providerChoices(readiness), [readiness]);
   const selectedModelAlias = modelOptions.includes(state.modelAlias) ? state.modelAlias : "";
   const sectionSuffix = compactId === "full" ? "-full" : "";
 
@@ -164,7 +207,7 @@ export function ProviderToolControl({
       >
         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${blockReason ? "bg-amber-400" : "bg-emerald-400"}`} />
         <span className="min-w-0 flex-1 truncate">
-          {PROVIDER_LABELS[state.providerId]} · {state.transport} · {selectedModelAlias || "default"} · {activeTools.join(" > ") || "No tools"}
+          {providerLabel(state.providerId)} · {state.transport} · {selectedModelAlias || "default"} · {activeTools.join(" > ") || "No tools"}
         </span>
       </div>
       {blockReason ? (
@@ -204,9 +247,10 @@ export function ProviderToolControl({
           data-testid={`provider-tool-provider-section${sectionSuffix}`}
         >
           <div className="grid grid-cols-2 gap-1" role="radiogroup" aria-label="Provider">
-            {PROVIDER_CHOICES.map((id) => {
+            {choices.map((id) => {
               const transport = providerDefaultTransport(id);
               const info = providerInfo(readiness, id, transport);
+              const label = providerLabel(id);
               return (
                 <label key={id} className="flex min-w-0 items-center gap-1 rounded bg-[#17171b] px-1.5 py-1">
                   <input
@@ -214,10 +258,10 @@ export function ProviderToolControl({
                     name={`provider-${compactId}`}
                     checked={state.providerId === id}
                     onChange={() => setProvider(id)}
-                    disabled={disabled || id === "antigravity" || Boolean(info && !info.ready)}
-                    aria-label={PROVIDER_LABELS[id]}
+                    disabled={disabled || info?.ready !== true}
+                    aria-label={label}
                   />
-                  <span className="min-w-0 flex-1 truncate">{PROVIDER_LABELS[id]}</span>
+                  <span className="min-w-0 flex-1 truncate">{label}</span>
                   <span className={info?.ready ? "text-emerald-300" : "text-amber-300"}>
                     {info?.ready ? "Ready" : "Off"}
                   </span>
@@ -250,7 +294,7 @@ export function ProviderToolControl({
               <option value="ordered-fallback">ordered-fallback</option>
             </select>
           </label>
-          {readiness?.providers.map((item) => !item.ready && item.reason_code ? (
+          {readiness?.providers.filter(providerReadinessIsDisplayable).map((item) => !item.ready && item.reason_code ? (
             <div key={`${item.provider}:${item.transport}`} className="mt-1 truncate text-amber-300">{item.reason_code}</div>
           ) : null)}
         </div>

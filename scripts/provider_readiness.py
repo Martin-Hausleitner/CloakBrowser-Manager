@@ -13,14 +13,11 @@ from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-PROVIDER_TARGETS: tuple[tuple[str, str], ...] = (
+CLI_PROVIDER_TARGETS: tuple[tuple[str, str], ...] = (
     ("antigravity", "cli"),
     ("grok", "cli"),
-    ("codex", "acp"),
-    ("claude", "acp"),
-    ("cursor", "acp"),
-    ("grok", "acp"),
-    ("opencode", "acp"),
+)
+OPENAI_COMPATIBLE_PROVIDER_TARGETS: tuple[tuple[str, str], ...] = (
     ("grok", "openai-compatible"),
 )
 ACP_PROVIDER_TO_AGENT: dict[str, str] = {
@@ -30,6 +27,11 @@ ACP_PROVIDER_TO_AGENT: dict[str, str] = {
     "grok": "grok-build",
     "opencode": "opencode",
 }
+PROVIDER_TARGETS: tuple[tuple[str, str], ...] = (
+    *CLI_PROVIDER_TARGETS,
+    *((provider, "acp") for provider in ACP_PROVIDER_TO_AGENT),
+    *OPENAI_COMPATIBLE_PROVIDER_TARGETS,
+)
 REQUIRED_GROK_MODEL = "grok-build-0.1"
 MAX_MODEL_ALIASES = 16
 MAX_MODEL_ALIAS_LENGTH = 96
@@ -155,8 +157,48 @@ def probe_grok_cli(
     return unavailable("grok", "cli", "protocol_unavailable")
 
 
-def acp_agent_for_provider(provider: str) -> str | None:
-    return ACP_PROVIDER_TO_AGENT.get(str(provider or "").strip())
+def acp_provider_for_agent(agent: str) -> str:
+    value = str(agent or "").strip()
+    if value == "grok-build":
+        return "grok"
+    return value
+
+
+def acp_provider_agent_map(agents: list[str] | tuple[str, ...]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for agent in sorted(str(item) for item in agents):
+        provider = acp_provider_for_agent(agent)
+        if provider == "grok" and agent == "grok-build":
+            mapping[provider] = agent
+        else:
+            mapping.setdefault(provider, agent)
+    return mapping
+
+
+def provider_targets_for_agents(agents: list[str] | tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    mapping = acp_provider_agent_map(agents)
+    providers: list[str] = []
+    for provider in ACP_PROVIDER_TO_AGENT:
+        if provider in mapping:
+            providers.append(provider)
+    providers.extend(
+        provider for provider in sorted(mapping) if provider not in providers
+    )
+    acp_targets = tuple((provider, "acp") for provider in providers)
+    return (
+        *CLI_PROVIDER_TARGETS,
+        *acp_targets,
+        *OPENAI_COMPATIBLE_PROVIDER_TARGETS,
+    )
+
+def acp_agent_for_provider(
+    provider: str,
+    agents: list[str] | tuple[str, ...] | None = None,
+) -> str | None:
+    value = str(provider or "").strip()
+    if agents is not None:
+        return acp_provider_agent_map(agents).get(value)
+    return ACP_PROVIDER_TO_AGENT.get(value)
 
 
 def acp_provider_result_from_agent_preflight(
@@ -165,6 +207,13 @@ def acp_provider_result_from_agent_preflight(
 ) -> ProviderReadinessResult:
     if acp_agent_for_provider(provider) is None:
         return unavailable(provider, "acp", "protocol_unavailable")
+    return acp_provider_result_from_discovered_agent_preflight(provider, result)
+
+
+def acp_provider_result_from_discovered_agent_preflight(
+    provider: str,
+    result: dict[str, Any] | None,
+) -> ProviderReadinessResult:
     if not result:
         return unavailable(provider, "acp", "protocol_unavailable")
     if bool(result.get("ready")):
@@ -216,6 +265,8 @@ def probe_provider_target(
     if (provider, transport) == ("grok", "cli"):
         return probe_grok_cli()
     if transport == "acp":
+        if acp_result is not None:
+            return acp_provider_result_from_discovered_agent_preflight(provider, acp_result)
         return acp_provider_result_from_agent_preflight(provider, acp_result)
     if (provider, transport) == ("grok", "openai-compatible"):
         return probe_grok_openai_compatible(

@@ -101,6 +101,45 @@ def test_provider_preflight_accepts_only_exact_public_ready_contract():
     assert ready.model_aliases == ["grok-build-0.1", "x" * 96]
 
 
+def test_provider_preflight_accepts_safe_dynamic_acp_provider_id():
+    ready = WorkerProviderPreflightRequest(
+        provider="gemini",
+        transport="acp",
+        ready=True,
+        reason_code="ready",
+        model_aliases=["gemini-2.5-pro", "https://secret.local"],
+    )
+
+    assert ready.provider == "gemini"
+    assert ready.transport == "acp"
+    assert ready.model_aliases == ["gemini-2.5-pro"]
+
+
+@pytest.mark.parametrize(
+    "provider",
+    ["Gemini", "gemini/../../token", "-gemini", "g" * 65, "gemini token"],
+)
+def test_provider_preflight_rejects_malicious_dynamic_provider_ids(provider: str):
+    with pytest.raises(ValidationError):
+        WorkerProviderPreflightRequest(
+            provider=provider,
+            transport="acp",
+            ready=False,
+            reason_code="protocol_unavailable",
+        )
+
+
+@pytest.mark.parametrize("transport", ["cli", "openai-compatible"])
+def test_provider_preflight_rejects_arbitrary_dynamic_direct_targets(transport: str):
+    with pytest.raises(ValidationError):
+        WorkerProviderPreflightRequest(
+            provider="gemini",
+            transport=transport,
+            ready=False,
+            reason_code="protocol_unavailable",
+        )
+
+
 @pytest.mark.parametrize(
     ("provider", "agent"),
     [
@@ -119,7 +158,8 @@ def test_acp_provider_mapping_is_exact_for_built_in_registry(
 
 def test_acp_provider_mapping_does_not_include_antigravity_or_unknowns():
     assert acp_agent_for_provider("antigravity") is None
-    assert acp_agent_for_provider("shell") is None
+    assert acp_agent_for_provider("shell") == "shell"
+    assert acp_agent_for_provider("Gemini") is None
 
 
 @pytest.mark.parametrize(
@@ -408,6 +448,41 @@ def test_task_run_routing_contract_accepts_exact_acp_provider_agent_mapping(
     assert run.provider is not None
     assert run.provider.id == provider
     assert run.agent == agent
+
+
+def test_task_run_routing_contract_accepts_dynamic_acp_provider_agent_mapping():
+    run = TaskRunCreate(
+        harness="acpx",
+        agent="gemini",
+        task="Inspect",
+        profile_id="profile-1",
+        provider={"id": "gemini", "transport": "acp"},
+        browser_tools=[
+            {"id": "unbrowse"},
+            {"id": "stagehand"},
+            {"id": "browser-harness"},
+        ],
+    )
+
+    assert run.provider is not None
+    assert run.provider.id == "gemini"
+    assert run.agent == "gemini"
+
+
+def test_task_run_routing_contract_rejects_dynamic_acp_provider_agent_mismatch():
+    with pytest.raises(ValidationError, match="provider and agent to match"):
+        TaskRunCreate(
+            harness="acpx",
+            agent="codex",
+            task="Inspect",
+            profile_id="profile-1",
+            provider={"id": "gemini", "transport": "acp"},
+            browser_tools=[
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+        )
 
 
 @pytest.mark.parametrize(

@@ -39,9 +39,11 @@ Harness = Literal[
     "stagehand",
     "acpx",
 ]
-AcpxAgent = Literal["codex", "claude", "cursor", "grok-build", "opencode"]
-ProviderId = Literal["antigravity", "codex", "claude", "cursor", "grok", "opencode"]
+AcpxAgent = str
+ProviderId = str
 ProviderTransport = Literal["cli", "acp", "openai-compatible"]
+SAFE_PROVIDER_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,63}$"
+SAFE_PROVIDER_ID_RE = re.compile(SAFE_PROVIDER_ID_PATTERN)
 ProviderReadinessReason = Literal[
     "ready",
     "auth_required",
@@ -59,13 +61,7 @@ PROVIDER_READINESS_TARGETS: tuple[tuple[str, str], ...] = (
     ("opencode", "acp"),
     ("grok", "openai-compatible"),
 )
-ACP_PROVIDER_TO_AGENT: dict[str, AcpxAgent] = {
-    "codex": "codex",
-    "claude": "claude",
-    "cursor": "cursor",
-    "grok": "grok-build",
-    "opencode": "opencode",
-}
+ACP_LEGACY_PROVIDER_AGENTS: dict[str, AcpxAgent] = {"grok": "grok-build"}
 MAX_PROVIDER_MODEL_ALIASES = 16
 MAX_PROVIDER_MODEL_ALIAS_LENGTH = 96
 BrowserToolId = Literal["unbrowse", "stagehand", "browser-harness"]
@@ -1491,9 +1487,16 @@ _SELECTOR_FIELD_NAMES = frozenset({"selector"})
 _OPAQUE_FIELD_NAMES = frozenset({"artifact_id"})
 
 
+def is_safe_provider_id(value: str) -> bool:
+    return SAFE_PROVIDER_ID_RE.fullmatch(str(value or "")) is not None
+
+
 def acp_agent_for_provider(provider: str) -> AcpxAgent | None:
-    """Return the reviewed ACPX agent for a normalized ACP provider id."""
-    return ACP_PROVIDER_TO_AGENT.get(str(provider or "").strip())
+    """Return the expected ACPX agent for a normalized ACP provider id."""
+    provider_id = str(provider or "").strip()
+    if provider_id == "antigravity" or not is_safe_provider_id(provider_id):
+        return None
+    return ACP_LEGACY_PROVIDER_AGENTS.get(provider_id, provider_id)
 
 
 class TaskProviderConfig(BaseModel):
@@ -1502,6 +1505,14 @@ class TaskProviderConfig(BaseModel):
     id: ProviderId
     transport: ProviderTransport
     model_alias: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @field_validator("id")
+    @classmethod
+    def validate_provider_id(cls, value: str) -> str:
+        provider_id = str(value or "").strip()
+        if not is_safe_provider_id(provider_id):
+            raise ValueError("provider id is invalid")
+        return provider_id
 
 
 class BrowserToolConfig(BaseModel):
@@ -1534,6 +1545,16 @@ class TaskRunCreate(BaseModel):
     provider: TaskProviderConfig | None = None
     browser_tools: list[BrowserToolConfig] = Field(default_factory=list)
     routing_policy: TaskRoutingPolicy | None = None
+
+    @field_validator("agent")
+    @classmethod
+    def validate_agent_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        agent = str(value or "").strip()
+        if not is_safe_provider_id(agent):
+            raise ValueError("agent id is invalid")
+        return agent
 
     @model_validator(mode="after")
     def validate_agent_for_harness(self):
@@ -1728,6 +1749,14 @@ class WorkerAcpxPreflightRequest(BaseModel):
     ready: bool
     reason_code: AcpxPreflightReason
 
+    @field_validator("agent")
+    @classmethod
+    def validate_agent_id(cls, value: str) -> str:
+        agent = str(value or "").strip()
+        if not is_safe_provider_id(agent):
+            raise ValueError("agent id is invalid")
+        return agent
+
     @model_validator(mode="after")
     def validate_ready_reason(self):
         if self.ready and self.reason_code != "ok":
@@ -1768,6 +1797,14 @@ class WorkerProviderPreflightRequest(BaseModel):
     reason_code: ProviderReadinessReason
     model_aliases: list[str] = Field(default_factory=list)
 
+    @field_validator("provider")
+    @classmethod
+    def validate_provider_id(cls, value: str) -> str:
+        provider_id = str(value or "").strip()
+        if not is_safe_provider_id(provider_id):
+            raise ValueError("provider id is invalid")
+        return provider_id
+
     @field_validator("model_aliases", mode="before")
     @classmethod
     def sanitize_model_aliases(cls, value):
@@ -1780,7 +1817,10 @@ class WorkerProviderPreflightRequest(BaseModel):
     @model_validator(mode="after")
     def validate_ready_reason_and_target(self):
         target = (self.provider, self.transport)
-        if target not in PROVIDER_READINESS_TARGETS:
+        if self.transport == "acp":
+            if acp_agent_for_provider(self.provider) is None:
+                raise ValueError("unsupported provider transport target")
+        elif target not in PROVIDER_READINESS_TARGETS:
             raise ValueError("unsupported provider transport target")
         if self.ready and self.reason_code != "ready":
             raise ValueError("ready provider preflight requires reason_code=ready")
@@ -1818,6 +1858,14 @@ class ProviderReadinessTargetResponse(BaseModel):
     reason_code: ProviderReadinessReason
     checked_at: str | None = None
     model_aliases: list[str] = Field(default_factory=list)
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider_id(cls, value: str) -> str:
+        provider_id = str(value or "").strip()
+        if not is_safe_provider_id(provider_id):
+            raise ValueError("provider id is invalid")
+        return provider_id
 
 
 class ProviderReadinessResponse(BaseModel):

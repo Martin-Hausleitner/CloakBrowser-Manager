@@ -87,6 +87,37 @@ def test_routing_contract_accepts_acp_provider_agent_mappings(provider_id, agent
     assert contract.provider == {"id": provider_id, "transport": "acp"}
 
 
+def test_routing_contract_accepts_dynamic_acp_provider_agent_mapping():
+    contract = routing_contract_from_claim(
+        normalized_claim(
+            provider={"id": "gemini", "transport": "acp"},
+            agent="gemini",
+        )
+    )
+
+    assert contract.provider == {"id": "gemini", "transport": "acp"}
+
+
+def test_routing_contract_rejects_dynamic_acp_provider_agent_mismatch():
+    with pytest.raises(ValueError):
+        routing_contract_from_claim(
+            normalized_claim(
+                provider={"id": "gemini", "transport": "acp"},
+                agent="codex",
+            )
+        )
+
+
+def test_routing_contract_rejects_malicious_dynamic_provider_ids():
+    with pytest.raises(ValueError):
+        routing_contract_from_claim(
+            normalized_claim(
+                provider={"id": "gemini/../../token", "transport": "acp"},
+                agent="gemini/../../token",
+            )
+        )
+
+
 def test_routing_contract_validates_capability_provider_agent_mapping():
     capability = normalized_claim(
         provider={"id": "claude", "transport": "acp"},
@@ -138,7 +169,7 @@ def test_routing_contract_rejects_acp_provider_agent_mismatches(provider, agent)
     [
         {"id": "antigravity", "transport": "cli"},
         {"id": "codex", "transport": "cli"},
-        {"id": "bogus", "transport": "acp"},
+        {"id": "gemini/../../token", "transport": "acp"},
         {"id": "cursor", "transport": "openai-compatible"},
     ],
 )

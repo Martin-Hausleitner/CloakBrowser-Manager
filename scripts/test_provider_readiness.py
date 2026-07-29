@@ -12,6 +12,7 @@ from scripts.provider_readiness import (
     ProviderReadinessResult,
     acp_agent_for_provider,
     acp_provider_result_from_agent_preflight,
+    provider_targets_for_agents,
     probe_antigravity_cli,
     probe_grok_cli,
     probe_grok_openai_compatible,
@@ -56,6 +57,47 @@ def test_provider_targets_include_exact_phase1_matrix():
 )
 def test_acp_agent_for_provider_is_exact(provider: str, agent: str):
     assert acp_agent_for_provider(provider) == agent
+
+
+def test_dynamic_provider_targets_include_arbitrary_acp_agents_with_grok_alias():
+    assert provider_targets_for_agents(("gemini", "pi", "grok-build", "custom.agent")) == (
+        ("antigravity", "cli"),
+        ("grok", "cli"),
+        ("grok", "acp"),
+        ("custom.agent", "acp"),
+        ("gemini", "acp"),
+        ("pi", "acp"),
+        ("grok", "openai-compatible"),
+    )
+    assert acp_agent_for_provider("custom.agent", ("custom.agent",)) == "custom.agent"
+    assert acp_agent_for_provider("grok", ("grok-build", "grok")) == "grok-build"
+
+
+@pytest.mark.parametrize(
+    ("provider", "payload", "expected_ready", "expected_reason", "expected_aliases"),
+    [
+        ("gemini", {"ready": True, "reason_code": "ok"}, True, "ready", []),
+        ("gemini", {"ready": False, "reason_code": "auth_required"}, False, "auth_required", []),
+        ("gemini", {"ready": False, "reason_code": "adapter_unavailable"}, False, "protocol_unavailable", []),
+        ("grok", {"ready": True, "reason_code": "ok"}, True, "ready", ["grok-build-0.1"]),
+    ],
+)
+def test_provider_target_accepts_discovered_acp_preflight_provider(
+    provider: str,
+    payload: dict[str, object],
+    expected_ready: bool,
+    expected_reason: str,
+    expected_aliases: list[str],
+):
+    result = probe_provider_target(provider, "acp", acp_result=payload)
+
+    assert result == ProviderReadinessResult(
+        provider=provider,
+        transport="acp",
+        ready=expected_ready,
+        reason_code=expected_reason,
+        model_aliases=expected_aliases,
+    )
 
 
 @pytest.mark.parametrize(

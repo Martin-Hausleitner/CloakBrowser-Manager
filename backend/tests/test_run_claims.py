@@ -329,7 +329,7 @@ def test_acpx_preflight_is_agent_scoped_redacted_and_expires(client_access: Test
     [
         {"agent": "cursor", "ready": True, "reason_code": "auth_required"},
         {"agent": "cursor", "ready": False, "reason_code": "ok"},
-        {"agent": "unknown", "ready": True, "reason_code": "ok"},
+        {"agent": "../cursor", "ready": True, "reason_code": "ok"},
         {
             "agent": "cursor",
             "ready": True,

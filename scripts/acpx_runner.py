@@ -19,9 +19,24 @@ ACPX_VERSION = "0.12.1"
 ACP_SDK_CONTRACT_BASELINE = "1.2.1"
 EVENT_VERSION = 1
 MAX_EVENT_BYTES = 1_048_576
-SUPPORTED_AGENTS = frozenset(
+LEGACY_SUPPORTED_AGENTS = frozenset(
     {"codex", "claude", "cursor", "grok-build", "opencode"}
 )
+ACPX_META_COMMANDS = frozenset(
+    {
+        "prompt",
+        "exec",
+        "cancel",
+        "set-mode",
+        "set",
+        "status",
+        "sessions",
+        "config",
+        "compare",
+        "flow",
+    }
+)
+_SAFE_AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 _SESSION_RE = re.compile(r"^cbm-[a-f0-9]{32}$")
 _SECRET_PATTERNS = (
@@ -35,6 +50,62 @@ _SENSITIVE_ARG_RE = re.compile(
     r"(?i)(?:authorization|bearer|password|secret|api[_-]?key|token|cookie|credential)"
 )
 
+
+def parse_acpx_configured_agent_ids(payload: Any) -> tuple[str, ...]:
+    """Extract only safe configured agent names from `acpx config show` JSON."""
+    if not isinstance(payload, dict):
+        raise ValueError("ACPX config JSON must be an object")
+    raw_agents = payload.get("agents", {})
+    names: list[str] = []
+    if raw_agents in (None, {}):
+        return ()
+    if isinstance(raw_agents, dict):
+        names = [str(name) for name in raw_agents]
+    elif isinstance(raw_agents, list):
+        for item in raw_agents:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise ValueError("ACPX config agents must expose safe names")
+            names.append(str(item["name"]))
+    else:
+        raise ValueError("ACPX config agents must be an object or array")
+    return tuple(_unique_sorted(validate_acpx_agent_id(name) for name in names))
+
+
+def parse_acpx_advertised_agent_ids(help_text: str) -> tuple[str, ...]:
+    """Parse safe ACP subcommand names advertised by ACPX help output."""
+    names: list[str] = []
+    in_commands = False
+    for line in str(help_text or "").splitlines():
+        if not in_commands:
+            if line == "Commands:":
+                in_commands = True
+            continue
+        if line and not line[0].isspace():
+            break
+        stripped = line.strip()
+        if not stripped or stripped.startswith("-"):
+            continue
+        match = re.match(r"^([a-z0-9][a-z0-9._-]{0,63})(?:\s|$)", stripped)
+        if match is None:
+            continue
+        name = match.group(1)
+        if name in ACPX_META_COMMANDS:
+            continue
+        names.append(name)
+    return tuple(_unique_sorted(names))
+
+
+def discover_acpx_agent_ids(*, help_text: str, config_payload: Any) -> tuple[str, ...]:
+    """Merge advertised ACP agents with safe operator-configured agent names."""
+    discovered = set(parse_acpx_advertised_agent_ids(help_text))
+    discovered.update(parse_acpx_configured_agent_ids(config_payload))
+    if not discovered:
+        raise ValueError("ACPX discovery found no safe ACP agents")
+    return tuple(_unique_sorted(discovered))
+
+
+def _unique_sorted(values: Any) -> list[str]:
+    return sorted(dict.fromkeys(str(value) for value in values))
 
 def validate_acpx_version(output: str) -> str:
     """Accept only the reviewed ACPX runtime version."""
@@ -53,11 +124,18 @@ def derive_session_name(task_session_id: str) -> str:
     return f"cbm-{hashlib.sha256(value.encode('utf-8')).hexdigest()[:32]}"
 
 
-def _validate_agent(agent: str) -> str:
+def validate_acpx_agent_id(agent: str) -> str:
+    """Accept one safe ACPX ACP subcommand token; reject ACPX meta commands."""
     value = str(agent or "").strip()
-    if value not in SUPPORTED_AGENTS:
-        raise ValueError(f"unsupported ACP agent: {value or 'empty'}")
+    if _SAFE_AGENT_RE.fullmatch(value) is None:
+        raise ValueError(f"unsafe ACP agent id: {value or 'empty'}")
+    if value in ACPX_META_COMMANDS:
+        raise ValueError(f"unsupported ACP agent: {value}")
     return value
+
+
+def _validate_agent(agent: str) -> str:
+    return validate_acpx_agent_id(agent)
 
 
 def _validate_cwd(cwd: Path) -> Path:
@@ -572,7 +650,12 @@ def map_acpx_event(event: dict[str, Any]) -> dict[str, Any]:
 __all__ = [
     "ACPX_VERSION",
     "ACP_SDK_CONTRACT_BASELINE",
-    "SUPPORTED_AGENTS",
+    "ACPX_META_COMMANDS",
+    "LEGACY_SUPPORTED_AGENTS",
+    "discover_acpx_agent_ids",
+    "parse_acpx_advertised_agent_ids",
+    "parse_acpx_configured_agent_ids",
+    "validate_acpx_agent_id",
     "build_close_command",
     "build_ensure_command",
     "build_preflight_close_command",

@@ -132,6 +132,33 @@ def test_provider_readiness_reports_exact_matrix_and_redacted_aliases(
     assert stale_targets[("grok", "openai-compatible")]["model_aliases"] == []
 
 
+def test_provider_readiness_reports_dynamic_acp_provider_rows(client_access: TestClient):
+    reported = client_access.post(
+        "/internal/providers/readiness",
+        headers=worker_headers(),
+        json={
+            "provider": "gemini",
+            "transport": "acp",
+            "ready": True,
+            "reason_code": "ready",
+            "model_aliases": ["gemini-2.5-pro", "Bearer secret"],
+        },
+    )
+    assert reported.status_code == 204, reported.text
+
+    response = client_access.get("/api/providers/readiness", headers=bootstrap_headers())
+    assert response.status_code == 200
+    body = response.json()
+    targets = {(item["provider"], item["transport"]): item for item in body["providers"]}
+    assert targets[("gemini", "acp")]["ready"] is True
+    assert targets[("gemini", "acp")]["state"] == "ready"
+    assert targets[("gemini", "acp")]["model_aliases"] == ["gemini-2.5-pro"]
+    assert ("codex", "acp") in targets
+    serialized = json.dumps(body)
+    assert "worker_id" not in serialized
+    assert "Bearer" not in serialized
+
+
 def test_provider_readiness_auth_and_payload_are_strict(client_access: TestClient):
     payload = {
         "provider": "grok",

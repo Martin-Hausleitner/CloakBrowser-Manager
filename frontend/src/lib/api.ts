@@ -14,10 +14,18 @@ export type ProfileHarness =
   | "acpx";
 
 export type OrcaAgentCli = "cursor-agent" | "grok" | "agy" | "codex";
-export type AcpxAgent = "codex" | "claude" | "cursor" | "grok-build" | "opencode";
-export type ProviderId = "antigravity" | "codex" | "claude" | "cursor" | "grok" | "opencode";
+export type KnownAcpxAgent = "codex" | "claude" | "cursor" | "grok-build" | "opencode";
+export type AcpxAgent = KnownAcpxAgent | (string & { readonly __acpxAgent?: never });
+export type KnownProviderId = "antigravity" | "codex" | "claude" | "cursor" | "grok" | "opencode";
+export type ProviderId = KnownProviderId | (string & { readonly __providerId?: never });
 export type ProviderTransport = "cli" | "acp" | "openai-compatible";
 export type BrowserToolId = "unbrowse" | "stagehand" | "browser-harness";
+
+const SAFE_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export function isSafeProviderId(value: unknown): value is ProviderId {
+  return typeof value === "string" && SAFE_PROVIDER_ID_PATTERN.test(value);
+}
 
 export interface BrowserToolSelection {
   id: BrowserToolId;

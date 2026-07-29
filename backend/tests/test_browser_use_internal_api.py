@@ -287,6 +287,54 @@ def test_antigravity_acpx_grok_run_persists_router_contract_and_claims_in_order(
     assert capability_body["routing_policy"] == routing_policy
 
 
+def test_capability_rechecks_dynamic_acp_readiness_for_bound_worker(
+    client_access: TestClient,
+):
+    from backend import main
+
+    now = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+    monkey_clock = lambda: now
+    main.worker_runtime_service._clock = monkey_clock
+    profile = db.create_profile("Dynamic ACPX", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = db.create_task_session(profile["id"], "alpha", "bootstrap")
+    seed_provider_preflight(client_access, provider="gemini", transport="acp")
+
+    created = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        headers=bootstrap_headers(),
+        json={
+            "harness": "acpx",
+            "agent": "gemini",
+            "task": "Navigate",
+            "profile_id": profile["id"],
+            "allowed_origins": ["https://example.com"],
+            "max_steps": 20,
+            "timeout_seconds": 300,
+            "provider": {"id": "gemini", "transport": "acp"},
+            "browser_tools": [
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+            "routing_policy": {
+                "mode": "ordered-fallback",
+                "allow_second_browser": False,
+                "max_tool_attempts": 3,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    claimed = client_access.post("/internal/task-runs/claim?harness=acpx", headers=worker_headers())
+    assert claimed.status_code == 200, claimed.text
+    main.worker_runtime_service._clock = lambda: now + timedelta(seconds=301)
+
+    cap = issue_capability(client_access, created.json()["id"])
+
+    assert cap.status_code == 404
+    assert "cbm_run_" not in cap.text
+
+
 def test_capability_waiting_health_no_token(client_access: TestClient):
     profile = db.create_profile("Waiting", sandbox_id="alpha")
     db.upsert_profile_health(

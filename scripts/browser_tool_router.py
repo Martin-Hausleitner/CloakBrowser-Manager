@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,13 +16,8 @@ from scripts.cbm_browser_ctl import redact_error_message
 
 ROUTING_BROWSER_TOOL_ORDER = ("unbrowse", "stagehand", "browser-harness")
 STAGEHAND_SEMANTIC_ACTIONS = frozenset({"act", "extract", "observe", "agent"})
-ACP_PROVIDER_AGENTS = {
-    "codex": "codex",
-    "claude": "claude",
-    "cursor": "cursor",
-    "grok": "grok-build",
-    "opencode": "opencode",
-}
+SAFE_PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+ACP_LEGACY_PROVIDER_AGENTS = {"grok": "grok-build"}
 OPENAI_COMPATIBLE_PROVIDER_AGENTS = {"grok": "grok-build"}
 MAX_PUBLIC_PAYLOAD_DEPTH = 6
 MAX_PUBLIC_PAYLOAD_ITEMS = 64
@@ -348,9 +344,15 @@ def _routing_source(
     return claim
 
 
+def _is_safe_provider_id(value: str) -> bool:
+    return SAFE_PROVIDER_ID_RE.fullmatch(str(value or "")) is not None
+
+
 def _expected_provider_agent(provider_id: str, transport: str) -> str | None:
     if transport == "acp":
-        return ACP_PROVIDER_AGENTS.get(provider_id)
+        if provider_id == "antigravity" or not _is_safe_provider_id(provider_id):
+            return None
+        return ACP_LEGACY_PROVIDER_AGENTS.get(provider_id, provider_id)
     if transport == "openai-compatible":
         return OPENAI_COMPATIBLE_PROVIDER_AGENTS.get(provider_id)
     return None

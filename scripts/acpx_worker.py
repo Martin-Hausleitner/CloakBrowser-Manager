@@ -25,7 +25,7 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import urlencode, urlparse
 
 from scripts.acpx_runner import (
-    SUPPORTED_AGENTS,
+    LEGACY_SUPPORTED_AGENTS,
     build_close_command,
     build_ensure_command,
     build_preflight_close_command,
@@ -33,6 +33,7 @@ from scripts.acpx_runner import (
     build_prompt_command,
     classify_acpx_control_failure,
     derive_session_name,
+    discover_acpx_agent_ids,
     map_acpx_event,
     parse_acpx_event,
     parse_acpx_frame,
@@ -40,6 +41,7 @@ from scripts.acpx_runner import (
     validate_mcp_config,
     validate_permission_policy,
     validate_preflight_mcp_config,
+    validate_acpx_agent_id,
 )
 from scripts.browser_use_worker import (
     ManagerClient,
@@ -64,10 +66,10 @@ from scripts.openai_compatible_toolloop import (
     run_openai_compatible_tool_loop,
 )
 from scripts.provider_readiness import (
-    PROVIDER_TARGETS,
     ProviderReadinessResult,
     acp_agent_for_provider,
     probe_provider_target,
+    provider_targets_for_agents,
 )
 
 logger = logging.getLogger(__name__)
@@ -353,6 +355,31 @@ class AcpxRuntime:
             validate_acpx_version(stdout.decode("utf-8", errors="replace"))
         except ValueError as exc:
             raise AcpxRuntimeError(str(exc), reason_code="version_mismatch") from exc
+
+    async def discover_agents(self) -> tuple[str, ...]:
+        await self.validate_version()
+        try:
+            help_stdout = await self._run_control([self.config.acpx_executable, "--help"])
+            config_stdout = await self._run_control(
+                [self.config.acpx_executable, "config", "show", "--format", "json"]
+            )
+            config_payload = json.loads(config_stdout.decode("utf-8", errors="replace"))
+            return discover_acpx_agent_ids(
+                help_text=help_stdout.decode("utf-8", errors="replace"),
+                config_payload=config_payload,
+            )
+        except AcpxRuntimeError:
+            raise
+        except json.JSONDecodeError as exc:
+            raise AcpxRuntimeError(
+                "ACPX config discovery failed",
+                reason_code="protocol_error",
+            ) from exc
+        except ValueError as exc:
+            raise AcpxRuntimeError(
+                str(exc),
+                reason_code="protocol_error",
+            ) from exc
 
     async def ensure_session(
         self,
@@ -955,9 +982,9 @@ class AcpxWorker:
         agent_results: dict[str, dict[str, Any]] = {}
         try:
             try:
-                await self.runtime.validate_version()
+                discovered_agents = await self.runtime.discover_agents()
             except AcpxRuntimeError as exc:
-                for agent in sorted(SUPPORTED_AGENTS):
+                for agent in sorted(LEGACY_SUPPORTED_AGENTS):
                     result = {"ready": False, "reason_code": exc.reason_code}
                     agent_results[agent] = result
                     await asyncio.to_thread(
@@ -966,10 +993,10 @@ class AcpxWorker:
                         ready=bool(result["ready"]),
                         reason_code=str(result["reason_code"]),
                     )
-                await self._report_provider_preflights(agent_results)
+                await self._report_provider_preflights(agent_results, agents=())
                 return
             except Exception:  # noqa: BLE001 - publish only redacted reason codes
-                for agent in sorted(SUPPORTED_AGENTS):
+                for agent in sorted(LEGACY_SUPPORTED_AGENTS):
                     result = {"ready": False, "reason_code": "protocol_error"}
                     agent_results[agent] = result
                     await asyncio.to_thread(
@@ -978,10 +1005,10 @@ class AcpxWorker:
                         ready=bool(result["ready"]),
                         reason_code=str(result["reason_code"]),
                     )
-                await self._report_provider_preflights(agent_results)
+                await self._report_provider_preflights(agent_results, agents=())
                 return
 
-            for agent in sorted(SUPPORTED_AGENTS):
+            for agent in discovered_agents:
                 session_name = derive_session_name(
                     f"preflight-v2:{self.config.worker_id}:{self.config.worktree}:{agent}"
                 )
@@ -998,18 +1025,21 @@ class AcpxWorker:
                     ready=ready,
                     reason_code=reason_code,
                 )
-            await self._report_provider_preflights(agent_results)
+            await self._report_provider_preflights(agent_results, agents=discovered_agents)
         finally:
             mcp_config.unlink(missing_ok=True)
 
     async def _report_provider_preflights(
         self,
         agent_results: dict[str, dict[str, Any]],
+        *,
+        agents: tuple[str, ...] | list[str] | None = None,
     ) -> None:
-        for provider, transport in PROVIDER_TARGETS:
+        agent_list = tuple(agents if agents is not None else tuple(agent_results))
+        for provider, transport in provider_targets_for_agents(agent_list):
             acp_result = None
             if transport == "acp":
-                agent = acp_agent_for_provider(provider)
+                agent = acp_agent_for_provider(provider, agent_list)
                 acp_result = agent_results.get(agent) if agent else None
             try:
                 kwargs: dict[str, Any] = {"acp_result": acp_result}
@@ -1040,13 +1070,8 @@ class AcpxWorker:
 
     async def execute_claim(self, claim: dict[str, Any]) -> dict[str, str]:
         run_id = str(claim.get("id") or "")
-        agent = claim.get("agent")
-        if (
-            not run_id
-            or claim.get("harness") != SUPPORTED_HARNESS
-            or agent not in SUPPORTED_AGENTS
-            or not claim.get("task_session_id")
-        ):
+        raw_agent = claim.get("agent")
+        if not run_id or claim.get("harness") != SUPPORTED_HARNESS or not claim.get("task_session_id"):
             if run_id:
                 await asyncio.to_thread(
                     self.client.fail,
@@ -1054,6 +1079,20 @@ class AcpxWorker:
                     error_code="internal_error",
                     message="invalid ACPX claim",
                 )
+            return {"status": "failed"}
+        try:
+            agent = validate_acpx_agent_id(str(raw_agent or ""))
+            discovered_agents = await self.runtime.discover_agents()
+        except Exception:  # noqa: BLE001 - discovery failures fail closed before execution
+            agent = str(raw_agent or "")
+            discovered_agents = ()
+        if agent not in discovered_agents:
+            await asyncio.to_thread(
+                self.client.fail,
+                run_id,
+                error_code="internal_error",
+                message="invalid ACPX claim",
+            )
             return {"status": "failed"}
 
         session_name = derive_session_name(
@@ -1125,7 +1164,6 @@ class AcpxWorker:
                     raise ToolLoopError("protocol_error", "final assistant content is empty")
                 result = await asyncio.to_thread(self.client.complete, run_id)
                 return {"status": str(result.get("status") or "succeeded")}
-            await self.runtime.validate_version()
             await self.runtime.ensure_session(
                 cwd=self.config.worktree,
                 agent=str(agent),

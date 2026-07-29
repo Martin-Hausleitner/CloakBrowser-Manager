@@ -15,11 +15,14 @@ from scripts.acpx_runner import (
     build_preflight_ensure_command,
     build_prompt_command,
     classify_acpx_control_failure,
+    discover_acpx_agent_ids,
     derive_session_name,
     map_acpx_event,
     map_acpx_jsonrpc_update,
+    parse_acpx_advertised_agent_ids,
     parse_acpx_event,
     parse_acpx_frame,
+    validate_acpx_agent_id,
     validate_acpx_version,
     validate_mcp_config,
     validate_permission_policy,
@@ -87,6 +90,124 @@ def test_classify_acpx_control_failure_distinguishes_adapter_version_and_protoco
     raw: bytes, expected: str
 ):
     assert classify_acpx_control_failure(raw) == expected
+
+
+def test_discover_acpx_agent_ids_merges_advertised_and_configured_safe_names():
+    help_text = """
+Commands:
+  codex        Start Codex ACP
+  gemini       Start Gemini ACP
+  pi           Start Pi ACP
+  prompt       Meta prompt command
+  config       Meta config command
+"""
+    config = {
+        "agents": {
+            "custom.agent": {"command": "secret-binary", "args": ["--token", "hidden"]},
+            "opencode": {"command": "opencode", "args": ["acp"]},
+        }
+    }
+
+    assert discover_acpx_agent_ids(help_text=help_text, config_payload=config) == (
+        "codex",
+        "custom.agent",
+        "gemini",
+        "opencode",
+        "pi",
+    )
+
+
+def test_parse_acpx_advertised_agent_ids_stops_before_examples_section():
+    help_text = """
+Usage: acpx [OPTIONS] <COMMAND>
+
+Commands:
+  codex        Start Codex ACP
+  gemini       Start Gemini ACP
+  pi           Start Pi ACP
+  prompt       Meta prompt command
+
+Examples:
+  acpx codex prompt --file -
+  acpx pi sessions list
+"""
+
+    assert parse_acpx_advertised_agent_ids(help_text) == ("codex", "gemini", "pi")
+
+
+@pytest.mark.parametrize(
+    "help_text",
+    [
+        """
+Usage: acpx [OPTIONS] <COMMAND>
+
+Examples:
+  acpx codex prompt --file -
+  gemini       Looks command-like but is not in Commands
+""",
+        """
+Usage: acpx [OPTIONS] <COMMAND>
+
+Commands
+  codex        Missing section colon
+
+Examples:
+  acpx gemini prompt --file -
+""",
+    ],
+)
+def test_discover_acpx_agent_ids_fails_closed_without_well_formed_commands_section(
+    help_text: str,
+):
+    with pytest.raises(ValueError, match="found no safe ACP agents"):
+        discover_acpx_agent_ids(help_text=help_text, config_payload={"agents": {}})
+
+
+def test_discover_acpx_agent_ids_rejects_malicious_config_names_and_meta_only_help():
+    help_text = """
+Commands:
+  prompt
+  sessions
+  set-mode
+"""
+    with pytest.raises(ValueError, match="unsafe ACP agent id"):
+        discover_acpx_agent_ids(
+            help_text=help_text,
+            config_payload={"agents": {"bad;rm -rf": {"command": "hidden"}}},
+        )
+    with pytest.raises(ValueError, match="found no safe ACP agents"):
+        discover_acpx_agent_ids(help_text=help_text, config_payload={"agents": {}})
+
+
+def test_dynamic_agent_builder_emits_agent_as_one_argv_token(tmp_path: Path):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"defaultAction":"deny"}', encoding="utf-8")
+    os.chmod(policy, 0o600)
+    mcp = tmp_path / "mcp.json"
+    mcp.write_text(
+        json.dumps(
+            {"mcpServers": [{"name": "cloakbrowser", "command": "cbm-mcp", "args": []}]}
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(mcp, 0o600)
+
+    command = build_prompt_command(
+        executable="/opt/acpx/bin/acpx",
+        cwd=tmp_path,
+        agent="custom.agent",
+        session_name="cbm-0123456789abcdef0123456789abcdef",
+        permission_policy=policy,
+        mcp_config=mcp,
+    )
+
+    assert "custom.agent" in command
+    assert command[command.index("custom.agent") + 1:] == [
+        "-s",
+        "cbm-0123456789abcdef0123456789abcdef",
+        "--file",
+        "-",
+    ]
 
 
 def test_version_is_pinned_and_rejects_drift():
@@ -215,16 +336,13 @@ def test_prompt_command_uses_stdin_and_fail_closed_permissions(tmp_path: Path):
     assert "cursor" in command
 
 
-def test_commands_reject_unsupported_agent_and_relative_worktree(tmp_path: Path):
+def test_commands_accept_safe_dynamic_agent_and_reject_meta_or_unsafe_ids(tmp_path: Path):
+    assert validate_acpx_agent_id("shell") == "shell"
+    assert validate_acpx_agent_id("custom.agent") == "custom.agent"
     with pytest.raises(ValueError, match="unsupported ACP agent"):
-        build_ensure_command(
-            executable="acpx",
-            cwd=tmp_path,
-            agent="shell",
-            session_name="cbm-0123456789abcdef0123456789abcdef",
-            permission_policy=tmp_path / "missing-policy",
-            mcp_config=tmp_path / "missing-mcp",
-        )
+        validate_acpx_agent_id("exec")
+    with pytest.raises(ValueError, match="unsafe ACP agent id"):
+        validate_acpx_agent_id("Shell")
     with pytest.raises(ValueError, match="absolute directory"):
         build_ensure_command(
             executable="acpx",

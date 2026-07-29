@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   api,
+  isSafeProviderId,
   type ProfileCreateData,
   type ProfileHarness,
   type TaskHarnessSession,
@@ -22,6 +23,18 @@ function jsonResponse(data: unknown, status = 200) {
 
 beforeEach(() => {
   mockFetch.mockReset();
+});
+
+describe("isSafeProviderId", () => {
+  it("matches backend provider id safety rules", () => {
+    expect(isSafeProviderId("custom.agent")).toBe(true);
+    expect(isSafeProviderId("custom_agent")).toBe(true);
+    expect(isSafeProviderId("1agent")).toBe(true);
+    expect(isSafeProviderId("bad<script>")).toBe(false);
+    expect(isSafeProviderId(" custom.agent")).toBe(false);
+    expect(isSafeProviderId("custom agent")).toBe(false);
+    expect(isSafeProviderId("custom/agent")).toBe(false);
+  });
 });
 
 describe("api.authStatus", () => {

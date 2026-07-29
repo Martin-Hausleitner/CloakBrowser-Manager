@@ -61,6 +61,10 @@ class ContractRuntime:
     async def validate_version(self):
         return None
 
+    async def discover_agents(self):
+        await self.validate_version()
+        return ("cursor",)
+
     async def ensure_session(self, *, cwd, agent, session_name, environment):
         assert agent == "cursor"
         assert session_name.startswith("cbm-")

@@ -13,6 +13,7 @@ import {
 import {
   api,
   type AcpxAgent,
+  isSafeProviderId,
   type OrcaAgentCli,
   type OrcaCapabilities,
   type ProviderId,
@@ -57,20 +58,14 @@ const DEFAULT_PROVIDER_ROUTING: ProviderRoutingState = {
   routingPolicy: "ordered-fallback",
 };
 
-const ACP_PROVIDER_AGENT_MAP: Partial<Record<ProviderId, AcpxAgent>> = {
-  codex: "codex",
-  claude: "claude",
-  cursor: "cursor",
-  grok: "grok-build",
-  opencode: "opencode",
-};
-
 function acpAgentForProvider(providerId: ProviderId): AcpxAgent | null {
-  return ACP_PROVIDER_AGENT_MAP[providerId] ?? null;
+  if (!isSafeProviderId(providerId)) return null;
+  return providerId === "grok" ? "grok-build" : providerId;
 }
 
 function acpxAgentLabel(agent: AcpxAgent): string {
-  return agent === "grok-build" ? "Grok Build (grok-build)" : agent;
+  if (agent === "grok-build") return "Grok Build (grok-build)";
+  return agent;
 }
 
 const AGENT_OPTIONS: AgentMode[] = [

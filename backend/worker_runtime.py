@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,7 @@ PROVIDER_PREFLIGHT_TARGETS = (
     ("grok", "openai-compatible"),
 )
 PROVIDER_PREFLIGHT_TTL_SECONDS = 300
+SAFE_PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 DEFAULT_GROK_OPENAI_COMPATIBLE_MODEL_ALIAS = "grok-build-0.1"
 MAX_PROVIDER_MODEL_ALIASES = 16
 MAX_PROVIDER_MODEL_ALIAS_LENGTH = 96
@@ -110,6 +112,19 @@ def _parse_dt(value: str | datetime | None) -> datetime | None:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _is_safe_provider_id(value: str) -> bool:
+    return SAFE_PROVIDER_ID_RE.fullmatch(str(value or "")) is not None
+
+
+def _is_dynamic_acp_provider_target(provider: str, transport: str) -> bool:
+    return (
+        transport == "acp"
+        and provider != "antigravity"
+        and _is_safe_provider_id(provider)
+        and (provider, transport) not in PROVIDER_PREFLIGHT_TARGETS
+    )
 
 
 def _sanitize_model_aliases(values: list[str]) -> list[str]:
@@ -614,7 +629,7 @@ class WorkerRuntimeService:
             conn.commit()
 
     def provider_preflights(self) -> dict[str, Any]:
-        """Return the exact provider readiness matrix from latest active workers."""
+        """Return provider readiness from latest active workers."""
         now = self._clock()
         with self._get_db() as conn:
             rows = conn.execute(
@@ -631,52 +646,59 @@ class WorkerRuntimeService:
         for row in rows:
             key = (str(row["provider"]), str(row["transport"]))
             latest.setdefault(key, row)
-        result: list[dict[str, Any]] = []
-        for provider, transport in PROVIDER_PREFLIGHT_TARGETS:
-            row = latest.get((provider, transport))
+
+        def public_row(provider: str, transport: str, row: Any | None) -> dict[str, Any]:
             if row is None:
-                result.append(
-                    {
-                        "provider": provider,
-                        "transport": transport,
-                        "ready": False,
-                        "state": "unavailable",
-                        "reason_code": "protocol_unavailable",
-                        "checked_at": None,
-                        "model_aliases": [],
-                    }
-                )
-                continue
+                return {
+                    "provider": provider,
+                    "transport": transport,
+                    "ready": False,
+                    "state": "unavailable",
+                    "reason_code": "protocol_unavailable",
+                    "checked_at": None,
+                    "model_aliases": [],
+                }
             checked_at = _parse_dt(row["checked_at"])
             if checked_at is None or now - checked_at > timedelta(
                 seconds=PROVIDER_PREFLIGHT_TTL_SECONDS
             ):
-                result.append(
-                    {
-                        "provider": provider,
-                        "transport": transport,
-                        "ready": False,
-                        "state": "stale",
-                        "reason_code": "protocol_unavailable",
-                        "checked_at": row["checked_at"],
-                        "model_aliases": [],
-                    }
-                )
-                continue
-            ready = bool(row["ready"])
-            result.append(
-                {
+                return {
                     "provider": provider,
                     "transport": transport,
-                    "ready": ready,
-                    "state": "ready" if ready else "failed",
-                    "reason_code": row["reason_code"],
+                    "ready": False,
+                    "state": "stale",
+                    "reason_code": "protocol_unavailable",
                     "checked_at": row["checked_at"],
-                    "model_aliases": _decode_model_aliases(row["model_aliases_json"])
-                    if ready
-                    else [],
+                    "model_aliases": [],
                 }
-            )
+            ready = bool(row["ready"])
+            return {
+                "provider": provider,
+                "transport": transport,
+                "ready": ready,
+                "state": "ready" if ready else "failed",
+                "reason_code": row["reason_code"],
+                "checked_at": row["checked_at"],
+                "model_aliases": _decode_model_aliases(row["model_aliases_json"])
+                if ready
+                else [],
+            }
+
+        result: list[dict[str, Any]] = []
+        fixed_keys = set(PROVIDER_PREFLIGHT_TARGETS)
+        for provider, transport in PROVIDER_PREFLIGHT_TARGETS:
+            result.append(public_row(provider, transport, latest.get((provider, transport))))
+
+        dynamic_keys = sorted(
+            key
+            for key, row in latest.items()
+            if _is_dynamic_acp_provider_target(*key)
+            and (checked_at := _parse_dt(row["checked_at"])) is not None
+            and now - checked_at <= timedelta(seconds=PROVIDER_PREFLIGHT_TTL_SECONDS)
+            and key not in fixed_keys
+        )
+        for provider, transport in dynamic_keys:
+            result.append(public_row(provider, transport, latest[(provider, transport)]))
         return {"providers": result}
 
     def provider_readiness_target(self, provider: str, transport: str) -> dict[str, Any]:

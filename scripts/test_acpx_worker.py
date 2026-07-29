@@ -111,6 +111,10 @@ class FakeRuntime:
     async def validate_version(self):
         self.version_checked = True
 
+    async def discover_agents(self):
+        await self.validate_version()
+        return ("claude", "codex", "cursor", "grok-build", "opencode")
+
     async def ensure_session(self, *, cwd, agent, session_name, environment):
         assert "CBM_RUN_CAPABILITY_FILE" in environment
         self.ensure_calls.append((cwd, agent, session_name))
@@ -410,6 +414,106 @@ def test_worker_reports_agent_preflights_and_cleans_empty_mcp_config(tmp_path: P
     assert ("cursor", True, "ok") in manager.preflights
     assert ("codex", False, "auth_required") in manager.preflights
     assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_preflight_discovers_gemini_pi_and_custom_safe_agents(tmp_path: Path):
+    manager = FakeManager()
+
+    class DynamicRuntime(FakeRuntime):
+        async def discover_agents(self):
+            await self.validate_version()
+            return ("cursor", "custom.agent", "gemini", "pi")
+
+        async def preflight_agent(self, *, agent, **_kwargs):
+            return {"ready": agent != "pi", "reason_code": "ok" if agent != "pi" else "auth_required"}
+
+    seen = []
+
+    def provider_probe(provider: str, transport: str, *, acp_result=None, base_url=None):
+        seen.append((provider, transport, acp_result, base_url))
+        return ProviderReadinessResult(
+            provider=provider,
+            transport=transport,
+            ready=bool(acp_result and acp_result.get("ready")) if transport == "acp" else False,
+            reason_code="ready" if acp_result and acp_result.get("ready") else "protocol_unavailable",
+            model_aliases=[],
+        )
+
+    worker = AcpxWorker(
+        manager,
+        make_config(tmp_path),
+        runtime=DynamicRuntime(),
+        provider_probe=provider_probe,
+    )
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert [agent for agent, _ready, _reason in manager.preflights] == [
+        "cursor",
+        "custom.agent",
+        "gemini",
+        "pi",
+    ]
+    assert ("custom.agent", "acp", {"ready": True, "reason_code": "ok"}, None) in seen
+    assert ("gemini", "acp", {"ready": True, "reason_code": "ok"}, None) in seen
+    assert ("pi", "acp", {"ready": False, "reason_code": "auth_required"}, None) in seen
+
+
+def test_worker_preflight_discovery_failure_fails_closed_without_probing(tmp_path: Path):
+    manager = FakeManager()
+
+    class FailingDiscoveryRuntime(FakeRuntime):
+        async def discover_agents(self):
+            self.version_checked = True
+            raise AcpxRuntimeError("config parse failed", reason_code="protocol_error")
+
+        async def preflight_agent(self, **_kwargs):
+            raise AssertionError("must not probe agents after failed discovery")
+
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=FailingDiscoveryRuntime())
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert manager.preflights
+    assert {ready for _agent, ready, _reason in manager.preflights} == {False}
+    assert {reason for _agent, _ready, reason in manager.preflights} == {"protocol_error"}
+
+
+def test_worker_rejects_unknown_claim_agent_after_dynamic_discovery(tmp_path: Path):
+    manager = FakeManager()
+
+    class DynamicRuntime(FakeRuntime):
+        async def discover_agents(self):
+            await self.validate_version()
+            return ("gemini", "pi")
+
+    runtime = DynamicRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    result = asyncio.run(worker.execute_claim(claim(agent="cursor")))
+
+    assert result == {"status": "failed"}
+    assert manager.failed == [("run-1", "internal_error", "invalid ACPX claim")]
+    assert runtime.ensure_calls == []
+    assert runtime.prompt_calls == []
+
+
+def test_worker_executes_custom_safe_claim_agent_from_dynamic_discovery(tmp_path: Path):
+    manager = FakeManager()
+
+    class DynamicRuntime(FakeRuntime):
+        async def discover_agents(self):
+            await self.validate_version()
+            return ("custom.agent", "gemini")
+
+    runtime = DynamicRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    result = asyncio.run(worker.execute_claim(claim(agent="custom.agent")))
+
+    assert result == {"status": "succeeded"}
+    assert runtime.ensure_calls[0][1] == "custom.agent"
+    assert runtime.prompt_calls[0][1] == "custom.agent"
 
 
 def test_worker_reports_all_provider_preflights_from_injected_probes(tmp_path: Path):
@@ -1341,7 +1445,7 @@ def test_worker_executes_openai_compatible_branch_through_router_without_acpx(
         }
     ]
     assert routed and routed[0].tool_id == "unbrowse"
-    assert runtime.version_checked is False
+    assert runtime.version_checked is True
     assert runtime.ensure_calls == []
     assert runtime.prompt_calls == []
     assert runtime.cancel_calls == []
@@ -1564,7 +1668,7 @@ def test_worker_starts_heartbeat_before_slow_session_ensure(tmp_path: Path):
 
 @pytest.mark.parametrize(
     "bad_claim",
-    [claim(harness="browser-use"), claim(agent=None), claim(agent="shell")],
+    [claim(harness="browser-use"), claim(agent=None), claim(agent="Shell")],
 )
 def test_worker_rejects_invalid_claim_without_starting_runtime(tmp_path: Path, bad_claim: dict):
     manager = FakeManager()

@@ -415,6 +415,107 @@ def test_create_run_allows_grok_acp_routing_when_exact_transport_ready(
     }
 
 
+def test_create_and_claim_dynamic_acp_routing_requires_exact_fresh_provider_agent(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX Gemini", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-gemini", "alpha", "automate")
+    login(client_access, "alpha-gemini", password)
+    seed_provider_preflight(
+        client_access,
+        provider="gemini",
+        transport="acp",
+        model_aliases=["gemini-2.5-pro"],
+    )
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider="gemini",
+            agent="gemini",
+            transport="acp",
+            provider_model_alias="gemini-2.5-pro",
+        ),
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["agent"] == "gemini"
+    assert created["provider"] == {
+        "id": "gemini",
+        "transport": "acp",
+        "model_alias": "gemini-2.5-pro",
+    }
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim?harness=acpx",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["provider"] == created["provider"]
+
+
+def test_create_run_rejects_dynamic_acp_provider_agent_mismatch_without_persistence(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX Gemini mismatch", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-gemini-mismatch", "alpha", "automate")
+    login(client_access, "alpha-gemini-mismatch", password)
+    seed_provider_preflight(client_access, provider="gemini", transport="acp", model_aliases=[])
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider="gemini",
+            agent="codex",
+            transport="acp",
+        ),
+    )
+
+    assert response.status_code == 422
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+def test_create_run_rejects_unreported_dynamic_acp_provider_without_persistence(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX Gemini missing", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-gemini-missing", "alpha", "automate")
+    login(client_access, "alpha-gemini-missing", password)
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider="gemini",
+            agent="gemini",
+            transport="acp",
+        ),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "provider_transport_not_ready"
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
 @pytest.mark.parametrize(
     ("provider", "agent"),
     [

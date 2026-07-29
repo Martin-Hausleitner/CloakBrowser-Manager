@@ -81,6 +81,18 @@ function managedHarnessLabel(harness: ManagedHarness): string {
   return "Stagehand";
 }
 
+function compactOrcaUnavailableMessage(caps: OrcaCapabilities | null): string {
+  const notes = caps?.notes?.filter((note) => note.trim()) ?? [];
+  if (!notes.length) {
+    return "Orca is unavailable. Launch stays disabled until readiness checks pass.";
+  }
+  const hiddenCount = notes.length - 1;
+  const hiddenLabel = hiddenCount === 1 ? "1 more check" : `${hiddenCount} more checks`;
+  return hiddenCount
+    ? `${notes[notes.length - 1]!} · ${hiddenLabel} in Session details`
+    : notes[0]!;
+}
+
 function allowedOrigins(task: string): string[] {
   const origins = new Set<string>();
   for (const match of task.matchAll(/https?:\/\/[^\s<>"']+/gi)) {
@@ -1123,9 +1135,7 @@ export function AgentBrowserWorkspace({
             className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1.5 text-[11px] text-amber-200"
             data-testid="orca-unavailable"
           >
-            {caps?.notes?.length
-              ? caps.notes.join(" · ")
-              : "Orca is unavailable. Launch/Stop stay disabled until readiness checks pass."}
+            {compactOrcaUnavailableMessage(caps)}
           </div>
         ) : null}
 

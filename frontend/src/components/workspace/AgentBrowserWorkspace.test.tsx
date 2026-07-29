@@ -671,8 +671,9 @@ describe("AgentBrowserWorkspace", () => {
     );
 
     const banner = await screen.findByTestId("orca-unavailable");
-    expect(banner.textContent).toContain("agent key file is missing");
     expect(banner.textContent).toContain("Orca runtime is not ready");
+    expect(banner.textContent).toContain("1 more check");
+    expect(banner.textContent).not.toContain("agent key file is missing");
     expect((screen.getByTestId("orca-launch") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId("orca-send") as HTMLButtonElement).disabled).toBe(true);
   });

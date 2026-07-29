@@ -202,6 +202,7 @@ def test_select_llm_provider_defaults_to_cursor_and_rejects_unknown():
     assert select_llm_provider("default") == "cursor-agent"
     assert select_llm_provider("cursor-agent") == "cursor-agent"
     assert select_llm_provider("claude-cli") == "claude-cli"
+    assert select_llm_provider("grok-cli") == "grok-cli"
     with pytest.raises(ValueError):
         select_llm_provider("openai")
 

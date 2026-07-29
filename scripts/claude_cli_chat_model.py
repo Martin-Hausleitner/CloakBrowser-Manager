@@ -19,31 +19,7 @@ from scripts.cursor_chat_model import (
     CursorAgentError,
     redact_text,
 )
-
-
-_CLAUDE_SCHEMA_KEY_ALIASES = {"min_items": "minItems"}
-_SCHEMA_IDENTIFIER_MAPS = frozenset({"$defs", "definitions", "properties"})
-
-
-def _normalize_claude_json_schema(value: Any) -> Any:
-    """Translate legacy Browser-Use schema keywords without renaming fields."""
-    if isinstance(value, list):
-        return [_normalize_claude_json_schema(item) for item in value]
-    if not isinstance(value, dict):
-        return value
-
-    normalized: dict[str, Any] = {}
-    for key, item in value.items():
-        if key in _SCHEMA_IDENTIFIER_MAPS and isinstance(item, dict):
-            normalized[key] = {
-                identifier: _normalize_claude_json_schema(schema)
-                for identifier, schema in item.items()
-            }
-            continue
-        normalized[_CLAUDE_SCHEMA_KEY_ALIASES.get(key, key)] = (
-            _normalize_claude_json_schema(item)
-        )
-    return normalized
+from scripts.json_schema_compat import normalize_cli_json_schema
 
 
 class ClaudeCLIChatModel(CursorAgentChatModel):
@@ -56,7 +32,7 @@ class ClaudeCLIChatModel(CursorAgentChatModel):
     def _argv(self, workspace: Path, *, schema: type[BaseModel] | None = None) -> list[str]:
         if schema is None:
             raise CursorAgentError("claude-cli requires a JSON schema")
-        provider_schema = _normalize_claude_json_schema(schema.model_json_schema())
+        provider_schema = normalize_cli_json_schema(schema.model_json_schema())
         schema_json = json.dumps(provider_schema, ensure_ascii=False, separators=(",", ":"))
         argv = [
             "claude",

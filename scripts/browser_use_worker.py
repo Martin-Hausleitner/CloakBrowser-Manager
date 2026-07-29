@@ -28,6 +28,7 @@ from urllib.parse import urlencode, urljoin, urlparse
 
 from scripts.claude_cli_chat_model import ClaudeCLIChatModel
 from scripts.cursor_chat_model import CursorAgentChatModel, redact_text
+from scripts.grok_cli_chat_model import GrokCLIChatModel
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024
 MAX_HEARTBEAT_TRANSIENT_FAILURES = 3
 ACTION_PAYLOAD_KEYS = frozenset({"name", "url", "selector", "text", "step", "target"})
 DEFAULT_LLM_PROVIDER = "cursor-agent"
-SUPPORTED_LLM_PROVIDERS = frozenset({DEFAULT_LLM_PROVIDER, "claude-cli"})
+SUPPORTED_LLM_PROVIDERS = frozenset({DEFAULT_LLM_PROVIDER, "claude-cli", "grok-cli"})
 
 # Browser Use per-call LLM wait must leave a cleanup margin under the run budget.
 # Formula: llm_timeout = run_timeout - clamp(run_timeout // 6, 15, 60),
@@ -71,7 +72,7 @@ def select_llm_provider(provider: str | None) -> str:
     if not value or value == "default":
         return DEFAULT_LLM_PROVIDER
     if value not in SUPPORTED_LLM_PROVIDERS:
-        raise ValueError("LLM provider must be cursor-agent or claude-cli")
+        raise ValueError("LLM provider must be cursor-agent, claude-cli, or grok-cli")
     return value
 
 
@@ -641,8 +642,11 @@ async def _capture_screenshot_bytes(session: Any) -> bytes | None:
 
 
 def _llm_factory_for_provider(provider: str) -> Callable[..., Any]:
-    if select_llm_provider(provider) == "claude-cli":
+    selected = select_llm_provider(provider)
+    if selected == "claude-cli":
         return ClaudeCLIChatModel
+    if selected == "grok-cli":
+        return GrokCLIChatModel
     return CursorAgentChatModel
 
 

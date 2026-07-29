@@ -408,6 +408,10 @@ class AcpxRuntime:
                         if chunk:
                             assistant_chunks.append(chunk)
                         continue
+                    if update_type == "agent_thought_chunk":
+                        # ACP thought streams are private, token-sized reasoning fragments.
+                        # They are neither stable operator output nor safe standalone payloads.
+                        continue
                     raw["_seq"] = jsonrpc_seq
                     mapped = map_acpx_event(raw)
                     await emit(mapped)

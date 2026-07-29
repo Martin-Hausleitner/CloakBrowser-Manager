@@ -1135,6 +1135,47 @@ else:
     assert outputs[0]["kind"] == "summary"
 
 
+def test_real_runtime_keeps_private_thought_chunks_out_of_manager_outputs(tmp_path: Path):
+    executable = tmp_path / "fake-acpx-jsonrpc-thoughts"
+    executable.write_text(
+        """#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+frames = [
+    {'jsonrpc': '2.0', 'id': 'req-1', 'method': 'session/prompt'},
+    {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'user_message_chunk', 'content': {'type': 'text', 'text': 'Open example'}}}},
+    {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_thought_chunk', 'content': {'type': 'text', 'text': 'https'}}}},
+    {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_thought_chunk', 'content': {'type': 'text', 'text': '://'}}}},
+    {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_thought_chunk', 'content': {'type': 'text', 'text': 'example.com/'}}}},
+    {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'Example Domain'}}}},
+    {'jsonrpc': '2.0', 'id': 'req-1', 'result': {'stopReason': 'end_turn'}},
+]
+for frame in frames:
+    print(json.dumps(frame))
+""",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(replace(make_config(tmp_path), acpx_executable=str(executable)))
+    outputs = []
+
+    async def scenario():
+        return await runtime.run_prompt(
+            cwd=tmp_path,
+            agent="grok-build",
+            session_name="cbm-0123456789abcdef0123456789abcdef",
+            prompt="Inspect",
+            timeout_seconds=5,
+            environment={},
+            emit=lambda output: _append_async(outputs, output),
+            cancel_event=asyncio.Event(),
+        )
+
+    assert asyncio.run(scenario()) == "Example Domain"
+    assert [output["kind"] for output in outputs] == ["status", "summary"]
+    assert "thought" not in json.dumps(outputs).lower()
+
+
 def test_real_runtime_accepts_a_bounded_large_acpx_frame(tmp_path: Path):
     executable = tmp_path / "fake-acpx-large-frame"
     executable.write_text(

@@ -1456,13 +1456,17 @@ export function MobileSplitScreen({
               </div>
             ) : null}
 
-            <p className="mobile-tools-meta">
-              {codexHostReady
+            <span
+              className="mobile-tools-meta"
+              aria-label={`Task execution status: ${codexHostReady ? "Host ready" : serverHistoryReady ? "History only" : "Host unavailable"}`}
+              title={codexHostReady
                 ? "Tasks run through the verified Codex Computer Use host; browser credentials stay outside the chat UI."
                 : serverHistoryReady
                   ? "Tasks are saved to scoped server history only. Nothing executes until a verified Codex host attaches."
                   : "A verified Codex Computer Use host or the scoped server history is required."}
-            </p>
+            >
+              {codexHostReady ? "Host ready" : serverHistoryReady ? "History only" : "Host unavailable"}
+            </span>
 
             {authRequired ? (
               <div className="mobile-account-row">

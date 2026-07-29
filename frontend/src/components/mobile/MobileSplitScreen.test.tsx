@@ -334,7 +334,8 @@ describe("MobileSplitScreen", () => {
 
     openBrowserTools();
     expect(screen.getByText("Save only")).toBeTruthy();
-    expect(screen.getByText("Tasks are saved to scoped server history only. Nothing executes until a verified Codex host attaches.")).toBeTruthy();
+    expect(screen.getByText("History only")).toBeTruthy();
+    expect(screen.getByTitle("Tasks are saved to scoped server history only. Nothing executes until a verified Codex host attaches.")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Close browser tools"));
 
     fireEvent.change(input, { target: { value: "Save this task" } });

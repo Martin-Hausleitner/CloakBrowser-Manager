@@ -873,7 +873,13 @@ export function AgentBrowserWorkspace({
   }, [canStop, managedRunMode, session, stopPolling, stopRunPolling, taskRun]);
 
   const handleTakeControl = useCallback(async () => {
-    if (!managedRunNeedsTakeover || !taskRun || !canAutomate || !canInteract || busy) return;
+    if (
+      !managedRunNeedsTakeover ||
+      !taskRun ||
+      !canInteract ||
+      (managedRunActive && !canAutomate) ||
+      busy
+    ) return;
     setBusy(true);
     setError(null);
     try {
@@ -1473,7 +1479,7 @@ export function AgentBrowserWorkspace({
               type="button"
               className="inline-flex h-7 items-center rounded border border-emerald-700/80 bg-emerald-950/70 px-2 text-[10px] font-semibold text-emerald-100 hover:bg-emerald-900/70 disabled:opacity-40"
               onClick={() => void handleTakeControl()}
-              disabled={busy || !canAutomate}
+              disabled={busy || (managedRunActive && !canAutomate)}
               aria-label={managedRunActive ? "Take over browser" : "Open browser"}
               title={managedRunActive
                 ? "Stop the agent and continue directly in this browser"

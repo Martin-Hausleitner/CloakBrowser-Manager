@@ -808,7 +808,7 @@ describe("AgentBrowserWorkspace", () => {
       <AgentBrowserWorkspace
         profiles={[browserUseProfile]}
         selectedProfile={browserUseProfile}
-        canAutomate
+        canAutomate={false}
         canInteract
         onSelectProfile={vi.fn()}
       />,

@@ -42,6 +42,7 @@ ALLOWLISTED_FAIL_CODES = frozenset(
         "health_blocked",
         "capability_revoked",
         "internal_error",
+        "invalid_routing_contract",
     }
 )
 
@@ -635,6 +636,45 @@ class WorkerRuntimeService:
 
     # ── Claim ────────────────────────────────────────────────────────────────
 
+    def _fail_invalid_routing_contract_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        profile_id: str,
+        now: datetime,
+    ) -> None:
+        row = conn.execute(
+            "SELECT lease_id FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        lease_id = row["lease_id"] if row is not None else None
+        if lease_id:
+            self._leases.release_on_conn(
+                conn,
+                str(lease_id),
+                now=now,
+                reason="invalid_routing_contract",
+            )
+        conn.execute(
+            """
+            UPDATE task_runs
+            SET status = 'failed',
+                claimed_by = NULL,
+                worker_id = NULL,
+                claim_expires_at = NULL,
+                lease_id = NULL,
+                capability_digest = NULL,
+                claim_eligible_at = NULL,
+                error_code = 'invalid_routing_contract',
+                error_message = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (db.PERSISTED_ROUTING_CONTRACT_ERROR, _iso(now), run_id),
+        )
+        self._refresh_profile_eligibility_preserving(conn, profile_id, now)
+
     def claim_next(
         self,
         worker_id: str,
@@ -689,6 +729,18 @@ class WorkerRuntimeService:
                     return None
 
                 profile_id = str(candidate["profile_id"])
+                try:
+                    db._parse_persisted_routing_contract_from_row(candidate)
+                except ValueError:
+                    self._fail_invalid_routing_contract_on_conn(
+                        conn,
+                        run_id=str(candidate["id"]),
+                        profile_id=profile_id,
+                        now=now,
+                    )
+                    conn.commit()
+                    return None
+
                 if automation_leases.profile_has_active_lease(conn, profile_id, now):
                     # Losing race: clear eligibility and retry none this round.
                     conn.execute(
@@ -769,6 +821,9 @@ class WorkerRuntimeService:
             "max_steps": run["max_steps"],
             "timeout_seconds": run["timeout_seconds"],
             "model_alias": run.get("model_alias"),
+            "provider": run.get("provider"),
+            "browser_tools": run.get("browser_tools") or [],
+            "routing_policy": run.get("routing_policy"),
             "deadline_at": run["deadline_at"],
             "claim_expires_at": run.get("claim_expires_at"),
             "worker_id": run.get("worker_id"),
@@ -876,6 +931,19 @@ class WorkerRuntimeService:
                 if not lease_id:
                     conn.commit()
                     raise WorkerNotFound(run_id)
+                try:
+                    provider, browser_tools, routing_policy = (
+                        db._parse_persisted_routing_contract_from_row(row)
+                    )
+                except ValueError as exc:
+                    self._fail_invalid_routing_contract_on_conn(
+                        conn,
+                        run_id=run_id,
+                        profile_id=str(row["profile_id"] or row["profile_id_snapshot"]),
+                        now=now,
+                    )
+                    conn.commit()
+                    raise WorkerNotFound(run_id) from exc
 
                 # Fresh health evaluation from current profile measurement.
                 profile_id = str(row["profile_id"] or row["profile_id_snapshot"])
@@ -1003,6 +1071,9 @@ class WorkerRuntimeService:
                     "allowed_origins": db._json_string_list(row["allowed_origins_json"]),
                     "viewport_revision": row["viewport_revision"],
                     "launch_evidence": db._json_object(row["launch_evidence_json"]),
+                    "provider": provider,
+                    "browser_tools": browser_tools,
+                    "routing_policy": routing_policy,
                 }
             except (WorkerNotFound, CapabilityConflict, CapabilityNotReady):
                 raise
@@ -1284,7 +1355,43 @@ class WorkerRuntimeService:
         return run, TerminalCleanup(lease_ids=tuple(lease_ids))
 
     def require_bound_claim(self, worker_id: str, run_id: str) -> dict[str, Any]:
-        run = db.get_task_run(run_id)
+        try:
+            run = db.get_task_run(run_id)
+        except ValueError as exc:
+            if str(exc) != db.PERSISTED_ROUTING_CONTRACT_ERROR:
+                raise
+            now = self._clock()
+            with self._get_db() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    row = conn.execute(
+                        "SELECT * FROM task_runs WHERE id = ?",
+                        (run_id,),
+                    ).fetchone()
+                    if (
+                        row is None
+                        or str(row["worker_id"] or "") != worker_id
+                        or row["status"] not in {"health_check", "running"}
+                    ):
+                        conn.commit()
+                        raise WorkerNotFound(run_id) from exc
+                    claim_exp = _parse_dt(row["claim_expires_at"])
+                    if claim_exp is None or claim_exp <= now:
+                        conn.commit()
+                        raise WorkerNotFound(run_id) from exc
+                    self._fail_invalid_routing_contract_on_conn(
+                        conn,
+                        run_id=run_id,
+                        profile_id=str(row["profile_id"] or row["profile_id_snapshot"]),
+                        now=now,
+                    )
+                    conn.commit()
+                    raise WorkerNotFound(run_id) from exc
+                except WorkerNotFound:
+                    raise
+                except Exception:
+                    conn.rollback()
+                    raise
         if run is None:
             raise WorkerNotFound(run_id)
         if str(run.get("worker_id") or "") != worker_id:

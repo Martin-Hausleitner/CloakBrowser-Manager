@@ -40,6 +40,14 @@ Harness = Literal[
     "acpx",
 ]
 AcpxAgent = Literal["codex", "claude", "cursor", "grok-build", "opencode"]
+ProviderId = Literal["antigravity", "grok"]
+ProviderTransport = Literal["cli", "acp", "openai-compatible"]
+BrowserToolId = Literal["unbrowse", "stagehand", "browser-harness"]
+ROUTING_BROWSER_TOOL_ORDER: tuple[BrowserToolId, ...] = (
+    "unbrowse",
+    "stagehand",
+    "browser-harness",
+)
 ProfileHealthState = Literal["pending", "running", "passed", "warning", "failed", "unavailable"]
 ProfileHealthSourceState = Literal["missing", "measured", "derived", "unavailable", "skipped"]
 CONTROL_PLANE_API_VERSION = "cloakbrowser.io/v1"
@@ -1457,6 +1465,29 @@ _SELECTOR_FIELD_NAMES = frozenset({"selector"})
 _OPAQUE_FIELD_NAMES = frozenset({"artifact_id"})
 
 
+class TaskProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: ProviderId
+    transport: ProviderTransport
+    model_alias: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class BrowserToolConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: BrowserToolId
+    enabled: bool = True
+
+
+class TaskRoutingPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["ordered-fallback"] = "ordered-fallback"
+    allow_second_browser: bool = False
+    max_tool_attempts: int = Field(default=3, ge=1, le=3)
+
+
 class TaskRunCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1469,6 +1500,9 @@ class TaskRunCreate(BaseModel):
     max_steps: int = Field(default=20, ge=1, le=200)
     timeout_seconds: int = Field(default=300, ge=1, le=3_600)
     model_alias: str | None = Field(default=None, min_length=1, max_length=80)
+    provider: TaskProviderConfig | None = None
+    browser_tools: list[BrowserToolConfig] = Field(default_factory=list)
+    routing_policy: TaskRoutingPolicy | None = None
 
     @model_validator(mode="after")
     def validate_agent_for_harness(self):
@@ -1476,6 +1510,31 @@ class TaskRunCreate(BaseModel):
             raise ValueError("agent is required for acpx harness")
         if self.harness != "acpx" and self.agent is not None:
             raise ValueError("agent is only valid for acpx harness")
+        has_provider = self.provider is not None
+        has_tools = bool(self.browser_tools)
+        if not has_provider and not has_tools and self.routing_policy is None:
+            return self
+        if self.provider is None or not self.browser_tools:
+            raise ValueError("provider and non-empty browser_tools are required together")
+        if self.routing_policy is None:
+            self.routing_policy = TaskRoutingPolicy()
+        tool_ids = [tool.id for tool in self.browser_tools]
+        if len(set(tool_ids)) != len(tool_ids):
+            raise ValueError("browser_tools must not contain duplicate ids")
+        if not any(tool.enabled for tool in self.browser_tools):
+            raise ValueError("browser_tools must contain at least one enabled tool")
+        if self.routing_policy.allow_second_browser:
+            raise ValueError("allow_second_browser is not supported")
+        if self.harness != "acpx":
+            raise ValueError("routing contract is only supported for acpx harness")
+        if self.agent != "grok-build":
+            raise ValueError("acpx routing contract requires agent grok-build")
+        if self.provider.id != "grok" or self.provider.transport != "acp":
+            raise ValueError("acpx routing contract requires provider grok over acp")
+        if tuple(tool_ids) != ROUTING_BROWSER_TOOL_ORDER:
+            raise ValueError(
+                "browser_tools must be ordered as unbrowse, stagehand, browser-harness"
+            )
         return self
 
     @field_validator("allowed_origins")
@@ -1542,6 +1601,9 @@ class TaskRunResponse(BaseModel):
     max_steps: int
     timeout_seconds: int
     model_alias: str | None = None
+    provider: TaskProviderConfig | None = None
+    browser_tools: list[BrowserToolConfig] = Field(default_factory=list)
+    routing_policy: TaskRoutingPolicy | None = None
     deadline_at: str
     health_snapshot: TaskHealthSnapshot
     health_decision: TaskHealthDecision
@@ -1580,6 +1642,9 @@ class WorkerClaimResponse(BaseModel):
     max_steps: int
     timeout_seconds: int
     model_alias: str | None = None
+    provider: TaskProviderConfig | None = None
+    browser_tools: list[BrowserToolConfig] = Field(default_factory=list)
+    routing_policy: TaskRoutingPolicy | None = None
     deadline_at: str
     claim_expires_at: str | None = None
     worker_id: str | None = None
@@ -1659,6 +1724,9 @@ class WorkerCapabilityResponse(BaseModel):
     allowed_origins: list[str] = Field(default_factory=list)
     viewport_revision: str | None = None
     launch_evidence: dict[str, object] = Field(default_factory=dict)
+    provider: TaskProviderConfig | None = None
+    browser_tools: list[BrowserToolConfig] = Field(default_factory=list)
+    routing_policy: TaskRoutingPolicy | None = None
 
 
 class WorkerFailRequest(BaseModel):

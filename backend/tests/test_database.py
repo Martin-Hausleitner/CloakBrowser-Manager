@@ -49,7 +49,23 @@ def test_init_db_idempotent(tmp_db: Path):
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
+        task_run_columns = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
     assert len(tables) >= 2
+    assert {
+        name: (task_run_columns[name]["type"], task_run_columns[name]["notnull"])
+        for name in (
+            "provider_json",
+            "browser_tools_json",
+            "routing_policy_json",
+        )
+    } == {
+        "provider_json": ("TEXT", 0),
+        "browser_tools_json": ("TEXT", 0),
+        "routing_policy_json": ("TEXT", 0),
+    }
 
 
 def test_list_applied_schema_migrations_returns_sorted_release_ids(tmp_db: Path):
@@ -57,6 +73,7 @@ def test_list_applied_schema_migrations_returns_sorted_release_ids(tmp_db: Path)
         "account_metadata_v1",
         "agent_workspace_v1",
         "task_run_binding_v1",
+        "task_run_routing_contract_v1",
         "task_runs_acpx_v1",
         "task_runs_v1",
         "worker_harness_preflights_v1",

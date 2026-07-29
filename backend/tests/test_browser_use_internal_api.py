@@ -203,6 +203,68 @@ def test_capability_allows_antigravity_profile_for_acpx_run(client_access: TestC
     assert cap.json()["headers"]["Authorization"].startswith("Bearer cbm_run_")
 
 
+def test_antigravity_acpx_grok_run_persists_router_contract_and_claims_in_order(
+    client_access: TestClient,
+):
+    provider = {"id": "grok", "transport": "acp"}
+    provider_response = {"id": "grok", "transport": "acp", "model_alias": None}
+    browser_tools = [
+        {"id": "unbrowse", "enabled": True},
+        {"id": "stagehand", "enabled": True},
+        {"id": "browser-harness", "enabled": True},
+    ]
+    routing_policy = {
+        "mode": "ordered-fallback",
+        "allow_second_browser": False,
+        "max_tool_attempts": 3,
+    }
+    profile = db.create_profile("Antigravity routed ACPX", sandbox_id="alpha", harness="antigravity")
+    seed_passed_health(profile["id"])
+    session = db.create_task_session(profile["id"], "alpha", "bootstrap")
+
+    created = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        headers=bootstrap_headers(),
+        json={
+            "harness": "acpx",
+            "agent": "grok-build",
+            "task": "Navigate",
+            "profile_id": profile["id"],
+            "allowed_origins": ["https://example.com"],
+            "max_steps": 20,
+            "timeout_seconds": 300,
+            "provider": provider,
+            "browser_tools": [
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+            "routing_policy": routing_policy,
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    created_body = created.json()
+    assert created_body["provider"] == provider_response
+    assert created_body["browser_tools"] == browser_tools
+    assert created_body["routing_policy"] == routing_policy
+
+    claimed = client_access.post("/internal/task-runs/claim?harness=acpx", headers=worker_headers())
+    assert claimed.status_code == 200, claimed.text
+    claim_body = claimed.json()
+    assert claim_body["id"] == created_body["id"]
+    assert claim_body["provider"] == provider_response
+    assert claim_body["browser_tools"] == browser_tools
+    assert claim_body["routing_policy"] == routing_policy
+
+    capability = issue_capability(client_access, created_body["id"])
+    assert capability.status_code == 200, capability.text
+    capability_body = capability.json()
+    assert capability_body["provider"] == provider_response
+    assert capability_body["browser_tools"] == browser_tools
+    assert capability_body["routing_policy"] == routing_policy
+
+
 def test_capability_waiting_health_no_token(client_access: TestClient):
     profile = db.create_profile("Waiting", sandbox_id="alpha")
     db.upsert_profile_health(

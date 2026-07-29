@@ -3180,6 +3180,9 @@ async def create_task_run(session_id: str, body: TaskRunCreate, request: Request
         created_by_kind=identity.kind,
         created_by_id=identity.id,
         message_metadata={"source": "task_run"},
+        provider=body.provider.model_dump(exclude_none=True) if body.provider else None,
+        browser_tools=[tool.model_dump() for tool in body.browser_tools],
+        routing_policy=body.routing_policy.model_dump() if body.routing_policy else None,
     )
     db.record_task_event(
         str(session["id"]),

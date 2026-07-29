@@ -584,6 +584,137 @@ def test_capability_rejects_viewport_revision_drift_without_token(
     assert "cbm_run_" not in capability.text
 
 
+def test_claim_fails_closed_on_corrupted_persisted_routing_contract_before_lease(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Corrupt routing", sandbox_id="alpha", harness="antigravity")
+    seed_passed_health(profile["id"])
+    session = db.create_task_session(profile["id"], "alpha", "bootstrap")
+    created = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        headers=bootstrap_headers(),
+        json={
+            "harness": "acpx",
+            "agent": "grok-build",
+            "task": "Work",
+            "profile_id": profile["id"],
+            "allowed_origins": ["https://example.com"],
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+    with db.get_db() as conn:
+        conn.execute(
+            "UPDATE task_runs SET browser_tools_json = ? WHERE id = ?",
+            ('{"not":"a-list"}', run_id),
+        )
+        conn.commit()
+
+    claim = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+        params={"harness": "acpx"},
+    )
+
+    assert claim.status_code == 204
+    with db.get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT status, claimed_by, worker_id, claim_expires_at, lease_id,
+                   capability_digest, error_code, error_message
+            FROM task_runs WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        active_leases = conn.execute(
+            "SELECT COUNT(*) FROM automation_leases WHERE profile_id = ? AND released_at IS NULL",
+            (profile["id"],),
+        ).fetchone()[0]
+    assert dict(row) == {
+        "status": "failed",
+        "claimed_by": None,
+        "worker_id": None,
+        "claim_expires_at": None,
+        "lease_id": None,
+        "capability_digest": None,
+        "error_code": "invalid_routing_contract",
+        "error_message": "Invalid persisted routing contract",
+    }
+    assert active_leases == 0
+
+
+def test_capability_rejects_corrupted_persisted_routing_contract_without_token(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Corrupt capability routing", sandbox_id="alpha", harness="antigravity")
+    seed_passed_health(profile["id"])
+    session = db.create_task_session(profile["id"], "alpha", "bootstrap")
+    created = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        headers=bootstrap_headers(),
+        json={
+            "harness": "acpx",
+            "agent": "grok-build",
+            "task": "Work",
+            "profile_id": profile["id"],
+            "allowed_origins": ["https://example.com"],
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+        params={"harness": "acpx"},
+    )
+    assert claimed.status_code == 200, claimed.text
+    with db.get_db() as conn:
+        conn.execute(
+            "UPDATE task_runs SET routing_policy_json = ? WHERE id = ?",
+            ('{"allow_second_browser":true}', run_id),
+        )
+        conn.commit()
+
+    capability = client_access.post(
+        f"/internal/task-runs/{run_id}/capability",
+        headers=worker_headers(),
+    )
+
+    assert capability.status_code == 404
+    assert "cbm_run_" not in capability.text
+    with db.get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT status, claimed_by, worker_id, claim_expires_at, lease_id,
+                   capability_digest, error_code, error_message
+            FROM task_runs WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+    assert dict(row) == {
+        "status": "failed",
+        "claimed_by": None,
+        "worker_id": None,
+        "claim_expires_at": None,
+        "lease_id": None,
+        "capability_digest": None,
+        "error_code": "invalid_routing_contract",
+        "error_message": "Invalid persisted routing contract",
+    }
+
+
 def test_direct_lease_blocks_claim_eligibility(client_access: TestClient):
     from backend import main
 

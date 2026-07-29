@@ -269,6 +269,165 @@ def test_acpx_task_run_rejects_missing_or_unrelated_agent():
         )
 
 
+def test_task_run_routing_contract_defaults_policy_when_present():
+    run = TaskRunCreate(
+        harness="acpx",
+        agent="grok-build",
+        task="Inspect",
+        profile_id="profile-1",
+        provider={"id": "grok", "transport": "acp"},
+        browser_tools=[
+            {"id": "unbrowse"},
+            {"id": "stagehand"},
+            {"id": "browser-harness"},
+        ],
+    )
+
+    assert run.provider.model_dump(exclude_none=True) == {"id": "grok", "transport": "acp"}
+    assert [tool.model_dump() for tool in run.browser_tools] == [
+        {"id": "unbrowse", "enabled": True},
+        {"id": "stagehand", "enabled": True},
+        {"id": "browser-harness", "enabled": True},
+    ]
+    assert run.routing_policy.model_dump() == {
+        "mode": "ordered-fallback",
+        "allow_second_browser": False,
+        "max_tool_attempts": 3,
+    }
+
+
+def test_task_run_routing_contract_allows_legacy_acpx_without_new_fields():
+    run = TaskRunCreate(
+        harness="acpx",
+        agent="grok-build",
+        task="Inspect",
+        profile_id="profile-1",
+    )
+
+    assert run.provider is None
+    assert run.browser_tools == []
+    assert run.routing_policy is None
+
+
+def test_task_run_routing_contract_rejects_max_tool_attempts_out_of_range():
+    for max_tool_attempts in (0, 4):
+        with pytest.raises(ValidationError):
+            TaskRunCreate(
+                harness="acpx",
+                agent="grok-build",
+                task="Inspect",
+                profile_id="profile-1",
+                provider={"id": "grok", "transport": "acp"},
+                browser_tools=[
+                    {"id": "unbrowse"},
+                    {"id": "stagehand"},
+                    {"id": "browser-harness"},
+                ],
+                routing_policy={"max_tool_attempts": max_tool_attempts},
+            )
+
+
+def test_task_run_routing_contract_rejects_non_acp_grok_transports():
+    for transport in ("cli", "openai-compatible"):
+        with pytest.raises(ValidationError):
+            TaskRunCreate(
+                harness="acpx",
+                agent="grok-build",
+                task="Inspect",
+                profile_id="profile-1",
+                provider={"id": "grok", "transport": transport},
+                browser_tools=[
+                    {"id": "unbrowse"},
+                    {"id": "stagehand"},
+                    {"id": "browser-harness"},
+                ],
+            )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"provider": {"id": "grok", "transport": "acp"}},
+        {"browser_tools": [{"id": "unbrowse"}]},
+        {
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [],
+        },
+        {
+            "agent": "codex",
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+        },
+        {
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [{"id": "unbrowse"}, {"id": "unbrowse"}],
+        },
+        {
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [
+                {"id": "unbrowse", "enabled": False},
+                {"id": "stagehand", "enabled": False},
+                {"id": "browser-harness", "enabled": False},
+            ],
+        },
+        {
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [{"id": "unbrowse"}],
+        },
+        {
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [
+                {"id": "stagehand"},
+                {"id": "unbrowse"},
+                {"id": "browser-harness"},
+            ],
+        },
+        {
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+            "routing_policy": {"allow_second_browser": True},
+        },
+        {
+            "harness": "browser-use",
+            "agent": None,
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+        },
+        {
+            "provider": {"id": "antigravity", "transport": "acp"},
+            "browser_tools": [
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+        },
+    ],
+)
+def test_task_run_routing_contract_rejects_invalid_task1_shapes(overrides: dict):
+    fields = {
+        "harness": "acpx",
+        "agent": "grok-build",
+        "task": "Inspect",
+        "profile_id": "profile-1",
+    }
+    fields.update(overrides)
+
+    with pytest.raises(ValidationError):
+        TaskRunCreate(**fields)
+
+
 # ── ProfileUpdate ────────────────────────────────────────────────────────────
 
 

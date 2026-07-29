@@ -231,6 +231,9 @@ def test_create_run_allows_antigravity_profile_only_as_acpx_grok_build_preset(
         json=run_body(profile_id=profile["id"], harness="acpx", agent="grok-build", model_alias=None),
     )
     assert acpx_response.status_code == 201, acpx_response.text
+    assert acpx_response.json()["provider"] is None
+    assert acpx_response.json()["browser_tools"] == []
+    assert acpx_response.json()["routing_policy"] is None
 
     browser_use_response = client_access.post(
         f"/api/task-sessions/{session['id']}/runs",

@@ -19,6 +19,7 @@ DOCKER_DATA_DIR = Path("/data")
 LOCAL_DATA_DIR = Path(__file__).resolve().parent / ".data"
 PROFILE_HEALTH_SOURCE_STATES = {"missing", "measured", "derived", "unavailable", "skipped"}
 SCHEMA_MIGRATION_STATUS_UNAVAILABLE = "Schema migration status unavailable"
+PERSISTED_ROUTING_CONTRACT_ERROR = "Invalid persisted routing contract"
 
 
 class SchemaMigrationStatusError(RuntimeError):
@@ -496,6 +497,44 @@ def _migrate_task_runs_acpx_v1(conn: sqlite3.Connection) -> None:
         }
         if "agent" not in cols:
             conn.execute("ALTER TABLE task_runs ADD COLUMN agent TEXT")
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_task_run_routing_contract_v1(conn: sqlite3.Connection) -> None:
+    """Persist optional provider/browser-tool routing contract JSON for task runs."""
+    migration_version = "task_run_routing_contract_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        task_runs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+        ).fetchone()
+        if task_runs_exists is None:
+            conn.rollback()
+            return
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if "provider_json" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN provider_json TEXT")
+        if "browser_tools_json" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN browser_tools_json TEXT")
+        if "routing_policy_json" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN routing_policy_json TEXT")
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (migration_version, _now()),
@@ -1043,6 +1082,7 @@ def init_db():
         _migrate_task_runs_v1(conn)
         _migrate_worker_runtime_v1(conn)
         _migrate_task_runs_acpx_v1(conn)
+        _migrate_task_run_routing_contract_v1(conn)
         _migrate_worker_harness_presence_v1(conn)
         _migrate_worker_harness_preflights_v1(conn)
         _migrate_task_run_binding_v1(conn)
@@ -1729,6 +1769,94 @@ def _json_string_list(value: str | None) -> list[str]:
     return _bounded_string_list(decoded)
 
 
+def _json_object_list(value: str | None) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [item for item in decoded if isinstance(item, dict)]
+
+
+def _json_dump_optional(value: dict[str, Any] | list[dict[str, Any]] | None) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _strict_contract_json(value: str | None, expected_type: type) -> Any:
+    if value is None:
+        return None
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(PERSISTED_ROUTING_CONTRACT_ERROR) from exc
+    if not isinstance(decoded, expected_type):
+        raise ValueError(PERSISTED_ROUTING_CONTRACT_ERROR)
+    return decoded
+
+
+def _parse_persisted_routing_contract(
+    *,
+    harness: str,
+    agent: str | None,
+    profile_id: str,
+    provider_json: str | None,
+    browser_tools_json: str | None,
+    routing_policy_json: str | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+    provider = _strict_contract_json(provider_json, dict)
+    browser_tools = _strict_contract_json(browser_tools_json, list)
+    routing_policy = _strict_contract_json(routing_policy_json, dict)
+    if browser_tools is None:
+        browser_tools = []
+    if provider is None and browser_tools == [] and routing_policy is None:
+        return None, [], None
+    if provider_json is None or browser_tools_json is None or routing_policy_json is None:
+        raise ValueError(PERSISTED_ROUTING_CONTRACT_ERROR)
+    try:
+        if __package__:
+            from .models import TaskRunCreate
+        else:  # pragma: no cover - flat uvicorn import path
+            from models import TaskRunCreate
+
+        body = TaskRunCreate(
+            harness=harness,
+            agent=agent,
+            task="persisted routing contract",
+            profile_id=profile_id,
+            provider=provider,
+            browser_tools=browser_tools,
+            routing_policy=routing_policy,
+        )
+    except Exception as exc:
+        raise ValueError(PERSISTED_ROUTING_CONTRACT_ERROR) from exc
+    return (
+        body.provider.model_dump(exclude_none=True) if body.provider else None,
+        [tool.model_dump() for tool in body.browser_tools],
+        body.routing_policy.model_dump() if body.routing_policy else None,
+    )
+
+
+def _parse_persisted_routing_contract_from_row(
+    row: sqlite3.Row | dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+    profile_id = str(
+        row["profile_id"] or row["profile_id_snapshot"] or "persisted-routing-contract"
+    )
+    return _parse_persisted_routing_contract(
+        harness=str(row["harness"] or ""),
+        agent=row["agent"],
+        profile_id=profile_id,
+        provider_json=row["provider_json"],
+        browser_tools_json=row["browser_tools_json"],
+        routing_policy_json=row["routing_policy_json"],
+    )
+
+
 def _bounded_string_map(value: object, *, max_length: int = 64) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
@@ -2180,6 +2308,21 @@ def _task_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
     run = dict(row)
     run["launch_if_stopped"] = bool(run.get("launch_if_stopped"))
     run["allowed_origins"] = _json_string_list(run.pop("allowed_origins_json", None))
+    provider, browser_tools, routing_policy = _parse_persisted_routing_contract(
+        harness=str(run.get("harness") or ""),
+        agent=run.get("agent"),
+        profile_id=str(
+            run.get("profile_id")
+            or run.get("profile_id_snapshot")
+            or "persisted-routing-contract"
+        ),
+        provider_json=run.pop("provider_json", None),
+        browser_tools_json=run.pop("browser_tools_json", None),
+        routing_policy_json=run.pop("routing_policy_json", None),
+    )
+    run["provider"] = provider
+    run["browser_tools"] = browser_tools
+    run["routing_policy"] = routing_policy
     launch_evidence = run.pop("launch_evidence_json", None)
     run["launch_evidence"] = _json_object(launch_evidence)
     run["health_snapshot"] = _json_object(run.pop("health_snapshot_json", None))
@@ -2392,6 +2535,9 @@ def _insert_task_run_on_conn(
     max_steps: int,
     timeout_seconds: int,
     model_alias: str | None,
+    provider: dict[str, Any] | None,
+    browser_tools: list[dict[str, Any]],
+    routing_policy: dict[str, Any] | None,
     deadline_at: str,
     health_snapshot: dict[str, Any],
     health_decision: dict[str, Any],
@@ -2414,6 +2560,7 @@ def _insert_task_run_on_conn(
             id, task_session_id, task_message_id, profile_id, profile_id_snapshot,
             sandbox_id, harness, agent, status, launch_if_stopped, allowed_origins_json,
             max_steps, timeout_seconds, model_alias, deadline_at,
+            provider_json, browser_tools_json, routing_policy_json,
             health_snapshot_json, health_decision_json, health_override_json,
             retry_count, first_action_sequence, first_action_at, next_output_sequence,
             claimed_by, claim_expires_at, worker_id, claim_eligible_at, cancelled_at,
@@ -2421,7 +2568,7 @@ def _insert_task_run_on_conn(
             lease_id, capability_digest, error_code, error_message, queued_at,
             viewport_revision, launch_evidence_json
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
             0, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?,
             NULL, NULL, NULL, NULL, ?, ?, '{}'
         )""",
@@ -2441,6 +2588,9 @@ def _insert_task_run_on_conn(
             int(timeout_seconds),
             model_alias,
             deadline_at,
+            _json_dump_optional(provider),
+            _json_dump_optional(browser_tools) if browser_tools else None,
+            _json_dump_optional(routing_policy),
             json.dumps(health_snapshot, separators=(",", ":"), sort_keys=True),
             json.dumps(health_decision, separators=(",", ":"), sort_keys=True),
             created_by_kind,
@@ -2474,6 +2624,9 @@ def create_task_run(
     health_decision: dict[str, Any],
     created_by_kind: str,
     created_by_id: str | None = None,
+    provider: dict[str, Any] | None = None,
+    browser_tools: list[dict[str, Any]] | None = None,
+    routing_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_id = str(uuid.uuid4())
     now = _now()
@@ -2498,6 +2651,9 @@ def create_task_run(
             max_steps=max_steps,
             timeout_seconds=timeout_seconds,
             model_alias=model_alias,
+            provider=provider,
+            browser_tools=browser_tools or [],
+            routing_policy=routing_policy,
             deadline_at=deadline_at,
             health_snapshot=health_snapshot,
             health_decision=health_decision,
@@ -2530,6 +2686,9 @@ def create_task_run_with_message(
     created_by_kind: str,
     created_by_id: str | None = None,
     message_metadata: dict[str, Any] | None = None,
+    provider: dict[str, Any] | None = None,
+    browser_tools: list[dict[str, Any]] | None = None,
+    routing_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Insert the user task message and task_run in one BEGIN IMMEDIATE transaction."""
     run_id = str(uuid.uuid4())
@@ -2582,6 +2741,9 @@ def create_task_run_with_message(
                 max_steps=max_steps,
                 timeout_seconds=timeout_seconds,
                 model_alias=model_alias,
+                provider=provider,
+                browser_tools=browser_tools or [],
+                routing_policy=routing_policy,
                 deadline_at=deadline_at,
                 health_snapshot=health_snapshot,
                 health_decision=health_decision,

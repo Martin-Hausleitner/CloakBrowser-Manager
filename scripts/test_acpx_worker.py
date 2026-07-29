@@ -17,6 +17,7 @@ from scripts.acpx_worker import (
     AcpxWorkerConfig,
     build_worker_config,
 )
+from scripts.browser_use_worker import ManagerHTTPError
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -236,6 +237,38 @@ def test_worker_executes_acpx_session_streams_outputs_and_cleans_capability(tmp_
     assert manager.failed == []
     assert manager.revoked == ["run-1"]
     assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_replaces_a_manager_rejected_adapter_output_with_safe_status(tmp_path: Path):
+    class RejectingManager(FakeManager):
+        def __init__(self):
+            super().__init__()
+            self.output_calls = []
+
+        def output(self, run_id, **body):
+            self.output_calls.append((run_id, body))
+            if len(self.output_calls) == 1:
+                raise ManagerHTTPError("Invalid output payload", status_code=422)
+            return {"id": "safe-output"}
+
+    manager = RejectingManager()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=FakeRuntime())
+
+    asyncio.run(worker._emit("run-1", {
+        "idempotency_key": "acpx-jsonrpc-19",
+        "kind": "observation",
+        "summary": "/",
+        "payload": {"text": "/"},
+    }))
+
+    assert len(manager.output_calls) == 2
+    _run_id, safe = manager.output_calls[-1]
+    assert safe == {
+        "kind": "status",
+        "summary": "ACP output omitted",
+        "payload": {"status": "running", "detail": "ACP output omitted"},
+        "idempotency_key": "acpx-jsonrpc-19",
+    }
 
 
 def test_worker_fails_clean_acpx_prompt_that_emits_no_outputs(tmp_path: Path):

@@ -544,14 +544,28 @@ class AcpxWorker:
         self.runtime = runtime or AcpxRuntime(config)
 
     async def _emit(self, run_id: str, output: dict[str, Any]) -> None:
-        await asyncio.to_thread(
-            self.client.output,
-            run_id,
-            kind=str(output["kind"]),
-            summary=str(output["summary"]),
-            payload=dict(output.get("payload") or {}),
-            idempotency_key=str(output["idempotency_key"]),
-        )
+        idempotency_key = str(output["idempotency_key"])
+        try:
+            await asyncio.to_thread(
+                self.client.output,
+                run_id,
+                kind=str(output["kind"]),
+                summary=str(output["summary"]),
+                payload=dict(output.get("payload") or {}),
+                idempotency_key=idempotency_key,
+            )
+        except ManagerHTTPError as exc:
+            if exc.status_code != 422:
+                raise
+            logger.warning("Manager rejected one ACPX adapter output; emitting safe status")
+            await asyncio.to_thread(
+                self.client.output,
+                run_id,
+                kind="status",
+                summary="ACP output omitted",
+                payload={"status": "running", "detail": "ACP output omitted"},
+                idempotency_key=idempotency_key,
+            )
 
     async def _heartbeat_loop(
         self,

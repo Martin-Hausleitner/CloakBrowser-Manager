@@ -218,6 +218,142 @@ async def test_profile_health_scheduler_reuses_inflight_task_and_suppresses_repe
     assert main._schedule_profile_health(profile, running, force=False) is None
 
 
+def _create_health_waiting_run(profile_id: str) -> dict[str, object]:
+    session = db.create_task_session(
+        profile_id,
+        "default",
+        "user",
+        title="Health gated run",
+    )
+    message = db.append_task_message(session["id"], "user", "go", "user")
+    snapshot, decision = db.build_run_health_gate(profile_id)
+    run = db.create_task_run(
+        task_session_id=session["id"],
+        task_message_id=message["id"],
+        profile_id=profile_id,
+        sandbox_id="default",
+        harness="browser-use",
+        launch_if_stopped=False,
+        allowed_origins=[],
+        max_steps=10,
+        timeout_seconds=60,
+        model_alias=None,
+        health_snapshot=snapshot,
+        health_decision=decision,
+        created_by_kind="user",
+    )
+    assert run["status"] == "health_check"
+    assert run["health_decision"]["waiting"] is True
+    return run
+
+
+@pytest.mark.asyncio
+async def test_profile_health_probe_requeues_waiting_run_after_passing_measurement(
+    tmp_db,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend import main
+
+    profile = db.create_profile("Passing probe", proxy="http://proxy.example:8080")
+    running = SimpleNamespace(context=AsyncMock())
+    db.upsert_profile_health(
+        profile["id"],
+        state="running",
+        proxy_configured=True,
+        warnings=[],
+        blockers=[],
+        sources={},
+    )
+    run = _create_health_waiting_run(profile["id"])
+    refresh_claims = MagicMock()
+    monkeypatch.setattr(main.worker_runtime_service, "refresh_claim_eligibility", refresh_claims)
+    monkeypatch.setattr(
+        main.profile_health_probe,
+        "run",
+        AsyncMock(
+            return_value=ProfileHealthResult(
+                state="passed",
+                checked_at=db._now(),
+                proxy_configured=True,
+                proxy_reachable=True,
+                outbound_ip_masked="203.0.113.x",
+                proxy_latency_ms=20.0,
+                proxy_risk_score=0,
+                proxy_authenticity_score=100,
+                fingerprint_consistency_score=100,
+                browser_scan_score=100,
+                warnings=(),
+                blockers=(),
+                error_code=None,
+                sources={"browser_network": "measured", "proxy_authenticity": "measured"},
+            )
+        ),
+    )
+
+    await main._run_profile_health_probe(profile, running)
+
+    updated = db.get_task_run(run["id"])
+    assert updated["status"] == "queued"
+    assert updated["health_snapshot"]["state"] == "passed"
+    assert updated["health_decision"]["allowed"] is True
+    assert updated["health_decision"]["waiting"] is False
+    refresh_claims.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_profile_health_probe_blocks_waiting_run_after_failed_measurement(
+    tmp_db,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend import main
+
+    profile = db.create_profile("Failed probe", proxy="http://proxy.example:8080")
+    running = SimpleNamespace(context=AsyncMock())
+    db.upsert_profile_health(
+        profile["id"],
+        state="running",
+        proxy_configured=True,
+        warnings=[],
+        blockers=[],
+        sources={},
+    )
+    run = _create_health_waiting_run(profile["id"])
+    refresh_claims = MagicMock()
+    monkeypatch.setattr(main.worker_runtime_service, "refresh_claim_eligibility", refresh_claims)
+    monkeypatch.setattr(
+        main.profile_health_probe,
+        "run",
+        AsyncMock(
+            return_value=ProfileHealthResult(
+                state="failed",
+                checked_at="2026-07-22T12:20:00+00:00",
+                proxy_configured=True,
+                proxy_reachable=False,
+                outbound_ip_masked=None,
+                proxy_latency_ms=None,
+                proxy_risk_score=None,
+                proxy_authenticity_score=None,
+                fingerprint_consistency_score=None,
+                browser_scan_score=None,
+                warnings=(),
+                blockers=("proxy_unreachable",),
+                error_code="proxy_unreachable",
+                sources={"browser_network": "measured"},
+            )
+        ),
+    )
+
+    await main._run_profile_health_probe(profile, running)
+
+    updated = db.get_task_run(run["id"])
+    assert updated["status"] == "blocked_health"
+    assert updated["status"] != "queued"
+    assert updated["health_snapshot"]["state"] == "failed"
+    assert updated["health_decision"]["allowed"] is False
+    assert updated["health_decision"]["waiting"] is False
+    refresh_claims.assert_called_once_with()
+
+
 @pytest.mark.asyncio
 async def test_profile_health_probe_failure_is_stored_without_raw_exception(
     tmp_db,

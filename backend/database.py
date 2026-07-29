@@ -2887,6 +2887,15 @@ def _active_profile_automation_lease_on_conn(
     *,
     now: str,
 ) -> bool:
+    table = conn.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = ? AND name = ?
+        """,
+        ("table", "automation_leases"),
+    ).fetchone()
+    if table is None:
+        return False
     row = conn.execute(
         """
         SELECT expires_at
@@ -3012,6 +3021,64 @@ def _release_task_run_claim_on_conn(
             now=now,
         )
     return lease_ids
+
+
+def reconcile_profile_health_waiting_task_runs(profile_id: str) -> int:
+    """Re-evaluate health_check task runs for a profile after a fresh measurement."""
+    safe_profile_id = str(profile_id)
+    if not safe_profile_id:
+        return 0
+    snapshot, decision = build_run_health_gate(safe_profile_id)
+    status = _status_from_health_decision(decision)
+    now = _now()
+    updated_count = 0
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """SELECT * FROM task_runs
+            WHERE profile_id = ?
+              AND status = ?
+              AND cancelled_at IS NULL
+            ORDER BY created_at ASC, id ASC""",
+            (safe_profile_id, "health_check"),
+        ).fetchall()
+        for row in rows:
+            _release_task_run_claim_on_conn(
+                conn,
+                row,
+                now=now,
+                status=status,
+                reason="profile_health_completed",
+            )
+            cursor = conn.execute(
+                """UPDATE task_runs
+                SET health_snapshot_json = ?,
+                    health_decision_json = ?,
+                    updated_at = ?,
+                    queued_at = CASE WHEN ? = ? THEN COALESCE(queued_at, ?) ELSE queued_at END
+                WHERE id = ?
+                  AND status = ?
+                  AND cancelled_at IS NULL""",
+                (
+                    json.dumps(snapshot, separators=(",", ":"), sort_keys=True),
+                    json.dumps(decision, separators=(",", ":"), sort_keys=True),
+                    now,
+                    status,
+                    "queued",
+                    now,
+                    row["id"],
+                    status,
+                ),
+            )
+            updated_count += int(cursor.rowcount or 0)
+        if updated_count:
+            _refresh_profile_claim_eligibility_on_conn(
+                conn,
+                safe_profile_id,
+                now=now,
+            )
+        conn.commit()
+    return updated_count
 
 
 def retry_task_run_health(run_id: str) -> dict[str, Any] | None:

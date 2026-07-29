@@ -1609,6 +1609,19 @@ class _RfbClientStreamFilter:
         return bytes(result)
 
 
+def _reconcile_profile_health_waiting_runs(profile_id: str) -> None:
+    try:
+        reconciled = db.reconcile_profile_health_waiting_task_runs(profile_id)
+        if reconciled:
+            worker_runtime_service.refresh_claim_eligibility()
+    except Exception as exc:
+        logger.error(
+            "Could not reconcile task runs after profile health for %s (%s)",
+            profile_id,
+            type(exc).__name__,
+        )
+
+
 async def _run_profile_health_probe(profile: dict[str, object], running: Any) -> None:
     """Run and persist one normalized probe without exposing provider errors."""
     profile_id = str(profile["id"])
@@ -1638,10 +1651,12 @@ async def _run_profile_health_probe(profile: dict[str, object], running: Any) ->
                 error_code="profile_health_probe_failed",
                 sources={},
             )
+            _reconcile_profile_health_waiting_runs(profile_id)
         return
 
     if db.get_profile(profile_id) is not None:
         db.upsert_profile_health(profile_id, **result.as_record())
+        _reconcile_profile_health_waiting_runs(profile_id)
 
 
 def _schedule_profile_health(

@@ -48,7 +48,14 @@ def test_get_profile_extensions_valid(client: TestClient, tmp_path: Path, monkey
     monkeypatch.setattr(
         extension_catalog,
         "list_catalog_extensions",
-        lambda **_kwargs: [{"id": "sample-extension", "path": str(ext_dir)}],
+        lambda **_kwargs: [
+            {
+                "id": "sample-extension",
+                "path": str(ext_dir),
+                "icon_url": "https://example.invalid/sample.png",
+                "store_url": "https://chromewebstore.google.com/detail/sample-extension",
+            }
+        ],
     )
     p = db.create_profile("WithExt", extension_ids=["sample-extension"])
 
@@ -58,7 +65,10 @@ def test_get_profile_extensions_valid(client: TestClient, tmp_path: Path, monkey
     assert data["profile_id"] == p["id"]
     assert len(data["extensions"]) == 1
     ext = data["extensions"][0]
+    assert ext["id"] == "sample-extension"
     assert ext["name"] == "Sample Extension"
     assert ext["version"] == "2.0.0"
     assert ext["trust_state"] == "valid"
     assert ext["permissions"] == ["notifications"]
+    assert ext["icon_url"] == "https://example.invalid/sample.png"
+    assert ext["store_url"] == "https://chromewebstore.google.com/detail/sample-extension"

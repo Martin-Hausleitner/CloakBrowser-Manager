@@ -1133,6 +1133,8 @@ class ExtensionItem(BaseModel):
     permissions: list[str] = Field(default_factory=list)
     trust_state: Literal["valid", "untrusted_manifest", "missing_manifest", "invalid_path"]
     error: str | None = None
+    icon_url: str | None = None
+    store_url: str | None = None
 
 
 class ExtensionInventoryResponse(BaseModel):

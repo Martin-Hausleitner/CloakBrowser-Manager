@@ -72,8 +72,8 @@ def test_parse_extension_manifest_valid(tmp_path: Path):
 
 
 def test_inspect_profile_extensions(tmp_path: Path, monkeypatch):
-    ext_dir = tmp_path / "my_extension"
-    ext_dir.mkdir()
+    ext_dir = tmp_path / "catalog-extension" / "1.0.0_0"
+    ext_dir.mkdir(parents=True)
     manifest_data = {
         "name": "Test Extension",
         "version": "1.0.0",
@@ -87,11 +87,21 @@ def test_inspect_profile_extensions(tmp_path: Path, monkeypatch):
         "extension_ids": ["catalog-extension"],
     }
     monkeypatch.setattr(
-        "backend.extension_catalog.catalog_paths_for_ids",
-        lambda _ids: [str(ext_dir)],
+        "backend.extension_catalog.list_catalog_extensions",
+        lambda **_kwargs: [
+            {
+                "id": "catalog-extension",
+                "path": str(ext_dir),
+                "icon_url": "https://example.invalid/icon.png",
+                "store_url": "https://chromewebstore.google.com/detail/catalog-extension",
+            }
+        ],
     )
 
     results = inspect_profile_extensions(profile)
     assert len(results) == 1
+    assert results[0]["id"] == "catalog-extension"
     assert results[0]["name"] == "Test Extension"
     assert results[0]["trust_state"] == "valid"
+    assert results[0]["icon_url"] == "https://example.invalid/icon.png"
+    assert results[0]["store_url"] == "https://chromewebstore.google.com/detail/catalog-extension"

@@ -78,7 +78,10 @@ def seed_passed_health(profile_id: str) -> None:
         warnings=[],
         blockers=[],
         error_code=None,
-        sources={"proxy_authenticity": "measured"},
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+        },
     )
 
 
@@ -545,11 +548,14 @@ def test_override_health_allows_overridable_reasons(client_access: TestClient):
         proxy_reachable=True,
         proxy_authenticity_score=10,
         fingerprint_consistency_score=100,
-        browser_scan_score=90,
+        browser_scan_score=10,
         warnings=[],
         blockers=[],
         error_code=None,
-        sources={"proxy_authenticity": "measured"},
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+        },
     )
     session = create_session(profile["id"])
     password = create_user(client_access, "alpha-auto", "alpha", "automate")
@@ -650,11 +656,14 @@ def seed_overridable_blocked_health(profile_id: str) -> None:
         proxy_reachable=True,
         proxy_authenticity_score=10,
         fingerprint_consistency_score=100,
-        browser_scan_score=90,
+        browser_scan_score=10,
         warnings=[],
         blockers=[],
         error_code=None,
-        sources={"proxy_authenticity": "measured"},
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+        },
     )
 
 

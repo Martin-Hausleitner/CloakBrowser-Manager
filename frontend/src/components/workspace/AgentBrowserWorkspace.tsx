@@ -586,6 +586,22 @@ export function AgentBrowserWorkspace({
         }
       }
 
+      let health = await api.runProfileHealth(smokeProfileId);
+      for (let attempt = 0; health.state === "pending" || health.state === "running"; attempt += 1) {
+        if (selectedProfileIdRef.current !== smokeProfileId) return;
+        if (attempt >= 60) {
+          throw new Error("Profile health check timed out before the harness test could start");
+        }
+        health = await api.getProfileHealth(smokeProfileId);
+        if (health.state === "pending" || health.state === "running") {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
+        }
+      }
+      if (selectedProfileIdRef.current !== smokeProfileId) return;
+      if (health.state !== "passed" && health.state !== "warning") {
+        throw new Error(`Profile health check ${health.state}; the harness test was not started`);
+      }
+
       const label = managedHarnessLabel(candidate);
       const created = await api.createTaskSession({
         profile_id: smokeProfileId,

@@ -2326,6 +2326,7 @@ def build_run_health_gate(profile_id: str) -> tuple[dict[str, Any], dict[str, An
             proxy_reachable=None,
             measured_authenticity_score=None,
             inferred_authenticity_score=None,
+            measured_authenticity_source=None,
             reasons=(),
             measurement_error=True,
             policy_version=HEALTH_POLICY_VERSION,
@@ -2361,6 +2362,7 @@ def build_run_health_gate(profile_id: str) -> tuple[dict[str, Any], dict[str, An
             proxy_reachable=fields["proxy_reachable"],  # type: ignore[arg-type]
             measured_authenticity_score=fields["measured_authenticity_score"],  # type: ignore[arg-type]
             inferred_authenticity_score=fields["inferred_authenticity_score"],  # type: ignore[arg-type]
+            measured_authenticity_source=fields["measured_authenticity_source"],  # type: ignore[arg-type]
             reasons=tuple(fields["reasons"]),  # type: ignore[arg-type]
             measurement_error=bool(fields["measurement_error"]),
             policy_version=str(fields["policy_version"]),

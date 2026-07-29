@@ -79,7 +79,10 @@ def seed_passed_health(profile_id: str) -> None:
         warnings=[],
         blockers=[],
         error_code=None,
-        sources={"proxy_authenticity": "measured"},
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+        },
     )
 
 
@@ -92,11 +95,14 @@ def seed_blocked_health(profile_id: str) -> None:
         proxy_reachable=True,
         proxy_authenticity_score=10,
         fingerprint_consistency_score=100,
-        browser_scan_score=90,
+        browser_scan_score=10,
         warnings=[],
         blockers=[],
         error_code=None,
-        sources={"proxy_authenticity": "measured"},
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+        },
     )
 
 

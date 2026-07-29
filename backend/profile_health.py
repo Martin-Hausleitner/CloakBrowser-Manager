@@ -22,7 +22,7 @@ _BROWSERSCAN_SCORE_RE = re.compile(
 )
 
 # Stable versioned reason mapping for immutable run-health snapshots.
-HEALTH_GATE_REASON_VERSION = "run-health.v1"
+HEALTH_GATE_REASON_VERSION = "run-health.v2"
 _MEASUREMENT_ERROR_CODES = frozenset(
     {
         "network_timeout",
@@ -117,12 +117,27 @@ def map_profile_health_gate_fields(result: ProfileHealthResult) -> dict[str, obj
     authenticity_source = result.sources.get("proxy_authenticity")
     measured_score: int | None = None
     inferred_score: int | None = None
-    score = result.proxy_authenticity_score
-    if score is not None:
-        if authenticity_source == "measured":
-            measured_score = score
-        elif authenticity_source in {"derived", "inferred"}:
-            inferred_score = score
+    measured_source: str | None = None
+    if result.proxy_configured:
+        score = result.proxy_authenticity_score
+        if score is not None:
+            if authenticity_source == "measured":
+                measured_score = score
+                measured_source = "proxychecker"
+            elif authenticity_source in {"derived", "inferred"}:
+                inferred_score = score
+    else:
+        browser_signals = (
+            result.fingerprint_consistency_score,
+            result.browser_scan_score,
+        )
+        browser_sources_measured = (
+            result.sources.get("fingerprint_consistency") == "measured"
+            and result.sources.get("browser_scan") == "measured"
+        )
+        if browser_sources_measured and all(isinstance(value, int) for value in browser_signals):
+            measured_score = min(value for value in browser_signals if isinstance(value, int))
+            measured_source = "browser_signals"
 
     reasons: list[str] = []
     if result.proxy_configured and result.proxy_reachable is not True:
@@ -147,6 +162,7 @@ def map_profile_health_gate_fields(result: ProfileHealthResult) -> dict[str, obj
         "outbound_ip_masked": result.outbound_ip_masked,
         "measured_authenticity_score": measured_score,
         "inferred_authenticity_score": inferred_score,
+        "measured_authenticity_source": measured_source,
         "reasons": tuple(dict.fromkeys(reasons)),
         "measurement_error": measurement_error,
         "policy_version": HEALTH_GATE_REASON_VERSION,

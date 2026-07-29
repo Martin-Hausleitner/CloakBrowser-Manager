@@ -34,12 +34,15 @@ def _snapshot(**overrides: object) -> HealthSnapshot:
         "proxy_reachable": None,
         "measured_authenticity_score": 90,
         "inferred_authenticity_score": None,
+        "measured_authenticity_source": "browser_signals",
         "reasons": (),
         "measurement_error": False,
         "policy_version": HEALTH_POLICY_VERSION,
         "outbound_ip_masked": "203.0.113.x",
     }
     base.update(overrides)
+    if overrides.get("proxy_configured") is True and "measured_authenticity_source" not in overrides:
+        base["measured_authenticity_source"] = "proxychecker"
     return HealthSnapshot(**base)  # type: ignore[arg-type]
 
 
@@ -207,6 +210,7 @@ def test_inferred_score_does_not_satisfy_measured_gate():
         _snapshot(
             measured_authenticity_score=None,
             inferred_authenticity_score=95,
+            measured_authenticity_source=None,
         ),
         POLICY,
         now=NOW,
@@ -414,10 +418,128 @@ def test_map_profile_health_gate_fields_exposes_stable_semantics():
         warnings=(),
         blockers=(),
         error_code=None,
-        sources={"proxy_authenticity": "measured"},
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+            "proxy_authenticity": "measured",
+        },
     )
     measured_fields = map_profile_health_gate_fields(measured)
-    assert measured_fields["measured_authenticity_score"] == 77
+    assert measured_fields["measured_authenticity_score"] == 88
+    assert measured_fields["measured_authenticity_source"] == "browser_signals"
     assert measured_fields["inferred_authenticity_score"] is None
     assert measured_fields["measurement_error"] is False
     assert measured_fields["reasons"] == ()
+
+
+def test_proxyless_gate_uses_the_lower_of_measured_browser_signals():
+    result = ProfileHealthResult(
+        state="passed",
+        checked_at="2026-07-24T11:55:00+00:00",
+        proxy_configured=False,
+        proxy_reachable=True,
+        outbound_ip_masked="203.0.113.x",
+        proxy_latency_ms=None,
+        proxy_risk_score=None,
+        proxy_authenticity_score=None,
+        fingerprint_consistency_score=93,
+        browser_scan_score=81,
+        warnings=(),
+        blockers=(),
+        error_code=None,
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+            "proxychecker": "skipped",
+        },
+    )
+
+    fields = map_profile_health_gate_fields(result)
+
+    assert fields["measured_authenticity_score"] == 81
+    assert fields["measured_authenticity_source"] == "browser_signals"
+    snapshot = HealthSnapshot.from_dict(fields)
+    assert evaluate_health(snapshot, POLICY, now=NOW).allowed is True
+
+
+def test_proxyless_gate_fails_closed_without_both_measured_browser_signals():
+    result = ProfileHealthResult(
+        state="warning",
+        checked_at="2026-07-24T11:55:00+00:00",
+        proxy_configured=False,
+        proxy_reachable=True,
+        outbound_ip_masked="203.0.113.x",
+        proxy_latency_ms=None,
+        proxy_risk_score=None,
+        proxy_authenticity_score=None,
+        fingerprint_consistency_score=100,
+        browser_scan_score=None,
+        warnings=(),
+        blockers=("browser_scan_score_missing",),
+        error_code="browser_scan_score_missing",
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "unavailable",
+            "proxychecker": "skipped",
+        },
+    )
+
+    fields = map_profile_health_gate_fields(result)
+
+    assert fields["measured_authenticity_score"] is None
+    assert fields["measured_authenticity_source"] is None
+    snapshot = HealthSnapshot.from_dict(fields)
+    decision = evaluate_health(snapshot, POLICY, now=NOW)
+    assert decision.allowed is False
+    assert "measurement_error" in decision.failed_reasons
+    assert "measured_authenticity_below_threshold" in decision.failed_reasons
+
+
+def test_configured_proxy_gate_keeps_measured_proxy_authenticity_authoritative():
+    result = ProfileHealthResult(
+        state="passed",
+        checked_at="2026-07-24T11:55:00+00:00",
+        proxy_configured=True,
+        proxy_reachable=True,
+        outbound_ip_masked="203.0.113.x",
+        proxy_latency_ms=18.0,
+        proxy_risk_score=12,
+        proxy_authenticity_score=76,
+        fingerprint_consistency_score=99,
+        browser_scan_score=98,
+        warnings=(),
+        blockers=(),
+        error_code=None,
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+            "proxychecker": "measured",
+            "proxy_authenticity": "measured",
+        },
+    )
+
+    fields = map_profile_health_gate_fields(result)
+
+    assert fields["measured_authenticity_score"] == 76
+    assert fields["measured_authenticity_source"] == "proxychecker"
+
+
+def test_measured_authenticity_source_must_match_proxy_mode():
+    direct = evaluate_health(
+        _snapshot(proxy_configured=False, measured_authenticity_source="proxychecker"),
+        POLICY,
+        now=NOW,
+    )
+    proxied = evaluate_health(
+        _snapshot(
+            proxy_configured=True,
+            proxy_reachable=True,
+            measured_authenticity_source="browser_signals",
+        ),
+        POLICY,
+        now=NOW,
+    )
+
+    assert "measured_authenticity_source_mismatch" in direct.failed_reasons
+    assert "measured_authenticity_source_mismatch" in direct.non_overridable_reasons
+    assert "measured_authenticity_source_mismatch" in proxied.failed_reasons

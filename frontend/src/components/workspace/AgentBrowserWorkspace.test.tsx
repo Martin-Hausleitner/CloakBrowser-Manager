@@ -19,6 +19,8 @@ const apiMock = vi.hoisted(() => ({
   cancelTaskRun: vi.fn(),
   retryTaskRunHealth: vi.fn(),
   overrideTaskRunHealth: vi.fn(),
+  runProfileHealth: vi.fn(),
+  getProfileHealth: vi.fn(),
   captureProfileScreenshot: vi.fn(),
   taskOutputScreenshotUrl: vi.fn((id: string) => `/api/task-outputs/${id}/screenshot`),
 }));
@@ -235,6 +237,8 @@ describe("AgentBrowserWorkspace", () => {
     apiMock.cancelTaskRun.mockReset();
     apiMock.retryTaskRunHealth.mockReset();
     apiMock.overrideTaskRunHealth.mockReset();
+    apiMock.runProfileHealth.mockReset();
+    apiMock.getProfileHealth.mockReset();
     apiMock.captureProfileScreenshot.mockReset();
     apiMock.getOrcaCapabilities.mockResolvedValue(capsAvailable);
     apiMock.getTaskHarnessPresence.mockResolvedValue({
@@ -253,6 +257,28 @@ describe("AgentBrowserWorkspace", () => {
         reason_code: "ok",
         checked_at: "2026-07-27T00:00:00Z",
       })),
+    });
+    apiMock.runProfileHealth.mockResolvedValue({
+      profile_id: runningProfile.id,
+      state: "passed",
+      checked_at: "2026-07-29T00:00:00Z",
+      proxy_configured: false,
+      proxy_reachable: true,
+      outbound_ip_masked: "203.0.113.x",
+      proxy_latency_ms: null,
+      proxy_risk_score: null,
+      proxy_authenticity_score: null,
+      fingerprint_consistency_score: 100,
+      browser_scan_score: 100,
+      warnings: [],
+      blockers: [],
+      error_code: null,
+      sources: {
+        browser_network: "measured",
+        fingerprint_consistency: "measured",
+        browser_scan: "measured",
+        proxychecker: "skipped",
+      },
     });
   });
 
@@ -381,6 +407,7 @@ describe("AgentBrowserWorkspace", () => {
     await waitFor(() => expect((testButton as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(testButton);
 
+    await waitFor(() => expect(apiMock.runProfileHealth).toHaveBeenCalledWith(runningProfile.id));
     await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledWith({
       profile_id: runningProfile.id,
       title: "Browser Use smoke test",
@@ -403,6 +430,81 @@ describe("AgentBrowserWorkspace", () => {
     expect(apiMock.overrideTaskRunHealth).not.toHaveBeenCalled();
     expect(await screen.findByRole("button", { name: "Run with override" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Take over browser" })).toBeTruthy();
+  });
+
+  it("waits for a fresh measured profile health result before creating a smoke run", async () => {
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-29T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.runProfileHealth.mockResolvedValue({
+      profile_id: runningProfile.id,
+      state: "running",
+      checked_at: null,
+      proxy_configured: false,
+      proxy_reachable: null,
+      outbound_ip_masked: null,
+      proxy_latency_ms: null,
+      proxy_risk_score: null,
+      proxy_authenticity_score: null,
+      fingerprint_consistency_score: null,
+      browser_scan_score: null,
+      warnings: [],
+      blockers: [],
+      error_code: null,
+      sources: {},
+    });
+    apiMock.getProfileHealth.mockResolvedValue({
+      profile_id: runningProfile.id,
+      state: "passed",
+      checked_at: "2026-07-29T00:00:01Z",
+      proxy_configured: false,
+      proxy_reachable: true,
+      outbound_ip_masked: "203.0.113.x",
+      proxy_latency_ms: null,
+      proxy_risk_score: null,
+      proxy_authenticity_score: null,
+      fingerprint_consistency_score: 100,
+      browser_scan_score: 100,
+      warnings: [],
+      blockers: [],
+      error_code: null,
+      sources: {
+        browser_network: "measured",
+        fingerprint_consistency: "measured",
+        browser_scan: "measured",
+        proxychecker: "skipped",
+      },
+    });
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture());
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture());
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const smokeButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
+      .getByRole("button", { name: "Run Browser Use smoke test" });
+    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(smokeButton);
+
+    await waitFor(() => expect(apiMock.getProfileHealth).toHaveBeenCalledWith(runningProfile.id));
+    expect(apiMock.createTaskSession).toHaveBeenCalledTimes(1);
+    expect(apiMock.runProfileHealth.mock.invocationCallOrder[0])
+      .toBeLessThan(apiMock.createTaskSession.mock.invocationCallOrder[0]);
+    expect(apiMock.getProfileHealth.mock.invocationCallOrder[0])
+      .toBeLessThan(apiMock.createTaskSession.mock.invocationCallOrder[0]);
   });
 
   it("disables a smoke run for a harness that is known to be unavailable", async () => {

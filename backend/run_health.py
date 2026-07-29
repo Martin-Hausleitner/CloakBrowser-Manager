@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-HEALTH_POLICY_VERSION = "run-health.v1"
+HEALTH_POLICY_VERSION = "run-health.v2"
 DEFAULT_FRESHNESS_MINUTES = 10
 MEASURED_AUTHENTICITY_THRESHOLD = 70
 
@@ -31,6 +31,7 @@ NON_OVERRIDABLE_REASON_CODES = frozenset(
         "measurement_error",
         "health_timestamp_in_future",
         "health_policy_version_mismatch",
+        "measured_authenticity_source_mismatch",
     }
 )
 
@@ -112,6 +113,7 @@ class HealthSnapshot:
     proxy_reachable: bool | None
     measured_authenticity_score: int | None
     inferred_authenticity_score: int | None
+    measured_authenticity_source: str | None
     reasons: tuple[str, ...]
     measurement_error: bool
     policy_version: str = HEALTH_POLICY_VERSION
@@ -142,6 +144,10 @@ class HealthSnapshot:
                 self.inferred_authenticity_score, field_name="inferred_authenticity_score"
             ),
         )
+        if self.measured_authenticity_source not in {None, "browser_signals", "proxychecker"}:
+            raise ValueError(
+                "measured_authenticity_source must be browser_signals, proxychecker, or null"
+            )
         object.__setattr__(self, "reasons", _require_reasons(self.reasons))
         object.__setattr__(
             self,
@@ -168,6 +174,7 @@ class HealthSnapshot:
             "proxy_reachable": self.proxy_reachable,
             "measured_authenticity_score": self.measured_authenticity_score,
             "inferred_authenticity_score": self.inferred_authenticity_score,
+            "measured_authenticity_source": self.measured_authenticity_source,
             "reasons": list(self.reasons),
             "measurement_error": self.measurement_error,
             "policy_version": self.policy_version,
@@ -204,6 +211,7 @@ class HealthSnapshot:
             proxy_reachable=data.get("proxy_reachable"),
             measured_authenticity_score=data.get("measured_authenticity_score"),
             inferred_authenticity_score=data.get("inferred_authenticity_score"),
+            measured_authenticity_source=data.get("measured_authenticity_source"),
             reasons=reasons,
             measurement_error=data.get("measurement_error"),
             policy_version=policy_version,
@@ -278,6 +286,11 @@ def evaluate_health(
         failed.append("proxy_unreachable")
 
     measured = snapshot.measured_authenticity_score
+    expected_measured_source = (
+        "proxychecker" if snapshot.proxy_configured else "browser_signals"
+    )
+    if snapshot.measured_authenticity_source != expected_measured_source:
+        failed.append("measured_authenticity_source_mismatch")
     if (
         not isinstance(measured, int)
         or isinstance(measured, bool)

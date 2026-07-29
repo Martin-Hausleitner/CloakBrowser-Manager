@@ -102,7 +102,10 @@ def seed_passed_health(profile_id: str) -> None:
         warnings=[],
         blockers=[],
         error_code=None,
-        sources={"proxy_authenticity": "measured"},
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+        },
     )
 
 

@@ -1497,6 +1497,7 @@ class TaskHealthSnapshot(BaseModel):
     proxy_reachable: bool | None = None
     measured_authenticity_score: int | None = None
     inferred_authenticity_score: int | None = None
+    measured_authenticity_source: Literal["browser_signals", "proxychecker"] | None = None
     reasons: list[str] = Field(default_factory=list)
     measurement_error: bool
     policy_version: str

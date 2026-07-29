@@ -84,6 +84,15 @@ class StagehandRouterAdapter:
         self.process_launcher = process_launcher or asyncio.create_subprocess_exec
         self._preflight_succeeded = False
 
+    async def preflight(self) -> dict[str, object]:
+        node = self.node_resolver(self.node_bin)
+        runner = self.runner_path.resolve()
+        if not node:
+            return {"ready": False, "reason_code": "executable_missing"}
+        if not runner.is_file():
+            return {"ready": False, "reason_code": "runtime_missing"}
+        return await self._preflight_status(node, runner)
+
     async def __call__(self, request: BrowserToolRequest) -> BrowserToolResult:
         try:
             action, arguments = _validated_action(request)
@@ -207,6 +216,16 @@ class StagehandRouterAdapter:
                 await _cleanup_gateway(gateway_runner)
 
     async def _preflight(self, node: str, runner: Path) -> BrowserToolResult | None:
+        status = await self._preflight_status(node, runner)
+        if status["ready"] is True:
+            return None
+        return BrowserToolResult(
+            outcome="failed",
+            classification="tool_unavailable",
+            message=f"Stagehand preflight failed: {status['reason_code']}",
+        )
+
+    async def _preflight_status(self, node: str, runner: Path) -> dict[str, object]:
         process: Any | None = None
         try:
             process = await self.process_launcher(
@@ -228,17 +247,32 @@ class StagehandRouterAdapter:
                 raise _PolicyDenied(_bounded_error(stderr, "Stagehand preflight failed"))
             payload = _parse_exact_json_object(stdout)
             _validate_preflight_payload(payload)
-            return None
+            return {"ready": True, "reason_code": "ready"}
         except asyncio.CancelledError:
             await _kill_process(process)
             raise
-        except Exception as exc:  # noqa: BLE001 - preflight unavailable is non-terminal
+        except asyncio.TimeoutError:
             await _kill_process(process)
-            return BrowserToolResult(
-                outcome="failed",
-                classification="tool_unavailable",
-                message=redact_error_message(str(exc))[:MAX_STDERR_CHARS],
-            )
+            return {"ready": False, "reason_code": "timeout"}
+        except _PolicyDenied as exc:
+            await _kill_process(process)
+            return {"ready": False, "reason_code": _stagehand_preflight_reason_code(str(exc))}
+        except ValueError:
+            await _kill_process(process)
+            return {"ready": False, "reason_code": "malformed_output"}
+        except _OutputTooLarge:
+            await _kill_process(process)
+            return {"ready": False, "reason_code": "malformed_output"}
+        except Exception:  # noqa: BLE001 - public readiness fails closed
+            await _kill_process(process)
+            return {"ready": False, "reason_code": "probe_error"}
+
+
+def _stagehand_preflight_reason_code(message: str) -> str:
+    lowered = message.lower()
+    if "incompatible" in lowered or "version" in lowered or "node" in lowered or "cdpurl" in lowered:
+        return "incompatible_runtime"
+    return "command_failed"
 
 
 async def stagehand_router_adapter(request: BrowserToolRequest) -> BrowserToolResult:

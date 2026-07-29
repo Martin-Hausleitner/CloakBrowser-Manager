@@ -178,6 +178,42 @@ class BrowserHarnessAdapter:
         self.gateway_starter = gateway_starter
         self.process_launcher = process_launcher or asyncio.create_subprocess_exec
 
+    async def preflight(self) -> dict[str, object]:
+        binary = self.executable_resolver(self.executable)
+        if not binary:
+            return {"ready": False, "reason_code": "executable_missing"}
+        process: Any | None = None
+        try:
+            process = await self.process_launcher(
+                binary,
+                "--version",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=_minimal_operational_env(),
+                start_new_session=True,
+                limit=MAX_OUTPUT_BYTES + 1,
+            )
+            stdout, stderr, returncode = await _run_version_process_bounded(
+                process,
+                timeout_seconds=min(self.timeout_seconds, 10.0),
+            )
+            if returncode != 0:
+                _bounded_error(stderr, "browser-harness version probe failed")
+                return {"ready": False, "reason_code": "command_failed"}
+            if not _is_browser_harness_version(stdout):
+                return {"ready": False, "reason_code": "malformed_output"}
+            return {"ready": True, "reason_code": "ready"}
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            return {"ready": False, "reason_code": "timeout"}
+        except _OutputTooLarge:
+            return {"ready": False, "reason_code": "malformed_output"}
+        except Exception:  # noqa: BLE001 - public readiness fails closed
+            await _kill_process(process)
+            return {"ready": False, "reason_code": "probe_error"}
+
     async def __call__(self, request: BrowserToolRequest) -> BrowserToolResult:
         try:
             action, arguments = _validated_action(request)
@@ -383,13 +419,17 @@ def _write_request_file(
         raise
 
 
+def _minimal_operational_env() -> dict[str, str]:
+    return {key: os.environ[key] for key in OPERATIONAL_ENV_KEYS if key in os.environ}
+
+
 def _harness_env(
     *,
     local_ws: str,
     request_path: Path,
     request: BrowserToolRequest,
 ) -> dict[str, str]:
-    env = {key: os.environ[key] for key in OPERATIONAL_ENV_KEYS if key in os.environ}
+    env = _minimal_operational_env()
     env.update(
         {
             "BU_AUTOSPAWN": "0",
@@ -503,6 +543,49 @@ def _safe_payload(payload: dict[str, Any], *, request: BrowserToolRequest) -> di
 def _bounded_error(stderr: bytes, fallback: str) -> str:
     raw = stderr.decode("utf-8", "replace").strip() or fallback
     return redact_error_message(raw)[:MAX_STDERR_CHARS]
+
+
+def _is_browser_harness_version(stdout: bytes) -> bool:
+    text = stdout.decode("utf-8", "replace").strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return False
+    return re.fullmatch(r"(?:browser-harness\s+)?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?", lines[0]) is not None
+
+
+async def _run_version_process_bounded(
+    process: Any,
+    *,
+    timeout_seconds: float,
+) -> tuple[bytes, bytes, int]:
+    async def run() -> tuple[bytes, bytes, int]:
+        stdout_reader = getattr(process, "stdout", None)
+        stderr_reader = getattr(process, "stderr", None)
+        if stdout_reader is None or stderr_reader is None:
+            raise RuntimeError("browser-harness preflight streams are unavailable")
+        stdout_task = asyncio.create_task(
+            _read_limited(stdout_reader, MAX_OUTPUT_BYTES, "browser-harness version output")
+        )
+        stderr_task = asyncio.create_task(
+            _read_limited(stderr_reader, MAX_STDERR_BYTES, "browser-harness version stderr")
+        )
+        wait_task = asyncio.create_task(process.wait())
+        tasks = (stdout_task, stderr_task, wait_task)
+        try:
+            stdout, stderr, returncode = await asyncio.gather(*tasks)
+            return stdout, stderr, int(returncode if returncode is not None else 0)
+        except Exception:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+    try:
+        return await asyncio.wait_for(run(), timeout=timeout_seconds)
+    except (asyncio.TimeoutError, asyncio.CancelledError, _OutputTooLarge):
+        await _kill_process(process)
+        raise
 
 
 async def _run_process_bounded(

@@ -473,6 +473,78 @@ def test_missing_runtime_or_node_returns_tool_unavailable_before_gateway(tmp_pat
     assert called is False
 
 
+def test_public_preflight_runs_exact_stagehand_probe_without_gateway(tmp_path: Path):
+    from scripts.stagehand_router_adapter import StagehandRouterAdapter
+
+    gateway_called = False
+
+    async def gateway(**_kwargs: Any) -> tuple[FakeGatewayRunner, str]:
+        nonlocal gateway_called
+        gateway_called = True
+        return FakeGatewayRunner(), "ws://127.0.0.1:1/nonce"
+
+    launcher = RecordingLauncher(process_specs=[{"stdout_chunks": [preflight_output()]}])
+    runner = tmp_path / "router-runner.mjs"
+    runner.write_text("// runtime", encoding="utf-8")
+    adapter = StagehandRouterAdapter(
+        node_resolver=lambda _name: "/bin/node",
+        runner_path=runner,
+        gateway_starter=gateway,
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": True, "reason_code": "ready"}
+    assert launcher.argvs == [("/bin/node", str(runner.resolve()), "--preflight")]
+    assert gateway_called is False
+
+
+def test_public_preflight_reports_missing_stagehand_runtime_without_gateway_or_process(tmp_path: Path):
+    from scripts.stagehand_router_adapter import StagehandRouterAdapter
+
+    gateway_called = False
+
+    async def gateway(**_kwargs: Any) -> tuple[FakeGatewayRunner, str]:
+        nonlocal gateway_called
+        gateway_called = True
+        return FakeGatewayRunner(), "ws://127.0.0.1:1/nonce"
+
+    launcher = RecordingLauncher(process_specs=[])
+    adapter = StagehandRouterAdapter(
+        node_resolver=lambda _name: "/bin/node",
+        runner_path=tmp_path / "missing.mjs",
+        gateway_starter=gateway,
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": False, "reason_code": "runtime_missing"}
+    assert launcher.argvs == []
+    assert gateway_called is False
+
+
+def test_public_preflight_sanitizes_stagehand_incompatible_runtime(tmp_path: Path):
+    from scripts.stagehand_router_adapter import StagehandRouterAdapter
+
+    runner = tmp_path / "router-runner.mjs"
+    runner.write_text("// runtime", encoding="utf-8")
+    launcher = RecordingLauncher(
+        process_specs=[{"stdout_chunks": [preflight_output(stagehandVersion="3.7.2")]}]
+    )
+    adapter = StagehandRouterAdapter(
+        node_resolver=lambda _name: "/bin/node",
+        runner_path=runner,
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": False, "reason_code": "incompatible_runtime"}
+    assert set(result) == {"ready", "reason_code"}
+
+
 def test_origin_and_argument_validation_happen_before_gateway(tmp_path: Path):
     from scripts.stagehand_router_adapter import StagehandRouterAdapter
 

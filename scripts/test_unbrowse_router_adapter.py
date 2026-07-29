@@ -330,6 +330,72 @@ def test_missing_unbrowse_binary_returns_tool_unavailable_before_gateway(tmp_pat
     assert called is False
 
 
+def test_public_preflight_runs_exact_unbrowse_probes_without_gateway():
+    from scripts.unbrowse_router_adapter import UnbrowseRouterAdapter
+
+    launcher = RecordingLauncher()
+    gateway_called = False
+
+    async def gateway(**_kwargs: Any) -> tuple[FakeGatewayRunner, str]:
+        nonlocal gateway_called
+        gateway_called = True
+        return FakeGatewayRunner(), "ws://127.0.0.1:1/nonce"
+
+    adapter = UnbrowseRouterAdapter(
+        executable_resolver=lambda _name: "/bin/unbrowse",
+        gateway_starter=gateway,
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": True, "reason_code": "ready"}
+    assert launcher.argvs == [
+        ("/bin/unbrowse", "eval", "version", "--json"),
+        ("/bin/unbrowse", "breath", "go", "--help"),
+    ]
+    assert gateway_called is False
+
+
+def test_public_preflight_reports_missing_unbrowse_binary_without_gateway_or_process():
+    from scripts.unbrowse_router_adapter import UnbrowseRouterAdapter
+
+    gateway_called = False
+
+    async def gateway(**_kwargs: Any) -> tuple[FakeGatewayRunner, str]:
+        nonlocal gateway_called
+        gateway_called = True
+        return FakeGatewayRunner(), "ws://127.0.0.1:1/nonce"
+
+    launcher = RecordingLauncher()
+    adapter = UnbrowseRouterAdapter(
+        executable_resolver=lambda _name: None,
+        gateway_starter=gateway,
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": False, "reason_code": "executable_missing"}
+    assert launcher.argvs == []
+    assert gateway_called is False
+
+
+def test_public_preflight_sanitizes_unbrowse_malformed_probe_failure():
+    from scripts.unbrowse_router_adapter import UnbrowseRouterAdapter
+
+    launcher = RecordingLauncher(version_stdout_chunks=[b"not-json /home/coder/secret token=secret\n"])
+    adapter = UnbrowseRouterAdapter(
+        executable_resolver=lambda _name: "/bin/unbrowse",
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": False, "reason_code": "malformed_output"}
+    assert set(result) == {"ready", "reason_code"}
+
+
 @pytest.mark.parametrize(
     "version_stdout",
     [

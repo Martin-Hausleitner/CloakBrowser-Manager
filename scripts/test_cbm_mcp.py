@@ -378,3 +378,15 @@ def test_router_facade_is_explicitly_unavailable_without_normalized_contract(
     assert result["ok"] is False
     assert result["classification"] == "tool_unavailable"
     assert "telemetry" in result
+
+
+def test_default_router_mapping_uses_real_unbrowse_and_browser_harness_adapters():
+    from scripts import cbm_mcp
+    from scripts.browser_harness_adapter import BrowserHarnessAdapter
+    from scripts.unbrowse_router_adapter import UnbrowseRouterAdapter
+
+    adapters = cbm_mcp._default_router_adapters()
+
+    assert isinstance(adapters["unbrowse"], UnbrowseRouterAdapter)
+    assert isinstance(adapters["browser-harness"], BrowserHarnessAdapter)
+    assert adapters["stagehand"].__name__ == "unavailable"

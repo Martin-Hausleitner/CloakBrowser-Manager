@@ -40,6 +40,7 @@ from scripts.browser_tool_router import (
     routing_contract_from_claim,
 )
 from scripts.browser_harness_adapter import BrowserHarnessAdapter
+from scripts.unbrowse_router_adapter import UnbrowseRouterAdapter
 
 
 @dataclass(frozen=True)
@@ -297,7 +298,7 @@ def _default_router_adapters() -> dict[str, BrowserToolAdapter]:
         return BrowserToolResult(outcome="failed", classification="tool_unavailable")
 
     return {
-        "unbrowse": unavailable,
+        "unbrowse": UnbrowseRouterAdapter(),
         "stagehand": unavailable,
         "browser-harness": BrowserHarnessAdapter(),
     }

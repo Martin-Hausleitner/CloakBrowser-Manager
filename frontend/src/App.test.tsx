@@ -343,6 +343,46 @@ describe("App Browser Use home handoff", () => {
     expect((workspacePrompt as HTMLTextAreaElement).value).toBe(task);
   });
 
+  it("clears a stale selected browser when the home project changes", async () => {
+    const defaultProfile: Profile = {
+      ...runningProfile,
+      id: "profile-default",
+      name: "Default browser",
+      project_id: "default",
+    };
+    const researchProfile: Profile = {
+      ...runningProfile,
+      id: "profile-research",
+      name: "Research browser",
+      project_id: "research",
+    };
+    useProfilesMock.mockReturnValue({
+      profiles: [defaultProfile, researchProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    fireEvent.change(await screen.findByRole("combobox", { name: "Run with browser profile" }), {
+      target: { value: defaultProfile.id },
+    });
+    expect((screen.getByRole("button", { name: "Open or launch selected browser" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), {
+      target: { value: researchProfile.project_id },
+    });
+
+    expect((screen.getByRole("combobox", { name: "Run with browser profile" }) as HTMLSelectElement).value).toBe("");
+    expect((screen.getByRole("button", { name: "Open or launch selected browser" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("exposes stable UI states across desktop navigation into the live workspace", async () => {
     useProfilesMock.mockReturnValue({
       profiles: [runningProfile],

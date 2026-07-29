@@ -193,11 +193,9 @@ async def start_cdp_gateway(
             if not hmac.compare_digest(supplied_nonce, nonce):
                 raise web.HTTPUnauthorized()
         else:
-            suffix = raw_tail
-            if suffix == nonce:
-                suffix = ""
-            elif suffix.startswith(f"{nonce}/"):
-                suffix = suffix[len(nonce) + 1 :]
+            supplied_nonce, separator, suffix = raw_tail.partition("/")
+            if not hmac.compare_digest(supplied_nonce, nonce):
+                raise web.HTTPUnauthorized()
             if suffix not in {"", "json/version", "json/list", "json/protocol"}:
                 raise web.HTTPNotFound()
         suffix_path = f"/{suffix}" if suffix else ("" if is_websocket else "/json/version")

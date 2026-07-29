@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
+from aiohttp import ClientSession
+
+from scripts.unbrowse_managed_helper import start_cdp_gateway
 
 from scripts.unbrowse_worker import (
     UnbrowseClient,
@@ -107,6 +111,23 @@ def test_unbrowse_gateway_fails_closed_when_kuri_port_9222_is_busy():
         )
 
     assert [call[2] for call in calls] == [9222]
+
+
+def test_cdp_gateway_rejects_discovery_without_its_nonce():
+    async def scenario():
+        runner, browser_ws = await start_cdp_gateway(
+            upstream_http="http://127.0.0.1:9/internal/cdp",
+            headers={"X-CBM-Run-Capability": "opaque"},
+        )
+        try:
+            endpoint = urlsplit(browser_ws)
+            async with ClientSession() as session:
+                async with session.get(f"http://{endpoint.netloc}/json/version") as response:
+                    assert response.status == 401
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(scenario())
 
 
 def test_mcp_start_closes_spawned_process_when_handshake_fails(monkeypatch):

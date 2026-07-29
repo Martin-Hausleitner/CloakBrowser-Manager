@@ -217,6 +217,8 @@ export function AgentBrowserWorkspace({
   const viewerPaneRef = useRef<HTMLElement | null>(null);
   const viewerFullscreenButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreViewerFullscreenFocusRef = useRef(false);
+  const harnessMenuRef = useRef<HTMLDivElement | null>(null);
+  const harnessMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const runningProfiles = useMemo(
     () => profiles.filter((profile) => profile.status === "running"),
@@ -240,6 +242,37 @@ export function AgentBrowserWorkspace({
       setFullViewMode("single");
     }
   }, [desktopGridAvailable, fullViewMode]);
+
+  useEffect(() => {
+    if (!harnessMenuOpen) return;
+    const focusTimer = window.setTimeout(() => {
+      harnessMenuRef.current
+        ?.querySelector<HTMLButtonElement>("[data-harness-option]")
+        ?.focus({ preventScroll: true });
+    }, 0);
+    const closeMenu = () => {
+      setHarnessMenuOpen(false);
+      window.setTimeout(() => harnessMenuTriggerRef.current?.focus({ preventScroll: true }), 0);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeMenu();
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (harnessMenuRef.current?.contains(event.target)) return;
+      if (harnessMenuTriggerRef.current?.contains(event.target)) return;
+      closeMenu();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [harnessMenuOpen]);
 
   const unavailable = caps != null && !caps.available;
   const browserUseMode = agent === "browser-use";
@@ -270,6 +303,9 @@ export function AgentBrowserWorkspace({
     )
     : selectedCliReady;
   const managedRunActive = Boolean(taskRun && ACTIVE_TASK_RUN_STATES.has(taskRun.status));
+  const managedRunNeedsTakeover = Boolean(
+    taskRun && (managedRunActive || taskRun.status === "failed" || taskRun.status === "revoked"),
+  );
   const orcaSessionActive = session?.status === "running" || session?.status === "starting";
   const sessionActive = managedRunMode ? managedRunActive : orcaSessionActive;
   const originList = useMemo(() => allowedOrigins(prompt), [prompt]);
@@ -450,16 +486,50 @@ export function AgentBrowserWorkspace({
         }
         return;
       }
-      const [nextCaps, presences, preflights] = await Promise.all([
-        api.getOrcaCapabilities(),
-        Promise.all(MANAGED_HARNESSES.map((harness) => api.getTaskHarnessPresence(harness, {}))),
-        api.getTaskHarnessPreflights("acpx", {}),
+      const [capsResult, presenceResults, preflightResult] = await Promise.all([
+        api.getOrcaCapabilities().then(
+          (value) => ({ ok: true as const, value }),
+          () => ({ ok: false as const }),
+        ),
+        Promise.all(MANAGED_HARNESSES.map(async (harness) => {
+          try {
+            return { harness, presence: await api.getTaskHarnessPresence(harness, {}) };
+          } catch {
+            return { harness, presence: null };
+          }
+        })),
+        api.getTaskHarnessPreflights("acpx", {}).then(
+          (value) => ({ ok: true as const, value }),
+          () => ({ ok: false as const }),
+        ),
       ]);
-      setCaps(nextCaps);
-      setHarnessPresence(Object.fromEntries(
-        presences.map((presence) => [presence.harness, presence]),
-      ) as Partial<Record<ManagedHarness, TaskHarnessPresence>>);
-      setAcpxPreflights(preflights.agents);
+      const failedChecks: string[] = [];
+      if (capsResult.ok) {
+        setCaps(capsResult.value);
+      } else {
+        failedChecks.push("Local CLI");
+      }
+      const nextPresences: Partial<Record<ManagedHarness, TaskHarnessPresence>> = {};
+      for (const result of presenceResults) {
+        nextPresences[result.harness] = result.presence ?? {
+          harness: result.harness,
+          worker_seen_recently: false,
+          state: "unavailable",
+          last_seen_at: null,
+          reason: `${managedHarnessLabel(result.harness)} readiness could not be verified`,
+        };
+        if (!result.presence) failedChecks.push(managedHarnessLabel(result.harness));
+      }
+      setHarnessPresence((current) => ({ ...current, ...nextPresences }));
+      if (preflightResult.ok) {
+        setAcpxPreflights(preflightResult.value.agents);
+      } else {
+        setAcpxPreflights([]);
+        failedChecks.push("ACPX adapters");
+      }
+      if (failedChecks.length) {
+        setError(`Could not check: ${failedChecks.join(", ")}`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Harness readiness check failed");
     } finally {
@@ -736,7 +806,7 @@ export function AgentBrowserWorkspace({
           profile_id: selectedProfile.id,
           allowed_origins: origins,
           timeout_seconds: 360,
-          model_alias: browserUseMode ? "cursor-grok-4.5-low" : null,
+          model_alias: null,
         });
         rememberBrowserUseRun(selectedProfile.id, started.id);
         setTaskRun(started);
@@ -803,20 +873,22 @@ export function AgentBrowserWorkspace({
   }, [canStop, managedRunMode, session, stopPolling, stopRunPolling, taskRun]);
 
   const handleTakeControl = useCallback(async () => {
-    if (!managedRunActive || !taskRun || !canAutomate || !canInteract || busy) return;
+    if (!managedRunNeedsTakeover || !taskRun || !canAutomate || !canInteract || busy) return;
     setBusy(true);
     setError(null);
     try {
-      const cancelled = await api.cancelTaskRun(taskRun.id);
-      setTaskRun(cancelled);
-      stopRunPolling();
+      if (managedRunActive) {
+        const cancelled = await api.cancelTaskRun(taskRun.id);
+        setTaskRun(cancelled);
+        stopRunPolling();
+      }
       setViewerFullscreen(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to hand browser control to the operator");
     } finally {
       setBusy(false);
     }
-  }, [busy, canAutomate, canInteract, managedRunActive, stopRunPolling, taskRun]);
+  }, [busy, canAutomate, canInteract, managedRunActive, managedRunNeedsTakeover, stopRunPolling, taskRun]);
 
   const handleRetryRunHealth = useCallback(async () => {
     if (!taskRun || taskRun.status !== "blocked_health" || !canAutomate || busy) return;
@@ -994,6 +1066,7 @@ export function AgentBrowserWorkspace({
             <div className="relative flex min-w-0 flex-1 items-center justify-end gap-1">
               <button
                 type="button"
+                ref={harnessMenuTriggerRef}
                 className={`inline-flex h-7 min-w-0 flex-1 items-center gap-1 rounded border px-1.5 text-[9px] font-medium transition-colors ${
                   selectedHarnessReady
                     ? "border-emerald-900/70 bg-emerald-950/60 text-emerald-300"
@@ -1007,6 +1080,7 @@ export function AgentBrowserWorkspace({
                 disabled={sessionActive}
                 aria-label="Open harness menu"
                 aria-expanded={harnessMenuOpen}
+                aria-controls="harness-menu"
                 title="Switch and check installed VCVM harnesses"
               >
                 <span
@@ -1026,6 +1100,8 @@ export function AgentBrowserWorkspace({
               </button>
               {harnessMenuOpen ? (
                 <div
+                  ref={harnessMenuRef}
+                  id="harness-menu"
                   role="dialog"
                   aria-label="Harnesses on VCVM"
                   className="absolute right-0 top-8 z-40 w-[18.5rem] rounded-lg border border-[#3b3b43] bg-[#111114] p-1.5 shadow-2xl"
@@ -1056,6 +1132,7 @@ export function AgentBrowserWorkspace({
                         <div key={candidate} className="flex items-center gap-1 rounded-md hover:bg-[#1d1d21]">
                           <button
                             type="button"
+                            data-harness-option
                             className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left"
                             onClick={() => chooseAgent(candidate)}
                             disabled={sessionActive}
@@ -1068,16 +1145,6 @@ export function AgentBrowserWorkspace({
                               {ready ? "Ready" : presence ? "Unavailable" : "Not checked"}
                             </span>
                           </button>
-                          <button
-                            type="button"
-                            className="inline-flex h-7 w-7 items-center justify-center rounded text-[#a1a1aa] hover:bg-[#303036] hover:text-white disabled:opacity-40"
-                            onClick={() => void handleHarnessCheck(candidate)}
-                            disabled={harnessCheckBusy || sessionActive}
-                            aria-label={`Recheck ${label}`}
-                            title={`Recheck ${label}`}
-                          >
-                            <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === candidate ? "animate-spin" : ""}`} aria-hidden="true" />
-                          </button>
                         </div>
                       );
                     })}
@@ -1089,6 +1156,7 @@ export function AgentBrowserWorkspace({
                       <div key={candidate} className="flex items-center gap-1 rounded-md hover:bg-[#1d1d21]">
                         <button
                           type="button"
+                          data-harness-option
                           className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left"
                           onClick={() => chooseAgent(candidate)}
                           disabled={sessionActive}
@@ -1100,15 +1168,6 @@ export function AgentBrowserWorkspace({
                             {candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}
                           </span>
                           <span className="text-[9px] text-emerald-300">Detected</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[#a1a1aa] hover:bg-[#303036] hover:text-white disabled:opacity-40"
-                          onClick={() => void handleHarnessCheck("orca")}
-                          disabled={harnessCheckBusy || sessionActive}
-                          aria-label={`Recheck ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}`}
-                        >
-                          <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === "orca" ? "animate-spin" : ""}`} aria-hidden="true" />
                         </button>
                       </div>
                     )) : (
@@ -1409,16 +1468,18 @@ export function AgentBrowserWorkspace({
               ? `${desktopGridProfiles.length}/${runningProfiles.length} live`
               : selectedProfile?.status ?? "none"}
           </span>
-          {managedRunActive && canInteract ? (
+          {managedRunNeedsTakeover && canInteract ? (
             <button
               type="button"
               className="inline-flex h-7 items-center rounded border border-emerald-700/80 bg-emerald-950/70 px-2 text-[10px] font-semibold text-emerald-100 hover:bg-emerald-900/70 disabled:opacity-40"
               onClick={() => void handleTakeControl()}
               disabled={busy || !canAutomate}
-              aria-label="Take over browser"
-              title="Stop the agent and continue directly in this browser"
+              aria-label={managedRunActive ? "Take over browser" : "Open browser"}
+              title={managedRunActive
+                ? "Stop the agent and continue directly in this browser"
+                : "Open the browser for direct control after the managed run stopped"}
             >
-              Take over
+              {managedRunActive ? "Take over" : "Open browser"}
             </button>
           ) : null}
           {viewerFullscreen ? (

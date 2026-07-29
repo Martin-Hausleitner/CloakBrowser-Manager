@@ -713,7 +713,12 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
               profiles={profiles}
               task={taskDraft}
               selectedProfile={selected}
-              onProjectChange={setProjectId}
+              onProjectChange={(nextProjectId) => {
+                setProjectId(nextProjectId);
+                if (!selected || (selected.project_id || "default") !== nextProjectId) {
+                  setSelectedId(null);
+                }
+              }}
               onTaskChange={setTaskDraft}
               onSelectProfile={(profileId) => {
                 setSelectedId(profileId);

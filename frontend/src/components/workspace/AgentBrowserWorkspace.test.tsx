@@ -260,16 +260,76 @@ describe("AgentBrowserWorkspace", () => {
     apiMock.getTaskHarnessPresence.mockClear();
     apiMock.getOrcaCapabilities.mockClear();
 
-    fireEvent.click(within(menu).getByRole("button", { name: "Recheck Stagehand" }));
+    expect(within(menu).queryByRole("button", { name: "Recheck Stagehand" })).toBeNull();
+    fireEvent.click(within(menu).getByRole("button", { name: "Recheck all harnesses" }));
 
-    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledTimes(4));
+    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("browser-use", expect.anything());
+    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("acpx", expect.anything());
+    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("unbrowse", expect.anything());
     expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything());
-    expect(apiMock.getOrcaCapabilities).not.toHaveBeenCalled();
+    expect(apiMock.getOrcaCapabilities).toHaveBeenCalledTimes(1);
 
     fireEvent.click(within(menu).getByRole("button", { name: "Use Stagehand" }));
     expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
     expect(screen.getByTestId("harness-readiness").textContent).toMatch(/stagehand.*unavailable/i);
     expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
+  });
+
+  it("focuses the harness menu and closes it with Escape while restoring trigger focus", async () => {
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    const trigger = await screen.findByRole("button", { name: "Open harness menu" });
+    expect(trigger.getAttribute("aria-controls")).toBe("harness-menu");
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
+    expect(menu.id).toBe("harness-menu");
+    await waitFor(() => expect(document.activeElement).toBe(within(menu).getByRole("button", { name: "Use Browser Use" })));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("preserves successful harness checks when the ACPX preflight check fails", async () => {
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: harness !== "acpx",
+      state: harness === "acpx" ? "unavailable" : "polling",
+      last_seen_at: harness === "acpx" ? null : "2026-07-29T00:00:00Z",
+      reason: harness === "acpx" ? "ACPX worker unavailable" : null,
+    }));
+    apiMock.getTaskHarnessPreflights.mockRejectedValue(new Error("ACPX preflight unavailable"));
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
+
+    await waitFor(() => {
+      expect(within(menu).getByRole("button", { name: "Use Browser Use" }).parentElement?.textContent).toMatch(/ready/i);
+      expect(within(menu).getByRole("button", { name: "Use Unbrowse" }).parentElement?.textContent).toMatch(/ready/i);
+      expect(within(menu).getByRole("button", { name: "Use Stagehand" }).parentElement?.textContent).toMatch(/ready/i);
+    });
   });
 
   it("selects the first ready supported ACPX adapter without falling back to Claude", async () => {
@@ -709,6 +769,59 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByRole("button", { name: "Exit full view" })).toBeTruthy();
   });
 
+  it("allows immediate browser takeover after a managed run fails without cancelling it again", async () => {
+    const browserUseProfile: Profile = { ...runningProfile, harness: "browser-use" };
+    const failedRun: TaskRun = {
+      id: "run-failed-takeover",
+      task_session_id: "task-failed-takeover",
+      task_message_id: "message-failed-takeover",
+      profile_id: browserUseProfile.id,
+      profile_id_snapshot: browserUseProfile.id,
+      sandbox_id: "default",
+      harness: "browser-use",
+      agent: null,
+      status: "failed",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: "cursor-grok-4.5-low",
+      deadline_at: "2026-07-29T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {},
+      retry_count: 0,
+      error_code: "worker_unavailable",
+      error_message: "The selected worker stopped responding",
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-29T00:00:00Z",
+      updated_at: "2026-07-29T00:01:00Z",
+    };
+    window.sessionStorage.setItem(
+      `cloakbrowser.browser-use.last-run:${browserUseProfile.id}`,
+      failedRun.id,
+    );
+    apiMock.getTaskRun.mockResolvedValue(failedRun);
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[browserUseProfile]}
+        selectedProfile={browserUseProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    const viewerPane = screen.getByTestId("agent-browser-viewer-pane");
+    const takeoverButton = await within(viewerPane).findByRole("button", { name: "Open browser" });
+    fireEvent.click(takeoverButton);
+
+    expect(apiMock.cancelTaskRun).not.toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "Exit full view" })).toBeTruthy();
+  });
+
   it("disables launch when Orca is unavailable", async () => {
     apiMock.getOrcaCapabilities.mockResolvedValue(capsUnavailable);
     render(
@@ -993,6 +1106,7 @@ describe("AgentBrowserWorkspace", () => {
           profile_id: browserUseProfile.id,
           allowed_origins: ["https://example.com"],
           timeout_seconds: 360,
+          model_alias: null,
         }),
       );
     });

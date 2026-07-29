@@ -125,10 +125,13 @@ def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():
     async def gateway_factory(**_kwargs):
         return FakeGateway(), "ws://127.0.0.1:45678/nonce"
 
+    title_reads = []
+
     async def title_reader(browser_ws, expected_url):
         assert browser_ws == "ws://127.0.0.1:45678/nonce"
         assert expected_url == "https://example.com/"
-        return "Example Domain"
+        title_reads.append((browser_ws, expected_url))
+        return "Example Domain" if len(title_reads) > 1 else ""
 
     client = FakeClient()
     worker = UnbrowseWorker(
@@ -161,6 +164,7 @@ def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():
     assert client.failed == []
     assert client.revoked == ["run-unbrowse-1"]
     assert cleanup == ["mcp", "gateway"]
+    assert len(title_reads) == 2
 
 
 def test_execute_claim_fails_closed_and_revokes_capability():

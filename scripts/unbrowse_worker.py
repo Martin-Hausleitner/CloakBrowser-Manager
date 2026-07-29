@@ -326,6 +326,28 @@ class UnbrowseWorker:
     gateway_factory: GatewayFactory = field(default=start_cdp_gateway, repr=False)
     title_reader: TitleReader = field(default=read_cdp_title, repr=False)
 
+    async def _read_observed_title(
+        self,
+        browser_ws: str,
+        expected_url: str,
+        *,
+        cancelled: asyncio.Event,
+    ) -> str:
+        for attempt in range(6):
+            title = await self._await_guarded(
+                self.title_reader(browser_ws, expected_url),
+                cancelled=cancelled,
+            )
+            if title:
+                return title
+            if attempt < 5:
+                try:
+                    await asyncio.wait_for(cancelled.wait(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    continue
+                raise RunCancelled("run cancelled")
+        return ""
+
     async def _heartbeat(self, run_id: str, stop: asyncio.Event) -> None:
         while not stop.is_set():
             try:
@@ -416,7 +438,11 @@ class UnbrowseWorker:
             )
             title = _snapshot_title(snapshot)
             if title == "Unbrowse opened the managed page":
-                observed_title = await self.title_reader(local_ws, safe_url)
+                observed_title = await self._read_observed_title(
+                    local_ws,
+                    safe_url,
+                    cancelled=cancelled,
+                )
                 title = observed_title or title
             await asyncio.to_thread(
                 self.client.output,

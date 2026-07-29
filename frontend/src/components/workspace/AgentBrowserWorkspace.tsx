@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Camera,
+  ChevronDown,
   MonitorSmartphone,
   Play,
   RefreshCw,
@@ -191,6 +192,8 @@ export function AgentBrowserWorkspace({
   const [harnessPresence, setHarnessPresence] = useState<Partial<Record<ManagedHarness, TaskHarnessPresence>>>({});
   const [acpxPreflights, setAcpxPreflights] = useState<TaskHarnessAgentPreflight[]>([]);
   const [harnessCheckBusy, setHarnessCheckBusy] = useState(false);
+  const [harnessCheckTarget, setHarnessCheckTarget] = useState<ManagedHarness | "orca" | "all" | null>(null);
+  const [harnessMenuOpen, setHarnessMenuOpen] = useState(false);
   const [taskOutputs, setTaskOutputs] = useState<TaskOutput[]>([]);
   const [transcript, setTranscript] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -249,6 +252,9 @@ export function AgentBrowserWorkspace({
   const acpxBackedMode = acpxMode || antigravityMode;
   const selectedAcpxAgent: AcpxAgent = antigravityMode ? "grok-build" : acpxAgent;
   const selectedAcpxPreflight = acpxPreflights.find((item) => item.agent === selectedAcpxAgent);
+  const readyAcpxAgent = ACPX_AGENT_OPTIONS.find((option) =>
+    acpxPreflights.some((preflight) => preflight.agent === option.value && preflight.ready),
+  )?.value;
   const managedRunMode = browserUseMode || acpxBackedMode || unbrowseMode || stagehandMode;
   const managedHarness: ManagedHarness = acpxBackedMode
     ? "acpx"
@@ -310,6 +316,24 @@ export function AgentBrowserWorkspace({
     () => antigravitySupported ? AGENT_OPTIONS : AGENT_OPTIONS.filter((option) => option !== "antigravity"),
     [antigravitySupported],
   );
+  const localOrcaAgents = useMemo(
+    () => (caps?.agents ?? []).filter((candidate): candidate is OrcaAgentCli =>
+      AGENT_OPTIONS.includes(candidate as AgentMode),
+    ),
+    [caps?.agents],
+  );
+  const managedHarnessIsReady = useCallback((candidate: ManagedHarness) => {
+    const presence = harnessPresence[candidate];
+    if (!presence?.worker_seen_recently) return false;
+    if (candidate !== "acpx") return true;
+    return Boolean(readyAcpxAgent);
+  }, [harnessPresence, readyAcpxAgent]);
+  const chooseAgent = useCallback((nextAgent: AgentMode) => {
+    if (sessionActive) return;
+    setAgent(nextAgent);
+    if (nextAgent === "acpx" && readyAcpxAgent) setAcpxAgent(readyAcpxAgent);
+    setHarnessMenuOpen(false);
+  }, [readyAcpxAgent, sessionActive]);
   const chooseCompactWorkspaceMode = (mode: "cli" | "acp" | "acpx") => {
     if (sessionActive) return;
     if (mode === "cli") {
@@ -328,6 +352,11 @@ export function AgentBrowserWorkspace({
     setAgent("acpx");
     setAcpxAgent("grok-build");
   };
+
+  useEffect(() => {
+    if (!acpxMode || sessionActive || selectedAcpxPreflight?.ready || !readyAcpxAgent) return;
+    setAcpxAgent(readyAcpxAgent);
+  }, [acpxMode, readyAcpxAgent, selectedAcpxPreflight?.ready, sessionActive]);
 
   useEffect(() => {
     let cancelled = false;
@@ -403,27 +432,40 @@ export function AgentBrowserWorkspace({
     };
   }, [acpxBackedMode, managedHarness, managedRunMode, refreshSelectedHarness]);
 
-  const handleHarnessCheck = useCallback(async () => {
+  const handleHarnessCheck = useCallback(async (target: ManagedHarness | "orca" | "all" = "all") => {
     if (harnessCheckBusy) return;
     setHarnessCheckBusy(true);
+    setHarnessCheckTarget(target);
     setError(null);
     try {
-      const [nextCaps, presences] = await Promise.all([
+      if (target === "orca") {
+        setCaps(await api.getOrcaCapabilities());
+        return;
+      }
+      if (target !== "all") {
+        const presence = await api.getTaskHarnessPresence(target, {});
+        setHarnessPresence((current) => ({ ...current, [target]: presence }));
+        if (target === "acpx") {
+          const preflights = await api.getTaskHarnessPreflights("acpx", {});
+          setAcpxPreflights(preflights.agents);
+        }
+        return;
+      }
+      const [nextCaps, presences, preflights] = await Promise.all([
         api.getOrcaCapabilities(),
-        Promise.all(
-          MANAGED_HARNESSES.map((harness) => api.getTaskHarnessPresence(harness, {})),
-        ),
+        Promise.all(MANAGED_HARNESSES.map((harness) => api.getTaskHarnessPresence(harness, {}))),
+        api.getTaskHarnessPreflights("acpx", {}),
       ]);
       setCaps(nextCaps);
       setHarnessPresence(Object.fromEntries(
         presences.map((presence) => [presence.harness, presence]),
       ) as Partial<Record<ManagedHarness, TaskHarnessPresence>>);
-      const preflights = await api.getTaskHarnessPreflights("acpx", {});
       setAcpxPreflights(preflights.agents);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Harness readiness check failed");
     } finally {
       setHarnessCheckBusy(false);
+      setHarnessCheckTarget(null);
     }
   }, [harnessCheckBusy]);
 
@@ -950,34 +992,132 @@ export function AgentBrowserWorkspace({
                 </button>
               ))}
             </div>
-            <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
-              <span
-                className={`min-w-0 flex-1 truncate rounded px-1.5 py-1 text-[9px] font-medium ${
-                  selectedHarnessReady
-                    ? "bg-emerald-950/70 text-emerald-300"
-                    : "bg-amber-950/60 text-amber-300"
-                }`}
-                data-testid="harness-readiness"
-                title={managedRunMode
-                  ? selectedHarnessPresence?.reason || `${managedHarnessLabel(managedHarness)} readiness`
-                  : `${agent} readiness`}
-              >
-                {managedRunMode ? managedHarnessLabel(managedHarness) : agent} · {harnessCheckBusy
-                  ? "Checking"
-                  : selectedHarnessReady
-                    ? "Ready"
-                    : "Unavailable"}
-              </span>
+            <div className="relative flex min-w-0 flex-1 items-center justify-end gap-1">
               <button
                 type="button"
-                className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#3c3c43] bg-[#18181b] text-[#d4d4d8] hover:border-[#60606b] hover:bg-[#232329] disabled:opacity-40"
-                onClick={() => void handleHarnessCheck()}
-                disabled={harnessCheckBusy || sessionActive}
-                aria-label="Test all harnesses"
-                title="Test Browser Use, Unbrowse, Stagehand, ACPX and local CLI runtimes"
+                className={`inline-flex h-7 min-w-0 flex-1 items-center gap-1 rounded border px-1.5 text-[9px] font-medium transition-colors ${
+                  selectedHarnessReady
+                    ? "border-emerald-900/70 bg-emerald-950/60 text-emerald-300"
+                    : "border-amber-900/60 bg-amber-950/50 text-amber-300"
+                }`}
+                onClick={() => {
+                  const nextOpen = !harnessMenuOpen;
+                  setHarnessMenuOpen(nextOpen);
+                  if (nextOpen) void handleHarnessCheck("all");
+                }}
+                disabled={sessionActive}
+                aria-label="Open harness menu"
+                aria-expanded={harnessMenuOpen}
+                title="Switch and check installed VCVM harnesses"
               >
-                <RefreshCw className={`h-3 w-3 ${harnessCheckBusy ? "animate-spin" : ""}`} aria-hidden="true" />
+                <span
+                  className="min-w-0 flex-1 truncate text-left"
+                  data-testid="harness-readiness"
+                  title={managedRunMode
+                    ? selectedHarnessPresence?.reason || `${managedHarnessLabel(managedHarness)} readiness`
+                    : `${agent} readiness`}
+                >
+                  {managedRunMode ? managedHarnessLabel(managedHarness) : agent} · {harnessCheckTarget === "all"
+                    ? "Checking"
+                    : selectedHarnessReady
+                      ? "Ready"
+                      : "Unavailable"}
+                </span>
+                <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${harnessMenuOpen ? "rotate-180" : ""}`} aria-hidden="true" />
               </button>
+              {harnessMenuOpen ? (
+                <div
+                  role="dialog"
+                  aria-label="Harnesses on VCVM"
+                  className="absolute right-0 top-8 z-40 w-[18.5rem] rounded-lg border border-[#3b3b43] bg-[#111114] p-1.5 shadow-2xl"
+                  data-testid="harness-menu"
+                >
+                  <div className="flex items-center justify-between gap-2 px-1 pb-1.5">
+                    <div>
+                      <div className="text-[10px] font-semibold text-white">Harnesses on VCVM</div>
+                      <div className="text-[9px] text-[#888892]">Select a runner or recheck its local service.</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="inline-flex h-7 items-center gap-1 rounded border border-[#3c3c43] px-2 text-[9px] text-[#d4d4d8] hover:bg-[#25252a] disabled:opacity-40"
+                      onClick={() => void handleHarnessCheck("all")}
+                      disabled={harnessCheckBusy}
+                      aria-label="Recheck all harnesses"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === "all" ? "animate-spin" : ""}`} aria-hidden="true" />
+                      Check all
+                    </button>
+                  </div>
+                  <div className="space-y-0.5" aria-label="Managed browser harnesses">
+                    {MANAGED_HARNESSES.map((candidate) => {
+                      const ready = managedHarnessIsReady(candidate);
+                      const presence = harnessPresence[candidate];
+                      const label = managedHarnessLabel(candidate);
+                      return (
+                        <div key={candidate} className="flex items-center gap-1 rounded-md hover:bg-[#1d1d21]">
+                          <button
+                            type="button"
+                            className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left"
+                            onClick={() => chooseAgent(candidate)}
+                            disabled={sessionActive}
+                            aria-label={`Use ${label}`}
+                            aria-pressed={agent === candidate}
+                          >
+                            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${ready ? "bg-emerald-400" : "bg-amber-400"}`} aria-hidden="true" />
+                            <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-[#ededf0]">{label}</span>
+                            <span className={`text-[9px] ${ready ? "text-emerald-300" : "text-amber-300"}`}>
+                              {ready ? "Ready" : presence ? "Unavailable" : "Not checked"}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded text-[#a1a1aa] hover:bg-[#303036] hover:text-white disabled:opacity-40"
+                            onClick={() => void handleHarnessCheck(candidate)}
+                            disabled={harnessCheckBusy || sessionActive}
+                            aria-label={`Recheck ${label}`}
+                            title={`Recheck ${label}`}
+                          >
+                            <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === candidate ? "animate-spin" : ""}`} aria-hidden="true" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="my-1 border-t border-[#2d2d33]" />
+                  <div className="px-2 pb-0.5 text-[8px] font-semibold uppercase tracking-[0.12em] text-[#6f6f78]">Local CLI</div>
+                  <div className="space-y-0.5" aria-label="Detected local CLI agents">
+                    {localOrcaAgents.length ? localOrcaAgents.map((candidate) => (
+                      <div key={candidate} className="flex items-center gap-1 rounded-md hover:bg-[#1d1d21]">
+                        <button
+                          type="button"
+                          className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left"
+                          onClick={() => chooseAgent(candidate)}
+                          disabled={sessionActive}
+                          aria-label={`Use ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}`}
+                          aria-pressed={agent === candidate}
+                        >
+                          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden="true" />
+                          <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-[#ededf0]">
+                            {candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}
+                          </span>
+                          <span className="text-[9px] text-emerald-300">Detected</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[#a1a1aa] hover:bg-[#303036] hover:text-white disabled:opacity-40"
+                          onClick={() => void handleHarnessCheck("orca")}
+                          disabled={harnessCheckBusy || sessionActive}
+                          aria-label={`Recheck ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}`}
+                        >
+                          <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === "orca" ? "animate-spin" : ""}`} aria-hidden="true" />
+                        </button>
+                      </div>
+                    )) : (
+                      <div className="rounded px-2 py-1.5 text-[9px] text-amber-300">No local CLI runtime detected.</div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
               <button
                 type="button"
                 className="sr-only"

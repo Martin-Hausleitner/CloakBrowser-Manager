@@ -246,18 +246,57 @@ describe("AgentBrowserWorkspace", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Show workspace settings" }));
-    fireEvent.change(screen.getByTestId("orca-agent-select"), { target: { value: "stagehand" } });
+    expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
+    expect(within(menu).getByRole("button", { name: "Use Browser Use" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Use ACPX" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Use Unbrowse" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Use Stagehand" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Use AGY" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Use Grok" })).toBeTruthy();
     await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything()));
     apiMock.getTaskHarnessPresence.mockClear();
     apiMock.getOrcaCapabilities.mockClear();
 
-    fireEvent.click(screen.getByRole("button", { name: "Test all harnesses" }));
+    fireEvent.click(within(menu).getByRole("button", { name: "Recheck Stagehand" }));
 
-    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything()));
-    expect(apiMock.getOrcaCapabilities).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledTimes(1));
+    expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything());
+    expect(apiMock.getOrcaCapabilities).not.toHaveBeenCalled();
+
+    fireEvent.click(within(menu).getByRole("button", { name: "Use Stagehand" }));
+    expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
     expect(screen.getByTestId("harness-readiness").textContent).toMatch(/stagehand.*unavailable/i);
     expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
+  });
+
+  it("selects the first ready supported ACPX adapter without falling back to Claude", async () => {
+    const acpxProfile: Profile = { ...runningProfile, harness: "acpx" };
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({
+      harness: "acpx",
+      agents: [
+        { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+        { agent: "grok-build", ready: false, state: "auth_required", reason_code: "auth_required", checked_at: "2026-07-29T00:00:00Z" },
+        { agent: "codex", ready: false, state: "auth_required", reason_code: "auth_required", checked_at: "2026-07-29T00:00:00Z" },
+        { agent: "cursor", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+        { agent: "opencode", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+      ],
+    });
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[acpxProfile]}
+        selectedProfile={acpxProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(apiMock.getTaskHarnessPreflights).toHaveBeenCalledWith("acpx", expect.anything()));
+    expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).toBe("cursor");
+    expect((screen.getByTestId("acpx-agent-select") as HTMLSelectElement).value).not.toBe("claude");
   });
 
   it("renders a full-view grid of running browsers while keeping stopped profiles out", async () => {

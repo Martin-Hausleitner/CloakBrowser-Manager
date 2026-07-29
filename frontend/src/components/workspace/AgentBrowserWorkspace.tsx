@@ -408,13 +408,13 @@ export function AgentBrowserWorkspace({
     setHarnessCheckBusy(true);
     setError(null);
     try {
-      if (!managedRunMode) {
-        setCaps(await api.getOrcaCapabilities());
-        return;
-      }
-      const presences = await Promise.all(
-        MANAGED_HARNESSES.map((harness) => api.getTaskHarnessPresence(harness, {})),
-      );
+      const [nextCaps, presences] = await Promise.all([
+        api.getOrcaCapabilities(),
+        Promise.all(
+          MANAGED_HARNESSES.map((harness) => api.getTaskHarnessPresence(harness, {})),
+        ),
+      ]);
+      setCaps(nextCaps);
       setHarnessPresence(Object.fromEntries(
         presences.map((presence) => [presence.harness, presence]),
       ) as Partial<Record<ManagedHarness, TaskHarnessPresence>>);
@@ -425,7 +425,7 @@ export function AgentBrowserWorkspace({
     } finally {
       setHarnessCheckBusy(false);
     }
-  }, [harnessCheckBusy, managedRunMode]);
+  }, [harnessCheckBusy]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current != null) {
@@ -755,6 +755,22 @@ export function AgentBrowserWorkspace({
     }
   }, [canStop, managedRunMode, session, stopPolling, stopRunPolling, taskRun]);
 
+  const handleTakeControl = useCallback(async () => {
+    if (!managedRunActive || !taskRun || !canAutomate || !canInteract || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const cancelled = await api.cancelTaskRun(taskRun.id);
+      setTaskRun(cancelled);
+      stopRunPolling();
+      setViewerFullscreen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to hand browser control to the operator");
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, canAutomate, canInteract, managedRunActive, stopRunPolling, taskRun]);
+
   const handleRetryRunHealth = useCallback(async () => {
     if (!taskRun || taskRun.status !== "blocked_health" || !canAutomate || busy) return;
     setBusy(true);
@@ -948,8 +964,8 @@ export function AgentBrowserWorkspace({
                 className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#3c3c43] bg-[#18181b] text-[#d4d4d8] hover:border-[#60606b] hover:bg-[#232329] disabled:opacity-40"
                 onClick={() => void handleHarnessCheck()}
                 disabled={harnessCheckBusy || sessionActive}
-                aria-label="Test selected harness"
-                title="Refresh local harness readiness"
+                aria-label="Test all harnesses"
+                title="Test Browser Use, Unbrowse, Stagehand, ACPX and local CLI runtimes"
               >
                 <RefreshCw className={`h-3 w-3 ${harnessCheckBusy ? "animate-spin" : ""}`} aria-hidden="true" />
               </button>
@@ -974,6 +990,18 @@ export function AgentBrowserWorkspace({
               >
                 <Square className="h-3 w-3" />
               </button>
+              {managedRunActive && canInteract ? (
+                <button
+                  type="button"
+                  className="inline-flex h-7 items-center rounded border border-emerald-800/70 bg-emerald-950/50 px-2 text-[10px] font-medium text-emerald-200 hover:bg-emerald-900/60 disabled:opacity-40"
+                  onClick={() => void handleTakeControl()}
+                  disabled={busy || !canAutomate}
+                  aria-label="Take over browser"
+                  title="Cancel the agent run and open the live browser for direct control"
+                >
+                  Take over
+                </button>
+              ) : null}
             </div>
           </div>
           <details className="mt-1 text-[9px] text-[#a1a1aa]">

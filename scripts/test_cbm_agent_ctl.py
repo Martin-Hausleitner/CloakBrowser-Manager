@@ -138,6 +138,42 @@ def test_tasks_run_builds_grok_acpx_request(monkeypatch: pytest.MonkeyPatch):
     assert captured["body"]["agent"] == "grok-build"
 
 
+def test_tasks_run_builds_unbrowse_request_without_agent(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, query=None):
+        captured.update({"method": method, "path": path, "body": body})
+        return {"id": "run-unbrowse", "status": "queued"}
+
+    monkeypatch.setenv("CBM_AGENT_KEY", "cbm_agent_test_key_not_real")
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(
+        [
+            "tasks",
+            "run",
+            "session-1",
+            "--profile-id",
+            "profile-1",
+            "--harness",
+            "unbrowse",
+            "--task",
+            "Open https://example.com",
+            "--allowed-origin",
+            "https://example.com",
+        ]
+    )
+    args.func(args)
+
+    assert captured["body"]["harness"] == "unbrowse"
+    assert "agent" not in captured["body"]
+
+
 def test_tasks_run_requires_an_explicit_acpx_agent(monkeypatch: pytest.MonkeyPatch):
     import importlib.util
 

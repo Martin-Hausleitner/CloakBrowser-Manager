@@ -225,7 +225,7 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
   });
 
-  it("detects and manually tests the selected managed harness", async () => {
+  it("detects and manually tests all locally available harnesses", async () => {
     apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
       harness,
       worker_seen_recently: harness !== "stagehand",
@@ -248,10 +248,12 @@ describe("AgentBrowserWorkspace", () => {
     fireEvent.change(screen.getByTestId("orca-agent-select"), { target: { value: "stagehand" } });
     await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything()));
     apiMock.getTaskHarnessPresence.mockClear();
+    apiMock.getOrcaCapabilities.mockClear();
 
-    fireEvent.click(screen.getByRole("button", { name: "Test selected harness" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test all harnesses" }));
 
     await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything()));
+    expect(apiMock.getOrcaCapabilities).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("harness-readiness").textContent).toMatch(/stagehand.*unavailable/i);
     expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
   });
@@ -604,7 +606,7 @@ describe("AgentBrowserWorkspace", () => {
     );
   });
 
-  it("blocks viewport changes while a Browser Use run is active", async () => {
+  it("blocks viewport changes while a Browser Use run is active and allows explicit takeover", async () => {
     const browserUseProfile: Profile = { ...runningProfile, harness: "browser-use" };
     const activeRun: TaskRun = {
       id: "run-active-viewport",
@@ -636,6 +638,7 @@ describe("AgentBrowserWorkspace", () => {
     );
     apiMock.getTaskRun.mockResolvedValue(activeRun);
     apiMock.listTaskRunOutputs.mockResolvedValue([]);
+    apiMock.cancelTaskRun.mockResolvedValue({ ...activeRun, status: "cancelled" });
 
     render(
       <AgentBrowserWorkspace
@@ -656,6 +659,10 @@ describe("AgentBrowserWorkspace", () => {
     expect((applyButton as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(applyButton);
     expect(onViewportApply).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Take over browser" }));
+    await waitFor(() => expect(apiMock.cancelTaskRun).toHaveBeenCalledWith(activeRun.id));
+    expect(screen.getByRole("button", { name: "Exit full view" })).toBeTruthy();
   });
 
   it("disables launch when Orca is unavailable", async () => {

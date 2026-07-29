@@ -271,6 +271,10 @@ async def run_command(args: list[str], *, timeout: float) -> dict[str, Any]:
         process.kill()
         await process.wait()
         raise RuntimeError("Unbrowse command timed out") from None
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        raise
     if process.returncode != 0:
         detail = redact_text(stderr.decode("utf-8", "replace"))[:400].strip()
         raise RuntimeError(

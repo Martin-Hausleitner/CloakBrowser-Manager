@@ -22,6 +22,7 @@ Examples:
   scripts/cbm_agent_ctl.py tasks create --profile-id <id> --title "demo"
   scripts/cbm_agent_ctl.py tasks run <session_id> --profile-id <id> --task "Read title" --allowed-origin https://example.com
   scripts/cbm_agent_ctl.py tasks run <session_id> --profile-id <id> --harness acpx --agent grok-build --task "Read title" --allowed-origin https://example.com
+  scripts/cbm_agent_ctl.py tasks run <session_id> --profile-id <id> --harness unbrowse --task "Read title" --allowed-origin https://example.com
   scripts/cbm_agent_ctl.py runs get <run_id>
   scripts/cbm_agent_ctl.py runs cancel <run_id>
   scripts/cbm_agent_ctl.py worktree-audit --root /path/to/repo
@@ -801,7 +802,7 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--task", required=True)
     tr.add_argument(
         "--harness",
-        choices=["browser-use", "acpx"],
+        choices=["browser-use", "acpx", "unbrowse", "stagehand"],
         default="browser-use",
         help="Managed worker backend",
     )

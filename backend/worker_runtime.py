@@ -31,6 +31,8 @@ WORKER_MAINTENANCE_INTERVAL_SECONDS = 5
 HARNESS_PRESENCE_TTL_SECONDS = 45
 HARNESS_PREFLIGHT_TTL_SECONDS = 300
 ACPX_AGENTS = ("codex", "claude", "cursor", "grok-build", "opencode")
+BROWSER_TOOL_PREFLIGHT_HARNESS = "browser-tools"
+BROWSER_TOOL_IDS = ("unbrowse", "stagehand", "browser-harness")
 PROVIDER_PREFLIGHT_TARGETS = (
     ("antigravity", "cli"),
     ("grok", "cli"),
@@ -529,7 +531,12 @@ class WorkerRuntimeService:
     def agent_preflights(self, harness: str) -> dict[str, Any]:
         """Return latest active-worker preflights with strict freshness semantics."""
         now = self._clock()
-        agents = ACPX_AGENTS if harness == "acpx" else ()
+        if harness == "acpx":
+            agents = ACPX_AGENTS
+        elif harness == BROWSER_TOOL_PREFLIGHT_HARNESS:
+            agents = BROWSER_TOOL_IDS
+        else:
+            agents = ()
         with self._get_db() as conn:
             rows = conn.execute(
                 """
@@ -583,6 +590,22 @@ class WorkerRuntimeService:
                 }
             )
         return {"harness": harness, "agents": result}
+
+    def browser_tool_preflights(self) -> dict[str, Any]:
+        """Return canonical redacted browser-tool readiness for public API consumers."""
+        raw = self.agent_preflights(BROWSER_TOOL_PREFLIGHT_HARNESS)
+        return {
+            "tools": [
+                {
+                    "id": item["agent"],
+                    "ready": item["ready"],
+                    "state": item["state"],
+                    "reason_code": item["reason_code"],
+                    "checked_at": item["checked_at"],
+                }
+                for item in raw["agents"]
+            ]
+        }
 
     def record_provider_preflight(
         self,

@@ -58,6 +58,7 @@ class FakeManager:
         self.revoked = []
         self.preflights = []
         self.provider_preflights = []
+        self.browser_tool_preflights = []
         self.heartbeat_calls = 0
 
     def issue_capability(self, run_id):
@@ -97,6 +98,9 @@ class FakeManager:
         self.provider_preflights.append(
             (provider, transport, ready, reason_code, list(model_aliases or []))
         )
+
+    def report_browser_tool_readiness(self, *, tool_id, ready, reason_code):
+        self.browser_tool_preflights.append((tool_id, ready, reason_code))
 
 
 class FakeRuntime:
@@ -293,6 +297,31 @@ def test_manager_client_reports_provider_preflight_without_secrets():
         "reason_code": "ready",
         "model_aliases": ["grok-build-0.1"],
     }
+
+
+def test_manager_client_reports_browser_tool_readiness_without_secrets():
+    http = FakeHTTP([FakeHTTPResponse(204)])
+    client = AcpxManagerClient(
+        "https://manager.local/base", token="cbm_worker_private", http=http
+    )
+
+    client.report_browser_tool_readiness(
+        tool_id="browser-harness",
+        ready=False,
+        reason_code="adapter_unavailable",
+    )
+
+    method, url, kwargs = http.calls[0]
+    assert method == "POST"
+    assert url == "https://manager.local/base/internal/browser-tools/readiness"
+    assert kwargs["json"] == {
+        "id": "browser-harness",
+        "ready": False,
+        "reason_code": "adapter_unavailable",
+    }
+    serialized = json.dumps(kwargs["json"])
+    assert "cbm_worker_private" not in serialized
+    assert "stderr" not in serialized
 
 
 def test_worker_executes_acpx_session_streams_outputs_and_cleans_capability(tmp_path: Path):
@@ -584,6 +613,39 @@ def test_worker_reports_all_provider_preflights_from_injected_probes(tmp_path: P
         ("grok", "acp", True, "ready", ["grok-build-0.1"]),
         ("opencode", "acp", False, "auth_required", []),
         ("grok", "openai-compatible", False, "protocol_unavailable", []),
+    ]
+
+
+def test_worker_reports_all_browser_tool_readiness_from_injected_probes(tmp_path: Path):
+    manager = FakeManager()
+    seen: list[str] = []
+
+    async def browser_tool_probe(tool_id: str):
+        seen.append(tool_id)
+        if tool_id == "stagehand":
+            return {"ready": True, "reason_code": "ready"}
+        if tool_id == "browser-harness":
+            return {"ready": False, "reason_code": "timeout"}
+        raise RuntimeError("/usr/bin/unbrowse stderr token leaked")
+
+    class DoctorRuntime(FakeRuntime):
+        async def preflight_agent(self, *, agent, **_kwargs):
+            return {"ready": False, "reason_code": "auth_required"}
+
+    worker = AcpxWorker(
+        manager,
+        make_config(tmp_path),
+        runtime=DoctorRuntime(),
+        browser_tool_probe=browser_tool_probe,
+    )
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert seen == ["unbrowse", "stagehand", "browser-harness"]
+    assert manager.browser_tool_preflights == [
+        ("unbrowse", False, "protocol_error"),
+        ("stagehand", True, "ready"),
+        ("browser-harness", False, "timeout"),
     ]
 
 

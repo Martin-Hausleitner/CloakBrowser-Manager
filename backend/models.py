@@ -70,6 +70,16 @@ ROUTING_BROWSER_TOOL_ORDER: tuple[BrowserToolId, ...] = (
     "stagehand",
     "browser-harness",
 )
+BrowserToolReadinessReason = Literal[
+    "ready",
+    "auth_required",
+    "adapter_unavailable",
+    "timeout",
+    "protocol_error",
+    "internal_error",
+    "not_checked",
+    "stale",
+]
 ProfileHealthState = Literal["pending", "running", "passed", "warning", "failed", "unavailable"]
 ProfileHealthSourceState = Literal["missing", "measured", "derived", "unavailable", "skipped"]
 CONTROL_PLANE_API_VERSION = "cloakbrowser.io/v1"
@@ -1831,6 +1841,24 @@ class WorkerProviderPreflightRequest(BaseModel):
         return self
 
 
+class WorkerBrowserToolReadinessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: BrowserToolId
+    ready: bool
+    reason_code: BrowserToolReadinessReason
+
+    @model_validator(mode="after")
+    def validate_ready_reason(self):
+        if self.ready and self.reason_code != "ready":
+            raise ValueError("ready browser tool requires reason_code=ready")
+        if not self.ready and self.reason_code == "ready":
+            raise ValueError("failed browser tool requires a failure reason")
+        if self.reason_code in {"not_checked", "stale"}:
+            raise ValueError("worker may not report derived browser tool states")
+        return self
+
+
 class TaskHarnessAgentPreflightResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1872,6 +1900,22 @@ class ProviderReadinessResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     providers: list[ProviderReadinessTargetResponse] = Field(default_factory=list)
+
+
+class BrowserToolReadinessTargetResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: BrowserToolId
+    ready: bool
+    state: Literal["ready", "failed", "stale", "unavailable"]
+    reason_code: BrowserToolReadinessReason
+    checked_at: str | None = None
+
+
+class BrowserToolReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tools: list[BrowserToolReadinessTargetResponse] = Field(default_factory=list)
 
 
 class WorkerCapabilityResponse(BaseModel):

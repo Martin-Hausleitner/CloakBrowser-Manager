@@ -120,12 +120,14 @@ if __package__:
         OrcaSessionSendRequest,
         OrcaSessionSendResponse,
         OrcaSessionStartRequest,
+        BrowserToolReadinessResponse,
         ProviderReadinessResponse,
         WorkerCapabilityResponse,
         WorkerClaimResponse,
         WorkerFailRequest,
         WorkerHeartbeatResponse,
         WorkerAcpxPreflightRequest,
+        WorkerBrowserToolReadinessRequest,
         WorkerProviderPreflightRequest,
     )
     from . import proxy_inventory
@@ -225,12 +227,14 @@ else:  # Support `uvicorn main:app` from the backend directory.
         OrcaSessionSendRequest,
         OrcaSessionSendResponse,
         OrcaSessionStartRequest,
+        BrowserToolReadinessResponse,
         ProviderReadinessResponse,
         WorkerCapabilityResponse,
         WorkerClaimResponse,
         WorkerFailRequest,
         WorkerHeartbeatResponse,
         WorkerAcpxPreflightRequest,
+        WorkerBrowserToolReadinessRequest,
         WorkerProviderPreflightRequest,
     )
     import proxy_inventory
@@ -3423,6 +3427,33 @@ async def get_acpx_preflights(request: Request):
     _require_identity(request.scope)
     return TaskHarnessPreflightsResponse(
         **worker_runtime_service.agent_preflights("acpx")
+    )
+
+
+@app.post("/internal/browser-tools/readiness", status_code=204)
+async def report_internal_browser_tool_readiness(
+    body: WorkerBrowserToolReadinessRequest,
+    request: Request,
+):
+    worker = _require_worker(request)
+    worker_runtime_service.record_agent_preflight(
+        worker.id,
+        harness=worker_runtime_mod.BROWSER_TOOL_PREFLIGHT_HARNESS,
+        agent=body.id,
+        ready=body.ready,
+        reason_code=body.reason_code,
+    )
+    return Response(status_code=204)
+
+
+@app.get(
+    "/api/browser-tools/readiness",
+    response_model=BrowserToolReadinessResponse,
+)
+async def get_browser_tool_readiness(request: Request):
+    _require_identity(request.scope)
+    return BrowserToolReadinessResponse(
+        **worker_runtime_service.browser_tool_preflights()
     )
 
 

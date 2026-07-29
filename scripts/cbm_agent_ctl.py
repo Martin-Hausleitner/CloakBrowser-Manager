@@ -484,6 +484,90 @@ def cmd_profiles_extensions(args: argparse.Namespace) -> None:
     _print(_request("GET", f"/api/profiles/{args.profile_id}/extensions"), args.json)
 
 
+def _extension_catalog() -> dict[str, Any]:
+    payload = _request("GET", "/api/extension/defaults")
+    if not isinstance(payload, dict):
+        raise SystemExit("Extension catalog response is invalid")
+    return payload
+
+
+def _extension_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = payload.get("extensions")
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _require_catalog_extension(payload: dict[str, Any], extension_id: str) -> None:
+    known = {str(row.get("id") or "") for row in _extension_rows(payload)}
+    if extension_id not in known:
+        raise SystemExit(f"Unknown trusted catalog extension: {extension_id}")
+
+
+def cmd_extensions_list(args: argparse.Namespace) -> None:
+    payload = _extension_catalog()
+    rows = _extension_rows(payload)
+    query = str(args.query or "").strip().casefold()
+    if query:
+        def matches(row: dict[str, Any]) -> bool:
+            values = [row.get("id"), row.get("name"), row.get("description")]
+            values.extend(row.get("tags") or [])
+            return any(query in str(value or "").casefold() for value in values)
+
+        rows = [row for row in rows if matches(row)]
+    _print(rows, args.json)
+
+
+def cmd_extensions_defaults(args: argparse.Namespace) -> None:
+    _print(_extension_catalog(), args.json)
+
+
+def cmd_extensions_set_defaults(args: argparse.Namespace) -> None:
+    selected_ids = list(dict.fromkeys(args.extension_ids or []))
+    payload = _extension_catalog()
+    for extension_id in selected_ids:
+        _require_catalog_extension(payload, extension_id)
+    _print(
+        _request(
+            "PUT",
+            "/api/extension/defaults",
+            body={"selected_ids": selected_ids},
+            **_request_options(args),
+        ),
+        args.json,
+    )
+
+
+def _set_profile_extension(args: argparse.Namespace, *, enabled: bool) -> None:
+    catalog = _extension_catalog()
+    _require_catalog_extension(catalog, args.extension_id)
+    profile = _request("GET", f"/api/profiles/{args.profile_id}")
+    if not isinstance(profile, dict):
+        raise SystemExit("Profile response is invalid")
+    current = [str(item) for item in (profile.get("extension_ids") or [])]
+    if enabled:
+        extension_ids = list(dict.fromkeys([*current, args.extension_id]))
+    else:
+        extension_ids = [item for item in current if item != args.extension_id]
+    _print(
+        _request(
+            "PUT",
+            f"/api/profiles/{args.profile_id}",
+            body={"extension_ids": extension_ids},
+            **_request_options(args),
+        ),
+        args.json,
+    )
+
+
+def cmd_extensions_enable(args: argparse.Namespace) -> None:
+    _set_profile_extension(args, enabled=True)
+
+
+def cmd_extensions_disable(args: argparse.Namespace) -> None:
+    _set_profile_extension(args, enabled=False)
+
+
 def cmd_profiles_open_links(args: argparse.Namespace) -> None:
     query = {"prefer": args.prefer, "mode": args.mode}
     payload = _request("GET", f"/api/profiles/{args.profile_id}/open-links", query=query)
@@ -888,6 +972,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print one field only (cdp_fullscreen_url, vnc_fullscreen_url, websocket_url, cdp_url, …)",
     )
     po.set_defaults(func=cmd_profiles_open_links)
+
+    extensions = sub.add_parser(
+        "extensions",
+        help="Manage trusted catalog extensions without accepting paths or downloads",
+    )
+    esub = extensions.add_subparsers(dest="extensions_command", required=True)
+
+    el = esub.add_parser("list", help="List or search trusted catalog extensions")
+    el.add_argument("--query", help="Filter by id, name, description, or tag")
+    el.set_defaults(func=cmd_extensions_list)
+
+    esearch = esub.add_parser("search", help="Search trusted catalog extensions")
+    esearch.add_argument("query", help="Match id, name, description, or tag")
+    esearch.set_defaults(func=cmd_extensions_list)
+
+    ed = esub.add_parser("defaults", help="Show the current default extension selection")
+    ed.set_defaults(func=cmd_extensions_defaults)
+
+    es = esub.add_parser("set-defaults", help="Replace defaults with trusted catalog ids")
+    es.add_argument(
+        "--extension-id",
+        dest="extension_ids",
+        action="append",
+        default=[],
+        help="Trusted catalog extension id; repeat for more than one; omit all to clear",
+    )
+    es.set_defaults(func=cmd_extensions_set_defaults)
+
+    ee = esub.add_parser("enable", help="Enable one trusted extension for a profile")
+    ee.add_argument("profile_id")
+    ee.add_argument("extension_id")
+    ee.set_defaults(func=cmd_extensions_enable)
+
+    exd = esub.add_parser("disable", help="Disable one trusted extension for a profile")
+    exd.add_argument("profile_id")
+    exd.add_argument("extension_id")
+    exd.set_defaults(func=cmd_extensions_disable)
 
     accounts = sub.add_parser("accounts", help="Profile-linked account metadata and auth history")
     asub = accounts.add_subparsers(dest="accounts_command", required=True)

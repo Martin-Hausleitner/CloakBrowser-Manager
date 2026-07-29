@@ -36,6 +36,148 @@ def test_cli_help_lists_control_plane_commands():
     assert "tasks" in text
     assert "runs" in text
     assert "accounts" in text
+    assert "extensions" in text
+
+
+def test_extensions_list_filters_catalog_locally(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    calls: list[tuple[str, str]] = []
+    printed: list[object] = []
+
+    def fake_request(method, path, **_options):
+        calls.append((method, path))
+        return {
+            "extensions": [
+                {"id": "privacy-id", "name": "Privacy Helper", "tags": ["privacy"]},
+                {"id": "media-id", "name": "Media Helper", "tags": ["media"]},
+            ]
+        }
+
+    monkeypatch.setattr(mod, "_request", fake_request)
+    monkeypatch.setattr(mod, "_print", lambda value, _json_mode: printed.append(value))
+    args = mod.build_parser().parse_args(["extensions", "list", "--query", "privacy"])
+    args.func(args)
+
+    assert calls == [("GET", "/api/extension/defaults")]
+    assert printed == [[{"id": "privacy-id", "name": "Privacy Helper", "tags": ["privacy"]}]]
+
+
+def test_extensions_search_accepts_a_positional_query():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    args = mod.build_parser().parse_args(["extensions", "search", "privacy helper"])
+
+    assert args.query == "privacy helper"
+    assert args.func is mod.cmd_extensions_list
+
+
+def test_extensions_set_defaults_sends_trusted_ids(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    captured: dict = {}
+
+    def fake_request(method, path, *, body=None, **options):
+        if method == "GET":
+            return {"extensions": [{"id": "one"}, {"id": "two"}]}
+        captured.update({"method": method, "path": path, "body": body, "options": options})
+        return {"selected_ids": body["selected_ids"]}
+
+    monkeypatch.setattr(mod, "_request", fake_request)
+    args = mod.build_parser().parse_args(
+        [
+            "--idempotency-key",
+            "extension-defaults-1",
+            "extensions",
+            "set-defaults",
+            "--extension-id",
+            "one",
+            "--extension-id",
+            "two",
+        ]
+    )
+    args.func(args)
+
+    assert captured == {
+        "method": "PUT",
+        "path": "/api/extension/defaults",
+        "body": {"selected_ids": ["one", "two"]},
+        "options": {"idempotency_key": "extension-defaults-1"},
+    }
+
+
+def test_extensions_enable_and_disable_update_only_catalog_ids(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    calls: list[dict] = []
+
+    def fake_request(method, path, *, body=None, **options):
+        calls.append({"method": method, "path": path, "body": body, "options": options})
+        if method == "GET" and path == "/api/extension/defaults":
+            return {"extensions": [{"id": "one"}, {"id": "two"}]}
+        if method == "GET" and path.startswith("/api/profiles/"):
+            return {"id": "profile-1", "extension_ids": ["one"]}
+        return {"id": "profile-1", "extension_ids": body["extension_ids"]}
+
+    monkeypatch.setattr(mod, "_request", fake_request)
+    enable = mod.build_parser().parse_args(
+        ["extensions", "enable", "profile-1", "two"]
+    )
+    enable.func(enable)
+    disable = mod.build_parser().parse_args(
+        ["extensions", "disable", "profile-1", "one"]
+    )
+    disable.func(disable)
+
+    assert calls[2] == {
+        "method": "PUT",
+        "path": "/api/profiles/profile-1",
+        "body": {"extension_ids": ["one", "two"]},
+        "options": {},
+    }
+    assert calls[5] == {
+        "method": "PUT",
+        "path": "/api/profiles/profile-1",
+        "body": {"extension_ids": []},
+        "options": {},
+    }
+
+
+def test_extensions_enable_rejects_unknown_catalog_id(monkeypatch: pytest.MonkeyPatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cbm_agent_ctl", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    monkeypatch.setattr(
+        mod,
+        "_request",
+        lambda method, path, **_options: {"extensions": [{"id": "known"}]},
+    )
+    args = mod.build_parser().parse_args(
+        ["extensions", "enable", "profile-1", "unknown"]
+    )
+    with pytest.raises(SystemExit, match="Unknown trusted catalog extension"):
+        args.func(args)
 
 
 def test_accounts_list_builds_filtered_request(monkeypatch: pytest.MonkeyPatch):

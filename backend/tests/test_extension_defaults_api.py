@@ -34,6 +34,10 @@ def test_extension_defaults_lists_comet_catalog(admin_client, tmp_path, monkeypa
     assert payload["items"]
     assert all("password" not in json.dumps(item).lower() for item in payload["extensions"])
     assert any(item["id"] == "ddkjiahejlhfcafbddmgiahcphecmpfh" for item in payload["extensions"])
+    assert all(
+        item["store_url"] == f"https://chromewebstore.google.com/detail/{item['id']}"
+        for item in payload["extensions"]
+    )
     assert "defaults" in main.session_links.catalog_endpoint_map()
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,14 @@ from backend.database import DATA_DIR
 
 _REPO_CATALOG = Path(__file__).resolve().parent.parent / "config" / "extension-catalog.json"
 _DEFAULTS_FILENAME = "extension-defaults.json"
+_CHROME_EXTENSION_ID = re.compile(r"^[a-p]{32}$")
+
+
+def chrome_web_store_url(ext_id: str) -> str | None:
+    """Return the public store page for a valid Chrome extension id."""
+    if not _CHROME_EXTENSION_ID.fullmatch(ext_id):
+        return None
+    return f"https://chromewebstore.google.com/detail/{ext_id}"
 
 
 def catalog_dir() -> Path:
@@ -88,9 +97,14 @@ def list_catalog_extensions(*, include_paths: bool = True) -> list[dict[str, Any
                 "description": str(raw.get("description") or ""),
                 "default_selected": bool(raw.get("default_selected")),
                 "tags": [str(tag) for tag in (raw.get("tags") or []) if isinstance(tag, str)],
-                "available": bool(path),
-                "path": path,
-                "icon_url": raw.get("icon_url") if isinstance(raw.get("icon_url"), str) else None,
+            "available": bool(path),
+            "path": path,
+            "icon_url": raw.get("icon_url") if isinstance(raw.get("icon_url"), str) else None,
+            "store_url": (
+                raw.get("store_url")
+                if isinstance(raw.get("store_url"), str)
+                else chrome_web_store_url(ext_id)
+            ),
             }
         )
     return rows
@@ -149,7 +163,7 @@ def defaults_payload() -> dict[str, Any]:
             "selected": item["id"] in selected,
             "available": bool(item["available"]),
             "icon_url": item["icon_url"],
-            "store_url": None,
+            "store_url": item["store_url"],
         }
         if item.get("path"):
             entry["path"] = item["path"]

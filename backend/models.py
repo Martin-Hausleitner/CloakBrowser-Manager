@@ -246,11 +246,11 @@ def control_plane_capabilities_payload(*, local_mac_available: bool = False) -> 
             "mcp_note": "discovery_schema_only",
         },
         "extensions": {
-            "available": _channel(True, False, False, False),
+            "available": _channel(True, True, False, True),
             "rest_operations": ["catalog", "defaults", "templates", "inventory", "open-session"],
-            "cli_operations": [],
+            "cli_operations": ["list", "search", "defaults", "set-defaults", "enable", "disable"],
             "mcp_operations": [],
-            "skill_operations": [],
+            "skill_operations": ["list", "search", "defaults", "set-defaults", "enable", "disable"],
             "mcp_note": "discovery_schema_only",
         },
         "accounts": {

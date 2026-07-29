@@ -217,6 +217,16 @@ def test_v2_capabilities_and_resource_schema_are_bounded(client_access: TestClie
     assert body["resources"]["proxies"]["available"]["rest"] is True
     assert body["resources"]["proxies"]["available"]["cli"] is False
     assert body["resources"]["extensions"]["available"]["rest"] is True
+    assert body["resources"]["extensions"]["available"]["cli"] is True
+    assert body["resources"]["extensions"]["available"]["skill"] is True
+    assert body["resources"]["extensions"]["cli_operations"] == [
+        "list",
+        "search",
+        "defaults",
+        "set-defaults",
+        "enable",
+        "disable",
+    ]
     assert body["resources"]["extensions"]["mcp_note"] == "discovery_schema_only"
     assert body["resources"]["accounts"]["available"] == {
         "rest": True,

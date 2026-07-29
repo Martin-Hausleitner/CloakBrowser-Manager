@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { OrcaCapabilities, OrcaSession, Profile, TaskRun } from "../../lib/api";
+import type { OrcaCapabilities, OrcaSession, Profile, TaskHarnessPresence, TaskHarnessSession, TaskRun } from "../../lib/api";
 import { UI_STATE, expectUiState } from "../../lib/uiFlowRegistry";
 import { AgentBrowserWorkspace } from "./AgentBrowserWorkspace";
 
@@ -160,6 +160,64 @@ function sessionFixture(overrides: Partial<OrcaSession> = {}): OrcaSession {
   };
 }
 
+function taskSessionFixture(overrides: Partial<TaskHarnessSession> = {}): TaskHarnessSession {
+  return {
+    id: "smoke-session",
+    profile_id: runningProfile.id,
+    sandbox_id: "default",
+    project_id: "default",
+    title: "Harness smoke test",
+    status: "active",
+    workflow_state: "open",
+    done_at: null,
+    archived_at: null,
+    retention_class: "temporary",
+    expires_at: null,
+    activity_at: "2026-07-29T00:00:00Z",
+    row_version: 1,
+    created_by_kind: "user",
+    created_by_id: "user-1",
+    created_at: "2026-07-29T00:00:00Z",
+    updated_at: "2026-07-29T00:00:00Z",
+    metadata: {},
+    ...overrides,
+  };
+}
+
+function taskRunFixture(overrides: Partial<TaskRun> = {}): TaskRun {
+  return {
+    id: "smoke-run",
+    task_session_id: "smoke-session",
+    task_message_id: "smoke-message",
+    profile_id: runningProfile.id,
+    profile_id_snapshot: runningProfile.id,
+    sandbox_id: "default",
+    harness: "browser-use",
+    agent: null,
+    status: "queued",
+    launch_if_stopped: false,
+    allowed_origins: ["https://example.com"],
+    max_steps: 8,
+    timeout_seconds: 180,
+    model_alias: null,
+    deadline_at: "2026-07-29T00:03:00Z",
+    health_snapshot: {},
+    health_decision: {},
+    health_override: null,
+    retry_count: 0,
+    first_action_sequence: null,
+    first_action_at: null,
+    cancelled_at: null,
+    error_code: null,
+    error_message: null,
+    created_by_kind: "user",
+    created_by_id: "user-1",
+    created_at: "2026-07-29T00:00:00Z",
+    updated_at: "2026-07-29T00:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("AgentBrowserWorkspace", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
@@ -260,11 +318,14 @@ describe("AgentBrowserWorkspace", () => {
     apiMock.getTaskHarnessPresence.mockClear();
     apiMock.getOrcaCapabilities.mockClear();
 
-    expect(within(menu).getByRole("button", { name: "Test Browser Use" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Test Unbrowse" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Test Stagehand" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Test AGY" })).toBeTruthy();
-    fireEvent.click(within(menu).getByRole("button", { name: "Test Stagehand" }));
+    expect(within(menu).getByRole("button", { name: "Check Browser Use readiness" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Check Unbrowse readiness" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Check Stagehand readiness" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Run Browser Use smoke test" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Run Unbrowse smoke test" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Run Stagehand smoke test" })).toBeTruthy();
+    expect(within(menu).getByRole("button", { name: "Check AGY readiness" })).toBeTruthy();
+    fireEvent.click(within(menu).getByRole("button", { name: "Check Stagehand readiness" }));
     await waitFor(() => expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledTimes(1));
     expect(apiMock.getTaskHarnessPresence).toHaveBeenCalledWith("stagehand", expect.anything());
     apiMock.getTaskHarnessPresence.mockClear();
@@ -281,6 +342,466 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.queryByRole("dialog", { name: "Harnesses on VCVM" })).toBeNull();
     expect(screen.getByTestId("harness-readiness").textContent).toMatch(/stagehand.*unavailable/i);
     expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
+  });
+
+  it("starts a real Browser Use smoke run from the harness menu without silently overriding health", async () => {
+    const blockedRun = taskRunFixture({
+      status: "blocked_health",
+      health_decision: {
+        allowed: false,
+        waiting: false,
+        failed_reasons: ["measured_authenticity_below_threshold"],
+        non_overridable_reasons: [],
+      },
+    });
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-29T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture());
+    apiMock.createTaskRun.mockResolvedValue(blockedRun);
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const testButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
+      .getByRole("button", { name: "Run Browser Use smoke test" });
+    await waitFor(() => expect((testButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(testButton);
+
+    await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledWith({
+      profile_id: runningProfile.id,
+      title: "Browser Use smoke test",
+      metadata: {
+        source: "harness-smoke-test",
+        harness: "browser-use",
+        smoke_test: true,
+      },
+    }));
+    expect(apiMock.createTaskRun).toHaveBeenCalledWith("smoke-session", {
+      harness: "browser-use",
+      agent: null,
+      task: "Open https://example.com/ and report the page title.",
+      profile_id: runningProfile.id,
+      allowed_origins: ["https://example.com"],
+      max_steps: 8,
+      timeout_seconds: 180,
+      model_alias: null,
+    });
+    expect(apiMock.overrideTaskRunHealth).not.toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "Run with override" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Take over browser" })).toBeTruthy();
+  });
+
+  it("disables a smoke run for a harness that is known to be unavailable", async () => {
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: harness !== "stagehand",
+      state: harness === "stagehand" ? "unavailable" : "polling",
+      last_seen_at: harness === "stagehand" ? null : "2026-07-29T00:00:00Z",
+      reason: harness === "stagehand" ? "Stagehand worker unavailable" : null,
+    }));
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
+    const smokeButton = within(menu).getByRole("button", { name: "Run Stagehand smoke test" });
+    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(true));
+    expect(smokeButton.getAttribute("title")).toMatch(/unavailable/i);
+  });
+
+  it("shows a busy smoke state and ignores a duplicate click while the run is starting", async () => {
+    let resolveSession!: (session: TaskHarnessSession) => void;
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-29T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.createTaskSession.mockImplementation(() => new Promise((resolve) => {
+      resolveSession = resolve;
+    }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture());
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(await screen.findByTestId("orca-prompt"), {
+      target: { value: "Open https://example.org/" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
+    const smokeButton = within(menu).getByRole("button", { name: "Run Browser Use smoke test" });
+    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(smokeButton);
+
+    await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledTimes(1));
+    expect(smokeButton.getAttribute("aria-busy")).toBe("true");
+    expect(smokeButton.textContent).toMatch(/starting/i);
+    expect(screen.getByTestId("orca-launch")).toHaveProperty("disabled", true);
+    fireEvent.click(smokeButton);
+    expect(apiMock.createTaskSession).toHaveBeenCalledTimes(1);
+
+    resolveSession(taskSessionFixture());
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledTimes(1));
+  });
+
+  it("uses the required Grok Build ACPX adapter for an Antigravity profile", async () => {
+    const antigravityProfile: Profile = {
+      ...runningProfile,
+      id: "profile-antigravity",
+      name: "Antigravity profile",
+      harness: "antigravity",
+    };
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-29T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({
+      harness: "acpx",
+      agents: [
+        { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+        { agent: "grok-build", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+      ],
+    });
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({
+      id: "smoke-antigravity",
+      profile_id: antigravityProfile.id,
+    }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
+      id: "run-antigravity",
+      task_session_id: "smoke-antigravity",
+      profile_id: antigravityProfile.id,
+      profile_id_snapshot: antigravityProfile.id,
+      harness: "acpx",
+      agent: "grok-build",
+    }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[antigravityProfile]}
+        selectedProfile={antigravityProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const smokeButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
+      .getByRole("button", { name: "Run ACPX smoke test" });
+    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(smokeButton);
+
+    await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledWith({
+      profile_id: antigravityProfile.id,
+      title: "ACPX smoke test",
+      metadata: {
+        source: "harness-smoke-test",
+        harness: "acpx",
+        smoke_test: true,
+        agent: "grok-build",
+        mode: "antigravity",
+      },
+    }));
+    expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+      "smoke-antigravity",
+      expect.objectContaining({ harness: "acpx", agent: "grok-build" }),
+    );
+  });
+
+  it("does not attach or start a stale smoke run after the selected profile changes", async () => {
+    let resolveSession!: (session: TaskHarnessSession) => void;
+    const nextProfile: Profile = {
+      ...runningProfile,
+      id: "profile-next",
+      name: "Next profile",
+    };
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-29T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.createTaskSession.mockImplementation(() => new Promise((resolve) => {
+      resolveSession = resolve;
+    }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    const view = render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile, nextProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const smokeButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
+      .getByRole("button", { name: "Run Browser Use smoke test" });
+    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(smokeButton);
+    await waitFor(() => expect(apiMock.createTaskSession).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile, nextProfile]}
+        selectedProfile={nextProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+    resolveSession(taskSessionFixture());
+
+    await waitFor(() => expect(screen.getAllByText("Next profile").length).toBeGreaterThan(0));
+    expect(apiMock.createTaskRun).not.toHaveBeenCalled();
+    expect(screen.getByTestId("orca-run-status").textContent).toMatch(/idle/i);
+  });
+
+  it("cancels a smoke run created while the selected profile changes", async () => {
+    let resolveRun!: (run: TaskRun) => void;
+    const nextProfile: Profile = {
+      ...runningProfile,
+      id: "profile-next-during-run",
+      name: "Next profile during run",
+    };
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-29T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture());
+    apiMock.createTaskRun.mockImplementation(() => new Promise((resolve) => {
+      resolveRun = resolve;
+    }));
+    apiMock.cancelTaskRun.mockResolvedValue(taskRunFixture({
+      id: "smoke-run-during-switch",
+      status: "cancelled",
+      cancelled_at: "2026-07-29T00:00:01Z",
+    }));
+
+    const view = render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile, nextProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const smokeButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
+      .getByRole("button", { name: "Run Browser Use smoke test" });
+    await waitFor(() => expect((smokeButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(smokeButton);
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile, nextProfile]}
+        selectedProfile={nextProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+    resolveRun(taskRunFixture({ id: "smoke-run-during-switch" }));
+
+    await waitFor(() => expect(apiMock.cancelTaskRun).toHaveBeenCalledWith("smoke-run-during-switch"));
+    expect(screen.getByTestId("orca-run-status").textContent).toMatch(/idle/i);
+  });
+
+  it("keeps ACPX smoke readiness when switching through another managed harness", async () => {
+    let unbrowseChecks = 0;
+    let resolveSlowUnbrowse!: (presence: TaskHarnessPresence) => void;
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => {
+      if (harness === "unbrowse") {
+        unbrowseChecks += 1;
+        if (unbrowseChecks === 2) {
+          return new Promise((resolve) => {
+            resolveSlowUnbrowse = resolve;
+          });
+        }
+      }
+      return {
+        harness,
+        worker_seen_recently: true,
+        state: "polling",
+        last_seen_at: "2026-07-29T00:00:00Z",
+        reason: null,
+      };
+    });
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({
+      harness: "acpx",
+      agents: [
+        { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+      ],
+    });
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    let menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
+    await waitFor(() => expect(
+      (within(menu).getByRole("button", { name: "Run ACPX smoke test" }) as HTMLButtonElement).disabled,
+    ).toBe(false));
+    fireEvent.click(within(menu).getByRole("button", { name: "Use Unbrowse" }));
+
+    await waitFor(() => expect(unbrowseChecks).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: "Open harness menu" }));
+    menu = await screen.findByRole("dialog", { name: "Harnesses on VCVM" });
+    await waitFor(() => expect(
+      (within(menu).getByRole("button", { name: "Recheck all harnesses" }) as HTMLButtonElement).disabled,
+    ).toBe(false));
+    await act(async () => {
+      resolveSlowUnbrowse({
+        harness: "unbrowse",
+        worker_seen_recently: true,
+        state: "polling",
+        last_seen_at: "2026-07-29T00:00:00Z",
+        reason: null,
+      });
+    });
+    await waitFor(() => expect(
+      (within(menu).getByRole("button", { name: "Run ACPX smoke test" }) as HTMLButtonElement).disabled,
+    ).toBe(false));
+  });
+
+  it.each([
+    ["Unbrowse", "unbrowse"],
+    ["Stagehand", "stagehand"],
+  ] as const)("maps the %s smoke test to the real %s managed run", async (label, harness) => {
+    apiMock.getTaskHarnessPresence.mockImplementation(async (candidate: string) => ({
+      harness: candidate,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-29T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: `smoke-${harness}` }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
+      id: `run-${harness}`,
+      task_session_id: `smoke-${harness}`,
+      harness,
+    }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const testButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
+      .getByRole("button", { name: `Run ${label} smoke test` });
+    await waitFor(() => expect((testButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(testButton);
+
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+      `smoke-${harness}`,
+      expect.objectContaining({ harness, agent: null, max_steps: 8, timeout_seconds: 180 }),
+    ));
+  });
+
+  it("uses the first ready ACPX adapter for a real ACPX smoke run", async () => {
+    apiMock.getTaskHarnessPresence.mockImplementation(async (harness: string) => ({
+      harness,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-29T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({
+      harness: "acpx",
+      agents: [
+        { agent: "grok-build", ready: false, state: "failed", reason_code: "protocol_error", checked_at: "2026-07-29T00:00:00Z" },
+        { agent: "claude", ready: true, state: "ready", reason_code: "ok", checked_at: "2026-07-29T00:00:00Z" },
+      ],
+    });
+    apiMock.createTaskSession.mockResolvedValue(taskSessionFixture({ id: "smoke-acpx" }));
+    apiMock.createTaskRun.mockResolvedValue(taskRunFixture({
+      id: "run-acpx-smoke",
+      task_session_id: "smoke-acpx",
+      harness: "acpx",
+      agent: "claude",
+    }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+
+    render(
+      <AgentBrowserWorkspace
+        profiles={[runningProfile]}
+        selectedProfile={runningProfile}
+        canAutomate
+        canInteract
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open harness menu" }));
+    const testButton = within(await screen.findByRole("dialog", { name: "Harnesses on VCVM" }))
+      .getByRole("button", { name: "Run ACPX smoke test" });
+    await waitFor(() => expect((testButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(testButton);
+
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+      "smoke-acpx",
+      expect.objectContaining({ harness: "acpx", agent: "claude" }),
+    ));
+    expect(apiMock.overrideTaskRunHealth).not.toHaveBeenCalled();
   });
 
   it("focuses the harness menu and closes it with Escape while restoring trigger focus", async () => {

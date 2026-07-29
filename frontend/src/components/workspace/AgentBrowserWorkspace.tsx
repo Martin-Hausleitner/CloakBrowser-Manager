@@ -193,6 +193,7 @@ export function AgentBrowserWorkspace({
   const [acpxPreflights, setAcpxPreflights] = useState<TaskHarnessAgentPreflight[]>([]);
   const [harnessCheckBusy, setHarnessCheckBusy] = useState(false);
   const [harnessCheckTarget, setHarnessCheckTarget] = useState<ManagedHarness | "orca" | "all" | null>(null);
+  const [smokeTestTarget, setSmokeTestTarget] = useState<ManagedHarness | null>(null);
   const [harnessMenuOpen, setHarnessMenuOpen] = useState(false);
   const [taskOutputs, setTaskOutputs] = useState<TaskOutput[]>([]);
   const [transcript, setTranscript] = useState("");
@@ -220,6 +221,9 @@ export function AgentBrowserWorkspace({
   const restoreViewerFullscreenFocusRef = useRef(false);
   const harnessMenuRef = useRef<HTMLDivElement | null>(null);
   const harnessMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const smokeTestBusyRef = useRef(false);
+  const selectedProfileIdRef = useRef<string | null>(selectedProfile?.id ?? null);
+  selectedProfileIdRef.current = selectedProfile?.id ?? null;
 
   const runningProfiles = useMemo(
     () => profiles.filter((profile) => profile.status === "running"),
@@ -362,8 +366,11 @@ export function AgentBrowserWorkspace({
     const presence = harnessPresence[candidate];
     if (!presence?.worker_seen_recently) return false;
     if (candidate !== "acpx") return true;
+    if (selectedProfile?.harness === "antigravity") {
+      return acpxPreflights.some((preflight) => preflight.agent === "grok-build" && preflight.ready);
+    }
     return Boolean(readyAcpxAgent);
-  }, [harnessPresence, readyAcpxAgent]);
+  }, [acpxPreflights, harnessPresence, readyAcpxAgent, selectedProfile?.harness]);
   const chooseAgent = useCallback((nextAgent: AgentMode) => {
     if (sessionActive) return;
     setAgent(nextAgent);
@@ -435,8 +442,6 @@ export function AgentBrowserWorkspace({
     if (acpxBackedMode) {
       const preflights = await api.getTaskHarnessPreflights("acpx", { signal });
       setAcpxPreflights(preflights.agents);
-    } else {
-      setAcpxPreflights([]);
     }
   }, [acpxBackedMode, managedHarness, managedRunMode]);
 
@@ -538,6 +543,106 @@ export function AgentBrowserWorkspace({
       setHarnessCheckTarget(null);
     }
   }, [harnessCheckBusy]);
+
+  const handleHarnessSmokeTest = useCallback(async (candidate: ManagedHarness) => {
+    if (
+      smokeTestBusyRef.current ||
+      busy ||
+      sessionActive ||
+      !canAutomate ||
+      !selectedProfile ||
+      selectedProfile.status !== "running"
+    ) {
+      return;
+    }
+    smokeTestBusyRef.current = true;
+    setBusy(true);
+    setSmokeTestTarget(candidate);
+    setError(null);
+    const smokeProfileId = selectedProfile.id;
+    try {
+      const presence = await api.getTaskHarnessPresence(candidate, {});
+      if (selectedProfileIdRef.current !== smokeProfileId) return;
+      setHarnessPresence((current) => ({ ...current, [candidate]: presence }));
+      if (!presence.worker_seen_recently) {
+        throw new Error(presence.reason || `${managedHarnessLabel(candidate)} worker unavailable`);
+      }
+
+      let candidateAgent: AcpxAgent | null = null;
+      const antigravitySmoke = candidate === "acpx" && selectedProfile.harness === "antigravity";
+      if (candidate === "acpx") {
+        const preflights = await api.getTaskHarnessPreflights("acpx", {});
+        if (selectedProfileIdRef.current !== smokeProfileId) return;
+        setAcpxPreflights(preflights.agents);
+        candidateAgent = antigravitySmoke
+          ? preflights.agents.find((preflight) => preflight.agent === "grok-build" && preflight.ready)?.agent ?? null
+          : ACPX_AGENT_OPTIONS.find((option) =>
+            preflights.agents.some((preflight) => preflight.agent === option.value && preflight.ready),
+          )?.value ?? null;
+        if (!candidateAgent) {
+          throw new Error(antigravitySmoke
+            ? "Antigravity requires a ready Grok Build ACPX adapter on VCVM"
+            : "No ready ACPX adapter is available on the VCVM worker");
+        }
+      }
+
+      const label = managedHarnessLabel(candidate);
+      const created = await api.createTaskSession({
+        profile_id: smokeProfileId,
+        title: `${label} smoke test`,
+        metadata: {
+          source: "harness-smoke-test",
+          harness: candidate,
+          smoke_test: true,
+          ...(candidateAgent ? { agent: candidateAgent } : {}),
+          ...(antigravitySmoke ? { mode: "antigravity" } : {}),
+        },
+      });
+      if (selectedProfileIdRef.current !== smokeProfileId) return;
+      const started = await api.createTaskRun(created.id, {
+        harness: candidate,
+        agent: candidateAgent,
+        task: "Open https://example.com/ and report the page title.",
+        profile_id: smokeProfileId,
+        allowed_origins: ["https://example.com"],
+        max_steps: 8,
+        timeout_seconds: 180,
+        model_alias: null,
+      });
+      const cancelStaleRun = async () => {
+        rememberBrowserUseRun(smokeProfileId, started.id);
+        try {
+          await api.cancelTaskRun(started.id);
+          forgetBrowserUseRun(smokeProfileId);
+        } catch {
+          // Keep the remembered run recoverable on the original profile if cancellation fails.
+        }
+      };
+      if (selectedProfileIdRef.current !== smokeProfileId) {
+        await cancelStaleRun();
+        return;
+      }
+      const outputs = await api.listTaskRunOutputs(started.id);
+      if (selectedProfileIdRef.current !== smokeProfileId) {
+        await cancelStaleRun();
+        return;
+      }
+
+      setAgent(antigravitySmoke ? "antigravity" : candidate);
+      if (candidateAgent) setAcpxAgent(candidateAgent);
+      setTaskSessionId(created.id);
+      rememberBrowserUseRun(smokeProfileId, started.id);
+      setTaskRun(started);
+      setTaskOutputs(outputs);
+      setHarnessMenuOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Harness smoke test failed");
+    } finally {
+      smokeTestBusyRef.current = false;
+      setBusy(false);
+      setSmokeTestTarget(null);
+    }
+  }, [busy, canAutomate, selectedProfile, sessionActive]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current != null) {
@@ -1117,7 +1222,7 @@ export function AgentBrowserWorkspace({
                   <div className="flex items-center justify-between gap-2 px-1 pb-1.5">
                     <div>
                       <div className="text-[10px] font-semibold text-white">Harnesses on VCVM</div>
-                      <div className="text-[9px] text-[#888892]">Select a runner or recheck its local service.</div>
+                      <div className="text-[9px] text-[#888892]">Switch, check, or run a safe E2E test.</div>
                     </div>
                     <button
                       type="button"
@@ -1135,6 +1240,7 @@ export function AgentBrowserWorkspace({
                       const ready = managedHarnessIsReady(candidate);
                       const presence = harnessPresence[candidate];
                       const label = managedHarnessLabel(candidate);
+                      const smokeKnownUnavailable = Boolean(presence && !ready);
                       return (
                         <div key={candidate} className="flex items-center gap-1 rounded-md hover:bg-[#1d1d21]">
                           <button
@@ -1154,14 +1260,36 @@ export function AgentBrowserWorkspace({
                           </button>
                           <button
                             type="button"
-                            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#34343b] px-1.5 text-[9px] text-[#c4c4cc] hover:bg-[#29292e] hover:text-white disabled:opacity-40"
+                            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-[#34343b] text-[#a1a1aa] hover:bg-[#29292e] hover:text-white disabled:opacity-40"
                             onClick={() => void handleHarnessCheck(candidate)}
-                            disabled={harnessCheckBusy}
-                            aria-label={`Test ${label}`}
-                            title={`Test ${label} on VCVM`}
+                            disabled={harnessCheckBusy || smokeTestTarget !== null}
+                            aria-label={`Check ${label} readiness`}
+                            title={`Check ${label} readiness on VCVM`}
                           >
                             <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === candidate ? "animate-spin" : ""}`} aria-hidden="true" />
-                            Test
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#3f3f48] px-1.5 text-[9px] font-medium text-[#e4e4e7] hover:border-[#6366f1] hover:bg-[#29293b] disabled:opacity-40"
+                            onClick={() => void handleHarnessSmokeTest(candidate)}
+                            disabled={
+                              harnessCheckBusy ||
+                              smokeTestTarget !== null ||
+                              busy ||
+                              sessionActive ||
+                              !canAutomate ||
+                              !selectedProfile ||
+                              selectedProfile.status !== "running" ||
+                              smokeKnownUnavailable
+                            }
+                            aria-label={`Run ${label} smoke test`}
+                            aria-busy={smokeTestTarget === candidate}
+                            title={smokeKnownUnavailable
+                              ? presence?.reason || `${label} is unavailable on VCVM`
+                              : `Run ${label} on example.com with the selected profile`}
+                          >
+                            <Activity className={`h-3 w-3 ${smokeTestTarget === candidate ? "animate-pulse" : ""}`} aria-hidden="true" />
+                            {smokeTestTarget === candidate ? "Starting" : "Run"}
                           </button>
                         </div>
                       );
@@ -1192,11 +1320,11 @@ export function AgentBrowserWorkspace({
                             className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[#34343b] px-1.5 text-[9px] text-[#c4c4cc] hover:bg-[#29292e] hover:text-white disabled:opacity-40"
                             onClick={() => void handleHarnessCheck("orca")}
                             disabled={harnessCheckBusy}
-                            aria-label={`Test ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate}`}
+                            aria-label={`Check ${candidate === "agy" ? "AGY" : candidate === "grok" ? "Grok" : candidate} readiness`}
                             title="Refresh installed local CLI detection"
                           >
                             <RefreshCw className={`h-3 w-3 ${harnessCheckTarget === "orca" ? "animate-spin" : ""}`} aria-hidden="true" />
-                            Test
+                            Check
                           </button>
                         </div>
                     )) : (

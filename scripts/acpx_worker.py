@@ -85,6 +85,16 @@ CLOSE_SESSION_RETRY_DELAY_SECONDS = 0.1
 PREFLIGHT_TRANSIENT_RETRY_REASON_CODES = frozenset(
     {"adapter_unavailable", "protocol_error"}
 )
+BROWSER_TOOL_READINESS_REASON_CODES = frozenset(
+    {
+        "ready",
+        "auth_required",
+        "adapter_unavailable",
+        "timeout",
+        "protocol_error",
+        "internal_error",
+    }
+)
 PREFLIGHT_SCRUBBED_ENV_KEYS = frozenset(
     {
         "CBM_RUN_CAPABILITY_FILE",
@@ -296,6 +306,19 @@ class AcpxManagerClient(ManagerClient):
                 "reason_code": reason_code,
                 "model_aliases": list(model_aliases or []),
             },
+        )
+
+    def report_browser_tool_readiness(
+        self,
+        *,
+        tool_id: str,
+        ready: bool,
+        reason_code: str,
+    ) -> None:
+        self.request(
+            "POST",
+            "/internal/browser-tools/readiness",
+            json={"id": tool_id, "ready": ready, "reason_code": reason_code},
         )
 
 
@@ -718,6 +741,48 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
         await process.wait()
 
 
+def _sanitize_browser_tool_readiness_result(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {"ready": False, "reason_code": "protocol_error"}
+    ready = bool(raw.get("ready"))
+    reason_code = str(raw.get("reason_code") or "protocol_error")
+    if reason_code == "ok":
+        reason_code = "ready"
+    if reason_code not in BROWSER_TOOL_READINESS_REASON_CODES:
+        reason_code = "protocol_error"
+    if ready:
+        reason_code = "ready"
+    elif reason_code == "ready":
+        reason_code = "protocol_error"
+    return {"ready": ready, "reason_code": reason_code}
+
+
+async def probe_browser_tool_readiness(tool_id: str) -> dict[str, Any]:
+    """Instantiate the production adapter and call its public readiness probe."""
+    if tool_id == "unbrowse":
+        from scripts.unbrowse_router_adapter import UnbrowseRouterAdapter
+
+        adapter: Any = UnbrowseRouterAdapter()
+    elif tool_id == "stagehand":
+        from scripts.stagehand_router_adapter import StagehandRouterAdapter
+
+        adapter = StagehandRouterAdapter()
+    elif tool_id == "browser-harness":
+        from scripts.browser_harness_adapter import BrowserHarnessAdapter
+
+        adapter = BrowserHarnessAdapter()
+    else:
+        return {"ready": False, "reason_code": "protocol_error"}
+
+    preflight = getattr(adapter, "preflight", None)
+    if not callable(preflight):
+        return {"ready": False, "reason_code": "adapter_unavailable"}
+    result = preflight()
+    if hasattr(result, "__await__"):
+        result = await result
+    return _sanitize_browser_tool_readiness_result(result)
+
+
 class AcpxWorker:
     """Execute ACPX claims and mirror their lifecycle into Manager state."""
 
@@ -728,6 +793,7 @@ class AcpxWorker:
         *,
         runtime: Any | None = None,
         provider_probe: Any | None = None,
+        browser_tool_probe: Any | None = None,
         openai_tool_loop: Callable[..., Awaitable[Any]] | None = None,
         controller_factory: Callable[[RunContext], CbmMcpController] | None = None,
     ) -> None:
@@ -735,6 +801,7 @@ class AcpxWorker:
         self.config = config
         self.runtime = runtime or AcpxRuntime(config)
         self.provider_probe = provider_probe or probe_provider_target
+        self.browser_tool_probe = browser_tool_probe or probe_browser_tool_readiness
         self.openai_tool_loop = openai_tool_loop or run_openai_compatible_tool_loop
         self.controller_factory = controller_factory or CbmMcpController
 
@@ -994,6 +1061,7 @@ class AcpxWorker:
                         reason_code=str(result["reason_code"]),
                     )
                 await self._report_provider_preflights(agent_results, agents=())
+                await self._report_browser_tool_readiness()
                 return
             except Exception:  # noqa: BLE001 - publish only redacted reason codes
                 for agent in sorted(LEGACY_SUPPORTED_AGENTS):
@@ -1006,6 +1074,7 @@ class AcpxWorker:
                         reason_code=str(result["reason_code"]),
                     )
                 await self._report_provider_preflights(agent_results, agents=())
+                await self._report_browser_tool_readiness()
                 return
 
             for agent in discovered_agents:
@@ -1026,6 +1095,7 @@ class AcpxWorker:
                     reason_code=reason_code,
                 )
             await self._report_provider_preflights(agent_results, agents=discovered_agents)
+            await self._report_browser_tool_readiness()
         finally:
             mcp_config.unlink(missing_ok=True)
 
@@ -1066,6 +1136,22 @@ class AcpxWorker:
                 ready=result.ready,
                 reason_code=result.reason_code,
                 model_aliases=result.model_aliases,
+            )
+
+    async def _report_browser_tool_readiness(self) -> None:
+        for tool_id in ROUTING_BROWSER_TOOL_ORDER:
+            try:
+                raw = self.browser_tool_probe(tool_id)
+                if hasattr(raw, "__await__"):
+                    raw = await raw
+                result = _sanitize_browser_tool_readiness_result(raw)
+            except Exception:  # noqa: BLE001 - publish only fixed public reason code
+                result = {"ready": False, "reason_code": "protocol_error"}
+            await asyncio.to_thread(
+                self.client.report_browser_tool_readiness,
+                tool_id=tool_id,
+                ready=bool(result["ready"]),
+                reason_code=str(result["reason_code"]),
             )
 
     async def execute_claim(self, claim: dict[str, Any]) -> dict[str, str]:

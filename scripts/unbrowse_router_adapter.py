@@ -83,6 +83,12 @@ class UnbrowseRouterAdapter:
         self.process_launcher = process_launcher or asyncio.create_subprocess_exec
         self._preflight_succeeded = False
 
+    async def preflight(self) -> dict[str, object]:
+        binary = self.executable_resolver(self.executable)
+        if not binary:
+            return {"ready": False, "reason_code": "executable_missing"}
+        return await self._preflight_status(binary)
+
     async def __call__(self, request: BrowserToolRequest) -> BrowserToolResult:
         try:
             safe_url = _validated_navigation_url(request)
@@ -201,6 +207,16 @@ class UnbrowseRouterAdapter:
                 await _cleanup_gateway(gateway_runner)
 
     async def _preflight(self, binary: str) -> BrowserToolResult | None:
+        status = await self._preflight_status(binary)
+        if status["ready"] is True:
+            return None
+        return BrowserToolResult(
+            outcome="failed",
+            classification="tool_unavailable",
+            message=f"unbrowse preflight failed: {status['reason_code']}",
+        )
+
+    async def _preflight_status(self, binary: str) -> dict[str, object]:
         try:
             version_payload = await self._run_preflight_probe(
                 binary,
@@ -216,21 +232,19 @@ class UnbrowseRouterAdapter:
                 fallback_error="unbrowse command preflight failed",
             )
             _validate_help_preflight_payload(help_payload)
-            return None
+            return {"ready": True, "reason_code": "ready"}
         except asyncio.CancelledError:
             raise
-        except (asyncio.TimeoutError, _OutputTooLarge, ValueError, _PolicyDenied) as exc:
-            return BrowserToolResult(
-                outcome="failed",
-                classification="tool_unavailable",
-                message=redact_error_message(str(exc))[:MAX_STDERR_CHARS],
-            )
-        except Exception as exc:  # noqa: BLE001 - preflight fails closed
-            return BrowserToolResult(
-                outcome="failed",
-                classification="tool_unavailable",
-                message=redact_error_message(str(exc))[:MAX_STDERR_CHARS],
-            )
+        except asyncio.TimeoutError:
+            return {"ready": False, "reason_code": "timeout"}
+        except _PolicyDenied as exc:
+            return {"ready": False, "reason_code": _unbrowse_preflight_reason_code(str(exc))}
+        except ValueError:
+            return {"ready": False, "reason_code": "malformed_output"}
+        except _OutputTooLarge:
+            return {"ready": False, "reason_code": "malformed_output"}
+        except Exception:  # noqa: BLE001 - public readiness fails closed
+            return {"ready": False, "reason_code": "probe_error"}
 
     async def _run_preflight_probe(
         self,
@@ -265,6 +279,13 @@ class UnbrowseRouterAdapter:
         except Exception:
             await _kill_process(process)
             raise
+
+
+def _unbrowse_preflight_reason_code(message: str) -> str:
+    lowered = message.lower()
+    if "incompatible" in lowered or "version" in lowered or "build" in lowered:
+        return "incompatible_runtime"
+    return "command_failed"
 
 
 async def unbrowse_router_adapter(request: BrowserToolRequest) -> BrowserToolResult:

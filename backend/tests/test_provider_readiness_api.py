@@ -265,3 +265,110 @@ def test_provider_readiness_uses_newest_active_worker_result(client_access: Test
     assert grok_cli["ready"] is True
     assert grok_cli["reason_code"] == "ready"
     assert grok_cli["model_aliases"] == ["grok-build-0.1"]
+
+
+def test_browser_tool_readiness_reports_canonical_redacted_matrix(
+    client_access: TestClient,
+):
+    from backend import main
+
+    reported = client_access.post(
+        "/internal/browser-tools/readiness",
+        headers=worker_headers(),
+        json={
+            "id": "stagehand",
+            "ready": True,
+            "reason_code": "ready",
+        },
+    )
+    assert reported.status_code == 204, reported.text
+
+    failed = client_access.post(
+        "/internal/browser-tools/readiness",
+        headers=worker_headers(),
+        json={
+            "id": "unbrowse",
+            "ready": False,
+            "reason_code": "auth_required",
+        },
+    )
+    assert failed.status_code == 204, failed.text
+
+    response = client_access.get("/api/browser-tools/readiness", headers=bootstrap_headers())
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["id"] for item in body["tools"]] == [
+        "unbrowse",
+        "stagehand",
+        "browser-harness",
+    ]
+    tools = {item["id"]: item for item in body["tools"]}
+    assert tools["stagehand"]["ready"] is True
+    assert tools["stagehand"]["state"] == "ready"
+    assert tools["stagehand"]["reason_code"] == "ready"
+    assert tools["unbrowse"]["ready"] is False
+    assert tools["unbrowse"]["state"] == "failed"
+    assert tools["unbrowse"]["reason_code"] == "auth_required"
+    assert tools["browser-harness"] == {
+        "id": "browser-harness",
+        "ready": False,
+        "state": "unavailable",
+        "reason_code": "not_checked",
+        "checked_at": None,
+    }
+    serialized = json.dumps(body)
+    assert "worker_id" not in serialized
+    assert "cbm_worker" not in serialized
+    assert "Bearer" not in serialized
+    assert "/usr/bin" not in serialized
+    assert "stderr" not in serialized
+
+    checked_at = datetime.fromisoformat(tools["stagehand"]["checked_at"])
+    main.worker_runtime_service._clock = lambda: checked_at + timedelta(seconds=301)
+    stale = client_access.get(
+        "/api/browser-tools/readiness",
+        headers=bootstrap_headers(),
+    ).json()
+    stale_tools = {item["id"]: item for item in stale["tools"]}
+    assert stale_tools["stagehand"]["ready"] is False
+    assert stale_tools["stagehand"]["state"] == "stale"
+    assert stale_tools["stagehand"]["reason_code"] == "stale"
+
+
+def test_browser_tool_readiness_auth_and_payload_are_strict(client_access: TestClient):
+    payload = {
+        "id": "stagehand",
+        "ready": False,
+        "reason_code": "protocol_error",
+    }
+    assert client_access.get("/api/browser-tools/readiness").status_code == 401
+    assert client_access.post(
+        "/internal/browser-tools/readiness",
+        headers=bootstrap_headers(),
+        json=payload,
+    ).status_code == 401
+    assert client_access.post(
+        "/internal/browser-tools/readiness",
+        headers=worker_headers(),
+        json={**payload, "stderr": "must not persist"},
+    ).status_code == 422
+    assert client_access.post(
+        "/internal/browser-tools/readiness",
+        headers=worker_headers(),
+        json={"id": "playwright", "ready": False, "reason_code": "protocol_error"},
+    ).status_code == 422
+    assert client_access.post(
+        "/internal/browser-tools/readiness",
+        headers=worker_headers(),
+        json={"id": "stagehand", "ready": True, "reason_code": "auth_required"},
+    ).status_code == 422
+
+    with db.get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT harness, agent, ready, reason_code
+            FROM worker_harness_preflights
+            WHERE harness = 'browser-tools'
+            """
+        ).fetchall()
+    assert rows == []

@@ -528,6 +528,129 @@ def test_missing_browser_harness_binary_returns_tool_unavailable(tmp_path: Path)
     assert result.classification == "tool_unavailable"
 
 
+def test_public_preflight_probes_browser_harness_version_with_minimal_env_without_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from scripts.browser_harness_adapter import BrowserHarnessAdapter
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("BROWSER_USE_API_KEY", "browser-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.setenv("CBM_RUN_CAPABILITY_FILE", "/tmp/secret-cap")
+    gateway_called = False
+
+    async def gateway(**_kwargs: Any) -> tuple[FakeGatewayRunner, str]:
+        nonlocal gateway_called
+        gateway_called = True
+        return FakeGatewayRunner(), "ws://127.0.0.1:1/nonce"
+
+    launcher = RecordingLauncher(stdout=b"browser-harness 1.2.3\n")
+    adapter = BrowserHarnessAdapter(
+        executable_resolver=lambda _name: "/bin/browser-harness",
+        gateway_starter=gateway,
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": True, "reason_code": "ready"}
+    assert launcher.argv == ("/bin/browser-harness", "--version")
+    assert "CBM_BROWSER_HARNESS_REQUEST_FILE" not in launcher.env
+    assert "BU_CDP_WS" not in launcher.env
+    assert "OPENAI_API_KEY" not in launcher.env
+    assert "BROWSER_USE_API_KEY" not in launcher.env
+    assert "GITHUB_TOKEN" not in launcher.env
+    assert "CBM_RUN_CAPABILITY_FILE" not in launcher.env
+    assert set(launcher.env) <= {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "XDG_RUNTIME_DIR"}
+    assert gateway_called is False
+
+
+def test_public_preflight_reports_missing_browser_harness_binary_without_gateway_or_process():
+    from scripts.browser_harness_adapter import BrowserHarnessAdapter
+
+    gateway_called = False
+
+    async def gateway(**_kwargs: Any) -> tuple[FakeGatewayRunner, str]:
+        nonlocal gateway_called
+        gateway_called = True
+        return FakeGatewayRunner(), "ws://127.0.0.1:1/nonce"
+
+    launcher = RecordingLauncher(stdout=b"browser-harness 1.2.3\n")
+    adapter = BrowserHarnessAdapter(
+        executable_resolver=lambda _name: None,
+        gateway_starter=gateway,
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": False, "reason_code": "executable_missing"}
+    assert launcher.argv == ()
+    assert gateway_called is False
+
+
+def test_public_preflight_rejects_malformed_browser_harness_version_without_leaking_paths():
+    from scripts.browser_harness_adapter import BrowserHarnessAdapter
+
+    launcher = RecordingLauncher(stdout=b"/home/coder/private token=secret\n")
+    adapter = BrowserHarnessAdapter(
+        executable_resolver=lambda _name: "/bin/browser-harness",
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": False, "reason_code": "malformed_output"}
+    assert set(result) == {"ready", "reason_code"}
+
+
+def test_public_preflight_timeout_kills_browser_harness_process_group(monkeypatch: pytest.MonkeyPatch):
+    from scripts import browser_harness_adapter as adapter_module
+    from scripts.browser_harness_adapter import BrowserHarnessAdapter
+
+    launcher = RecordingLauncher(stdout=b"browser-harness 1.2.3\n", sleep=60)
+    group_kills: list[tuple[int, int]] = []
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        group_kills.append((pid, sig))
+
+    monkeypatch.setattr(adapter_module.os, "killpg", fake_killpg)
+    adapter = BrowserHarnessAdapter(
+        timeout_seconds=0.01,
+        executable_resolver=lambda _name: "/bin/browser-harness",
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter.preflight())
+
+    assert result == {"ready": False, "reason_code": "timeout"}
+    assert group_kills == [(4321, adapter_module.signal.SIGKILL)]
+    assert launcher.processes[0].killed is False
+    assert launcher.processes[0].waited is True
+
+
+def test_public_preflight_cancellation_propagates_after_browser_harness_process_kill():
+    from scripts.browser_harness_adapter import BrowserHarnessAdapter
+
+    launcher = RecordingLauncher(stdout=b"browser-harness 1.2.3\n", sleep=60)
+    adapter = BrowserHarnessAdapter(
+        executable_resolver=lambda _name: "/bin/browser-harness",
+        process_launcher=launcher,
+    )
+
+    async def run_and_cancel() -> None:
+        task = asyncio.create_task(adapter.preflight())
+        await asyncio.sleep(0)
+        task.cancel()
+        await task
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_and_cancel())
+
+    assert launcher.processes[0].killed is True
+    assert launcher.processes[0].waited is True
+
+
 def test_unsupported_action_is_rejected_before_gateway_or_process(tmp_path: Path):
     from scripts.browser_harness_adapter import BrowserHarnessAdapter
 

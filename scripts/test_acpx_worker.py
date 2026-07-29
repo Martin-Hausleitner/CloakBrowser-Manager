@@ -5,6 +5,7 @@ import json
 import os
 import re
 import signal
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -1112,9 +1113,13 @@ def test_worker_propagates_manager_cancellation_to_acpx(tmp_path: Path):
     assert manager.revoked == ["run-1"]
 
 
-def test_worker_execute_claim_uses_manager_capability_and_real_mcp_config(tmp_path: Path):
+def test_worker_execute_claim_uses_manager_capability_and_real_mcp_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     manager = FakeManager()
     config = make_config(tmp_path)
+    monkeypatch.setenv("CBM_MCP_PYTHON", "/tmp/ambient-python-must-not-win")
 
     class RealRunRuntime(FakeRuntime):
         async def ensure_session(self, *, cwd, agent, session_name, environment):
@@ -1125,6 +1130,7 @@ def test_worker_execute_claim_uses_manager_capability_and_real_mcp_config(tmp_pa
             assert environment["CBM_PROFILE_ID"] == "profile-1"
             assert environment["CBM_TASK_RUN_ID"] == "run-1"
             assert json.loads(environment["CBM_ALLOWED_ORIGINS"]) == ["https://app.local"]
+            assert environment["CBM_MCP_PYTHON"] == sys.executable
             assert json.loads(
                 Path(config.mcp_config).read_text(encoding="utf-8")
             ) == {
@@ -1236,11 +1242,25 @@ def test_worker_omits_routing_contract_env_for_legacy_acpx_claim(tmp_path: Path)
 
 def test_worker_executes_openai_compatible_branch_through_router_without_acpx(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    from scripts import acpx_worker
+
     manager = FakeManager()
     runtime = FakeRuntime()
     routed = []
     loop_calls = []
+    seen_run_environments = []
+    monkeypatch.setenv("CBM_MCP_PYTHON", "/tmp/ambient-python-must-not-win")
+    real_from_environment = acpx_worker.RunContext.from_environment
+
+    class RecordingRunContext:
+        @staticmethod
+        def from_environment(environment):
+            seen_run_environments.append(dict(environment))
+            return real_from_environment(environment)
+
+    monkeypatch.setattr(acpx_worker, "RunContext", RecordingRunContext)
 
     async def unbrowse_adapter(request):
         routed.append(request)
@@ -1280,6 +1300,8 @@ def test_worker_executes_openai_compatible_branch_through_router_without_acpx(
         assert "cbm_run_private_capability" not in serialized_inputs
         assert "CBM_RUN_CAPABILITY_FILE" not in serialized_inputs
         assert "CBM_ROUTING_CONTRACT_JSON" not in serialized_inputs
+        assert "CBM_MCP_PYTHON" not in serialized_inputs
+        assert sys.executable not in serialized_inputs
         return SimpleNamespace(
             final_text="OpenAI-compatible completed",
             model=model_alias,
@@ -1302,6 +1324,8 @@ def test_worker_executes_openai_compatible_branch_through_router_without_acpx(
     )
 
     assert result == {"status": "succeeded"}
+    assert seen_run_environments
+    assert seen_run_environments[0]["CBM_MCP_PYTHON"] == sys.executable
     assert loop_calls == [
         {
             "user_task": "Inspect the browser",

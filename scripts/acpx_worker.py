@@ -1081,6 +1081,7 @@ class AcpxWorker:
                 "CBM_ALLOWED_ORIGINS": json.dumps(
                     list(claim.get("allowed_origins") or []), separators=(",", ":")
                 ),
+                "CBM_MCP_PYTHON": sys.executable,
             }
             if is_openai_compatible:
                 routing_contract_json = json.dumps(

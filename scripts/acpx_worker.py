@@ -817,9 +817,8 @@ class AcpxWorker:
                 "summary": final_text[:500],
                 "payload": {
                     "text": final_text[:500],
-                    "model": str(getattr(result, "model", ""))[:80],
-                    "turns": int(getattr(result, "turns", 0) or 0),
-                    "tool_calls": int(getattr(result, "tool_calls", 0) or 0),
+                    "result": "openai-compatible",
+                    "status": "succeeded",
                 },
             },
         )

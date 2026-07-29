@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.models import TaskOutputCreate
 from scripts.acpx_worker import (
     AcpxManagerClient,
     AcpxRuntime,
@@ -1246,7 +1247,12 @@ def test_worker_executes_openai_compatible_branch_through_router_without_acpx(
 ):
     from scripts import acpx_worker
 
-    manager = FakeManager()
+    class SchemaValidatingManager(FakeManager):
+        def output(self, run_id, **body):
+            TaskOutputCreate(**body)
+            return super().output(run_id, **body)
+
+    manager = SchemaValidatingManager()
     runtime = FakeRuntime()
     routed = []
     loop_calls = []
@@ -1348,9 +1354,8 @@ def test_worker_executes_openai_compatible_branch_through_router_without_acpx(
                 "summary": "OpenAI-compatible completed",
                 "payload": {
                     "text": "OpenAI-compatible completed",
-                    "model": "grok-build-0.1",
-                    "turns": 1,
-                    "tool_calls": 1,
+                    "result": "openai-compatible",
+                    "status": "succeeded",
                 },
                 "idempotency_key": "openai-compatible-final-summary",
             },

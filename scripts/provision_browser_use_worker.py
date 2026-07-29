@@ -25,7 +25,7 @@ WORKER_KEY_PREFIX = "cbm_worker_"
 WORKER_KEY_HEX_LEN = 64
 DEFAULT_WORKER_ID = "browser-use-worker"
 DEFAULT_LLM_PROVIDER = "cursor-agent"
-ALLOWED_LLM_PROVIDERS = frozenset({DEFAULT_LLM_PROVIDER, "claude-cli"})
+ALLOWED_LLM_PROVIDERS = frozenset({DEFAULT_LLM_PROVIDER, "claude-cli", "grok-cli"})
 TOKEN_PATTERN = re.compile(rf"^{re.escape(WORKER_KEY_PREFIX)}[0-9a-f]{{{WORKER_KEY_HEX_LEN}}}$")
 WORKER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SECURE_MODE = 0o600
@@ -435,7 +435,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm-provider",
         default=DEFAULT_LLM_PROVIDER,
-        help=f"Browser-Use worker LLM provider (default: {DEFAULT_LLM_PROVIDER})",
+        help=(
+            "Browser-Use worker LLM provider: cursor-agent, claude-cli, or grok-cli "
+            f"(default: {DEFAULT_LLM_PROVIDER})"
+        ),
     )
     parser.add_argument(
         "--template",

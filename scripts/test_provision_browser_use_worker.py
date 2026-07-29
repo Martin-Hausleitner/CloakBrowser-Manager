@@ -254,6 +254,7 @@ def test_validate_llm_provider_allowlist_and_rejection():
     assert mod.validate_llm_provider(None) == "cursor-agent"
     assert mod.validate_llm_provider("cursor-agent") == "cursor-agent"
     assert mod.validate_llm_provider("claude-cli") == "claude-cli"
+    assert mod.validate_llm_provider("grok-cli") == "grok-cli"
     for bad in ("", "cursor", "claude", "grok", "codex", "cursor-agent ", "claude-cli\n--token pwned"):
         with pytest.raises(ValueError, match="llm provider"):
             mod.validate_llm_provider(bad)
@@ -320,6 +321,32 @@ def test_render_unit_supports_explicit_claude_cli_provider(tmp_path: Path):
     exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
     argv = shlex.split(exec_line.removeprefix("ExecStart="))
     assert argv[-2:] == ["--llm-provider", "claude-cli"]
+    assert argv.count("--llm-provider") == 1
+
+
+def test_render_unit_supports_explicit_grok_cli_provider(tmp_path: Path):
+    mod = _load()
+    paths = _paths(tmp_path)
+    (paths["venv"] / "bin").mkdir(parents=True)
+    (paths["venv"] / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    key = paths["worker_key_file"]
+    key.parent.mkdir(parents=True)
+    key.write_text("cbm_worker_" + ("aa" * 32) + "\n", encoding="utf-8")
+    key.chmod(0o600)
+
+    unit = mod.render_systemd_unit(
+        repo=paths["repo"],
+        venv=paths["venv"],
+        manager_url=str(paths["manager_url"]),
+        worker_id="browser-use-worker",
+        worker_key_file=key,
+        template_path=TEMPLATE,
+        llm_provider="grok-cli",
+    )
+
+    exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+    argv = shlex.split(exec_line.removeprefix("ExecStart="))
+    assert argv[-2:] == ["--llm-provider", "grok-cli"]
     assert argv.count("--llm-provider") == 1
 
 

@@ -37,7 +37,7 @@ interface HarnessSettingsWorkspaceProps {
   runActive?: boolean;
 }
 
-const MANAGED_HARNESSES: readonly ManagedHarness[] = ["browser-use", "acpx", "unbrowse", "stagehand"];
+const MANAGED_HARNESSES: readonly ManagedHarness[] = ["browser-use", "acpx"];
 const ACPX_AGENT_OPTIONS: ReadonlyArray<{ value: AcpxAgent; label: string }> = [
   { value: "claude", label: "Claude" },
   { value: "grok-build", label: "Grok Build" },
@@ -80,6 +80,10 @@ function harnessReason(presence: TaskHarnessPresence | null | undefined): string
   return presence.reason || presence.state;
 }
 
+function browserToolsForOnly(toolId: BrowserToolId) {
+  return DEFAULT_BROWSER_TOOLS.map((tool) => ({ ...tool, enabled: tool.id === toolId }));
+}
+
 export function HarnessSettingsWorkspace({
   profiles,
   selectedProfile,
@@ -95,7 +99,7 @@ export function HarnessSettingsWorkspace({
   const [harnessPresence, setHarnessPresence] = useState<Partial<Record<ManagedHarness, TaskHarnessPresence>>>({});
   const [acpxPreflights, setAcpxPreflights] = useState<TaskHarnessAgentPreflight[]>([]);
   const [loading, setLoading] = useState(false);
-  const [smokeTarget, setSmokeTarget] = useState<ManagedHarness | null>(null);
+  const [smokeTarget, setSmokeTarget] = useState<ManagedHarness | BrowserToolId | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const selectedProfileIdRef = useRef<string | null>(selectedProfile?.id ?? null);
 
@@ -182,6 +186,20 @@ export function HarnessSettingsWorkspace({
     }));
   };
 
+  const selectBrowserTool = (toolId: BrowserToolId) => {
+    if (runActive) return;
+    setConfig((current) => ({
+      ...current,
+      mode: "acpx",
+      agent: "acpx",
+      acpxAgent: acpAgentForProvider(current.providerRouting.providerId) ?? current.acpxAgent,
+      providerRouting: {
+        ...current.providerRouting,
+        browserTools: browserToolsForOnly(toolId),
+      },
+    }));
+  };
+
   const runSmokeTest = async (harness: ManagedHarness) => {
     if (runActive || !selectedProfile || selectedProfile.status !== "running" || smokeTarget) return;
     const profileAtStart = selectedProfile;
@@ -243,6 +261,80 @@ export function HarnessSettingsWorkspace({
     }
   };
 
+  const runBrowserToolSmokeTest = async (toolId: BrowserToolId) => {
+    if (runActive || !selectedProfile || selectedProfile.status !== "running" || smokeTarget) return;
+    const profileAtStart = selectedProfile;
+    setSmokeTarget(toolId);
+    setMessage(null);
+    try {
+      const presence = await api.getTaskHarnessPresence("acpx", {});
+      setHarnessPresence((current) => ({ ...current, acpx: presence }));
+      if (!presence.worker_seen_recently) {
+        throw new Error(presence.reason || "ACPX worker unavailable");
+      }
+      const tool = browserToolById[toolId];
+      if (!tool?.ready) {
+        throw new Error(tool?.reason_code || `${TOOL_LABELS[toolId]} is unavailable`);
+      }
+      const blockReason = providerLaunchBlockReason({
+        ...config.providerRouting,
+        browserTools: browserToolsForOnly(toolId),
+      }, providerReadiness);
+      if (blockReason) throw new Error(blockReason);
+      await api.runProfileHealth(profileAtStart.id);
+      await api.getProfileHealth(profileAtStart.id);
+      if (selectedProfileIdRef.current !== profileAtStart.id) return;
+      const session = await api.createTaskSession({
+        profile_id: profileAtStart.id,
+        title: `${TOOL_LABELS[toolId]} smoke test`,
+        metadata: {
+          source: "settings-browser-tool-smoke-test",
+          harness: "acpx",
+          browser_tool: toolId,
+          smoke_test: true,
+        },
+      }, {});
+      if (selectedProfileIdRef.current !== profileAtStart.id) return;
+      const provider = providerReadiness?.providers.find((item) =>
+        item.provider === config.providerRouting.providerId && item.transport === config.providerRouting.transport,
+      );
+      const selectedModelAlias = provider?.model_aliases.includes(config.providerRouting.modelAlias)
+        ? config.providerRouting.modelAlias
+        : null;
+      const startedRun = await api.createTaskRun(session.id, {
+        harness: "acpx",
+        agent: config.acpxAgent,
+        task: "Open https://example.com/ and report the page title.",
+        profile_id: profileAtStart.id,
+        launch_if_stopped: false,
+        allowed_origins: ["https://example.com"],
+        max_steps: 8,
+        timeout_seconds: 180,
+        model_alias: selectedModelAlias,
+        provider: {
+          id: config.providerRouting.providerId,
+          transport: config.providerRouting.transport,
+          ...(selectedModelAlias ? { model_alias: selectedModelAlias } : {}),
+        },
+        browser_tools: browserToolsForOnly(toolId),
+        routing_policy: {
+          mode: "ordered-fallback" as const,
+          allow_second_browser: false,
+          max_tool_attempts: 3,
+        },
+      }, {});
+      if (selectedProfileIdRef.current !== profileAtStart.id) {
+        await api.cancelTaskRun(startedRun.id);
+        return;
+      }
+      setMessage(`${TOOL_LABELS[toolId]} smoke test started for ${profileAtStart.name}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Smoke test failed to start");
+    } finally {
+      setSmokeTarget(null);
+    }
+  };
+
   const browserToolById = useMemo(() => {
     const next: Partial<Record<BrowserToolId, BrowserToolReadinessTarget>> = {};
     for (const tool of browserToolReadiness?.tools ?? []) next[tool.id] = tool;
@@ -267,7 +359,7 @@ export function HarnessSettingsWorkspace({
       data-testid="harness-settings-workspace"
       data-ui-state={UI_STATE.appDesktopSettings}
     >
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-3 p-3">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-3 p-3" data-testid="harness-settings-main-content">
         <header className="flex items-center justify-between gap-3 border-b border-[#2d2d33] pb-3">
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold">Harness Settings</h1>
@@ -443,6 +535,12 @@ export function HarnessSettingsWorkspace({
             {DEFAULT_BROWSER_TOOLS.map((tool) => {
               const info = browserToolById[tool.id];
               const ready = info?.ready === true;
+              const acpxReady = harnessReady(harnessPresence.acpx);
+              const providerReady = !providerLaunchBlockReason({
+                ...config.providerRouting,
+                browserTools: browserToolsForOnly(tool.id),
+              }, providerReadiness);
+              const canUseTool = ready && acpxReady && providerReady;
               return (
                 <div
                   key={tool.id}
@@ -453,6 +551,28 @@ export function HarnessSettingsWorkspace({
                   <div className="text-xs font-medium">{TOOL_LABELS[tool.id]}</div>
                   <div className="mt-1 text-[11px] text-[#a1a1aa]">
                     {info ? `${info.state} · ${info.reason_code}${info.checked_at ? ` · ${info.checked_at}` : ""}` : "Not checked"}
+                  </div>
+                  <div className="mt-2 flex gap-1">
+                    <button
+                      type="button"
+                      className="inline-flex h-7 items-center rounded border border-[#4f46e5] px-1.5 text-[10px] text-indigo-100 disabled:opacity-40"
+                      onClick={() => selectBrowserTool(tool.id)}
+                      disabled={runActive || !ready}
+                      aria-label={`Select ${TOOL_LABELS[tool.id]} for next ACPX run`}
+                    >
+                      Select
+                    </button>
+                    <button
+                      type="button"
+                      className="inline-flex h-7 items-center gap-1 rounded border border-[#3f3f48] px-1.5 text-[10px] disabled:opacity-40"
+                      onClick={() => void runBrowserToolSmokeTest(tool.id)}
+                      disabled={runActive || !selectedProfileIsRunnable || smokeTarget !== null || !canUseTool}
+                      aria-label={`Test ${TOOL_LABELS[tool.id]}`}
+                      title={!canUseTool ? "ACPX, provider and browser tool readiness are required." : undefined}
+                    >
+                      <Activity className={`h-3 w-3 ${smokeTarget === tool.id ? "animate-pulse" : ""}`} />
+                      Test
+                    </button>
                   </div>
                 </div>
               );

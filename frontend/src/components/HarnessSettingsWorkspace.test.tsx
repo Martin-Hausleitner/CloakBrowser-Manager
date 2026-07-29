@@ -190,9 +190,14 @@ function runFixture(overrides: Partial<TaskRun> = {}): TaskRun {
 function RuntimeConfigProbe() {
   const { config } = useWorkspaceRuntimeConfig();
   return (
-    <div data-testid="settings-runtime-config">
-      {config.mode}:{config.agent}:{config.acpxAgent}:{config.providerRouting.providerId}:{config.providerRouting.transport}
-    </div>
+    <>
+      <div data-testid="settings-runtime-config">
+        {config.mode}:{config.agent}:{config.acpxAgent}:{config.providerRouting.providerId}:{config.providerRouting.transport}
+      </div>
+      <div data-testid="settings-runtime-browser-tools">
+        {JSON.stringify(config.providerRouting.browserTools)}
+      </div>
+    </>
   );
 }
 
@@ -251,6 +256,125 @@ afterEach(() => {
 });
 
 describe("HarnessSettingsWorkspace", () => {
+  it("shows only Browser Use and ACPX as top-level managed harnesses and exposes browser-tool controls", async () => {
+    renderSettings();
+    await waitForSettingsReady();
+
+    expect(screen.getAllByTestId("harness-settings-main-content")).toHaveLength(1);
+    expect(screen.getByTestId("settings-harness-browser-use")).toBeTruthy();
+    expect(screen.getByTestId("settings-harness-acpx")).toBeTruthy();
+    expect(screen.queryByTestId("settings-harness-unbrowse")).toBeNull();
+    expect(screen.queryByTestId("settings-harness-stagehand")).toBeNull();
+
+    for (const [label, toolId] of [
+      ["Unbrowse", "unbrowse"],
+      ["Stagehand", "stagehand"],
+      ["Browser Harness", "browser-harness"],
+    ] as const) {
+      const tool = screen.getByTestId(`settings-browser-tool-${toolId}`);
+      expect(within(tool).getByRole("button", { name: `Select ${label} for next ACPX run` })).toBeTruthy();
+      expect(within(tool).getByRole("button", { name: `Test ${label}` })).toBeTruthy();
+    }
+  });
+
+  it.each([
+    ["Unbrowse", "unbrowse"],
+    ["Stagehand", "stagehand"],
+    ["Browser Harness", "browser-harness"],
+  ] as const)("selects %s as the only enabled ACPX browser tool", async (label, toolId) => {
+    apiMock.getTaskHarnessPresence.mockImplementation((harness: TaskHarnessPresence["harness"]) =>
+      Promise.resolve(presence(harness, true)),
+    );
+    apiMock.getBrowserToolReadiness.mockResolvedValue({
+      tools: browserToolReadiness.tools.map((tool) => ({ ...tool, ready: true, state: "ready", reason_code: "ready" })),
+    });
+    renderSettings();
+    await waitForSettingsReady();
+
+    await act(async () => {
+      fireEvent.click(within(screen.getByTestId(`settings-browser-tool-${toolId}`)).getByRole("button", { name: `Select ${label} for next ACPX run` }));
+    });
+
+    expect(screen.getByTestId("settings-runtime-config").textContent).toBe("acpx:acpx:grok-build:grok:acp");
+    expect(JSON.parse(screen.getByTestId("settings-runtime-browser-tools").textContent || "[]")).toEqual([
+      { id: "unbrowse", enabled: toolId === "unbrowse" },
+      { id: "stagehand", enabled: toolId === "stagehand" },
+      { id: "browser-harness", enabled: toolId === "browser-harness" },
+    ]);
+  });
+
+  it.each([
+    ["Unbrowse", "unbrowse"],
+    ["Stagehand", "stagehand"],
+    ["Browser Harness", "browser-harness"],
+  ] as const)("tests %s through ACPX with exact provider routing and the selected live profile", async (label, toolId) => {
+    apiMock.getTaskHarnessPresence.mockImplementation((harness: TaskHarnessPresence["harness"]) =>
+      Promise.resolve(presence(harness, true)),
+    );
+    apiMock.getBrowserToolReadiness.mockResolvedValue({
+      tools: browserToolReadiness.tools.map((tool) => ({ ...tool, ready: true, state: "ready", reason_code: "ready" })),
+    });
+    apiMock.createTaskSession.mockResolvedValue(sessionFixture({ id: `smoke-${toolId}` }));
+    renderSettings();
+    await waitForSettingsReady();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Toggle KI Provider settings" }));
+    });
+    const providerPanel = await screen.findByTestId("provider-tool-provider-section");
+    await act(async () => {
+      fireEvent.click(within(providerPanel).getByRole("radio", { name: "Gemini" }));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Model alias"), { target: { value: "gemini-2.5-flash" } });
+    });
+    await act(async () => {
+      fireEvent.click(within(screen.getByTestId(`settings-browser-tool-${toolId}`)).getByRole("button", { name: `Test ${label}` }));
+    });
+
+    await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledTimes(1));
+    expect(apiMock.createTaskRun).toHaveBeenCalledWith(
+      `smoke-${toolId}`,
+      expect.objectContaining({
+        harness: "acpx",
+        agent: "gemini",
+        profile_id: runningProfile.id,
+        provider: { id: "gemini", transport: "acp", model_alias: "gemini-2.5-flash" },
+        browser_tools: [
+          { id: "unbrowse", enabled: toolId === "unbrowse" },
+          { id: "stagehand", enabled: toolId === "stagehand" },
+          { id: "browser-harness", enabled: toolId === "browser-harness" },
+        ],
+        routing_policy: {
+          mode: "ordered-fallback",
+          allow_second_browser: false,
+          max_tool_attempts: 3,
+        },
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("keeps browser-tool smoke tests fail-closed when ACPX, provider, or tool readiness is unavailable", async () => {
+    apiMock.getTaskHarnessPresence.mockImplementation((harness: TaskHarnessPresence["harness"]) =>
+      Promise.resolve(presence(harness, harness !== "acpx")),
+    );
+    apiMock.getProviderReadiness.mockResolvedValue({
+      providers: readiness.providers.map((provider) =>
+        provider.provider === "grok" && provider.transport === "acp"
+          ? { ...provider, ready: false, state: "failed", reason_code: "auth_required" }
+          : provider,
+      ),
+    });
+
+    renderSettings();
+    await waitForSettingsReady();
+
+    expect(within(screen.getByTestId("settings-browser-tool-unbrowse")).getByRole("button", { name: "Test Unbrowse" })).toHaveProperty("disabled", true);
+    expect(within(screen.getByTestId("settings-browser-tool-stagehand")).getByRole("button", { name: "Test Stagehand" })).toHaveProperty("disabled", true);
+    expect(within(screen.getByTestId("settings-browser-tool-browser-harness")).getByRole("button", { name: "Test Browser Harness" })).toHaveProperty("disabled", true);
+  });
+
   it("renders runtime, harness, provider, model and browser-tool settings with honest readiness", async () => {
     renderSettings();
     await waitForSettingsReady();
@@ -305,7 +429,7 @@ describe("HarnessSettingsWorkspace", () => {
     }
   });
 
-  it("selects installed managed harnesses for the next run through shared runtime config", async () => {
+  it("selects installed top-level managed harnesses for the next run through shared runtime config", async () => {
     apiMock.getTaskHarnessPresence.mockImplementation((candidate: TaskHarnessPresence["harness"]) =>
       Promise.resolve(presence(candidate, true)),
     );
@@ -318,13 +442,8 @@ describe("HarnessSettingsWorkspace", () => {
     });
     expect(acpxRow.getAttribute("data-selected")).toBe("true");
     expect(screen.getByTestId("settings-runtime-config").textContent).toBe("acpx:acpx:grok-build:grok:acp");
-
-    const unbrowseRow = await screen.findByTestId("settings-harness-unbrowse");
-    await act(async () => {
-      fireEvent.click(within(unbrowseRow).getByRole("button", { name: "Select Unbrowse for next run" }));
-    });
-    expect(unbrowseRow.getAttribute("data-selected")).toBe("true");
-    expect(screen.getByTestId("settings-runtime-config").textContent).toBe("cli:unbrowse:grok-build:grok:acp");
+    expect(screen.queryByTestId("settings-harness-unbrowse")).toBeNull();
+    expect(screen.queryByTestId("settings-harness-stagehand")).toBeNull();
   });
 
   it("sends exact provider transport, selected model, browser tools and routing only for ACPX smoke tests", async () => {
@@ -408,12 +527,15 @@ describe("HarnessSettingsWorkspace", () => {
   it.each([
     ["Unbrowse", "unbrowse"],
     ["Stagehand", "stagehand"],
-  ] as const)("maps the %s smoke test to the real %s managed run", async (label, harness) => {
+  ] as const)("maps the %s smoke test to an ACPX run with only %s enabled", async (label, toolId) => {
     apiMock.getTaskHarnessPresence.mockImplementation((candidate: TaskHarnessPresence["harness"]) =>
       Promise.resolve(presence(candidate, true)),
     );
-    apiMock.createTaskSession.mockResolvedValue(sessionFixture({ id: `smoke-${harness}` }));
-    apiMock.createTaskRun.mockResolvedValue(runFixture({ id: `run-${harness}`, task_session_id: `smoke-${harness}`, harness }));
+    apiMock.getBrowserToolReadiness.mockResolvedValue({
+      tools: browserToolReadiness.tools.map((tool) => ({ ...tool, ready: true, state: "ready", reason_code: "ready" })),
+    });
+    apiMock.createTaskSession.mockResolvedValue(sessionFixture({ id: `smoke-${toolId}` }));
+    apiMock.createTaskRun.mockResolvedValue(runFixture({ id: `run-${toolId}`, task_session_id: `smoke-${toolId}`, harness: "acpx" }));
     renderSettings();
     await waitForSettingsReady();
 
@@ -422,13 +544,28 @@ describe("HarnessSettingsWorkspace", () => {
     });
 
     await waitFor(() => expect(apiMock.createTaskRun).toHaveBeenCalledWith(
-      `smoke-${harness}`,
-      expect.objectContaining({ harness, agent: null, max_steps: 8, timeout_seconds: 180 }),
+      `smoke-${toolId}`,
+      expect.objectContaining({
+        harness: "acpx",
+        agent: "grok-build",
+        max_steps: 8,
+        timeout_seconds: 180,
+        browser_tools: [
+          { id: "unbrowse", enabled: toolId === "unbrowse" },
+          { id: "stagehand", enabled: toolId === "stagehand" },
+          { id: "browser-harness", enabled: false },
+        ],
+        routing_policy: {
+          mode: "ordered-fallback",
+          allow_second_browser: false,
+          max_tool_attempts: 3,
+        },
+      }),
       expect.any(Object),
     ));
   });
 
-  it("keeps unavailable harness smoke disabled and preserves successful checks when ACPX preflight fails", async () => {
+  it("keeps unavailable ACPX and browser-tool smoke disabled while preserving Browser Use checks", async () => {
     apiMock.getTaskHarnessPresence.mockImplementation((harness: TaskHarnessPresence["harness"]) =>
       Promise.resolve(presence(harness, harness !== "acpx" && harness !== "stagehand")),
     );
@@ -438,14 +575,13 @@ describe("HarnessSettingsWorkspace", () => {
     await waitForSettingsReady();
 
     const browserUse = await screen.findByTestId("settings-harness-browser-use");
-    const unbrowse = await screen.findByTestId("settings-harness-unbrowse");
     const acpx = await screen.findByTestId("settings-harness-acpx");
-    const stagehand = await screen.findByTestId("settings-harness-stagehand");
     expect(browserUse.textContent).toMatch(/Ready/i);
-    expect(unbrowse.textContent).toMatch(/Ready/i);
     expect(acpx.textContent).toMatch(/acpx_missing/i);
-    expect(stagehand.textContent).toMatch(/stagehand_missing/i);
-    expect(within(stagehand).getByRole("button", { name: "Test Stagehand" })).toHaveProperty("disabled", true);
+    expect(screen.queryByTestId("settings-harness-unbrowse")).toBeNull();
+    expect(screen.queryByTestId("settings-harness-stagehand")).toBeNull();
+    expect(within(screen.getByTestId("settings-browser-tool-unbrowse")).getByRole("button", { name: "Test Unbrowse" })).toHaveProperty("disabled", true);
+    expect(within(screen.getByTestId("settings-browser-tool-stagehand")).getByRole("button", { name: "Test Stagehand" })).toHaveProperty("disabled", true);
   });
 
   it("blocks noncanonical browser tool order before creating an ACPX smoke session", async () => {

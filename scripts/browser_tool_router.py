@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable
 from scripts.cbm_browser_ctl import redact_error_message
 
 ROUTING_BROWSER_TOOL_ORDER = ("unbrowse", "stagehand", "browser-harness")
+STAGEHAND_SEMANTIC_ACTIONS = frozenset({"act", "extract", "observe", "agent"})
 MAX_PUBLIC_PAYLOAD_DEPTH = 6
 MAX_PUBLIC_PAYLOAD_ITEMS = 64
 MAX_PUBLIC_STRING_CHARS = 4_096
@@ -29,6 +30,7 @@ STOP_CLASSIFICATIONS = frozenset(
         "capability_invalid",
         "profile_lease_lost",
         "policy_denied",
+        "model_required",
         "secret_boundary_violation",
         "second_browser_attempt",
     }
@@ -200,6 +202,15 @@ async def route_browser_action(
 ) -> BrowserRouteResult:
     if adapter_timeout_seconds <= 0:
         raise ValueError("adapter_timeout_seconds must be positive")
+    if _is_stagehand_semantic_action(action):
+        return BrowserRouteResult(
+            outcome="failed",
+            classification="model_required",
+            tool_id=None,
+            payload={},
+            telemetry=(),
+            message="Stagehand semantic actions require explicit model configuration",
+        )
     if contract is None:
         return BrowserRouteResult(
             outcome="failed",
@@ -245,7 +256,7 @@ async def route_browser_action(
                 )
                 if not isinstance(result, BrowserToolResult):
                     raise BrowserToolRouterError(
-                        "tool_unavailable", "browser tool returned invalid result"
+                        "policy_denied", "browser tool returned invalid result"
                     )
             if result.opened_second_browser or result.classification == "second_browser_attempt":
                 classification = "second_browser_attempt"
@@ -267,9 +278,9 @@ async def route_browser_action(
         except asyncio.TimeoutError as exc:
             classification = "transient_timeout"
             message = str(exc)
-        except Exception as exc:  # noqa: BLE001 - adapter boundary is terminal-safe
-            classification = "tool_unavailable"
-            message = str(exc)
+        except Exception:  # noqa: BLE001 - adapter boundary is terminal-safe
+            classification = "policy_denied"
+            message = "browser tool adapter failed"
         duration_ms = max(0, int((time.perf_counter() - started) * 1000))
         will_fallback = (
             classification in FAILOVER_CLASSIFICATIONS
@@ -328,6 +339,10 @@ def _normalize_classification(value: str) -> str:
     if classification in FAILOVER_CLASSIFICATIONS or classification in STOP_CLASSIFICATIONS:
         return classification
     return "policy_denied"
+
+
+def _is_stagehand_semantic_action(value: str) -> bool:
+    return str(value or "").strip().lower() in STAGEHAND_SEMANTIC_ACTIONS
 
 
 def _is_async_adapter(adapter: BrowserToolAdapter) -> bool:

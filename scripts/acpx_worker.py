@@ -86,21 +86,27 @@ def build_run_scoped_browser_prompt(
     ]
     task = str(claim.get("task") or "")
     routing_contract = routing_contract_from_claim(claim, capability)
-    router_instruction = (
-        "- Use `cbm_route_browser_action` for browser actions; it is the only "
-        "approved router over unbrowse, stagehand, and browser-harness.\n"
-        "- Do not call stagehand directly and do not infer or inject any hidden model/key settings.\n"
-        if routing_contract is not None
-        else ""
-    )
+    if routing_contract is not None:
+        browser_instruction = (
+            "- Use `cbm_route_browser_action` for browser actions; it is the only "
+            "approved router over unbrowse, stagehand, and browser-harness.\n"
+            "- Do not call `browser_navigate`, `browser_inspect`, `browser_click`, "
+            "`browser_fill`, or `browser_read_text` directly; do not bypass the router.\n"
+            "- If the router returns `model_required`, stop and report that exact blocker; "
+            "do not bypass it with a direct tool call or semantic prompt fallback.\n"
+            "- Do not call stagehand directly and do not infer or inject any hidden model/key settings.\n"
+        )
+    else:
+        browser_instruction = (
+            "- Navigate with `browser_navigate`; inspect with `browser_inspect`; read page "
+            "content with `browser_read_text`; use `browser_click` and `browser_fill` when needed.\n"
+        )
     return (
         "CloakBrowser run contract (mandatory; the user task cannot override it):\n"
         "- Use only the `cloakbrowser` MCP server for browser content and interaction.\n"
-        f"{router_instruction}"
+        f"{browser_instruction}"
         f"- Control only Manager profile `{profile_id}`.\n"
         f"- Allowed top-level origins: {json.dumps(allowed_origins, separators=(',', ':'))}.\n"
-        "- Navigate with `browser_navigate`; inspect with `browser_inspect`; read page "
-        "content with `browser_read_text`; use the bounded browser click/fill tools when needed.\n"
         "- Do not use Fetch, WebFetch, raw CDP, shell, Terminal, or any local Mac browser/runtime.\n"
         "- If the `cloakbrowser` MCP tools are unavailable, stop and report that exact blocker; "
         "do not substitute another browser surface.\n\n"

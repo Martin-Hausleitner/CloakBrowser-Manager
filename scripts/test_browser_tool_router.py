@@ -225,6 +225,215 @@ def test_router_stops_on_non_failover_classification_without_trying_next_tool(
     assert calls == ["unbrowse"]
 
 
+def test_model_required_is_terminal_and_never_falls_back_to_prompted_tools(
+    tmp_path: Path,
+):
+    calls = []
+
+    async def stagehand(request):
+        calls.append((request.tool_id, dict(request.arguments)))
+        return BrowserToolResult(
+            outcome="failed",
+            classification="model_required",
+            message="Stagehand semantic actions require an explicit model",
+        )
+
+    async def browser_harness(request):
+        calls.append((request.tool_id, dict(request.arguments)))
+        raise AssertionError("semantic Stagehand prompt must not fall back")
+
+    result = asyncio.run(
+        route_browser_action(
+            contract=routing_contract_from_claim(
+                normalized_claim(
+                    browser_tools=[
+                        {"id": "unbrowse", "enabled": False},
+                        {"id": "stagehand", "enabled": True},
+                        {"id": "browser-harness", "enabled": True},
+                    ],
+                    routing_policy={
+                        "mode": "ordered-fallback",
+                        "allow_second_browser": False,
+                        "max_tool_attempts": 3,
+                    },
+                )
+            ),
+            context=run_context(tmp_path),
+            action="act",
+            arguments={"prompt": "click the login button"},
+            adapters={"stagehand": stagehand, "browser-harness": browser_harness},
+        )
+    )
+
+    assert result.outcome == "failed"
+    assert result.classification == "model_required"
+    assert result.tool_id is None
+    assert result.telemetry == ()
+    assert calls == []
+
+
+@pytest.mark.parametrize("action", ["act", "extract", "observe", "agent"])
+def test_semantic_stagehand_actions_stop_before_tool_selection_even_when_stagehand_unavailable(
+    tmp_path: Path,
+    action: str,
+):
+    calls = []
+
+    async def unbrowse(request):
+        calls.append(request.tool_id)
+        return BrowserToolResult(outcome="failed", classification="tool_unavailable")
+
+    async def browser_harness(request):
+        calls.append(request.tool_id)
+        return BrowserToolResult(outcome="succeeded", classification="ok")
+
+    contract = routing_contract_from_claim(
+        normalized_claim(
+            browser_tools=[
+                {"id": "unbrowse", "enabled": True},
+                {"id": "stagehand", "enabled": False},
+                {"id": "browser-harness", "enabled": True},
+            ],
+            routing_policy={
+                "mode": "ordered-fallback",
+                "allow_second_browser": False,
+                "max_tool_attempts": 1,
+            },
+        )
+    )
+
+    result = asyncio.run(
+        route_browser_action(
+            contract=contract,
+            context=run_context(tmp_path),
+            action=action,
+            arguments={"prompt": "click the login button"},
+            adapters={"unbrowse": unbrowse, "browser-harness": browser_harness},
+        )
+    )
+
+    assert result.outcome == "failed"
+    assert result.classification == "model_required"
+    assert result.tool_id is None
+    assert result.telemetry == ()
+    assert calls == []
+
+
+def test_unexpected_adapter_exception_is_terminal_redacted_policy_denied(
+    tmp_path: Path,
+):
+    calls = []
+
+    async def unbrowse(request):
+        calls.append(request.tool_id)
+        raise RuntimeError(
+            "boom cbm_run_private_capability https://u:p@example.com?token=secret"
+        )
+
+    async def stagehand(request):
+        calls.append(request.tool_id)
+        return BrowserToolResult(outcome="succeeded", classification="ok")
+
+    result = asyncio.run(
+        route_browser_action(
+            contract=routing_contract_from_claim(normalized_claim()),
+            context=run_context(tmp_path),
+            action="inspect",
+            arguments={},
+            adapters={"unbrowse": unbrowse, "stagehand": stagehand},
+        )
+    )
+
+    assert result.outcome == "failed"
+    assert result.classification == "policy_denied"
+    assert result.tool_id == "unbrowse"
+    assert calls == ["unbrowse"]
+    assert result.telemetry[0]["result_class"] == "policy_denied"
+    assert result.telemetry[0]["fallback_reason"] is None
+    serialized = json.dumps(result.public_json())
+    assert "cbm_run_private_capability" not in serialized
+    assert "u:p" not in serialized
+    assert "secret" not in serialized
+    assert "boom" not in serialized
+    assert "RuntimeError" not in serialized
+    assert "cbm_run_private_capability" not in result.message
+    assert "secret" not in result.message
+    assert "boom" not in result.message
+
+
+def test_invalid_adapter_return_is_terminal_redacted_policy_denied(tmp_path: Path):
+    calls = []
+
+    async def unbrowse(request):
+        calls.append(request.tool_id)
+        return {
+            "classification": "tool_unavailable",
+            "secret": "cbm_run_private_capability",
+            "url": "https://u:p@example.com?token=secret",
+        }
+
+    async def stagehand(request):
+        calls.append(request.tool_id)
+        return BrowserToolResult(outcome="succeeded", classification="ok")
+
+    result = asyncio.run(
+        route_browser_action(
+            contract=routing_contract_from_claim(normalized_claim()),
+            context=run_context(tmp_path),
+            action="inspect",
+            arguments={},
+            adapters={"unbrowse": unbrowse, "stagehand": stagehand},
+        )
+    )
+
+    assert result.outcome == "failed"
+    assert result.classification == "policy_denied"
+    assert result.tool_id == "unbrowse"
+    assert calls == ["unbrowse"]
+    assert result.telemetry[0]["result_class"] == "policy_denied"
+    assert result.telemetry[0]["fallback_reason"] is None
+    serialized = json.dumps(result.public_json())
+    assert "cbm_run_private_capability" not in serialized
+    assert "u:p" not in serialized
+    assert "secret" not in serialized
+    assert "tool_unavailable" not in result.message
+
+
+def test_explicit_tool_unavailable_result_still_falls_back(tmp_path: Path):
+    calls = []
+
+    async def unbrowse(request):
+        calls.append(request.tool_id)
+        return BrowserToolResult(
+            outcome="failed",
+            classification="tool_unavailable",
+            message="unbrowse binary missing",
+        )
+
+    async def stagehand(request):
+        calls.append(request.tool_id)
+        return BrowserToolResult(
+            outcome="succeeded",
+            classification="ok",
+            payload={"title": "Recovered"},
+        )
+
+    result = asyncio.run(
+        route_browser_action(
+            contract=routing_contract_from_claim(normalized_claim()),
+            context=run_context(tmp_path),
+            action="inspect",
+            arguments={},
+            adapters={"unbrowse": unbrowse, "stagehand": stagehand},
+        )
+    )
+
+    assert result.outcome == "succeeded"
+    assert result.tool_id == "stagehand"
+    assert calls == ["unbrowse", "stagehand"]
+    assert result.telemetry[0]["fallback_reason"] == "tool_unavailable"
+
+
 def test_sync_adapter_is_never_invoked_and_fails_closed_promptly(tmp_path: Path):
     calls = []
 

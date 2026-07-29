@@ -1015,6 +1015,12 @@ def test_worker_passes_normalized_routing_contract_to_acpx_without_secrets(
     assert result == {"status": "succeeded"}
     prompt = runtime.prompt_calls[0][3]
     assert "cbm_route_browser_action" in prompt
+    assert "Do not call `browser_navigate`, `browser_inspect`, `browser_click`" in prompt
+    assert "`browser_fill`, or `browser_read_text` directly" in prompt
+    assert "Navigate with `browser_navigate`" not in prompt
+    assert "read page content with `browser_read_text`" not in prompt
+    assert "model_required" in prompt
+    assert "do not bypass" in prompt
     assert "Stagehand model" not in prompt
 
 
@@ -1086,6 +1092,24 @@ def test_worker_wraps_browser_task_with_run_scoped_mcp_contract(tmp_path: Path):
     assert "cbm_run_private_capability" not in prompt
     assert "CBM_RUN_CAPABILITY_FILE" not in prompt
     assert "/api/profiles/profile-1/cdp" not in prompt
+
+
+def test_legacy_acpx_claim_keeps_direct_browser_tool_prompt_shape(tmp_path: Path):
+    manager = FakeManager()
+    runtime = FakeRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    result = asyncio.run(worker.execute_claim(claim(agent="grok-build")))
+
+    assert result == {"status": "succeeded"}
+    prompt = runtime.prompt_calls[0][3]
+    assert "cbm_route_browser_action" not in prompt
+    assert "browser_navigate" in prompt
+    assert "browser_inspect" in prompt
+    assert "browser_click" in prompt
+    assert "browser_fill" in prompt
+    assert "browser_read_text" in prompt
+    assert "model_required" not in prompt
 
 
 def test_worker_uses_and_closes_a_unique_acpx_session_for_each_run(tmp_path: Path):

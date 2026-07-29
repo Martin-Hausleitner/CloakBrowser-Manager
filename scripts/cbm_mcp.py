@@ -34,12 +34,12 @@ from scripts.cbm_browser_ctl import (
 )
 from scripts.browser_tool_router import (
     BrowserToolAdapter,
-    BrowserToolResult,
     RunScopedBrowserContext,
     route_browser_action,
     routing_contract_from_claim,
 )
 from scripts.browser_harness_adapter import BrowserHarnessAdapter
+from scripts.stagehand_router_adapter import StagehandRouterAdapter
 from scripts.unbrowse_router_adapter import UnbrowseRouterAdapter
 
 
@@ -294,12 +294,9 @@ class CbmMcpController:
 
 
 def _default_router_adapters() -> dict[str, BrowserToolAdapter]:
-    async def unavailable(_request):
-        return BrowserToolResult(outcome="failed", classification="tool_unavailable")
-
     return {
         "unbrowse": UnbrowseRouterAdapter(),
-        "stagehand": unavailable,
+        "stagehand": StagehandRouterAdapter(),
         "browser-harness": BrowserHarnessAdapter(),
     }
 

@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 import re
+import signal
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -648,6 +650,63 @@ elif 'close' in sys.argv:
     ))
 
     assert result == {"ready": False, "reason_code": "protocol_error"}
+
+
+def test_runtime_ensure_allows_slow_authenticated_adapter_startup(tmp_path: Path):
+    class RecordingRuntime(AcpxRuntime):
+        def __init__(self, config):
+            super().__init__(config)
+            self.timeouts = []
+
+        async def _run_control(self, command, *, timeout=30.0, **_kwargs):
+            self.timeouts.append(timeout)
+            return b"{}"
+
+    runtime = RecordingRuntime(make_config(tmp_path))
+
+    asyncio.run(runtime.ensure_session(
+        cwd=tmp_path,
+        agent="grok-build",
+        session_name="cbm-0123456789abcdef0123456789abcdef",
+        environment={},
+    ))
+
+    assert runtime.timeouts == [90.0]
+
+
+def test_runtime_timeout_terminates_the_entire_adapter_process_group(tmp_path: Path):
+    child_pid_file = tmp_path / "child.pid"
+    executable = tmp_path / "fake-acpx-process-tree"
+    executable.write_text(
+        """#!/usr/bin/env python3
+import pathlib, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')
+time.sleep(60)
+""",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o700)
+    runtime = AcpxRuntime(make_config(tmp_path))
+
+    async def scenario():
+        with pytest.raises(AcpxRuntimeError, match="timed out"):
+            await runtime._run_control(
+                [str(executable), str(child_pid_file)],
+                timeout=0.2,
+            )
+
+    child_pid = None
+    try:
+        asyncio.run(scenario())
+        child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 1
+        while _process_is_running(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert _process_is_running(child_pid) is False
+    finally:
+        if child_pid is not None and _process_exists(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
 
 
 def test_real_preflight_retries_close_before_reporting_ready(tmp_path: Path):
@@ -1422,3 +1481,13 @@ def _process_exists(pid: int) -> bool:
     except ProcessLookupError:
         return False
     return True
+
+
+def _process_is_running(pid: int) -> bool:
+    if not _process_exists(pid):
+        return False
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[2]
+    except (OSError, IndexError):
+        return True
+    return state != "Z"

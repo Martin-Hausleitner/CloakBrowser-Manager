@@ -166,6 +166,7 @@ class AcpxRuntime:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=child_env,
+                start_new_session=True,
             )
         except (FileNotFoundError, PermissionError, OSError) as exc:
             raise AcpxRuntimeError(
@@ -212,7 +213,7 @@ class AcpxRuntime:
             permission_policy=self.config.permission_policy,
             mcp_config=self.config.mcp_config,
         )
-        await self._run_control(command, environment=environment)
+        await self._run_control(command, timeout=90.0, environment=environment)
 
     async def close_session(
         self,
@@ -334,6 +335,7 @@ class AcpxRuntime:
             stderr=asyncio.subprocess.PIPE,
             env=child_env,
             limit=MAX_CONTROL_LINE_BYTES + 1,
+            start_new_session=True,
         )
         if process.stdin is None or process.stdout is None:
             process.kill()
@@ -441,15 +443,13 @@ class AcpxRuntime:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not done:
-                process.kill()
-                await process.wait()
+                await _terminate_process(process)
                 raise AcpxRuntimeError("ACPX prompt timed out")
             if cancel_task in done and cancel_event.is_set() and not stream_task.done():
                 try:
                     await asyncio.wait_for(stream_task, timeout=5.0)
                 except asyncio.TimeoutError:
-                    process.terminate()
-                    await process.wait()
+                    await _terminate_process(process)
                 return None
             await stream_task
             return_code = await asyncio.wait_for(process.wait(), timeout=5.0)
@@ -468,12 +468,7 @@ class AcpxRuntime:
             if not stderr_task.done():
                 stderr_task.cancel()
             if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+                await _terminate_process(process)
             if not stderr_task.done():
                 try:
                     await stderr_task
@@ -513,9 +508,14 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
     if process.returncode is not None:
         return
     try:
-        process.terminate()
-    except ProcessLookupError:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (AttributeError, ProcessLookupError):
         return
+    except OSError:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            return
     try:
         await asyncio.wait_for(
             process.wait(),
@@ -523,9 +523,14 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
         )
     except asyncio.TimeoutError:
         try:
-            process.kill()
-        except ProcessLookupError:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (AttributeError, ProcessLookupError):
             return
+        except OSError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                return
         await process.wait()
 
 

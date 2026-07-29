@@ -88,25 +88,23 @@ def test_validated_browser_endpoint_requires_same_nonce_gateway():
         )
 
 
-def test_unbrowse_gateway_uses_kuri_discovery_port_range():
+def test_unbrowse_gateway_fails_closed_when_kuri_port_9222_is_busy():
     calls = []
 
     async def starter(*, upstream_http, headers, bind_port):
         calls.append((upstream_http, headers, bind_port))
-        if bind_port == 9222:
-            raise OSError("busy")
-        return "runner", f"ws://127.0.0.1:{bind_port}/nonce"
+        raise OSError("busy")
 
-    result = asyncio.run(
-        start_unbrowse_gateway(
-            upstream_http="http://manager/internal/cdp",
-            headers={"X-CBM-Run": "opaque"},
-            gateway_starter=starter,
+    with pytest.raises(RuntimeError, match="9222"):
+        asyncio.run(
+            start_unbrowse_gateway(
+                upstream_http="http://manager/internal/cdp",
+                headers={"X-CBM-Run": "opaque"},
+                gateway_starter=starter,
+            )
         )
-    )
 
-    assert result == ("runner", "ws://127.0.0.1:9223/nonce")
-    assert [call[2] for call in calls] == [9222, 9223]
+    assert [call[2] for call in calls] == [9222]
 
 
 def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():

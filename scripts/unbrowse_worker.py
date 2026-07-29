@@ -373,16 +373,14 @@ async def start_unbrowse_gateway(
     headers: dict[str, str],
     gateway_starter: GatewayStarter = start_cdp_gateway,
 ) -> tuple[Any, str]:
-    for bind_port in range(9222, 9226):
-        try:
-            return await gateway_starter(
-                upstream_http=upstream_http,
-                headers=headers,
-                bind_port=bind_port,
-            )
-        except OSError:
-            continue
-    raise RuntimeError("No loopback CDP relay port is available for Unbrowse")
+    try:
+        return await gateway_starter(
+            upstream_http=upstream_http,
+            headers=headers,
+            bind_port=9222,
+        )
+    except OSError as exc:
+        raise RuntimeError("Kuri CDP relay port 9222 is unavailable") from exc
 
 
 @dataclass

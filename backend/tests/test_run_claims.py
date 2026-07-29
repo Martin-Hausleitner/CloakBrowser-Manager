@@ -46,6 +46,29 @@ def worker_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {WORKER_KEY}"}
 
 
+def seed_provider_preflight(
+    client: TestClient,
+    *,
+    provider: str = "grok",
+    transport: str = "acp",
+    ready: bool = True,
+    reason_code: str = "ready",
+    model_aliases: list[str] | None = None,
+) -> None:
+    response = client.post(
+        "/internal/providers/readiness",
+        headers=worker_headers(),
+        json={
+            "provider": provider,
+            "transport": transport,
+            "ready": ready,
+            "reason_code": reason_code,
+            "model_aliases": model_aliases if model_aliases is not None else [],
+        },
+    )
+    assert response.status_code == 204, response.text
+
+
 def seed_passed_health(profile_id: str) -> None:
     db.upsert_profile_health(
         profile_id,
@@ -94,6 +117,77 @@ def create_run(
     )
     assert created.status_code == 201, created.text
     return created.json()
+
+
+def create_routed_run(
+    client: TestClient,
+    *,
+    profile_id: str,
+    provider: str = "grok",
+    transport: str = "acp",
+    agent: str = "grok-build",
+    provider_model_alias: str | None = None,
+    run_model_alias: str | None = None,
+    launch_if_stopped: bool = False,
+) -> dict:
+    seed_passed_health(profile_id)
+    session = db.create_task_session(profile_id, "alpha", "bootstrap")
+    created = client.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        headers=bootstrap_headers(),
+        json={
+            "harness": "acpx",
+            "agent": agent,
+            "task": "Use routed browser tools",
+            "profile_id": profile_id,
+            "launch_if_stopped": launch_if_stopped,
+            "allowed_origins": ["https://example.com"],
+            "max_steps": 20,
+            "timeout_seconds": 300,
+            "model_alias": run_model_alias,
+            "provider": {
+                "id": provider,
+                "transport": transport,
+                "model_alias": provider_model_alias,
+            },
+            "browser_tools": [
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+            "routing_policy": {
+                "mode": "ordered-fallback",
+                "allow_second_browser": False,
+                "max_tool_attempts": 2,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    return created.json()
+
+
+def claim_routed_run(client: TestClient, run_id: str) -> dict:
+    claimed = client.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+        params={"harness": "acpx"},
+    )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["id"] == run_id
+    return claimed.json()
+
+
+def routed_capability_row(run_id: str) -> dict:
+    with db.get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT status, claimed_by, worker_id, claim_expires_at, lease_id,
+                   capability_digest, error_code, error_message
+            FROM task_runs WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+    return dict(row)
 
 
 def test_acpx_agent_persists_and_is_returned_to_filtered_worker(
@@ -563,6 +657,190 @@ def test_launch_if_stopped_launches_records_evidence_before_capability(
     assert fetched["launch_evidence"]["cdp_ready"] is True
 
 
+def test_routed_capability_revalidates_exact_worker_provider_freshness(
+    client_access: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend import main
+
+    now = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+    main.worker_runtime_service._clock = lambda: now
+    profile = db.create_profile("Routed stale provider", sandbox_id="alpha", harness="acpx")
+    seed_provider_preflight(client_access, provider="grok", transport="acp")
+    run = create_routed_run(
+        client_access,
+        profile_id=profile["id"],
+        transport="acp",
+        launch_if_stopped=True,
+    )
+    claim_routed_run(client_access, run["id"])
+    with db.get_db() as conn:
+        conn.execute(
+            """
+            UPDATE worker_provider_preflights
+            SET checked_at = ?
+            WHERE worker_id = ? AND provider = 'grok' AND transport = 'acp'
+            """,
+            ((now - timedelta(seconds=301)).isoformat(), WORKER_ID),
+        )
+        conn.commit()
+    launched = False
+
+    async def fail_if_launched(_profile: dict):
+        nonlocal launched
+        launched = True
+        raise AssertionError("browser launch must not run for stale provider")
+
+    monkeypatch.setattr(main.browser_mgr, "launch", fail_if_launched)
+
+    capability = client_access.post(
+        f"/internal/task-runs/{run['id']}/capability",
+        headers=worker_headers(),
+    )
+
+    assert capability.status_code == 404
+    assert "cbm_run_" not in capability.text
+    assert launched is False
+    row = routed_capability_row(run["id"])
+    assert row["status"] == "health_check"
+    assert row["worker_id"] == WORKER_ID
+    assert row["lease_id"]
+    assert row["capability_digest"] is None
+    assert row["error_code"] is None
+
+
+def test_routed_capability_requires_provider_readiness_from_claimed_worker(
+    client_access: TestClient,
+):
+    now = datetime(2026, 7, 29, 13, 0, tzinfo=timezone.utc)
+    profile = db.create_profile("Routed wrong worker", sandbox_id="alpha", harness="acpx")
+    seed_provider_preflight(client_access, provider="grok", transport="acp")
+    run = create_routed_run(client_access, profile_id=profile["id"], transport="acp")
+    claim_routed_run(client_access, run["id"])
+    with db.get_db() as conn:
+        conn.execute(
+            """
+            UPDATE worker_provider_preflights
+            SET ready = 0, reason_code = 'auth_required', checked_at = ?
+            WHERE worker_id = ? AND provider = 'grok' AND transport = 'acp'
+            """,
+            (now.isoformat(), WORKER_ID),
+        )
+        conn.execute(
+            """
+            INSERT INTO worker_identities (id, key_digest, active, created_at, updated_at)
+            VALUES ('other-worker', 'other-digest', 1, ?, ?)
+            """,
+            (now.isoformat(), now.isoformat()),
+        )
+        conn.execute(
+            """
+            INSERT INTO worker_provider_preflights
+                (worker_id, provider, transport, ready, reason_code, model_aliases_json, checked_at)
+            VALUES ('other-worker', 'grok', 'acp', 1, 'ready', '[]', ?)
+            """,
+            (now.isoformat(),),
+        )
+        conn.commit()
+
+    capability = client_access.post(
+        f"/internal/task-runs/{run['id']}/capability",
+        headers=worker_headers(),
+    )
+
+    assert capability.status_code == 404
+    assert "cbm_run_" not in capability.text
+    assert routed_capability_row(run["id"])["capability_digest"] is None
+
+
+def test_routed_capability_rejects_openai_compatible_model_alias_drift(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Routed wrong model", sandbox_id="alpha", harness="acpx")
+    seed_provider_preflight(
+        client_access,
+        provider="grok",
+        transport="openai-compatible",
+        model_aliases=["grok-build-0.1"],
+    )
+    run = create_routed_run(
+        client_access,
+        profile_id=profile["id"],
+        transport="openai-compatible",
+        provider_model_alias="grok-build-0.1",
+    )
+    claim_routed_run(client_access, run["id"])
+    seed_provider_preflight(
+        client_access,
+        provider="grok",
+        transport="openai-compatible",
+        model_aliases=["other-model"],
+    )
+
+    capability = client_access.post(
+        f"/internal/task-runs/{run['id']}/capability",
+        headers=worker_headers(),
+    )
+
+    assert capability.status_code == 404
+    assert "cbm_run_" not in capability.text
+    assert routed_capability_row(run["id"])["capability_digest"] is None
+
+
+def test_routed_capability_succeeds_with_fresh_exact_provider_readiness(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Routed fresh provider", sandbox_id="alpha", harness="acpx")
+    seed_provider_preflight(
+        client_access,
+        provider="grok",
+        transport="openai-compatible",
+        model_aliases=["grok-build-0.1"],
+    )
+    run = create_routed_run(
+        client_access,
+        profile_id=profile["id"],
+        transport="openai-compatible",
+        provider_model_alias="grok-build-0.1",
+    )
+    claim_routed_run(client_access, run["id"])
+
+    capability = client_access.post(
+        f"/internal/task-runs/{run['id']}/capability",
+        headers=worker_headers(),
+    )
+
+    assert capability.status_code == 200, capability.text
+    body = capability.json()
+    assert body["provider"] == run["provider"]
+    assert body["browser_tools"] == run["browser_tools"]
+    assert body["token"].startswith("cbm_run_")
+    row = routed_capability_row(run["id"])
+    assert row["status"] == "running"
+    assert row["capability_digest"]
+
+
+def test_legacy_capability_without_provider_readiness_still_succeeds(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Legacy capability", sandbox_id="alpha")
+    run = create_run(client_access, profile_id=profile["id"])
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["id"] == run["id"]
+
+    capability = client_access.post(
+        f"/internal/task-runs/{run['id']}/capability",
+        headers=worker_headers(),
+    )
+
+    assert capability.status_code == 200, capability.text
+    assert capability.json()["provider"] is None
+
+
 def test_capability_rejects_viewport_revision_drift_without_token(
     client_access: TestClient,
 ):
@@ -590,6 +868,7 @@ def test_claim_fails_closed_on_corrupted_persisted_routing_contract_before_lease
     profile = db.create_profile("Corrupt routing", sandbox_id="alpha", harness="antigravity")
     seed_passed_health(profile["id"])
     session = db.create_task_session(profile["id"], "alpha", "bootstrap")
+    seed_provider_preflight(client_access, transport="acp")
     created = client_access.post(
         f"/api/task-sessions/{session['id']}/runs",
         headers=bootstrap_headers(),
@@ -655,6 +934,7 @@ def test_capability_rejects_corrupted_persisted_routing_contract_without_token(
     profile = db.create_profile("Corrupt capability routing", sandbox_id="alpha", harness="antigravity")
     seed_passed_health(profile["id"])
     session = db.create_task_session(profile["id"], "alpha", "bootstrap")
+    seed_provider_preflight(client_access, transport="acp")
     created = client_access.post(
         f"/api/task-sessions/{session['id']}/runs",
         headers=bootstrap_headers(),

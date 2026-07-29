@@ -275,6 +275,7 @@ def test_workspace_migration_preserves_history_and_snapshots_ownership(
         "task_runs_v1",
         "worker_harness_preflights_v1",
         "worker_harness_presence_v1",
+        "worker_provider_preflights_v1",
         "worker_runtime_v1",
     ]
     with db.get_db() as conn:
@@ -291,6 +292,21 @@ def test_workspace_migration_preserves_history_and_snapshots_ownership(
                 "PRAGMA index_list(worker_harness_preflights)"
             ).fetchall()
         }
+        provider_preflight_columns = {
+            row["name"]: row
+            for row in conn.execute(
+                "PRAGMA table_info(worker_provider_preflights)"
+            ).fetchall()
+        }
+        provider_preflight_fks = conn.execute(
+            "PRAGMA foreign_key_list(worker_provider_preflights)"
+        ).fetchall()
+        provider_preflight_indexes = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA index_list(worker_provider_preflights)"
+            ).fetchall()
+        }
     assert [preflight_columns[name]["pk"] for name in ("worker_id", "harness", "agent")] == [1, 2, 3]
     assert any(
         row["table"] == "worker_identities"
@@ -300,6 +316,18 @@ def test_workspace_migration_preserves_history_and_snapshots_ownership(
         for row in preflight_fks
     )
     assert "idx_worker_harness_preflights_lookup" in preflight_indexes
+    assert [
+        provider_preflight_columns[name]["pk"]
+        for name in ("worker_id", "provider", "transport")
+    ] == [1, 2, 3]
+    assert any(
+        row["table"] == "worker_identities"
+        and row["from"] == "worker_id"
+        and row["to"] == "id"
+        and row["on_delete"] == "CASCADE"
+        for row in provider_preflight_fks
+    )
+    assert "idx_worker_provider_preflights_lookup" in provider_preflight_indexes
     assert profile_fk["table"] == "profiles"
     assert profile_fk["on_delete"] == "SET NULL"
 
@@ -341,7 +369,7 @@ def test_workspace_migration_is_idempotent(legacy_database: Path):
     db.init_db()
 
     with db.get_db() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 9
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 10
         assert {
             row["version"]
             for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
@@ -354,6 +382,7 @@ def test_workspace_migration_is_idempotent(legacy_database: Path):
             "task_runs_v1",
             "worker_harness_preflights_v1",
             "worker_harness_presence_v1",
+            "worker_provider_preflights_v1",
             "worker_runtime_v1",
         }
         assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
@@ -475,7 +504,7 @@ def test_workspace_migration_serializes_concurrent_initialization(
             initialization.result(timeout=10)
 
     with db.get_db() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 9
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 10
         assert {
             row["version"]
             for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
@@ -488,6 +517,7 @@ def test_workspace_migration_serializes_concurrent_initialization(
             "task_runs_v1",
             "worker_harness_preflights_v1",
             "worker_harness_presence_v1",
+            "worker_provider_preflights_v1",
             "worker_runtime_v1",
         }
         assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2

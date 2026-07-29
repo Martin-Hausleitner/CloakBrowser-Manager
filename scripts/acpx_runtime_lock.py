@@ -15,13 +15,15 @@ SDK_VERSION = "1.2.1"
 NODE_ENGINE = ">=22.13.0"
 ACPX_INTEGRITY = "sha512-MoV932yPJUcjkX2L9u5TeFncvrxVD+jNTd3ES/tslaiT78S/7CwtgintmX9bonPbSgOB9vinvN+1OCHTQq4HJg=="
 SDK_INTEGRITY = "sha512-jwYUdOQR7tc+Zfch53VL4JJyUNK/46q03uUTYb+PjECsmnNl94XFXOfYLJ8RBpMNidXd1rpOAVgb0vqD98xImA=="
-PYTHON_REQUIREMENTS = {"mcp": "1.28.1", "playwright": "1.61.0"}
+PYTHON_REQUIREMENTS = {"aiohttp": "3.14.3", "mcp": "1.28.1", "playwright": "1.61.0"}
+PYTHON_INPUT_REQUIREMENTS = {"aiohttp": ">=3.12,<4", "mcp": "1.28.1", "playwright": "1.61.0"}
 PYTHON_LOCK_NAME = "requirements-acpx-worker.linux-x86_64.py312.txt"
 PYTHON_LOCK_TARGET = "linux-x86_64.py312"
 UV_EXCLUDE_NEWER = "2026-07-27T00:00:00Z"
 SECRET_RE = re.compile(r"cbm_worker_[0-9A-Za-z_=-]+")
 HASH_RE = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 PIN_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\\\s]+)")
+INPUT_RE = re.compile(r"^([A-Za-z0-9_.-]+)(==|>=)([^\\\s]+)")
 
 
 class LockVerificationError(ValueError):
@@ -160,9 +162,9 @@ def _read_requirement_pins(path: Path) -> dict[str, str]:
         line = raw.strip()
         if not line or line.startswith(("#", "--hash=")):
             continue
-        match = PIN_RE.match(line)
+        match = INPUT_RE.match(line)
         if match:
-            pins[match.group(1).lower()] = match.group(2)
+            pins[match.group(1).lower()] = match.group(3) if match.group(2) == "==" else f"{match.group(2)}{match.group(3)}"
     return pins
 
 
@@ -195,8 +197,8 @@ def _verify_python_inputs(repo_path: Path) -> dict[str, Any]:
     ):
         _require_no_symlink_components(repo_path, path, label)
     input_pins = _read_requirement_pins(requirements_in)
-    if input_pins != PYTHON_REQUIREMENTS:
-        _fail("requirements-acpx-worker.in must contain exactly mcp==1.28.1 and playwright==1.61.0")
+    if input_pins != PYTHON_INPUT_REQUIREMENTS:
+        _fail("requirements-acpx-worker.in must contain exactly aiohttp>=3.12,<4, mcp==1.28.1, and playwright==1.61.0")
 
     legacy = _require_file(legacy_path, "legacy requirements-acpx-worker.txt").read_text(encoding="utf-8")
     if "LEGACY NON-PRODUCTION" not in legacy:
@@ -282,7 +284,7 @@ def _run_venv_metadata(python: Path) -> dict[str, Any]:
     code = (
         "import importlib.metadata as m, json, sys; "
         "print(json.dumps({'python_version': '.'.join(map(str, sys.version_info[:3])), "
-        "'packages': {'mcp': m.version('mcp'), 'playwright': m.version('playwright')}}))"
+        "'packages': {'aiohttp': m.version('aiohttp'), 'mcp': m.version('mcp'), 'playwright': m.version('playwright')}}))"
     )
     completed = subprocess.run([str(python), "-c", code], check=False, capture_output=True, text=True, timeout=10)
     if completed.returncode != 0:
@@ -308,7 +310,7 @@ def verify_venv(venv: Path | str) -> dict[str, Any]:
         _fail("venv Python 3.12 is required")
     packages = metadata.get("packages")
     if packages != PYTHON_REQUIREMENTS:
-        _fail("venv packages must be exactly mcp==1.28.1 and playwright==1.61.0")
+        _fail("venv packages must be exactly aiohttp==3.14.3, mcp==1.28.1, and playwright==1.61.0")
     pip_check = subprocess.run([str(python), "-m", "pip", "check"], check=False, capture_output=True, text=True, timeout=20)
     if pip_check.returncode != 0:
         _fail(f"pip check failed: {pip_check.stdout or pip_check.stderr}")

@@ -59,27 +59,40 @@ def _write_private_json(path: Path, payload: object) -> Path:
 
 
 def _paths(tmp_path: Path) -> dict[str, Path | str]:
-    repo = _make_repo(tmp_path)
-    venv = tmp_path / "venvs" / "acpx-worker"
+    case_root = tmp_path / "case"
+    case_root.mkdir(mode=0o700)
+    os.chmod(case_root, 0o700)
+    assert _mode(case_root) == 0o700
+    secrets_dir = case_root / "secrets"
+    units_dir = case_root / "units"
+    secrets_dir.mkdir(mode=0o700)
+    units_dir.mkdir(mode=0o700)
+    os.chmod(secrets_dir, 0o700)
+    os.chmod(units_dir, 0o700)
+    assert _mode(secrets_dir) == 0o700
+    assert _mode(units_dir) == 0o700
+
+    repo = _make_repo(case_root)
+    venv = case_root / "venvs" / "acpx-worker"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-    acpx = _write_executable(tmp_path / "bin" / "acpx")
+    acpx = _write_executable(case_root / "bin" / "acpx")
     policy = _write_private_json(
-        tmp_path / "policy" / "acpx-policy.json",
+        case_root / "policy" / "acpx-policy.json",
         {"autoApprove": [], "autoDeny": ["write"], "escalate": ["read"], "defaultAction": "deny"},
     )
     mcp = _write_private_json(
-        tmp_path / "mcp" / "acpx-mcp.json",
+        case_root / "mcp" / "acpx-mcp.json",
         {"mcpServers": [{"name": "cloakbrowser", "command": "cbm-mcp", "args": []}]},
     )
-    capability_dir = tmp_path / "capabilities"
+    capability_dir = case_root / "capabilities"
     capability_dir.mkdir(mode=0o700)
     return {
         "repo": repo,
         "manager_url": "http://127.0.0.1:18115",
-        "worker_key_file": tmp_path / "secrets" / "acpx-worker.key",
+        "worker_key_file": secrets_dir / "acpx-worker.key",
         "venv": venv,
-        "unit_output": tmp_path / "units" / "cloakbrowser-acpx-worker.service",
+        "unit_output": units_dir / "cloakbrowser-acpx-worker.service",
         "permission_policy": policy,
         "mcp_config": mcp,
         "capability_dir": capability_dir,
@@ -91,7 +104,7 @@ def test_render_unit_uses_module_token_file_and_no_placeholder_leftovers(tmp_pat
     mod = _load()
     paths = _paths(tmp_path)
     key = paths["worker_key_file"]
-    key.parent.mkdir(parents=True)
+    key.parent.mkdir(parents=True, exist_ok=True)
     token = "cbm_worker_" + ("12" * 32)
     key.write_text(token + "\n", encoding="utf-8")
     os.chmod(key, 0o600)
@@ -119,6 +132,7 @@ def test_render_unit_uses_module_token_file_and_no_placeholder_leftovers(tmp_pat
     assert "UMask=0077" in unit
     assert "Restart=on-failure" in unit
     assert "PATH=" in unit
+    assert f"Environment=CBM_MCP_PYTHON={paths['venv'] / 'bin' / 'python'}" in unit
     assert str(paths["acpx"]) in unit
     assert str(paths["permission_policy"]) in unit
     assert str(paths["mcp_config"]) in unit
@@ -153,6 +167,7 @@ def test_provision_end_to_end_secret_safe_and_idempotent(tmp_path: Path, capsys:
     assert _mode(paths["unit_output"]) == 0o600
     unit1 = paths["unit_output"].read_text(encoding="utf-8")
     assert token1 not in unit1
+    assert f"Environment=CBM_MCP_PYTHON={paths['venv'] / 'bin' / 'python'}" in unit1
     assert "--token-file" in unit1
     assert result1["version"] == "0.12.1"
     assert result1["worker_id"] == "acpx-worker"

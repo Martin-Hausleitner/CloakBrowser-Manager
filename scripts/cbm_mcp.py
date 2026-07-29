@@ -131,6 +131,13 @@ class CbmMcpController:
     def _require_allowed_page(self, page: Any) -> None:
         self._require_allowed_url(str(getattr(page, "url", "") or ""))
 
+    def _reject_direct_browser_tool_on_routed_context(self) -> None:
+        if self.context.routing_contract is not None:
+            raise BrowserCtlError(
+                "policy_denied",
+                "direct browser tools are disabled for routed runs; use the router",
+            )
+
     @contextmanager
     def _page(self) -> Iterator[Any]:
         endpoint = (
@@ -161,6 +168,7 @@ class CbmMcpController:
                     pass
 
     def inspect(self) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
         with self._page() as page:
             self._require_allowed_page(page)
             return {
@@ -172,6 +180,7 @@ class CbmMcpController:
             }
 
     def navigate(self, url: str) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
         safe_url = validate_http_url(url)
         self._require_allowed_url(safe_url)
         with self._page() as page:
@@ -186,6 +195,7 @@ class CbmMcpController:
             }
 
     def click(self, selector: str) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
         safe_selector = validate_selector(selector)
         with self._page() as page:
             self._require_allowed_page(page)
@@ -200,6 +210,7 @@ class CbmMcpController:
             }
 
     def fill(self, selector: str, text: str) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
         safe_selector = validate_selector(selector)
         safe_text = validate_text(text)
         with self._page() as page:
@@ -216,6 +227,7 @@ class CbmMcpController:
             }
 
     def read_text(self, selector: str | None = None) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
         safe_selector = validate_selector(selector) if selector else None
         with self._page() as page:
             self._require_allowed_page(page)
@@ -232,7 +244,16 @@ class CbmMcpController:
 
     def control_plane_capabilities(self) -> dict[str, Any]:
         """Expose bounded resource semantics; unavailable targets are explicit."""
-        return control_plane_capabilities_payload(local_mac_available=False)
+        payload = control_plane_capabilities_payload(local_mac_available=False)
+        if self.context.routing_contract is not None:
+            payload = json.loads(json.dumps(payload))
+            payload["mcp_contract"]["tools"] = [
+                "cbm_route_browser_action",
+                "control_plane_capabilities",
+                "control_plane_resource_schema",
+                "orca_web_capabilities",
+            ]
+        return payload
 
     def control_plane_resource_schema(self) -> dict[str, Any]:
         """Expose the shared versioned resource envelope schema."""
@@ -324,38 +345,45 @@ def build_server(controller: CbmMcpController | None = None):
         json_response=True,
     )
 
-    @server.tool()
-    async def browser_inspect() -> dict[str, Any]:
-        """Return the current managed tab URL and title."""
-        return await asyncio.to_thread(ctl.inspect)
+    routed_context = (
+        getattr(getattr(ctl, "context", None), "routing_contract", None) is not None
+    )
+    if not routed_context:
 
-    @server.tool()
-    async def browser_navigate(url: str) -> dict[str, Any]:
-        """Navigate within the exact Manager-approved origin set."""
-        return await asyncio.to_thread(ctl.navigate, url)
+        @server.tool()
+        async def browser_inspect() -> dict[str, Any]:
+            """Return the current managed tab URL and title."""
+            return await asyncio.to_thread(ctl.inspect)
 
-    @server.tool()
-    async def browser_click(selector: str) -> dict[str, Any]:
-        """Click one bounded Playwright selector in the managed tab."""
-        return await asyncio.to_thread(ctl.click, selector)
+        @server.tool()
+        async def browser_navigate(url: str) -> dict[str, Any]:
+            """Navigate within the exact Manager-approved origin set."""
+            return await asyncio.to_thread(ctl.navigate, url)
 
-    @server.tool()
-    async def browser_fill(selector: str, text: str) -> dict[str, Any]:
-        """Fill one bounded selector without returning the submitted text."""
-        return await asyncio.to_thread(ctl.fill, selector, text)
+        @server.tool()
+        async def browser_click(selector: str) -> dict[str, Any]:
+            """Click one bounded Playwright selector in the managed tab."""
+            return await asyncio.to_thread(ctl.click, selector)
 
-    @server.tool()
-    async def browser_read_text(selector: str | None = None) -> dict[str, Any]:
-        """Read bounded visible text, never raw HTML or DOM snapshots."""
-        return await asyncio.to_thread(ctl.read_text, selector)
+        @server.tool()
+        async def browser_fill(selector: str, text: str) -> dict[str, Any]:
+            """Fill one bounded selector without returning the submitted text."""
+            return await asyncio.to_thread(ctl.fill, selector, text)
 
-    @server.tool()
-    async def cbm_route_browser_action(
-        action: str,
-        arguments: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Route one browser action through Manager-approved browser tools."""
-        return await ctl.route_browser_action(action, arguments or {})
+        @server.tool()
+        async def browser_read_text(selector: str | None = None) -> dict[str, Any]:
+            """Read bounded visible text, never raw HTML or DOM snapshots."""
+            return await asyncio.to_thread(ctl.read_text, selector)
+
+    if routed_context:
+
+        @server.tool()
+        async def cbm_route_browser_action(
+            action: str,
+            arguments: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            """Route one browser action through Manager-approved browser tools."""
+            return await ctl.route_browser_action(action, arguments or {})
 
     @server.tool()
     def control_plane_capabilities() -> dict[str, Any]:

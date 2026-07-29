@@ -636,6 +636,54 @@ def _migrate_worker_harness_preflights_v1(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_worker_provider_preflights_v1(conn: sqlite3.Connection) -> None:
+    """Persist redacted provider readiness results by active worker and transport."""
+    migration_version = "worker_provider_preflights_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        workers_exist = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_identities'"
+        ).fetchone()
+        if workers_exist is None:
+            conn.rollback()
+            return
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_provider_preflights (
+                worker_id TEXT NOT NULL REFERENCES worker_identities(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                transport TEXT NOT NULL,
+                ready BOOLEAN NOT NULL,
+                reason_code TEXT NOT NULL,
+                model_aliases_json TEXT NOT NULL DEFAULT '[]',
+                checked_at TEXT NOT NULL,
+                PRIMARY KEY (worker_id, provider, transport)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_worker_provider_preflights_lookup
+                ON worker_provider_preflights(provider, transport, checked_at DESC)
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def _migrate_task_run_binding_v1(conn: sqlite3.Connection) -> None:
     """Persist immutable run/profile binding details used before CDP capability issue."""
     migration_version = "task_run_binding_v1"
@@ -1085,6 +1133,7 @@ def init_db():
         _migrate_task_run_routing_contract_v1(conn)
         _migrate_worker_harness_presence_v1(conn)
         _migrate_worker_harness_preflights_v1(conn)
+        _migrate_worker_provider_preflights_v1(conn)
         _migrate_task_run_binding_v1(conn)
         _migrate_account_metadata_v1(conn)
 

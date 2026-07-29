@@ -281,6 +281,9 @@ def render_systemd_unit(
         raise RuntimeError("rendered ACPX unit must use --token-file only")
     if SECRET_TOKEN_RE.search(rendered):
         raise RuntimeError("rendered ACPX unit must not contain a worker token")
+    venv_python = str(values["venv"] / "bin" / "python")
+    if f"Environment=CBM_MCP_PYTHON={systemd_quote(venv_python)}" not in rendered:
+        raise RuntimeError("rendered ACPX unit must export CBM_MCP_PYTHON")
     return rendered
 
 

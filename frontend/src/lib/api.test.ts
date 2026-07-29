@@ -813,6 +813,79 @@ describe("api.taskRuns", () => {
       "/api/task-harnesses/acpx/preflights",
     ]);
   });
+
+  it("reads provider readiness and serializes normalized provider routing fields", async () => {
+    const readiness = {
+      providers: [
+        {
+          provider: "grok",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: ["grok-build"],
+        },
+        {
+          provider: "antigravity",
+          transport: "cli",
+          ready: false,
+          state: "unavailable",
+          reason_code: "adapter_unavailable",
+          checked_at: null,
+          model_aliases: [],
+        },
+      ],
+    };
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(readiness))
+      .mockResolvedValueOnce(jsonResponse({ id: "run-normalized", status: "queued" }, 201));
+
+    await expect(api.getProviderReadiness()).resolves.toEqual(readiness);
+    await api.createTaskRun("session-normalized", {
+      harness: "acpx",
+      agent: "grok-build",
+      task: "Inspect https://example.com",
+      profile_id: "profile-grok",
+      allowed_origins: ["https://example.com"],
+      model_alias: "grok-build",
+      provider: { id: "grok", transport: "acp", model_alias: "grok-build" },
+      browser_tools: [
+        { id: "unbrowse", enabled: true },
+        { id: "stagehand", enabled: false },
+        { id: "browser-harness", enabled: true },
+      ],
+      routing_policy: {
+        mode: "ordered-fallback",
+        allow_second_browser: false,
+        max_tool_attempts: 3,
+      },
+    });
+
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/providers/readiness",
+      "/api/task-sessions/session-normalized/runs",
+    ]);
+    expect(JSON.parse(String(mockFetch.mock.calls[1][1]?.body))).toEqual({
+      harness: "acpx",
+      agent: "grok-build",
+      task: "Inspect https://example.com",
+      profile_id: "profile-grok",
+      allowed_origins: ["https://example.com"],
+      model_alias: "grok-build",
+      provider: { id: "grok", transport: "acp", model_alias: "grok-build" },
+      browser_tools: [
+        { id: "unbrowse", enabled: true },
+        { id: "stagehand", enabled: false },
+        { id: "browser-harness", enabled: true },
+      ],
+      routing_policy: {
+        mode: "ordered-fallback",
+        allow_second_browser: false,
+        max_tool_attempts: 3,
+      },
+    });
+  });
 });
 
 // ── Error handling ──────────────────────────────────────────────────────────

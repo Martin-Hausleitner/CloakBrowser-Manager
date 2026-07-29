@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import struct
 import zlib
 from datetime import datetime, timedelta, timezone
@@ -64,6 +63,28 @@ def bootstrap_headers() -> dict[str, str]:
 
 def worker_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {WORKER_KEY}"}
+
+
+def seed_provider_preflight(
+    client: TestClient,
+    *,
+    provider: str = "grok",
+    transport: str = "acp",
+    ready: bool = True,
+    reason_code: str = "ready",
+) -> None:
+    response = client.post(
+        "/internal/providers/readiness",
+        headers=worker_headers(),
+        json={
+            "provider": provider,
+            "transport": transport,
+            "ready": ready,
+            "reason_code": reason_code,
+            "model_aliases": [],
+        },
+    )
+    assert response.status_code == 204, response.text
 
 
 def seed_passed_health(profile_id: str) -> None:
@@ -221,6 +242,7 @@ def test_antigravity_acpx_grok_run_persists_router_contract_and_claims_in_order(
     profile = db.create_profile("Antigravity routed ACPX", sandbox_id="alpha", harness="antigravity")
     seed_passed_health(profile["id"])
     session = db.create_task_session(profile["id"], "alpha", "bootstrap")
+    seed_provider_preflight(client_access, transport="acp")
 
     created = client_access.post(
         f"/api/task-sessions/{session['id']}/runs",

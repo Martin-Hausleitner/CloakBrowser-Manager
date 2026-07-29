@@ -15,6 +15,14 @@ from scripts.cbm_browser_ctl import redact_error_message
 
 ROUTING_BROWSER_TOOL_ORDER = ("unbrowse", "stagehand", "browser-harness")
 STAGEHAND_SEMANTIC_ACTIONS = frozenset({"act", "extract", "observe", "agent"})
+ACP_PROVIDER_AGENTS = {
+    "codex": "codex",
+    "claude": "claude",
+    "cursor": "cursor",
+    "grok": "grok-build",
+    "opencode": "opencode",
+}
+OPENAI_COMPATIBLE_PROVIDER_AGENTS = {"grok": "grok-build"}
 MAX_PUBLIC_PAYLOAD_DEPTH = 6
 MAX_PUBLIC_PAYLOAD_ITEMS = 64
 MAX_PUBLIC_STRING_CHARS = 4_096
@@ -146,8 +154,14 @@ def routing_contract_from_claim(
         raise ValueError("provider, browser_tools, and routing_policy are required")
     if not isinstance(routing_policy, dict):
         raise ValueError("provider, browser_tools, and routing_policy are required")
-    if provider.get("id") != "grok" or provider.get("transport") != "acp":
-        raise ValueError("routing contract requires grok over acp")
+    provider_id = str(provider.get("id") or "")
+    transport = str(provider.get("transport") or "")
+    agent = _routing_agent(claim or {}, capability or {}, source, provider)
+    expected_agent = _expected_provider_agent(provider_id, transport)
+    if expected_agent is None:
+        raise ValueError("routing contract provider transport is not supported")
+    if agent is not None and agent != expected_agent:
+        raise ValueError("routing contract provider and agent do not match")
     if len(browser_tools) != len(ROUTING_BROWSER_TOOL_ORDER):
         raise ValueError(
             "browser_tools must be ordered as unbrowse, stagehand, browser-harness"
@@ -168,7 +182,9 @@ def routing_contract_from_claim(
         )
     required_policy_keys = {"mode", "allow_second_browser", "max_tool_attempts"}
     if set(routing_policy) != required_policy_keys:
-        raise ValueError("routing_policy requires explicit mode, allow_second_browser, max_tool_attempts")
+        raise ValueError(
+            "routing_policy requires explicit mode, allow_second_browser, max_tool_attempts"
+        )
     max_tool_attempts = routing_policy.get("max_tool_attempts")
     if not isinstance(max_tool_attempts, int) or isinstance(max_tool_attempts, bool):
         raise ValueError("max_tool_attempts must be an integer between 1 and 3")
@@ -183,7 +199,7 @@ def routing_contract_from_claim(
     if mode != "ordered-fallback":
         raise ValueError("routing mode must be ordered-fallback")
     return BrowserRoutingContract(
-        provider={"id": "grok", "transport": "acp"},
+        provider={"id": provider_id, "transport": transport},
         browser_tools=tool_configs,
         max_tool_attempts=max_tool_attempts,
         allow_second_browser=False,
@@ -330,6 +346,34 @@ def _routing_source(
     ):
         return capability
     return claim
+
+
+def _expected_provider_agent(provider_id: str, transport: str) -> str | None:
+    if transport == "acp":
+        return ACP_PROVIDER_AGENTS.get(provider_id)
+    if transport == "openai-compatible":
+        return OPENAI_COMPATIBLE_PROVIDER_AGENTS.get(provider_id)
+    return None
+
+
+def _routing_agent(
+    claim: dict[str, Any],
+    capability: dict[str, Any],
+    source: dict[str, Any],
+    provider: dict[str, Any],
+) -> str | None:
+    containers: tuple[dict[str, Any], ...] = (source, provider, capability, claim)
+    for container in containers:
+        value = container.get("agent")
+        if value is not None:
+            return str(value)
+    for envelope in (capability, claim):
+        nested_provider = envelope.get("provider")
+        if isinstance(nested_provider, dict):
+            value = nested_provider.get("agent")
+            if value is not None:
+                return str(value)
+    return None
 
 
 def _normalize_classification(value: str) -> str:

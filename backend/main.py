@@ -120,11 +120,13 @@ if __package__:
         OrcaSessionSendRequest,
         OrcaSessionSendResponse,
         OrcaSessionStartRequest,
+        ProviderReadinessResponse,
         WorkerCapabilityResponse,
         WorkerClaimResponse,
         WorkerFailRequest,
         WorkerHeartbeatResponse,
         WorkerAcpxPreflightRequest,
+        WorkerProviderPreflightRequest,
     )
     from . import proxy_inventory
     from . import session_links
@@ -223,11 +225,13 @@ else:  # Support `uvicorn main:app` from the backend directory.
         OrcaSessionSendRequest,
         OrcaSessionSendResponse,
         OrcaSessionStartRequest,
+        ProviderReadinessResponse,
         WorkerCapabilityResponse,
         WorkerClaimResponse,
         WorkerFailRequest,
         WorkerHeartbeatResponse,
         WorkerAcpxPreflightRequest,
+        WorkerProviderPreflightRequest,
     )
     import proxy_inventory
     import session_links
@@ -328,6 +332,7 @@ worker_runtime_service = worker_runtime_mod.WorkerRuntimeService(
     worker_id_env=lambda: CBM_WORKER_ID,
     worker_token_env=lambda: CBM_WORKER_TOKEN,
 )
+DEFAULT_GROK_OPENAI_COMPATIBLE_MODEL_ALIAS = "grok-build-0.1"
 direct_cdp_socket_registry = cdp_gateway.DirectCdpSocketRegistry(
     poll_interval_seconds=0.25
 )
@@ -1969,12 +1974,51 @@ def _profile_harness_compatible(profile_harness: object, run_harness: object) ->
     )
 
 
+def _selected_provider_model_alias(body: TaskRunCreate) -> str | None:
+    if body.provider:
+        provider_alias = str(body.provider.model_alias or "").strip()
+        if provider_alias:
+            return provider_alias[:80]
+    run_alias = str(body.model_alias or "").strip()
+    if run_alias:
+        return run_alias[:80]
+    if (
+        body.provider
+        and body.provider.id == "grok"
+        and body.provider.transport == "openai-compatible"
+    ):
+        return DEFAULT_GROK_OPENAI_COMPATIBLE_MODEL_ALIAS
+    return None
+
+
+def _require_provider_ready_for_task_run(body: TaskRunCreate) -> None:
+    if body.provider is None:
+        return
+    target = worker_runtime_service.provider_readiness_target(
+        body.provider.id,
+        body.provider.transport,
+    )
+    if not bool(target.get("ready")):
+        raise HTTPException(status_code=409, detail="provider_transport_not_ready")
+
+    selected_alias = _selected_provider_model_alias(body)
+    aliases = target.get("model_aliases")
+    model_aliases = aliases if isinstance(aliases, list) else []
+    if body.provider.transport == "openai-compatible":
+        if selected_alias not in model_aliases:
+            raise HTTPException(status_code=422, detail="provider_model_not_ready")
+        return
+    if selected_alias and model_aliases and selected_alias not in model_aliases:
+        raise HTTPException(status_code=422, detail="provider_model_not_ready")
+
+
 async def _prepare_run_browser_for_capability(worker_id: str, run_id: str) -> None:
     """Launch/validate Manager-owned CDP before issuing a worker run token."""
     try:
         run = worker_runtime_service.require_bound_claim(worker_id, run_id)
     except worker_runtime_mod.WorkerNotFound:
         raise
+    worker_runtime_service.require_bound_provider_readiness(worker_id, run_id)
     profile_id = str(run.get("profile_id") or run.get("profile_id_snapshot") or "")
     if not profile_id:
         raise worker_runtime_mod.WorkerNotFound(run_id)
@@ -3162,6 +3206,8 @@ async def create_task_run(session_id: str, body: TaskRunCreate, request: Request
             detail="Empty allowed_origins requires operate permission",
         )
 
+    _require_provider_ready_for_task_run(body)
+
     snapshot, decision = db.build_run_health_gate(str(profile["id"]))
     run = db.create_task_run_with_message(
         task_session_id=str(session["id"]),
@@ -3378,6 +3424,32 @@ async def get_acpx_preflights(request: Request):
     return TaskHarnessPreflightsResponse(
         **worker_runtime_service.agent_preflights("acpx")
     )
+
+
+@app.post("/internal/providers/readiness", status_code=204)
+async def report_internal_provider_readiness(
+    body: WorkerProviderPreflightRequest,
+    request: Request,
+):
+    worker = _require_worker(request)
+    worker_runtime_service.record_provider_preflight(
+        worker.id,
+        provider=body.provider,
+        transport=body.transport,
+        ready=body.ready,
+        reason_code=body.reason_code,
+        model_aliases=body.model_aliases,
+    )
+    return Response(status_code=204)
+
+
+@app.get(
+    "/api/providers/readiness",
+    response_model=ProviderReadinessResponse,
+)
+async def get_provider_readiness(request: Request):
+    _require_identity(request.scope)
+    return ProviderReadinessResponse(**worker_runtime_service.provider_preflights())
 
 
 @app.post(

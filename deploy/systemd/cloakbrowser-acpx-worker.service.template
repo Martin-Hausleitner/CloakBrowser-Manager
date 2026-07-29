@@ -20,6 +20,7 @@ Restart=on-failure
 RestartSec=5
 UMask=0077
 Environment=@PATH_ENVIRONMENT@
+Environment=CBM_MCP_PYTHON=@VENV_PYTHON@
 
 [Install]
 WantedBy=default.target

@@ -78,6 +78,7 @@ def test_list_applied_schema_migrations_returns_sorted_release_ids(tmp_db: Path)
         "task_runs_v1",
         "worker_harness_preflights_v1",
         "worker_harness_presence_v1",
+        "worker_provider_preflights_v1",
         "worker_runtime_v1",
     ]
 
@@ -141,6 +142,49 @@ def test_init_db_adds_profile_health_to_existing_database(tmp_path: Path, monkey
             "SELECT name FROM sqlite_master WHERE type='table' AND name='profile_health'"
         ).fetchone()
     assert table is not None
+
+
+def test_init_db_adds_provider_preflights_to_legacy_worker_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_file = tmp_path / "profiles.db"
+    monkeypatch.setattr(db, "DB_PATH", db_file)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute("CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+        conn.execute(
+            """
+            CREATE TABLE worker_identities (
+                id TEXT PRIMARY KEY,
+                key_digest TEXT NOT NULL UNIQUE,
+                active BOOLEAN NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES ('worker_runtime_v1', ?)",
+            (now,),
+        )
+        conn.commit()
+
+    db.init_db()
+    db.init_db()
+
+    with db.get_db() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_provider_preflights'"
+        ).fetchone()
+        migration_count = conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 'worker_provider_preflights_v1'"
+        ).fetchone()[0]
+    assert table is not None
+    assert migration_count == 1
 
 
 def test_init_db_migrates_profile_organization_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

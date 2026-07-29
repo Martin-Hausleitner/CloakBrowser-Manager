@@ -93,6 +93,7 @@ class RecordingProcess:
         returncode: int = 0,
         sleep: float = 0,
         cancel: bool = False,
+        pid: int | None = 4321,
     ) -> None:
         self.launcher = launcher
         self.stdout = stdout if stdout is not None else b'{"ok":true,"url":"https://example.com","title":"Example"}\n'
@@ -100,6 +101,7 @@ class RecordingProcess:
         self.returncode = returncode
         self.sleep = sleep
         self.cancel = cancel
+        self.pid = pid
         self.killed = False
         self.waited = False
         self.stdin = FakeWritable(launcher)
@@ -155,12 +157,14 @@ class StreamingProcess:
         stdout_chunks: list[bytes],
         stderr_chunks: list[bytes] | None = None,
         returncode: int = 0,
+        pid: int | None = 9876,
     ) -> None:
         self.launcher = launcher
         self.stdin = FakeWritable(launcher)
         self.stdout = FakeReadable(stdout_chunks)
         self.stderr = FakeReadable(stderr_chunks or [])
         self.returncode = returncode
+        self.pid = pid
         self.killed = False
         self.waited = False
 
@@ -183,11 +187,13 @@ class StreamingLauncher(RecordingLauncher):
         stdout_chunks: list[bytes],
         stderr_chunks: list[bytes] | None = None,
         returncode: int = 0,
+        pid: int | None = 9876,
     ) -> None:
         super().__init__()
         self.stdout_chunks = stdout_chunks
         self.stderr_chunks = stderr_chunks or []
         self.returncode = returncode
+        self.pid = pid
 
     async def __call__(self, *argv: str, **kwargs: Any) -> StreamingProcess:
         self.argv = tuple(argv)
@@ -200,6 +206,7 @@ class StreamingLauncher(RecordingLauncher):
             stdout_chunks=list(self.stdout_chunks),
             stderr_chunks=list(self.stderr_chunks),
             returncode=self.returncode,
+            pid=self.pid,
         )
         self.processes.append(process)
         return process
@@ -582,11 +589,21 @@ def test_argument_bounds_are_enforced_before_gateway_or_process(tmp_path: Path):
     assert result.classification == "policy_denied"
 
 
-def test_timeout_kills_process_deletes_request_and_cleans_gateway(tmp_path: Path):
+def test_timeout_kills_process_group_deletes_request_and_cleans_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from scripts import browser_harness_adapter as adapter_module
     from scripts.browser_harness_adapter import BrowserHarnessAdapter
 
     runner = FakeGatewayRunner()
     launcher = RecordingLauncher(sleep=60)
+    group_kills: list[tuple[int, int]] = []
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        group_kills.append((pid, sig))
+
+    monkeypatch.setattr(adapter_module.os, "killpg", fake_killpg)
     adapter = BrowserHarnessAdapter(
         timeout_seconds=0.01,
         executable_resolver=lambda _name: "/bin/browser-harness",
@@ -598,7 +615,8 @@ def test_timeout_kills_process_deletes_request_and_cleans_gateway(tmp_path: Path
 
     assert result.outcome == "failed"
     assert result.classification == "transient_timeout"
-    assert launcher.processes[0].killed is True
+    assert group_kills == [(4321, adapter_module.signal.SIGKILL)]
+    assert launcher.processes[0].killed is False
     assert launcher.processes[0].waited is True
     assert not Path(launcher.env["CBM_BROWSER_HARNESS_REQUEST_FILE"]).exists()
     assert runner.cleaned is True
@@ -673,6 +691,36 @@ def test_streaming_stdout_overflow_kills_process_before_eof_and_cleans_up(tmp_pa
     assert result.outcome == "failed"
     assert result.classification == "tool_unavailable"
     assert "exceeds size bound" in result.message
+    assert launcher.processes[0].killed is True
+    assert launcher.processes[0].waited is True
+    assert not Path(launcher.env["CBM_BROWSER_HARNESS_REQUEST_FILE"]).exists()
+    assert runner.cleaned is True
+
+
+def test_streaming_overflow_falls_back_to_process_kill_when_group_kill_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from scripts import browser_harness_adapter as adapter_module
+    from scripts.browser_harness_adapter import BrowserHarnessAdapter, MAX_OUTPUT_BYTES
+
+    runner = FakeGatewayRunner()
+    launcher = StreamingLauncher(stdout_chunks=[b"x" * (MAX_OUTPUT_BYTES + 1)])
+
+    def missing_group(_pid: int, _sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(adapter_module.os, "killpg", missing_group)
+    adapter = BrowserHarnessAdapter(
+        executable_resolver=lambda _name: "/bin/browser-harness",
+        gateway_starter=gateway_factory({}, runner),
+        process_launcher=launcher,
+    )
+
+    result = asyncio.run(adapter(request(tmp_path, "inspect", {})))
+
+    assert result.outcome == "failed"
+    assert result.classification == "tool_unavailable"
     assert launcher.processes[0].killed is True
     assert launcher.processes[0].waited is True
     assert not Path(launcher.env["CBM_BROWSER_HARNESS_REQUEST_FILE"]).exists()

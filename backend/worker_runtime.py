@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,20 @@ WORKER_MAINTENANCE_INTERVAL_SECONDS = 5
 HARNESS_PRESENCE_TTL_SECONDS = 45
 HARNESS_PREFLIGHT_TTL_SECONDS = 300
 ACPX_AGENTS = ("codex", "claude", "cursor", "grok-build", "opencode")
+PROVIDER_PREFLIGHT_TARGETS = (
+    ("antigravity", "cli"),
+    ("grok", "cli"),
+    ("codex", "acp"),
+    ("claude", "acp"),
+    ("cursor", "acp"),
+    ("grok", "acp"),
+    ("opencode", "acp"),
+    ("grok", "openai-compatible"),
+)
+PROVIDER_PREFLIGHT_TTL_SECONDS = 300
+DEFAULT_GROK_OPENAI_COMPATIBLE_MODEL_ALIAS = "grok-build-0.1"
+MAX_PROVIDER_MODEL_ALIASES = 16
+MAX_PROVIDER_MODEL_ALIAS_LENGTH = 96
 UNIVERSAL_PROFILE_HARNESSES = frozenset({"codex"})
 
 ALLOWLISTED_FAIL_CODES = frozenset(
@@ -95,6 +110,38 @@ def _parse_dt(value: str | datetime | None) -> datetime | None:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _sanitize_model_aliases(values: list[str]) -> list[str]:
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        alias = raw.strip()
+        if not alias:
+            continue
+        lowered = alias.lower()
+        if "://" in lowered or "token" in lowered or "secret" in lowered or "bearer" in lowered:
+            continue
+        alias = alias[:MAX_PROVIDER_MODEL_ALIAS_LENGTH]
+        if alias in seen:
+            continue
+        aliases.append(alias)
+        seen.add(alias)
+        if len(aliases) >= MAX_PROVIDER_MODEL_ALIASES:
+            break
+    return aliases
+
+
+def _decode_model_aliases(raw: object) -> list[str]:
+    try:
+        parsed = json.loads(str(raw or "[]"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return _sanitize_model_aliases(parsed)
 
 
 def _clamp_eligibility_timeout(raw: object) -> int:
@@ -522,6 +569,240 @@ class WorkerRuntimeService:
             )
         return {"harness": harness, "agents": result}
 
+    def record_provider_preflight(
+        self,
+        worker_id: str,
+        *,
+        provider: str,
+        transport: str,
+        ready: bool,
+        reason_code: str,
+        model_aliases: list[str] | None = None,
+    ) -> None:
+        """Store one authenticated redacted provider readiness result."""
+        now = self._clock()
+        aliases = _sanitize_model_aliases(model_aliases or []) if ready else []
+        with self._get_db() as conn:
+            active = conn.execute(
+                "SELECT 1 FROM worker_identities WHERE id = ? AND active = 1",
+                (worker_id,),
+            ).fetchone()
+            if active is None:
+                raise WorkerNotFound(worker_id)
+            conn.execute(
+                """
+                INSERT INTO worker_provider_preflights (
+                    worker_id, provider, transport, ready, reason_code,
+                    model_aliases_json, checked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(worker_id, provider, transport) DO UPDATE SET
+                    ready = excluded.ready,
+                    reason_code = excluded.reason_code,
+                    model_aliases_json = excluded.model_aliases_json,
+                    checked_at = excluded.checked_at
+                """,
+                (
+                    worker_id,
+                    provider,
+                    transport,
+                    bool(ready),
+                    reason_code,
+                    json.dumps(aliases, separators=(",", ":")),
+                    _iso(now),
+                ),
+            )
+            conn.commit()
+
+    def provider_preflights(self) -> dict[str, Any]:
+        """Return the exact provider readiness matrix from latest active workers."""
+        now = self._clock()
+        with self._get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.provider, p.transport, p.ready, p.reason_code,
+                       p.model_aliases_json, p.checked_at
+                FROM worker_provider_preflights p
+                JOIN worker_identities w ON w.id = p.worker_id
+                WHERE w.active = 1
+                ORDER BY p.checked_at DESC
+                """
+            ).fetchall()
+        latest: dict[tuple[str, str], Any] = {}
+        for row in rows:
+            key = (str(row["provider"]), str(row["transport"]))
+            latest.setdefault(key, row)
+        result: list[dict[str, Any]] = []
+        for provider, transport in PROVIDER_PREFLIGHT_TARGETS:
+            row = latest.get((provider, transport))
+            if row is None:
+                result.append(
+                    {
+                        "provider": provider,
+                        "transport": transport,
+                        "ready": False,
+                        "state": "unavailable",
+                        "reason_code": "protocol_unavailable",
+                        "checked_at": None,
+                        "model_aliases": [],
+                    }
+                )
+                continue
+            checked_at = _parse_dt(row["checked_at"])
+            if checked_at is None or now - checked_at > timedelta(
+                seconds=PROVIDER_PREFLIGHT_TTL_SECONDS
+            ):
+                result.append(
+                    {
+                        "provider": provider,
+                        "transport": transport,
+                        "ready": False,
+                        "state": "stale",
+                        "reason_code": "protocol_unavailable",
+                        "checked_at": row["checked_at"],
+                        "model_aliases": [],
+                    }
+                )
+                continue
+            ready = bool(row["ready"])
+            result.append(
+                {
+                    "provider": provider,
+                    "transport": transport,
+                    "ready": ready,
+                    "state": "ready" if ready else "failed",
+                    "reason_code": row["reason_code"],
+                    "checked_at": row["checked_at"],
+                    "model_aliases": _decode_model_aliases(row["model_aliases_json"])
+                    if ready
+                    else [],
+                }
+            )
+        return {"providers": result}
+
+    def provider_readiness_target(self, provider: str, transport: str) -> dict[str, Any]:
+        """Return one sanitized public provider readiness target."""
+        target = (provider, transport)
+        for item in self.provider_preflights()["providers"]:
+            if (item["provider"], item["transport"]) == target:
+                return item
+        return {
+            "provider": provider,
+            "transport": transport,
+            "ready": False,
+            "state": "unavailable",
+            "reason_code": "protocol_unavailable",
+            "checked_at": None,
+            "model_aliases": [],
+        }
+
+    def _selected_provider_model_alias(
+        self,
+        *,
+        provider: dict[str, Any],
+        run_model_alias: object,
+    ) -> str | None:
+        provider_alias = str(provider.get("model_alias") or "").strip()
+        if provider_alias:
+            return provider_alias[:80]
+        model_alias = str(run_model_alias or "").strip()
+        if model_alias:
+            return model_alias[:80]
+        if (
+            provider.get("id") == "grok"
+            and provider.get("transport") == "openai-compatible"
+        ):
+            return DEFAULT_GROK_OPENAI_COMPATIBLE_MODEL_ALIAS
+        return None
+
+    def _validate_provider_readiness_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        worker_id: str,
+        provider: dict[str, Any] | None,
+        run_model_alias: object,
+        now: datetime,
+    ) -> None:
+        """Fail closed unless the claimed worker still has exact ready routing."""
+        if provider is None:
+            return
+        provider_id = str(provider.get("id") or "")
+        transport = str(provider.get("transport") or "")
+        row = conn.execute(
+            """
+            SELECT p.ready, p.reason_code, p.model_aliases_json, p.checked_at
+            FROM worker_provider_preflights p
+            JOIN worker_identities w ON w.id = p.worker_id
+            WHERE p.worker_id = ?
+              AND w.active = 1
+              AND p.provider = ?
+              AND p.transport = ?
+            """,
+            (worker_id, provider_id, transport),
+        ).fetchone()
+        if row is None:
+            logger.info(
+                "Denying capability because routed provider readiness is missing"
+            )
+            raise WorkerNotFound("provider_readiness_unavailable")
+        checked_at = _parse_dt(row["checked_at"])
+        if checked_at is None or now - checked_at > timedelta(
+            seconds=PROVIDER_PREFLIGHT_TTL_SECONDS
+        ):
+            logger.info("Denying capability because routed provider readiness is stale")
+            raise WorkerNotFound("provider_readiness_unavailable")
+        if not bool(row["ready"]) or row["reason_code"] != "ready":
+            logger.info("Denying capability because routed provider is not ready")
+            raise WorkerNotFound("provider_readiness_unavailable")
+
+        selected_alias = self._selected_provider_model_alias(
+            provider=provider,
+            run_model_alias=run_model_alias,
+        )
+        aliases = _decode_model_aliases(row["model_aliases_json"])
+        if transport == "openai-compatible":
+            if selected_alias not in aliases:
+                logger.info(
+                    "Denying capability because routed provider model is not ready"
+                )
+                raise WorkerNotFound("provider_readiness_unavailable")
+            return
+        if selected_alias and aliases and selected_alias not in aliases:
+            logger.info("Denying capability because routed provider alias is not ready")
+            raise WorkerNotFound("provider_readiness_unavailable")
+
+    def require_bound_provider_readiness(self, worker_id: str, run_id: str) -> None:
+        """Read-only precheck for routed claims before browser preparation."""
+        now = self._clock()
+        with self._get_db() as conn:
+            row = conn.execute(
+                "SELECT * FROM task_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None or str(row["worker_id"] or "") != worker_id:
+                raise WorkerNotFound(run_id)
+            if row["status"] not in {"health_check", "running"}:
+                raise WorkerNotFound(run_id)
+            claim_exp = _parse_dt(row["claim_expires_at"])
+            deadline = _parse_dt(row["deadline_at"])
+            if claim_exp is None or claim_exp <= now:
+                raise WorkerNotFound(run_id)
+            if deadline is not None and deadline <= now:
+                raise WorkerNotFound(run_id)
+            try:
+                provider, _browser_tools, _routing_policy = (
+                    db._parse_persisted_routing_contract_from_row(row)
+                )
+            except ValueError as exc:
+                raise WorkerNotFound(run_id) from exc
+            self._validate_provider_readiness_on_conn(
+                conn,
+                worker_id=worker_id,
+                provider=provider,
+                run_model_alias=row["model_alias"],
+                now=now,
+            )
+
     # ── Eligibility ──────────────────────────────────────────────────────────
 
     def refresh_claim_eligibility(self) -> None:
@@ -944,6 +1225,13 @@ class WorkerRuntimeService:
                     )
                     conn.commit()
                     raise WorkerNotFound(run_id) from exc
+                self._validate_provider_readiness_on_conn(
+                    conn,
+                    worker_id=worker_id,
+                    provider=provider,
+                    run_model_alias=row["model_alias"],
+                    now=now,
+                )
 
                 # Fresh health evaluation from current profile measurement.
                 profile_id = str(row["profile_id"] or row["profile_id_snapshot"])

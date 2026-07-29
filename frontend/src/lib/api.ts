@@ -15,6 +15,40 @@ export type ProfileHarness =
 
 export type OrcaAgentCli = "cursor-agent" | "grok" | "agy" | "codex";
 export type AcpxAgent = "codex" | "claude" | "cursor" | "grok-build" | "opencode";
+export type ProviderId = "antigravity" | "codex" | "claude" | "cursor" | "grok" | "opencode";
+export type ProviderTransport = "cli" | "acp" | "openai-compatible";
+export type BrowserToolId = "unbrowse" | "stagehand" | "browser-harness";
+
+export interface BrowserToolSelection {
+  id: BrowserToolId;
+  enabled: boolean;
+}
+
+export interface ProviderReadinessProvider {
+  provider: ProviderId;
+  transport: ProviderTransport;
+  ready: boolean;
+  state: "ready" | "failed" | "stale" | "unavailable";
+  reason_code: string;
+  checked_at: string | null;
+  model_aliases: string[];
+}
+
+export interface ProviderReadiness {
+  providers: ProviderReadinessProvider[];
+}
+
+export interface TaskRunProviderSelection {
+  id: ProviderId;
+  transport: ProviderTransport;
+  model_alias?: string;
+}
+
+export interface TaskRunRoutingPolicy {
+  mode: "ordered-fallback";
+  allow_second_browser: boolean;
+  max_tool_attempts: number;
+}
 
 export interface OrcaSessionCapabilities {
   start: boolean;
@@ -583,6 +617,9 @@ export interface TaskRun {
   sandbox_id: string;
   harness: ProfileHarness;
   agent: AcpxAgent | null;
+  provider?: TaskRunProviderSelection | null;
+  browser_tools?: BrowserToolSelection[];
+  routing_policy?: TaskRunRoutingPolicy | null;
   status: TaskRunStatus;
   launch_if_stopped: boolean;
   allowed_origins: string[];
@@ -615,6 +652,9 @@ export interface TaskRunCreateData {
   max_steps?: number;
   timeout_seconds?: number;
   model_alias?: string | null;
+  provider?: TaskRunProviderSelection;
+  browser_tools?: BrowserToolSelection[];
+  routing_policy?: TaskRunRoutingPolicy;
 }
 
 export interface TaskHarnessPresence {
@@ -1105,6 +1145,9 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
     `/api/task-harnesses/${encodeURIComponent(harness)}/preflights`,
     { signal: options?.signal },
   ),
+
+  getProviderReadiness: (options?: { signal?: AbortSignal }) =>
+    request<ProviderReadiness>("/api/providers/readiness", { signal: options?.signal }),
 
   getTaskRun: (runId: string, options?: { signal?: AbortSignal }) =>
     request<TaskRun>(

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import tempfile
 import uuid
 from pathlib import Path
@@ -249,14 +250,12 @@ class BrowserHarnessAdapter:
                 )
             return _result_from_stdout(stdout, request=request)
         except _OutputTooLarge as exc:
-            await _kill_process(process)
             return BrowserToolResult(
                 outcome="failed",
                 classification="tool_unavailable",
                 message=str(exc),
             )
         except asyncio.TimeoutError:
-            await _kill_process(process)
             return BrowserToolResult(
                 outcome="failed",
                 classification="transient_timeout",
@@ -572,14 +571,21 @@ async def _read_limited(reader: Any, max_bytes: int, label: str) -> bytes:
 async def _kill_process(process: Any | None) -> None:
     if process is None:
         return
-    if getattr(process, "returncode", None) is not None and getattr(process, "killed", False):
-        return
-    kill = getattr(process, "kill", None)
-    if callable(kill):
+    group_killed = False
+    pid = getattr(process, "pid", None)
+    if isinstance(pid, int) and pid > 0:
         try:
-            kill()
-        except ProcessLookupError:
-            pass
+            os.killpg(pid, signal.SIGKILL)
+            group_killed = True
+        except (ProcessLookupError, OSError):
+            group_killed = False
+    if not group_killed:
+        kill = getattr(process, "kill", None)
+        if callable(kill):
+            try:
+                kill()
+            except (ProcessLookupError, OSError):
+                pass
     wait = getattr(process, "wait", None)
     if callable(wait):
         try:

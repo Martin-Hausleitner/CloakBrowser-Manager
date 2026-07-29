@@ -67,6 +67,130 @@ def test_routing_contract_is_absent_for_legacy_claims():
 
 
 @pytest.mark.parametrize(
+    ("provider_id", "agent"),
+    [
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("cursor", "cursor"),
+        ("grok", "grok-build"),
+        ("opencode", "opencode"),
+    ],
+)
+def test_routing_contract_accepts_acp_provider_agent_mappings(provider_id, agent):
+    contract = routing_contract_from_claim(
+        normalized_claim(
+            provider={"id": provider_id, "transport": "acp"},
+            agent=agent,
+        )
+    )
+
+    assert contract.provider == {"id": provider_id, "transport": "acp"}
+
+
+def test_routing_contract_validates_capability_provider_agent_mapping():
+    capability = normalized_claim(
+        provider={"id": "claude", "transport": "acp"},
+        agent="claude",
+    )
+
+    contract = routing_contract_from_claim(partial_claim(), capability=capability)
+
+    assert contract.provider == {"id": "claude", "transport": "acp"}
+
+
+def test_routing_contract_rejects_capability_provider_agent_mismatch():
+    capability = normalized_claim(
+        provider={"id": "claude", "transport": "acp"},
+        agent="cursor",
+    )
+
+    with pytest.raises(ValueError):
+        routing_contract_from_claim(partial_claim(), capability=capability)
+
+
+@pytest.mark.parametrize(
+    "provider_id",
+    ["codex", "claude", "cursor", "grok", "opencode"],
+)
+def test_routing_contract_accepts_acp_provider_without_agent(provider_id):
+    contract = routing_contract_from_claim(
+        normalized_claim(provider={"id": provider_id, "transport": "acp"})
+    )
+
+    assert contract.provider == {"id": provider_id, "transport": "acp"}
+
+
+@pytest.mark.parametrize(
+    ("provider", "agent"),
+    [
+        ({"id": "cursor", "transport": "acp"}, "codex"),
+        ({"id": "grok", "transport": "acp"}, "cursor"),
+        ({"id": "codex", "transport": "acp"}, "grok-build"),
+    ],
+)
+def test_routing_contract_rejects_acp_provider_agent_mismatches(provider, agent):
+    with pytest.raises(ValueError):
+        routing_contract_from_claim(normalized_claim(provider=provider, agent=agent))
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        {"id": "antigravity", "transport": "cli"},
+        {"id": "codex", "transport": "cli"},
+        {"id": "bogus", "transport": "acp"},
+        {"id": "cursor", "transport": "openai-compatible"},
+    ],
+)
+def test_routing_contract_rejects_unsupported_provider_transports(provider):
+    with pytest.raises(ValueError):
+        routing_contract_from_claim(normalized_claim(provider=provider))
+
+
+@pytest.mark.parametrize("agent", [None, "grok-build"])
+def test_routing_contract_accepts_openai_compatible_grok(agent):
+    claim = normalized_claim(provider={"id": "grok", "transport": "openai-compatible"})
+    if agent is not None:
+        claim["agent"] = agent
+
+    contract = routing_contract_from_claim(claim)
+
+    assert contract.provider == {"id": "grok", "transport": "openai-compatible"}
+
+
+@pytest.mark.parametrize(
+    ("provider", "agent"),
+    [
+        ({"id": "grok", "transport": "openai-compatible"}, "codex"),
+        ({"id": "cursor", "transport": "openai-compatible"}, "cursor"),
+    ],
+)
+def test_routing_contract_rejects_openai_compatible_mismatches(provider, agent):
+    with pytest.raises(ValueError):
+        routing_contract_from_claim(normalized_claim(provider=provider, agent=agent))
+
+
+def test_routing_contract_accepts_mcp_public_contract_without_agent():
+    public_contract = {
+        "provider": {"id": "cursor", "transport": "acp"},
+        "browser_tools": [
+            {"id": "unbrowse", "enabled": True},
+            {"id": "stagehand", "enabled": True},
+            {"id": "browser-harness", "enabled": True},
+        ],
+        "routing_policy": {
+            "mode": "ordered-fallback",
+            "allow_second_browser": False,
+            "max_tool_attempts": 2,
+        },
+    }
+
+    contract = routing_contract_from_claim(public_contract)
+
+    assert contract.provider == {"id": "cursor", "transport": "acp"}
+
+
+@pytest.mark.parametrize(
     "overrides",
     [
         {"provider": {"id": "grok", "transport": "acp"}},

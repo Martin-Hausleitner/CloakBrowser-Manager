@@ -15,7 +15,6 @@ import hmac
 import json
 import re
 import secrets
-import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
@@ -28,6 +27,68 @@ from scripts.browser_use_worker import ManagerClient, redact_text
 HARNESS = "browser-harness"
 URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 VAULT_PREFIXES = ("keychain://", "op://", "bw://")
+CDP_CLIENT_COMMAND_MAX_BYTES = 64 * 1024
+CDP_UPSTREAM_RESPONSE_MAX_BYTES = 1024 * 1024
+CDP_UPSTREAM_EVENT_MAX_BYTES = 256 * 1024
+CDP_DISCOVERY_MAX_BYTES = 1024 * 1024
+CDP_ID_MAX_INT = 2_147_483_647
+CDP_ID_MAX_STRING_BYTES = 128
+CDP_METHOD_MAX_BYTES = 256
+CDP_SESSION_ID_MAX_BYTES = 256
+CDP_DENIED_METHODS = frozenset(
+    {
+        "Target.createTarget",
+        "Target.createBrowserContext",
+        "Target.disposeBrowserContext",
+        "Target.closeTarget",
+        "Browser.close",
+        "Browser.crash",
+        "Browser.crashGpuProcess",
+        "Page.crash",
+        "Network.getCookies",
+        "Network.getAllCookies",
+        "Network.getResponseBody",
+        "Network.getRequestPostData",
+        "Fetch.getResponseBody",
+        "Storage.getCookies",
+        "Storage.getTrustTokens",
+        "Storage.getInterestGroupDetails",
+        "Storage.getSharedStorageMetadata",
+        "Storage.getSharedStorageEntries",
+        "DOMStorage.getDOMStorageItems",
+        "IndexedDB.requestDatabaseNames",
+        "IndexedDB.requestDatabase",
+        "IndexedDB.requestData",
+        "CacheStorage.requestCacheNames",
+        "CacheStorage.requestEntries",
+        "CacheStorage.requestCachedResponse",
+        "Database.getDatabaseTableNames",
+        "Database.executeSQL",
+        "PasswordManager.enable",
+        "PasswordManager.disable",
+        "PasswordManager.getSavedPasswords",
+        "PasswordManager.setCredentials",
+        "PasswordManager.addCredential",
+        "PasswordManager.removeCredential",
+        "PasswordManager.removeSavedPassword",
+        "Autofill.trigger",
+        "Autofill.setAddresses",
+        "Browser.setDownloadBehavior",
+        "Page.setDownloadBehavior",
+        "Browser.cancelDownload",
+        "DOM.setFileInputFiles",
+        "IO.read",
+        "IO.close",
+        "FileSystem.enable",
+        "FileSystem.disable",
+        "FileSystem.requestFileSystemRoot",
+        "FileSystem.requestDirectoryContent",
+        "FileSystem.requestMetadata",
+        "FileSystem.requestFileContent",
+        "FileSystem.deleteEntry",
+        "WebAuthn.getCredentials",
+    }
+)
 
 
 class HarnessClient(ManagerClient):
@@ -61,11 +122,15 @@ def normalized_navigation_url(value: str) -> str:
 
 def select_target(claim: dict[str, Any], flow: dict[str, Any]) -> str:
     target = str(flow.get("url") or "").strip()
-    allowed = {normalized_origin(str(item)) for item in claim.get("allowed_origins") or []}
+    allowed = {
+        normalized_origin(str(item)) for item in claim.get("allowed_origins") or []
+    }
     if not allowed or normalized_origin(target) not in allowed:
         raise ValueError("flow URL origin is not allowed by the run")
     task_urls = URL_RE.findall(str(claim.get("task") or ""))
-    if not any(normalized_origin(item) == normalized_origin(target) for item in task_urls):
+    if not any(
+        normalized_origin(item) == normalized_origin(target) for item in task_urls
+    ):
         raise ValueError("flow URL must also be explicit in the persisted task")
     return target
 
@@ -76,8 +141,7 @@ def validate_flow(flow: dict[str, Any], *, task: str = "") -> None:
         raise ValueError("flow requires actions")
     flow_origin = normalized_origin(str(flow.get("url") or ""))
     task_urls = {
-        normalized_navigation_url(item.rstrip(".,);]"))
-        for item in URL_RE.findall(task)
+        normalized_navigation_url(item.rstrip(".,);]")) for item in URL_RE.findall(task)
     }
     for action in actions:
         if not isinstance(action, dict):
@@ -110,7 +174,9 @@ def validate_flow(flow: dict[str, Any], *, task: str = "") -> None:
             if normalized_origin(navigation_url) != flow_origin:
                 raise ValueError("navigation origin is not allowed")
             if task_urls and normalized_navigation_url(navigation_url) not in task_urls:
-                raise ValueError("navigation URL must be explicit in the persisted task")
+                raise ValueError(
+                    "navigation URL must be explicit in the persisted task"
+                )
         else:
             raise ValueError("unsupported flow action")
 
@@ -125,7 +191,9 @@ def absolute_ws_url(manager_url: str, cdp_url: str) -> str:
 def rewrite_discovery(value: Any, *, local_base: str, upstream_path: str) -> Any:
     if isinstance(value, dict):
         return {
-            key: rewrite_discovery(item, local_base=local_base, upstream_path=upstream_path)
+            key: rewrite_discovery(
+                item, local_base=local_base, upstream_path=upstream_path
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -137,9 +205,107 @@ def rewrite_discovery(value: Any, *, local_base: str, upstream_path: str) -> Any
         parsed = urlsplit(value)
         suffix = parsed.path
         if suffix.startswith(upstream_path):
-            suffix = suffix[len(upstream_path):]
+            suffix = suffix[len(upstream_path) :]
         return f"{local_base}{suffix or '/'}"
     return value
+
+
+def _json_bytes(value: Any) -> bytes:
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+
+def _safe_cdp_id(value: Any) -> int | str | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and 0 <= value <= CDP_ID_MAX_INT:
+        return value
+    if isinstance(value, str) and value:
+        if len(value.encode("utf-8")) <= CDP_ID_MAX_STRING_BYTES:
+            return value
+    return None
+
+
+def _safe_cdp_session_id(value: Any) -> str | None:
+    if isinstance(value, str) and value:
+        if len(value.encode("utf-8")) <= CDP_SESSION_ID_MAX_BYTES:
+            return value
+    return None
+
+
+def _cdp_error(
+    request_id: int | str,
+    *,
+    session_id: str | None = None,
+    message: str = "CDP command rejected by gateway policy",
+) -> str:
+    payload: dict[str, Any] = {
+        "id": request_id,
+        "error": {"code": -32000, "message": message},
+    }
+    if session_id:
+        payload["sessionId"] = session_id
+    return _json_bytes(payload).decode("utf-8")
+
+
+def _validate_client_cdp_frame(
+    data: str,
+) -> tuple[dict[str, Any] | None, str | None, int]:
+    if len(data.encode("utf-8")) > CDP_CLIENT_COMMAND_MAX_BYTES:
+        return None, None, 1009
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return None, None, 1008
+    if not isinstance(payload, dict):
+        return None, None, 1008
+
+    request_id = _safe_cdp_id(payload.get("id"))
+    session_id = _safe_cdp_session_id(payload.get("sessionId"))
+    if request_id is None:
+        return None, None, 1008
+
+    method = payload.get("method")
+    params = payload.get("params")
+    if (
+        not isinstance(method, str)
+        or not method
+        or len(method.encode("utf-8")) > CDP_METHOD_MAX_BYTES
+        or (params is not None and not isinstance(params, dict))
+        or ("sessionId" in payload and session_id is None)
+        or method in CDP_DENIED_METHODS
+    ):
+        return None, _cdp_error(request_id, session_id=session_id), 1008
+    return payload, None, 1000
+
+
+def _upstream_cdp_frame(data: str) -> tuple[str | None, bool]:
+    size = len(data.encode("utf-8"))
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return None, True
+    if not isinstance(payload, dict):
+        return None, True
+
+    session_id = _safe_cdp_session_id(payload.get("sessionId"))
+    if "sessionId" in payload and session_id is None:
+        return None, False
+
+    id_present = "id" in payload
+    request_id = _safe_cdp_id(payload.get("id"))
+    if id_present and request_id is None:
+        return None, False
+    if request_id is None:
+        if size > CDP_UPSTREAM_EVENT_MAX_BYTES:
+            return None, False
+        return data, False
+    if size > CDP_UPSTREAM_RESPONSE_MAX_BYTES:
+        return _cdp_error(
+            request_id,
+            session_id=session_id,
+            message="CDP upstream response exceeded gateway policy",
+        ), False
+    return data, False
 
 
 def validate_cdp_state(state: dict[str, Any], flow: dict[str, Any]) -> None:
@@ -155,9 +321,13 @@ def validate_cdp_state(state: dict[str, Any], flow: dict[str, Any]) -> None:
             "alreadyExists",
         )
     ):
-        raise RuntimeError("managed Browser Harness reported an authentication form error")
+        raise RuntimeError(
+            "managed Browser Harness reported an authentication form error"
+        )
     if int(state.get("errorElements") or 0) > 0:
-        raise RuntimeError("managed Browser Harness reported a visible authentication error")
+        raise RuntimeError(
+            "managed Browser Harness reported a visible authentication error"
+        )
     if any(
         bool(item.get("genericError"))
         for item in state.get("fetchResults") or []
@@ -182,7 +352,9 @@ async def start_cdp_gateway(
 ) -> tuple[web.AppRunner, str]:
     upstream_parts = urlsplit(upstream_http)
     upstream_path = upstream_parts.path.rstrip("/")
-    upstream_origin = urlunsplit((upstream_parts.scheme, upstream_parts.netloc, "", "", ""))
+    upstream_origin = urlunsplit(
+        (upstream_parts.scheme, upstream_parts.netloc, "", "", "")
+    )
     nonce = secrets.token_urlsafe(24)
 
     async def gateway(request: web.Request) -> web.StreamResponse:
@@ -198,30 +370,68 @@ async def start_cdp_gateway(
                 raise web.HTTPUnauthorized()
             if suffix not in {"", "json/version", "json/list", "json/protocol"}:
                 raise web.HTTPNotFound()
-        suffix_path = f"/{suffix}" if suffix else ("" if is_websocket else "/json/version")
+        suffix_path = (
+            f"/{suffix}" if suffix else ("" if is_websocket else "/json/version")
+        )
         query = f"?{request.query_string}" if request.query_string else ""
         upstream_url = f"{upstream_origin}{upstream_path}{suffix_path}{query}"
         if is_websocket:
-            client_ws = web.WebSocketResponse(max_msg_size=0, autoping=True)
+            client_ws = web.WebSocketResponse(
+                max_msg_size=CDP_CLIENT_COMMAND_MAX_BYTES,
+                autoping=True,
+            )
             await client_ws.prepare(request)
             ws_parts = urlsplit(upstream_url)
             ws_scheme = "wss" if ws_parts.scheme == "https" else "ws"
-            ws_url = urlunsplit((ws_scheme, ws_parts.netloc, ws_parts.path, ws_parts.query, ""))
+            ws_url = urlunsplit(
+                (ws_scheme, ws_parts.netloc, ws_parts.path, ws_parts.query, "")
+            )
             async with ClientSession() as session:
-                async with session.ws_connect(ws_url, headers=headers, max_msg_size=0) as upstream_ws:
+                async with session.ws_connect(
+                    ws_url,
+                    headers=headers,
+                    max_msg_size=CDP_UPSTREAM_RESPONSE_MAX_BYTES + 4096,
+                ) as upstream_ws:
+
                     async def client_to_upstream() -> None:
                         async for message in client_ws:
                             if message.type == WSMsgType.TEXT:
-                                await upstream_ws.send_str(message.data)
+                                payload, error, close_code = _validate_client_cdp_frame(
+                                    message.data
+                                )
+                                if payload is not None:
+                                    await upstream_ws.send_str(
+                                        _json_bytes(payload).decode("utf-8")
+                                    )
+                                elif error is not None:
+                                    await client_ws.send_str(error)
+                                else:
+                                    await client_ws.close(code=close_code)
+                                    await upstream_ws.close()
+                                    return
                             elif message.type == WSMsgType.BINARY:
-                                await upstream_ws.send_bytes(message.data)
+                                await client_ws.close(code=1008)
+                                await upstream_ws.close()
+                                return
+                            elif message.type == WSMsgType.ERROR:
+                                await upstream_ws.close()
+                                return
 
                     async def upstream_to_client() -> None:
                         async for message in upstream_ws:
                             if message.type == WSMsgType.TEXT:
-                                await client_ws.send_str(message.data)
+                                frame, close_client = _upstream_cdp_frame(message.data)
+                                if frame is not None:
+                                    await client_ws.send_str(frame)
+                                if close_client:
+                                    await client_ws.close(code=1008)
+                                    return
                             elif message.type == WSMsgType.BINARY:
-                                await client_ws.send_bytes(message.data)
+                                await client_ws.close(code=1008)
+                                return
+                            elif message.type == WSMsgType.ERROR:
+                                await client_ws.close(code=1008)
+                                return
 
                     tasks = {
                         asyncio.create_task(client_to_upstream()),
@@ -238,14 +448,43 @@ async def start_cdp_gateway(
 
         async with ClientSession() as session:
             async with session.get(upstream_url, headers=headers) as response:
-                body = await response.read()
+                chunks = bytearray()
+                while len(chunks) <= CDP_DISCOVERY_MAX_BYTES:
+                    chunk = await response.content.read(
+                        min(64 * 1024, CDP_DISCOVERY_MAX_BYTES + 1 - len(chunks))
+                    )
+                    if not chunk:
+                        break
+                    chunks.extend(chunk)
+                body = bytes(chunks)
+                if len(body) > CDP_DISCOVERY_MAX_BYTES:
+                    return web.json_response(
+                        {"error": "CDP discovery response exceeded gateway policy"},
+                        status=502,
+                    )
                 content_type = response.headers.get("Content-Type", "application/json")
                 if "json" in content_type:
-                    parsed = json.loads(body.decode("utf-8"))
+                    try:
+                        parsed = json.loads(body.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        return web.json_response(
+                            {
+                                "error": (
+                                    "CDP discovery response rejected by gateway policy"
+                                )
+                            },
+                            status=502,
+                        )
                     local_base = f"ws://{request.host}/{nonce}"
-                    safe = rewrite_discovery(parsed, local_base=local_base, upstream_path=upstream_path)
+                    safe = rewrite_discovery(
+                        parsed, local_base=local_base, upstream_path=upstream_path
+                    )
                     return web.json_response(safe, status=response.status)
-                return web.Response(body=body, status=response.status, content_type=content_type.split(";")[0])
+                return web.Response(
+                    body=body,
+                    status=response.status,
+                    content_type=content_type.split(";")[0],
+                )
 
     app = web.Application()
     app.router.add_route("*", "/{tail:.*}", gateway)
@@ -284,7 +523,9 @@ async def run_command(args: list[str], *, timeout: float) -> dict[str, Any]:
             f"Unbrowse command failed ({process.returncode})"
             + (f": {detail}" if detail else "")
         )
-    lines = [line for line in stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+    lines = [
+        line for line in stdout.decode("utf-8", "replace").splitlines() if line.strip()
+    ]
     for line in reversed(lines):
         try:
             value = json.loads(line)
@@ -436,7 +677,9 @@ async def execute_cdp_actions(
                     selector = str(action["selector"])
                     index = max(0, int(action.get("index") or 0))
                     expression = (
-                        "(()=>{const e=Array.from(document.querySelectorAll(" + json.dumps(selector) + "))["
+                        "(()=>{const e=Array.from(document.querySelectorAll("
+                        + json.dumps(selector)
+                        + "))["
                         + str(index)
                         + "];if(!e)return false;e.focus();e.select();return true})()"
                     )
@@ -482,7 +725,8 @@ async def execute_cdp_actions(
                 elif op == "click":
                     selector = str(action["selector"])
                     expression = (
-                        "(()=>{const e=document.querySelector(" + json.dumps(selector)
+                        "(()=>{const e=document.querySelector("
+                        + json.dumps(selector)
                         + ");if(!e)return false;e.click();return true})()"
                     )
                     found = False
@@ -510,14 +754,14 @@ async def execute_cdp_actions(
                         "if(!window.__cbmFetchWrapped){window.__cbmFetchWrapped=true;const of=window.fetch.bind(window);"
                         "window.fetch=async(...a)=>{const r=await of(...a);try{const raw=typeof a[0]==='string'?a[0]:a[0]?.url||'';"
                         "const u=new URL(raw,location.href);if(u.pathname.includes('/auth/password/sign-')){const x=await r.clone().text();"
-                        "const l=x.toLowerCase();const sdkError=/\\\"status\\\"\\s*:\\s*\\\"error\\\"/.test(l);"
-                        "const cm=x.match(/\\\"(?:errorCode|error_code)\\\"\\s*:\\s*\\\"([A-Z0-9_]{1,80})\\\"/i);const ec=(cm?.[1]||'').toUpperCase();"
+                        'const l=x.toLowerCase();const sdkError=/\\"status\\"\\s*:\\s*\\"error\\"/.test(l);'
+                        'const cm=x.match(/\\"(?:errorCode|error_code)\\"\\s*:\\s*\\"([A-Z0-9_]{1,80})\\"/i);const ec=(cm?.[1]||\'\').toUpperCase();'
                         "const errorCategory=/USER_EMAIL_ALREADY_EXISTS|CONTACT_CHANNEL_ALREADY_USED/.test(ec)?'email_exists':ec==='EMAIL_PASSWORD_MISMATCH'?'mismatch':ec==='SIGN_UP_NOT_ENABLED'?'signup_disabled':ec==='PASSWORD_AUTHENTICATION_NOT_ENABLED'?'password_auth_disabled':/VERIFY/.test(ec)?'verification':/PASSWORD|WEAK/.test(ec)?'password_policy':/RATE|TOO_MANY/.test(ec)?'rate_limit':ec?'other':'none';"
                         "const red={status:r.status,path:u.host+u.pathname,"
                         "duplicate:/user_email_already_exists|contact_channel_already_used_for_auth_by_someone_else/.test(l),temporary:/temporary|disposable/.test(l),"
                         "password:/password|weak|complex/.test(l),rate:/rate|too many/.test(l),"
                         "verification:/verify|verification|email_not_verified/.test(l),"
-                        "authMaterial:/access[_-]?token|refresh[_-]?token|session[_-]?token|\\\"user\\\"/.test(l),"
+                        'authMaterial:/access[_-]?token|refresh[_-]?token|session[_-]?token|\\"user\\"/.test(l),'
                         "emailPasswordMismatch:/email_password_mismatch/.test(l),"
                         "signupDisabled:/sign_up_not_enabled/.test(l),"
                         "passwordAuthDisabled:/password_authentication_not_enabled/.test(l),"
@@ -592,7 +836,9 @@ async def execute_cdp_actions(
     return {"title": "", "path": "", "formCount": -1}
 
 
-async def heartbeat_loop(client: HarnessClient, run_id: str, stop: asyncio.Event) -> None:
+async def heartbeat_loop(
+    client: HarnessClient, run_id: str, stop: asyncio.Event
+) -> None:
     while not stop.is_set():
         body = await asyncio.to_thread(client.heartbeat, run_id)
         if body.get("cancel_requested"):
@@ -615,7 +861,9 @@ async def execute_flow(
     target = select_target(claim, flow)
     validate_flow(flow, task=str(claim.get("task") or ""))
     capability = await asyncio.to_thread(client.issue_capability, run_id)
-    upstream_http = urljoin(client.base_url.rstrip("/") + "/", str(capability.get("cdp_url") or ""))
+    upstream_http = urljoin(
+        client.base_url.rstrip("/") + "/", str(capability.get("cdp_url") or "")
+    )
     headers = {str(k): str(v) for k, v in dict(capability.get("headers") or {}).items()}
     stop = asyncio.Event()
     heartbeat = asyncio.create_task(heartbeat_loop(client, run_id, stop))
@@ -630,7 +878,17 @@ async def execute_flow(
         )
         try:
             opened = await run_command(
-                [unbrowse_bin, "breath", "go", target, "--ws", local_ws, "--timeout", "30000", "--json"],
+                [
+                    unbrowse_bin,
+                    "breath",
+                    "go",
+                    target,
+                    "--ws",
+                    local_ws,
+                    "--timeout",
+                    "30000",
+                    "--json",
+                ],
                 timeout=45,
             )
             session_id = str(opened.get("session_id") or opened.get("sessionId") or "")
@@ -704,21 +962,57 @@ async def execute_flow(
             for index, action in enumerate(flow["actions"], start=1):
                 op = str(action["op"])
                 if op == "fill":
-                    command = [unbrowse_bin, "breath", "fill", str(action["selector"]), str(action["pointer"]), "--session", session_id, "--json"]
+                    command = [
+                        unbrowse_bin,
+                        "breath",
+                        "fill",
+                        str(action["selector"]),
+                        str(action["pointer"]),
+                        "--session",
+                        session_id,
+                        "--json",
+                    ]
                     await run_command(command, timeout=30)
                 elif op == "click":
-                    command = [unbrowse_bin, "breath", "click", str(action["selector"]), "--session", session_id, "--json"]
+                    command = [
+                        unbrowse_bin,
+                        "breath",
+                        "click",
+                        str(action["selector"]),
+                        "--session",
+                        session_id,
+                        "--json",
+                    ]
                     await run_command(command, timeout=30)
                 elif op == "submit":
                     command = [unbrowse_bin, "breath", "submit"]
                     if action.get("selector"):
                         command.append(str(action["selector"]))
-                    command.extend(["--session", session_id, "--wait", "--timeout", "30000", "--json"])
+                    command.extend(
+                        [
+                            "--session",
+                            session_id,
+                            "--wait",
+                            "--timeout",
+                            "30000",
+                            "--json",
+                        ]
+                    )
                     await run_command(command, timeout=40)
                 elif op == "wait":
                     await asyncio.sleep(int(action.get("milliseconds") or 0) / 1000)
                 elif op == "snapshot":
-                    snap = await run_command([unbrowse_bin, "eval", "snap", "--session", session_id, "--json"], timeout=30)
+                    snap = await run_command(
+                        [
+                            unbrowse_bin,
+                            "eval",
+                            "snap",
+                            "--session",
+                            session_id,
+                            "--json",
+                        ],
+                        timeout=30,
+                    )
                     title = str(snap.get("title") or "")[:200]
                     await asyncio.to_thread(
                         client.output,
@@ -737,7 +1031,10 @@ async def execute_flow(
         heartbeat.cancel()
         if session_id:
             try:
-                await run_command([unbrowse_bin, "breath", "sync", "--session", session_id, "--json"], timeout=20)
+                await run_command(
+                    [unbrowse_bin, "breath", "sync", "--session", session_id, "--json"],
+                    timeout=20,
+                )
             except Exception:
                 pass
         if gateway_runner is not None:
@@ -771,14 +1068,22 @@ async def async_main(args: argparse.Namespace) -> int:
             run_id,
             kind="summary",
             summary="Secure Unbrowse flow completed",
-            payload={"status": "succeeded", "text": "Secure flow completed without persisting cleartext secrets."},
+            payload={
+                "status": "succeeded",
+                "text": "Secure flow completed without persisting cleartext secrets.",
+            },
             idempotency_key=f"unbrowse:{run_id}:summary",
         )
         await asyncio.to_thread(client.complete, run_id)
         completed = True
         return 0
     except Exception as exc:
-        await asyncio.to_thread(client.fail, run_id, error_code="internal_error", message=redact_text(str(exc)))
+        await asyncio.to_thread(
+            client.fail,
+            run_id,
+            error_code="internal_error",
+            message=redact_text(str(exc)),
+        )
         return 1
     finally:
         if not completed:

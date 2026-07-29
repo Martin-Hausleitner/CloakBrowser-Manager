@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -30,6 +30,10 @@ def client_access(tmp_db, monkeypatch):
 
 def bootstrap_headers() -> dict[str, str]:
     return {"Authorization": "Bearer bootstrap-test-secret"}
+
+
+def worker_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer cbm_worker_" + ("ab" * 32)}
 
 
 def create_user(
@@ -131,6 +135,61 @@ def run_body(**overrides):
     }
     body.update(overrides)
     return body
+
+
+def routing_run_body(
+    profile_id: str,
+    *,
+    provider: str = "grok",
+    agent: str = "grok-build",
+    transport: str = "openai-compatible",
+    provider_model_alias=None,
+    run_model_alias=None,
+):
+    return run_body(
+        profile_id=profile_id,
+        harness="acpx",
+        agent=agent,
+        model_alias=run_model_alias,
+        provider={
+            "id": provider,
+            "transport": transport,
+            "model_alias": provider_model_alias,
+        },
+        browser_tools=[
+            {"id": "unbrowse", "enabled": True},
+            {"id": "stagehand", "enabled": True},
+            {"id": "browser-harness", "enabled": True},
+        ],
+        routing_policy={
+            "mode": "ordered-fallback",
+            "allow_second_browser": False,
+            "max_tool_attempts": 2,
+        },
+    )
+
+
+def seed_provider_preflight(
+    client: TestClient,
+    *,
+    provider: str = "grok",
+    transport: str = "openai-compatible",
+    ready: bool = True,
+    reason_code: str = "ready",
+    model_aliases: list[str] | None = None,
+) -> None:
+    response = client.post(
+        "/internal/providers/readiness",
+        headers=worker_headers(),
+        json={
+            "provider": provider,
+            "transport": transport,
+            "ready": ready,
+            "reason_code": reason_code,
+            "model_aliases": model_aliases if model_aliases is not None else ["grok-build-0.1"],
+        },
+    )
+    assert response.status_code == 204, response.text
 
 
 def create_run(client: TestClient, session_id: str, profile_id: str, **overrides) -> dict:
@@ -280,6 +339,326 @@ def test_create_run_allows_acpx_profile_with_any_acpx_agent(
     )
 
     assert response.status_code == 201, response.text
+
+
+def test_create_run_persists_and_claims_grok_openai_compatible_routing_contract(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-openai", "alpha", "automate")
+    login(client_access, "alpha-openai", password)
+    seed_provider_preflight(client_access, transport="openai-compatible")
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            transport="openai-compatible",
+            provider_model_alias="grok-build-0.1",
+        ),
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["provider"] == {
+        "id": "grok",
+        "transport": "openai-compatible",
+        "model_alias": "grok-build-0.1",
+    }
+    assert [tool["id"] for tool in created["browser_tools"]] == [
+        "unbrowse",
+        "stagehand",
+        "browser-harness",
+    ]
+    assert created["routing_policy"]["max_tool_attempts"] == 2
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim?harness=acpx",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+    body = claimed.json()
+    assert body["id"] == created["id"]
+    assert body["harness"] == "acpx"
+    assert body["agent"] == "grok-build"
+    assert body["provider"] == created["provider"]
+    assert body["browser_tools"] == created["browser_tools"]
+    assert body["routing_policy"] == created["routing_policy"]
+
+
+def test_create_run_allows_grok_acp_routing_when_exact_transport_ready(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-acp", "alpha", "automate")
+    login(client_access, "alpha-acp", password)
+    seed_provider_preflight(
+        client_access,
+        transport="acp",
+        model_aliases=[],
+    )
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(profile["id"], transport="acp"),
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["provider"] == {
+        "id": "grok",
+        "transport": "acp",
+        "model_alias": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("provider", "agent"),
+    [
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("cursor", "cursor"),
+        ("grok", "grok-build"),
+        ("opencode", "opencode"),
+    ],
+)
+def test_create_and_claim_normalized_acp_routing_for_exact_provider_agent_mapping(
+    client_access: TestClient,
+    provider: str,
+    agent: str,
+):
+    profile = db.create_profile(f"ACPX {provider}", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, f"alpha-{provider}", "alpha", "automate")
+    login(client_access, f"alpha-{provider}", password)
+    seed_provider_preflight(
+        client_access,
+        provider=provider,
+        transport="acp",
+        model_aliases=["grok-build-0.1"] if provider == "grok" else [],
+    )
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider=provider,
+            agent=agent,
+            transport="acp",
+        ),
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["provider"] == {
+        "id": provider,
+        "transport": "acp",
+        "model_alias": None,
+    }
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim?harness=acpx",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+    body = claimed.json()
+    assert body["id"] == created["id"]
+    assert body["harness"] == "acpx"
+    assert body["agent"] == agent
+    assert body["provider"] == created["provider"]
+
+    cancelled = client_access.post(f"/api/task-runs/{created['id']}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+
+
+@pytest.mark.parametrize(
+    ("provider", "agent"),
+    [
+        ("codex", "grok-build"),
+        ("claude", "codex"),
+        ("cursor", "claude"),
+        ("grok", "cursor"),
+        ("opencode", "grok-build"),
+    ],
+)
+def test_create_run_rejects_mismatched_acp_provider_agent_without_persistence(
+    client_access: TestClient,
+    provider: str,
+    agent: str,
+):
+    profile = db.create_profile(f"ACPX mismatch {provider}", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, f"alpha-bad-{provider}", "alpha", "automate")
+    login(client_access, f"alpha-bad-{provider}", password)
+    seed_provider_preflight(client_access, provider=provider, transport="acp", model_aliases=[])
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider=provider,
+            agent=agent,
+            transport="acp",
+        ),
+    )
+
+    assert response.status_code == 422
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+def test_create_run_rejects_antigravity_cli_normalized_contract_without_persistence(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX antigravity", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-antigravity-cli", "alpha", "automate")
+    login(client_access, "alpha-antigravity-cli", password)
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider="antigravity",
+            agent="grok-build",
+            transport="cli",
+        ),
+    )
+
+    assert response.status_code == 422
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+@pytest.mark.parametrize(
+    ("preflight_transport", "preflight_ready", "reason_code", "expected_status"),
+    [
+        (None, True, "ready", 409),
+        ("acp", True, "ready", 409),
+        ("openai-compatible", False, "proxy_unavailable", 409),
+    ],
+)
+def test_create_run_rejects_normalized_provider_when_transport_not_ready_without_persistence(
+    client_access: TestClient,
+    preflight_transport: str | None,
+    preflight_ready: bool,
+    reason_code: str,
+    expected_status: int,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-blocked", "alpha", "automate")
+    login(client_access, "alpha-blocked", password)
+    if preflight_transport is not None:
+        seed_provider_preflight(
+            client_access,
+            transport=preflight_transport,
+            ready=preflight_ready,
+            reason_code=reason_code,
+        )
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(profile["id"], transport="openai-compatible"),
+    )
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"] == "provider_transport_not_ready"
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+def test_create_run_rejects_normalized_provider_when_preflight_is_stale_without_persistence(
+    client_access: TestClient,
+):
+    from backend import main
+
+    now = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+    main.worker_runtime_service._clock = lambda: now
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-stale", "alpha", "automate")
+    login(client_access, "alpha-stale", password)
+    seed_provider_preflight(client_access, transport="openai-compatible")
+    main.worker_runtime_service._clock = lambda: now + timedelta(seconds=301)
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(profile["id"], transport="openai-compatible"),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "provider_transport_not_ready"
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+@pytest.mark.parametrize(
+    ("provider_model_alias", "run_model_alias"),
+    [
+        ("missing-model", None),
+        (None, "missing-model"),
+        (None, None),
+    ],
+)
+def test_create_run_rejects_openai_compatible_when_selected_model_is_not_ready_without_persistence(
+    client_access: TestClient,
+    provider_model_alias: str | None,
+    run_model_alias: str | None,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-model", "alpha", "automate")
+    login(client_access, "alpha-model", password)
+    seed_provider_preflight(
+        client_access,
+        transport="openai-compatible",
+        model_aliases=["other-model"],
+    )
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            transport="openai-compatible",
+            provider_model_alias=provider_model_alias,
+            run_model_alias=run_model_alias,
+        ),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "provider_model_not_ready"
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
 
 
 def test_initial_status_follows_health_decision(client_access: TestClient):

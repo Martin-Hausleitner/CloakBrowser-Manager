@@ -45,7 +45,7 @@ def write_fake_venv(path: Path, *, python_version: str = "3.12.10", pip_check: s
     python.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "python_version": python_version,
-        "packages": {"mcp": "1.28.1", "playwright": "1.61.0"},
+        "packages": {"aiohttp": "3.14.3", "mcp": "1.28.1", "playwright": "1.61.0"},
     }
     if pip_check == "ok":
         script = (
@@ -104,8 +104,9 @@ def test_repo_locks_validate_and_emit_secret_safe_json(tmp_path: Path):
     assert receipt["ok"] is True
     assert receipt["node"]["acpx_version"] == "0.12.1"
     assert receipt["node"]["sdk_version"] == "1.2.1"
-    assert receipt["python"]["requirements"] == {"mcp": "1.28.1", "playwright": "1.61.0"}
+    assert receipt["python"]["requirements"] == {"aiohttp": "3.14.3", "mcp": "1.28.1", "playwright": "1.61.0"}
     assert receipt["python"]["lock_target"] == "linux-x86_64.py312"
+    assert receipt["python"]["exclude_newer"] == "2026-07-27T00:00:00Z"
     assert "cbm_worker_" not in json.dumps(receipt)
 
 
@@ -242,7 +243,7 @@ def test_rejects_broad_production_requirements_and_wrong_lock_target(tmp_path: P
     repo = copy_runtime_lock_repo(tmp_path)
     module = load_module()
     (repo / "scripts" / "requirements-acpx-worker.in").write_text(
-        "mcp>=1.28\nplaywright==1.61.0\n",
+        "aiohttp>=3.12,<4\nmcp>=1.28\nplaywright==1.61.0\n",
         encoding="utf-8",
     )
     try:
@@ -266,7 +267,7 @@ def test_rejects_broad_production_requirements_and_wrong_lock_target(tmp_path: P
 
 def test_rejects_lock_stanzas_without_following_hashes(tmp_path: Path):
     module = load_module()
-    for package_name in ("mcp", "playwright", "attrs"):
+    for package_name in ("aiohttp", "mcp", "playwright", "attrs"):
         repo = copy_runtime_lock_repo(tmp_path / package_name)
         lock_path = repo / "scripts" / "requirements-acpx-worker.linux-x86_64.py312.txt"
         lock_path.write_text(
@@ -362,7 +363,7 @@ def test_venv_requires_python_312_exact_packages_and_pip_check(tmp_path: Path):
     receipt = module.verify_venv(venv)
 
     assert receipt["python_version"].startswith("3.12.")
-    assert receipt["packages"] == {"mcp": "1.28.1", "playwright": "1.61.0"}
+    assert receipt["packages"] == {"aiohttp": "3.14.3", "mcp": "1.28.1", "playwright": "1.61.0"}
     assert receipt["pip_check"] == "ok"
 
     wrong_python = write_fake_venv(tmp_path / "wrong-python", python_version="3.13.0")

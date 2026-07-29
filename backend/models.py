@@ -40,8 +40,34 @@ Harness = Literal[
     "acpx",
 ]
 AcpxAgent = Literal["codex", "claude", "cursor", "grok-build", "opencode"]
-ProviderId = Literal["antigravity", "grok"]
+ProviderId = Literal["antigravity", "codex", "claude", "cursor", "grok", "opencode"]
 ProviderTransport = Literal["cli", "acp", "openai-compatible"]
+ProviderReadinessReason = Literal[
+    "ready",
+    "auth_required",
+    "protocol_unavailable",
+    "proxy_unavailable",
+    "model_unavailable",
+]
+PROVIDER_READINESS_TARGETS: tuple[tuple[str, str], ...] = (
+    ("antigravity", "cli"),
+    ("grok", "cli"),
+    ("codex", "acp"),
+    ("claude", "acp"),
+    ("cursor", "acp"),
+    ("grok", "acp"),
+    ("opencode", "acp"),
+    ("grok", "openai-compatible"),
+)
+ACP_PROVIDER_TO_AGENT: dict[str, AcpxAgent] = {
+    "codex": "codex",
+    "claude": "claude",
+    "cursor": "cursor",
+    "grok": "grok-build",
+    "opencode": "opencode",
+}
+MAX_PROVIDER_MODEL_ALIASES = 16
+MAX_PROVIDER_MODEL_ALIAS_LENGTH = 96
 BrowserToolId = Literal["unbrowse", "stagehand", "browser-harness"]
 ROUTING_BROWSER_TOOL_ORDER: tuple[BrowserToolId, ...] = (
     "unbrowse",
@@ -1465,6 +1491,11 @@ _SELECTOR_FIELD_NAMES = frozenset({"selector"})
 _OPAQUE_FIELD_NAMES = frozenset({"artifact_id"})
 
 
+def acp_agent_for_provider(provider: str) -> AcpxAgent | None:
+    """Return the reviewed ACPX agent for a normalized ACP provider id."""
+    return ACP_PROVIDER_TO_AGENT.get(str(provider or "").strip())
+
+
 class TaskProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1527,10 +1558,21 @@ class TaskRunCreate(BaseModel):
             raise ValueError("allow_second_browser is not supported")
         if self.harness != "acpx":
             raise ValueError("routing contract is only supported for acpx harness")
-        if self.agent != "grok-build":
-            raise ValueError("acpx routing contract requires agent grok-build")
-        if self.provider.id != "grok" or self.provider.transport != "acp":
-            raise ValueError("acpx routing contract requires provider grok over acp")
+        if self.provider.transport == "openai-compatible":
+            if self.provider.id != "grok" or self.agent != "grok-build":
+                raise ValueError(
+                    "openai-compatible routing contract requires provider grok and agent grok-build"
+                )
+        elif self.provider.transport == "acp":
+            expected_agent = acp_agent_for_provider(self.provider.id)
+            if expected_agent is None or self.agent != expected_agent:
+                raise ValueError(
+                    "acpx routing contract requires provider and agent to match"
+                )
+        else:
+            raise ValueError(
+                "acpx routing contract requires provider over acp or openai-compatible"
+            )
         if tuple(tool_ids) != ROUTING_BROWSER_TOOL_ORDER:
             raise ValueError(
                 "browser_tools must be ordered as unbrowse, stagehand, browser-harness"
@@ -1695,6 +1737,60 @@ class WorkerAcpxPreflightRequest(BaseModel):
         return self
 
 
+def _sanitize_provider_model_aliases(values: list[str]) -> list[str]:
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        alias = raw.strip()
+        if not alias:
+            continue
+        lowered = alias.lower()
+        if "://" in lowered or "token" in lowered or "secret" in lowered or "bearer" in lowered:
+            continue
+        alias = alias[:MAX_PROVIDER_MODEL_ALIAS_LENGTH]
+        if alias in seen:
+            continue
+        aliases.append(alias)
+        seen.add(alias)
+        if len(aliases) >= MAX_PROVIDER_MODEL_ALIASES:
+            break
+    return aliases
+
+
+class WorkerProviderPreflightRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ProviderId
+    transport: ProviderTransport
+    ready: bool
+    reason_code: ProviderReadinessReason
+    model_aliases: list[str] = Field(default_factory=list)
+
+    @field_validator("model_aliases", mode="before")
+    @classmethod
+    def sanitize_model_aliases(cls, value):
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("model_aliases must be a list")
+        return _sanitize_provider_model_aliases(value)
+
+    @model_validator(mode="after")
+    def validate_ready_reason_and_target(self):
+        target = (self.provider, self.transport)
+        if target not in PROVIDER_READINESS_TARGETS:
+            raise ValueError("unsupported provider transport target")
+        if self.ready and self.reason_code != "ready":
+            raise ValueError("ready provider preflight requires reason_code=ready")
+        if not self.ready and self.reason_code == "ready":
+            raise ValueError("failed provider preflight requires a failure reason")
+        if not self.ready:
+            self.model_aliases = []
+        return self
+
+
 class TaskHarnessAgentPreflightResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1710,6 +1806,24 @@ class TaskHarnessPreflightsResponse(BaseModel):
 
     harness: Literal["acpx"]
     agents: list[TaskHarnessAgentPreflightResponse] = Field(default_factory=list)
+
+
+class ProviderReadinessTargetResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ProviderId
+    transport: ProviderTransport
+    ready: bool
+    state: Literal["ready", "failed", "stale", "unavailable"]
+    reason_code: ProviderReadinessReason
+    checked_at: str | None = None
+    model_aliases: list[str] = Field(default_factory=list)
+
+
+class ProviderReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    providers: list[ProviderReadinessTargetResponse] = Field(default_factory=list)
 
 
 class WorkerCapabilityResponse(BaseModel):

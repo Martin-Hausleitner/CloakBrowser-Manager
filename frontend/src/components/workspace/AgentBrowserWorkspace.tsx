@@ -15,6 +15,8 @@ import {
   type AcpxAgent,
   type OrcaAgentCli,
   type OrcaCapabilities,
+  type ProviderId,
+  type ProviderReadiness,
   type OrcaSession,
   type Profile,
   type TaskOutput,
@@ -32,14 +34,44 @@ import {
 import { ProfileViewer } from "../ProfileViewer";
 import { LiveDevPanel } from "../LiveDevPanel";
 import { AgentOutputTimeline } from "./AgentOutputTimeline";
+import {
+  DEFAULT_BROWSER_TOOLS,
+  ProviderToolControl,
+  providerInfo,
+  providerLaunchBlockReason,
+  type ProviderRoutingState,
+} from "./ProviderToolControl";
 
 type ManagedHarness = "browser-use" | "acpx" | "unbrowse" | "stagehand";
 type AgentMode = ManagedHarness | "antigravity" | OrcaAgentCli;
-type FullViewPanel = "view" | "viewport" | "sessions" | null;
+type FullViewPanel = "view" | "viewport" | "sessions" | "provider" | null;
 type FullViewFitMode = "fit" | "width" | "height";
 type FullViewMode = "single" | "grid";
 
 const MAX_DESKTOP_GRID_STREAMS = 6;
+const DEFAULT_PROVIDER_ROUTING: ProviderRoutingState = {
+  providerId: "grok",
+  transport: "acp",
+  modelAlias: "",
+  browserTools: DEFAULT_BROWSER_TOOLS,
+  routingPolicy: "ordered-fallback",
+};
+
+const ACP_PROVIDER_AGENT_MAP: Partial<Record<ProviderId, AcpxAgent>> = {
+  codex: "codex",
+  claude: "claude",
+  cursor: "cursor",
+  grok: "grok-build",
+  opencode: "opencode",
+};
+
+function acpAgentForProvider(providerId: ProviderId): AcpxAgent | null {
+  return ACP_PROVIDER_AGENT_MAP[providerId] ?? null;
+}
+
+function acpxAgentLabel(agent: AcpxAgent): string {
+  return agent === "grok-build" ? "Grok Build (grok-build)" : agent;
+}
 
 const AGENT_OPTIONS: AgentMode[] = [
   "browser-use",
@@ -186,6 +218,8 @@ export function AgentBrowserWorkspace({
   const [acpxAgent, setAcpxAgent] = useState<AcpxAgent>("grok-build");
   const [prompt, setPrompt] = useState("");
   const [caps, setCaps] = useState<OrcaCapabilities | null>(null);
+  const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness | null>(null);
+  const [providerRouting, setProviderRouting] = useState<ProviderRoutingState>(DEFAULT_PROVIDER_ROUTING);
   const [session, setSession] = useState<OrcaSession | null>(null);
   const [taskSessionId, setTaskSessionId] = useState<string | null>(null);
   const [taskRun, setTaskRun] = useState<TaskRun | null>(null);
@@ -288,7 +322,13 @@ export function AgentBrowserWorkspace({
   const antigravityMode = agent === "antigravity";
   const antigravitySupported = selectedProfile?.harness === "antigravity";
   const acpxBackedMode = acpxMode || antigravityMode;
-  const selectedAcpxAgent: AcpxAgent = antigravityMode ? "grok-build" : acpxAgent;
+  const selectedProviderAgent = acpAgentForProvider(providerRouting.providerId);
+  const normalizedAcpProviderMode = acpxMode && providerRouting.transport === "acp" && selectedProviderAgent !== null;
+  const selectedAcpxAgent: AcpxAgent = antigravityMode
+    ? "grok-build"
+    : normalizedAcpProviderMode
+      ? selectedProviderAgent
+      : acpxAgent;
   const selectedAcpxPreflight = acpxPreflights.find((item) => item.agent === selectedAcpxAgent);
   const readyAcpxAgent = ACPX_AGENT_OPTIONS.find((option) =>
     acpxPreflights.some((preflight) => preflight.agent === option.value && preflight.ready),
@@ -326,12 +366,21 @@ export function AgentBrowserWorkspace({
   const hasModePermissions = managedRunMode
     ? canAutomate
     : canAutomate && canInteract;
+  const normalizedProviderBlockReason = antigravityMode
+    ? providerInfo(providerReadiness, "antigravity", "cli")?.reason_code
+      || "Antigravity CLI execution adapter is not available yet."
+    : acpxMode
+      ? !normalizedAcpProviderMode
+        ? "Only normalized ACP provider launches are executable from this provider control today."
+        : providerLaunchBlockReason(providerRouting, providerReadiness)
+    : null;
   const canStart =
     Boolean(selectedProfile) &&
     selectedProfile?.status === "running" &&
     hasModePermissions &&
     (managedRunMode ? Boolean(prompt.trim()) && originList.length > 0 : !unavailable) &&
     selectedHarnessReady &&
+    !normalizedProviderBlockReason &&
     !sessionActive &&
     !busy;
   const canSend = Boolean(!managedRunMode && sessionActive && canInteract && prompt.trim() && !busy);
@@ -430,6 +479,89 @@ export function AgentBrowserWorkspace({
       });
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+    api
+      .getProviderReadiness({ signal: controller.signal })
+      .then((next) => {
+        if (cancelled) return;
+        setProviderReadiness(next);
+        setProviderRouting((current) => {
+          const currentProvider = providerInfo(next, current.providerId, current.transport);
+          const modelAlias = currentProvider?.model_aliases.includes(current.modelAlias)
+            ? current.modelAlias
+            : currentProvider?.model_aliases[0] ?? "";
+          return { ...current, modelAlias };
+        });
+      })
+      .catch((err) => {
+        if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
+        setProviderReadiness({
+          providers: [
+            {
+              provider: "codex",
+              transport: "acp",
+              ready: false,
+              state: "unavailable",
+              reason_code: "readiness_unavailable",
+              checked_at: null,
+              model_aliases: [],
+            },
+            {
+              provider: "claude",
+              transport: "acp",
+              ready: false,
+              state: "unavailable",
+              reason_code: "readiness_unavailable",
+              checked_at: null,
+              model_aliases: [],
+            },
+            {
+              provider: "cursor",
+              transport: "acp",
+              ready: false,
+              state: "unavailable",
+              reason_code: "readiness_unavailable",
+              checked_at: null,
+              model_aliases: [],
+            },
+            {
+              provider: "grok",
+              transport: "acp",
+              ready: false,
+              state: "unavailable",
+              reason_code: "readiness_unavailable",
+              checked_at: null,
+              model_aliases: [],
+            },
+            {
+              provider: "opencode",
+              transport: "acp",
+              ready: false,
+              state: "unavailable",
+              reason_code: "readiness_unavailable",
+              checked_at: null,
+              model_aliases: [],
+            },
+            {
+              provider: "antigravity",
+              transport: "cli",
+              ready: false,
+              state: "unavailable",
+              reason_code: "readiness_unavailable",
+              checked_at: null,
+              model_aliases: [],
+            },
+          ],
+        });
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
     };
   }, []);
 
@@ -945,6 +1077,27 @@ export function AgentBrowserWorkspace({
         if (!origins.length) {
           throw new Error("Managed browser tasks must include an explicit http(s) URL.");
         }
+        const normalizedAcpRunAgent = normalizedAcpProviderMode ? selectedAcpxAgent : null;
+        const exactProvider = normalizedAcpProviderMode
+          ? providerInfo(providerReadiness, providerRouting.providerId, providerRouting.transport)
+          : null;
+        const selectedModelAlias = exactProvider?.model_aliases.includes(providerRouting.modelAlias)
+          ? providerRouting.modelAlias
+          : null;
+        const normalizedAcpProvider = normalizedAcpRunAgent
+          ? {
+            id: providerRouting.providerId,
+            transport: "acp" as const,
+            ...(selectedModelAlias ? { model_alias: selectedModelAlias } : {}),
+          }
+          : null;
+        const normalizedAcpRoutingPolicy = normalizedAcpRunAgent
+          ? {
+            mode: "ordered-fallback" as const,
+            allow_second_browser: false,
+            max_tool_attempts: 3,
+          }
+          : null;
         let sessionId = taskSessionId;
         if (!sessionId) {
           const created = await api.createTaskSession({
@@ -953,7 +1106,8 @@ export function AgentBrowserWorkspace({
             metadata: {
               source: "agent-browser-workspace",
               harness: managedHarness,
-              ...(acpxBackedMode ? { agent: selectedAcpxAgent } : {}),
+              ...(normalizedAcpRunAgent ? { agent: normalizedAcpRunAgent, provider: normalizedAcpProvider, routing_policy: normalizedAcpRoutingPolicy } : {}),
+              ...(!normalizedAcpRunAgent && acpxBackedMode ? { agent: selectedAcpxAgent } : {}),
               ...(antigravityMode ? { mode: "antigravity" } : {}),
             },
           });
@@ -962,12 +1116,21 @@ export function AgentBrowserWorkspace({
         }
         const started = await api.createTaskRun(sessionId, {
           harness: managedHarness,
-          agent: acpxBackedMode ? selectedAcpxAgent : null,
+          agent: normalizedAcpRunAgent
+            ? normalizedAcpRunAgent
+            : acpxBackedMode
+              ? selectedAcpxAgent
+              : null,
           task,
           profile_id: selectedProfile.id,
           allowed_origins: origins,
           timeout_seconds: 360,
-          model_alias: null,
+          model_alias: normalizedAcpRunAgent ? selectedModelAlias : null,
+          ...(normalizedAcpRunAgent ? {
+            provider: normalizedAcpProvider!,
+            browser_tools: providerRouting.browserTools,
+            routing_policy: normalizedAcpRoutingPolicy!,
+          } : {}),
         });
         rememberBrowserUseRun(selectedProfile.id, started.id);
         setTaskRun(started);
@@ -992,7 +1155,7 @@ export function AgentBrowserWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [acpxBackedMode, agent, antigravityMode, browserUseMode, canStart, managedHarness, managedRunMode, prompt, selectedAcpxAgent, selectedProfile, taskSessionId]);
+  }, [acpxBackedMode, agent, antigravityMode, browserUseMode, canStart, managedHarness, managedRunMode, normalizedAcpProviderMode, prompt, providerReadiness, providerRouting, selectedAcpxAgent, selectedProfile, taskSessionId]);
 
   const handleSend = useCallback(async () => {
     if (!session || !canSend) return;
@@ -1207,9 +1370,9 @@ export function AgentBrowserWorkspace({
                 { mode: "acp", label: "ACP", title: "Run through the selected ACP adapter" },
                 {
                   mode: "acpx",
-                  label: antigravitySupported ? "ACPX · Grok" : "ACPX",
+                  label: "ACPX",
                   title: antigravitySupported
-                    ? "Run Antigravity through the ACPX Grok Build preset"
+                    ? "Antigravity CLI execution is unavailable until its adapter lands"
                     : "Run ACPX through the Grok Build adapter",
                 },
               ] as const).map((option) => (
@@ -1396,6 +1559,14 @@ export function AgentBrowserWorkspace({
               </button>
             </div>
           </div>
+          <div className="mt-1.5">
+            <ProviderToolControl
+              state={providerRouting}
+              readiness={providerReadiness}
+              disabled={sessionActive}
+              onChange={setProviderRouting}
+            />
+          </div>
           <details className="mt-1 text-[9px] text-[#a1a1aa]">
             <summary className="w-fit cursor-pointer select-none hover:text-white">Session details</summary>
             <div className="mt-1 truncate" data-testid="orca-connection-status">
@@ -1447,28 +1618,38 @@ export function AgentBrowserWorkspace({
             >
               {visibleAgentOptions.map((option) => (
                 <option key={option} value={option}>
-                  {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option === "unbrowse" ? "Unbrowse" : option === "stagehand" ? "Stagehand" : option === "antigravity" ? "Antigravity · ACPX/Grok" : option === "agy" ? "AGY · Live CLI" : option === "grok" ? "Grok · Live CLI" : option}
+                  {option === "browser-use" ? "Browser Use" : option === "acpx" ? "ACPX / ACP" : option === "unbrowse" ? "Unbrowse" : option === "stagehand" ? "Stagehand" : option === "antigravity" ? "Antigravity CLI" : option === "agy" ? "AGY · Live CLI" : option === "grok" ? "Grok · Live CLI" : option}
                 </option>
               ))}
             </select>
 
             {acpxMode ? (
-              <>
-                <label className="sr-only" htmlFor="acpx-agent">ACP agent</label>
-                <select
-                  id="acpx-agent"
-                  className="input h-7 max-w-[8rem] bg-[#18181b] py-0.5 text-[10px]"
-                  value={acpxAgent}
-                  onChange={(event) => setAcpxAgent(event.target.value as AcpxAgent)}
-                  disabled={sessionActive}
-                  data-testid="acpx-agent-select"
-                  aria-label="ACP agent"
+              normalizedAcpProviderMode ? (
+                <span
+                  className="inline-flex h-7 max-w-[9rem] items-center rounded border border-[#33343a] bg-[#18181b] px-2 text-[10px] text-[#d4d4d8]"
+                  data-testid="acpx-agent-fixed"
+                  title={`${selectedAcpxAgent} is selected by the normalized ACP provider route`}
                 >
-                  {ACPX_AGENT_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
-              </>
+                  {acpxAgentLabel(selectedAcpxAgent)}
+                </span>
+              ) : (
+                <>
+                  <label className="sr-only" htmlFor="acpx-agent">ACP agent</label>
+                  <select
+                    id="acpx-agent"
+                    className="input h-7 max-w-[8rem] bg-[#18181b] py-0.5 text-[10px]"
+                    value={acpxAgent}
+                    onChange={(event) => setAcpxAgent(event.target.value as AcpxAgent)}
+                    disabled={sessionActive}
+                    data-testid="acpx-agent-select"
+                    aria-label="ACP agent"
+                  >
+                    {ACPX_AGENT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </>
+              )
             ) : null}
           </div>
           {!settingsOpen ? (
@@ -1504,6 +1685,15 @@ export function AgentBrowserWorkspace({
             data-testid="acpx-agent-unavailable"
           >
             {acpxPreflightLabel(selectedAcpxPreflight)}
+          </div>
+        ) : null}
+
+        {managedRunMode && normalizedProviderBlockReason ? (
+          <div
+            className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1.5 text-[11px] text-amber-200"
+            data-testid="provider-launch-unavailable"
+          >
+            {normalizedProviderBlockReason}
           </div>
         ) : null}
 
@@ -1569,7 +1759,7 @@ export function AgentBrowserWorkspace({
             ) : (
               <p className="text-[11px] text-[#a1a1aa]">
                 Add an explicit URL, then run {antigravityMode
-                  ? "Antigravity · ACPX/Grok"
+                  ? "Antigravity CLI"
                   : acpxMode
                     ? `ACPX with ${selectedAcpxAgent}`
                     : managedHarnessLabel(managedHarness)}. Actions, screenshots, data and the
@@ -1726,6 +1916,17 @@ export function AgentBrowserWorkspace({
                 data-testid="desktop-full-view-group"
               >
                 Sessions
+              </button>
+              <button
+                type="button"
+                className={fullViewButtonClass}
+                onClick={() => setFullViewPanel((panel) => (panel === "provider" ? null : "provider"))}
+                aria-label="Open desktop full-view Provider controls"
+                aria-expanded={fullViewPanel === "provider"}
+                aria-controls="desktop-full-view-provider-panel"
+                data-testid="desktop-full-view-group"
+              >
+                Provider
               </button>
               <button
                 ref={viewerFullscreenButtonRef}
@@ -2041,6 +2242,20 @@ export function AgentBrowserWorkspace({
                   {desktopGridOverflow > 0 ? ` · ${desktopGridOverflow} more available from Sessions` : ""}
                 </div>
               )}
+            </div>
+          ) : null}
+          {viewerFullscreen && fullViewPanel === "provider" ? (
+            <div
+              id="desktop-full-view-provider-panel"
+              className="absolute right-3 top-[3.4rem] z-20 w-72 rounded-md border border-[#333] bg-[#171717] p-2 text-[10px] text-[#bbb]"
+            >
+              <ProviderToolControl
+                state={providerRouting}
+                readiness={providerReadiness}
+                disabled={sessionActive}
+                compactId="full"
+                onChange={setProviderRouting}
+              />
             </div>
           ) : null}
         </header>

@@ -14,6 +14,8 @@ from backend.models import (
     TagCreate,
     TaskRunCreate,
     WorkerAcpxPreflightRequest,
+    WorkerProviderPreflightRequest,
+    acp_agent_for_provider,
 )
 
 
@@ -78,6 +80,87 @@ def test_acpx_preflight_requires_consistent_ready_reason(ready: bool, reason_cod
             ready=ready,
             reason_code=reason_code,
         )
+
+
+def test_provider_preflight_accepts_only_exact_public_ready_contract():
+    ready = WorkerProviderPreflightRequest(
+        provider="grok",
+        transport="openai-compatible",
+        ready=True,
+        reason_code="ready",
+        model_aliases=[
+            "grok-build-0.1",
+            "grok-build-0.1",
+            "https://secret.local",
+            "x" * 160,
+        ],
+    )
+
+    assert ready.ready is True
+    assert ready.reason_code == "ready"
+    assert ready.model_aliases == ["grok-build-0.1", "x" * 96]
+
+
+@pytest.mark.parametrize(
+    ("provider", "agent"),
+    [
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("cursor", "cursor"),
+        ("grok", "grok-build"),
+        ("opencode", "opencode"),
+    ],
+)
+def test_acp_provider_mapping_is_exact_for_built_in_registry(
+    provider: str, agent: str
+):
+    assert acp_agent_for_provider(provider) == agent
+
+
+def test_acp_provider_mapping_does_not_include_antigravity_or_unknowns():
+    assert acp_agent_for_provider("antigravity") is None
+    assert acp_agent_for_provider("shell") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "provider": "grok",
+            "transport": "openai-compatible",
+            "ready": True,
+            "reason_code": "auth_required",
+        },
+        {
+            "provider": "grok",
+            "transport": "openai-compatible",
+            "ready": False,
+            "reason_code": "ready",
+        },
+        {
+            "provider": "antigravity",
+            "transport": "acp",
+            "ready": False,
+            "reason_code": "protocol_unavailable",
+        },
+        {
+            "provider": "codex",
+            "transport": "cli",
+            "ready": False,
+            "reason_code": "protocol_unavailable",
+        },
+        {
+            "provider": "grok",
+            "transport": "cli",
+            "ready": False,
+            "reason_code": "protocol_unavailable",
+            "raw_error": "Bearer cbm_worker_secret failed",
+        },
+    ],
+)
+def test_provider_preflight_rejects_invalid_contracts(payload: dict[str, object]):
+    with pytest.raises(ValidationError):
+        WorkerProviderPreflightRequest(**payload)
 
 
 # ── ProfileCreate ────────────────────────────────────────────────────────────
@@ -296,6 +379,65 @@ def test_task_run_routing_contract_defaults_policy_when_present():
     }
 
 
+@pytest.mark.parametrize(
+    ("provider", "agent"),
+    [
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("cursor", "cursor"),
+        ("grok", "grok-build"),
+        ("opencode", "opencode"),
+    ],
+)
+def test_task_run_routing_contract_accepts_exact_acp_provider_agent_mapping(
+    provider: str, agent: str
+):
+    run = TaskRunCreate(
+        harness="acpx",
+        agent=agent,
+        task="Inspect",
+        profile_id="profile-1",
+        provider={"id": provider, "transport": "acp"},
+        browser_tools=[
+            {"id": "unbrowse"},
+            {"id": "stagehand"},
+            {"id": "browser-harness"},
+        ],
+    )
+
+    assert run.provider is not None
+    assert run.provider.id == provider
+    assert run.agent == agent
+
+
+@pytest.mark.parametrize(
+    ("provider", "agent"),
+    [
+        ("codex", "grok-build"),
+        ("claude", "codex"),
+        ("cursor", "claude"),
+        ("grok", "cursor"),
+        ("opencode", "grok-build"),
+    ],
+)
+def test_task_run_routing_contract_rejects_mismatched_acp_provider_agent_mapping(
+    provider: str, agent: str
+):
+    with pytest.raises(ValidationError, match="provider and agent to match"):
+        TaskRunCreate(
+            harness="acpx",
+            agent=agent,
+            task="Inspect",
+            profile_id="profile-1",
+            provider={"id": provider, "transport": "acp"},
+            browser_tools=[
+                {"id": "unbrowse"},
+                {"id": "stagehand"},
+                {"id": "browser-harness"},
+            ],
+        )
+
+
 def test_task_run_routing_contract_allows_legacy_acpx_without_new_fields():
     run = TaskRunCreate(
         harness="acpx",
@@ -327,8 +469,71 @@ def test_task_run_routing_contract_rejects_max_tool_attempts_out_of_range():
             )
 
 
-def test_task_run_routing_contract_rejects_non_acp_grok_transports():
-    for transport in ("cli", "openai-compatible"):
+def test_task_run_routing_contract_accepts_openai_compatible_grok_build_combo():
+    run = TaskRunCreate(
+        harness="acpx",
+        agent="grok-build",
+        task="Inspect",
+        profile_id="profile-1",
+        provider={
+            "id": "grok",
+            "transport": "openai-compatible",
+            "model_alias": "grok-build-0.1",
+        },
+        browser_tools=[
+            {"id": "unbrowse"},
+            {"id": "stagehand"},
+            {"id": "browser-harness"},
+        ],
+        routing_policy={"max_tool_attempts": 2},
+    )
+
+    assert run.provider.model_dump(exclude_none=True) == {
+        "id": "grok",
+        "transport": "openai-compatible",
+        "model_alias": "grok-build-0.1",
+    }
+    assert run.routing_policy is not None
+    assert run.routing_policy.max_tool_attempts == 2
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"harness": "browser-use", "agent": None},
+        {"agent": "codex"},
+        {"provider": {"id": "antigravity", "transport": "openai-compatible"}},
+        {"provider": {"id": "grok", "transport": "openai-compatible"}, "browser_tools": []},
+    ],
+)
+def test_task_run_openai_compatible_rejects_mismatched_combinations(
+    overrides: dict,
+):
+    fields = {
+        "harness": "acpx",
+        "agent": "grok-build",
+        "task": "Inspect",
+        "profile_id": "profile-1",
+        "provider": {
+            "id": "grok",
+            "transport": "openai-compatible",
+            "model_alias": "grok-build-0.1",
+        },
+        "browser_tools": [
+            {"id": "unbrowse"},
+            {"id": "stagehand"},
+            {"id": "browser-harness"},
+        ],
+        "routing_policy": {"max_tool_attempts": 2},
+    }
+    fields.update(overrides)
+
+    with pytest.raises(ValidationError):
+        TaskRunCreate(**fields)
+
+
+def test_task_run_routing_contract_rejects_non_supported_grok_transports():
+    for transport in ("cli",):
         with pytest.raises(ValidationError):
             TaskRunCreate(
                 harness="acpx",

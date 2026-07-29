@@ -8,6 +8,7 @@ import signal
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,8 @@ from scripts.acpx_worker import (
     build_worker_config,
 )
 from scripts.browser_use_worker import ManagerHTTPError
+from scripts.browser_tool_router import BrowserToolResult
+from scripts.provider_readiness import ProviderReadinessResult
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,6 +55,7 @@ class FakeManager:
         self.failed = []
         self.revoked = []
         self.preflights = []
+        self.provider_preflights = []
         self.heartbeat_calls = 0
 
     def issue_capability(self, run_id):
@@ -84,6 +88,13 @@ class FakeManager:
 
     def report_preflight(self, *, agent, ready, reason_code):
         self.preflights.append((agent, ready, reason_code))
+
+    def report_provider_preflight(
+        self, *, provider, transport, ready, reason_code, model_aliases=None
+    ):
+        self.provider_preflights.append(
+            (provider, transport, ready, reason_code, list(model_aliases or []))
+        )
 
 
 class FakeRuntime:
@@ -211,6 +222,17 @@ def routing_claim(**overrides):
     )
 
 
+def openai_routing_claim(**overrides):
+    body = routing_claim()
+    body["provider"] = {
+        "id": "grok",
+        "transport": "openai-compatible",
+        "model_alias": "grok-build-0.1",
+    }
+    body.update(overrides)
+    return body
+
+
 def test_checked_in_acpx_config_only_overrides_opencode_to_pure_local_acp():
     parsed = json.loads((ROOT / ".acpxrc.json").read_text(encoding="utf-8"))
 
@@ -239,6 +261,32 @@ def test_manager_client_claims_only_acpx_runs():
     method, url, _kwargs = http.calls[0]
     assert method == "POST"
     assert url == "https://manager.local/base/internal/task-runs/claim?harness=acpx"
+
+
+def test_manager_client_reports_provider_preflight_without_secrets():
+    http = FakeHTTP([FakeHTTPResponse(204)])
+    client = AcpxManagerClient(
+        "https://manager.local/base", token="cbm_worker_private", http=http
+    )
+
+    client.report_provider_preflight(
+        provider="grok",
+        transport="openai-compatible",
+        ready=True,
+        reason_code="ready",
+        model_aliases=["grok-build-0.1"],
+    )
+
+    method, url, kwargs = http.calls[0]
+    assert method == "POST"
+    assert url == "https://manager.local/base/internal/providers/readiness"
+    assert kwargs["json"] == {
+        "provider": "grok",
+        "transport": "openai-compatible",
+        "ready": True,
+        "reason_code": "ready",
+        "model_aliases": ["grok-build-0.1"],
+    }
 
 
 def test_worker_executes_acpx_session_streams_outputs_and_cleans_capability(tmp_path: Path):
@@ -360,6 +408,128 @@ def test_worker_reports_agent_preflights_and_cleans_empty_mcp_config(tmp_path: P
     assert ("cursor", True, "ok") in manager.preflights
     assert ("codex", False, "auth_required") in manager.preflights
     assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_reports_all_provider_preflights_from_injected_probes(tmp_path: Path):
+    manager = FakeManager()
+    seen: list[tuple[str, str, dict | None, str | None]] = []
+
+    def provider_probe(provider: str, transport: str, *, acp_result=None, base_url=None):
+        seen.append((provider, transport, acp_result, base_url))
+        if transport == "acp":
+            assert base_url is None
+            if provider in {"codex", "grok"}:
+                assert acp_result == {"ready": True, "reason_code": "ok"}
+                aliases = ["grok-build-0.1"] if provider == "grok" else []
+                return ProviderReadinessResult(
+                    provider=provider,
+                    transport="acp",
+                    ready=True,
+                    reason_code="ready",
+                    model_aliases=aliases,
+                )
+            assert acp_result == {"ready": False, "reason_code": "auth_required"}
+            return ProviderReadinessResult(
+                provider=provider,
+                transport="acp",
+                ready=False,
+                reason_code="auth_required",
+                model_aliases=[],
+            )
+        return ProviderReadinessResult(
+            provider=provider,
+            transport=transport,
+            ready=False,
+            reason_code="protocol_unavailable",
+            model_aliases=[],
+        )
+
+    class DoctorRuntime(FakeRuntime):
+        async def preflight_agent(self, *, agent, **_kwargs):
+            if agent in {"codex", "grok-build"}:
+                return {"ready": True, "reason_code": "ok"}
+            return {"ready": False, "reason_code": "auth_required"}
+
+    worker = AcpxWorker(
+        manager,
+        make_config(tmp_path),
+        runtime=DoctorRuntime(),
+        provider_probe=provider_probe,
+    )
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert seen == [
+        ("antigravity", "cli", None, None),
+        ("grok", "cli", None, None),
+        ("codex", "acp", {"ready": True, "reason_code": "ok"}, None),
+        ("claude", "acp", {"ready": False, "reason_code": "auth_required"}, None),
+        ("cursor", "acp", {"ready": False, "reason_code": "auth_required"}, None),
+        ("grok", "acp", {"ready": True, "reason_code": "ok"}, None),
+        ("opencode", "acp", {"ready": False, "reason_code": "auth_required"}, None),
+        ("grok", "openai-compatible", None, "http://127.0.0.1:8317"),
+    ]
+    assert manager.provider_preflights == [
+        ("antigravity", "cli", False, "protocol_unavailable", []),
+        ("grok", "cli", False, "protocol_unavailable", []),
+        ("codex", "acp", True, "ready", []),
+        ("claude", "acp", False, "auth_required", []),
+        ("cursor", "acp", False, "auth_required", []),
+        ("grok", "acp", True, "ready", ["grok-build-0.1"]),
+        ("opencode", "acp", False, "auth_required", []),
+        ("grok", "openai-compatible", False, "protocol_unavailable", []),
+    ]
+
+
+def test_worker_provider_preflight_uses_configured_openai_compatible_base_url(
+    tmp_path: Path,
+):
+    manager = FakeManager()
+    seen: list[str | None] = []
+    config = replace(
+        make_config(tmp_path),
+        openai_compatible_base_url="http://127.0.0.1:9321",
+    )
+
+    def provider_probe(provider: str, transport: str, *, acp_result=None, base_url=None):
+        if (provider, transport) == ("grok", "openai-compatible"):
+            seen.append(base_url)
+            return ProviderReadinessResult(
+                provider="grok",
+                transport="openai-compatible",
+                ready=True,
+                reason_code="ready",
+                model_aliases=["grok-build-0.1"],
+            )
+        return ProviderReadinessResult(
+            provider=provider,
+            transport=transport,
+            ready=False,
+            reason_code="protocol_unavailable",
+            model_aliases=[],
+        )
+
+    class DoctorRuntime(FakeRuntime):
+        async def preflight_agent(self, *, agent, **_kwargs):
+            return {"ready": False, "reason_code": "auth_required"}
+
+    worker = AcpxWorker(
+        manager,
+        config,
+        runtime=DoctorRuntime(),
+        provider_probe=provider_probe,
+    )
+
+    asyncio.run(worker.refresh_preflights())
+
+    assert seen == ["http://127.0.0.1:9321"]
+    assert manager.provider_preflights[-1] == (
+        "grok",
+        "openai-compatible",
+        True,
+        "ready",
+        ["grok-build-0.1"],
+    )
 
 
 @pytest.mark.parametrize("transient_reason", ["adapter_unavailable", "protocol_error"])
@@ -1064,6 +1234,218 @@ def test_worker_omits_routing_contract_env_for_legacy_acpx_claim(tmp_path: Path)
     assert result == {"status": "succeeded"}
 
 
+def test_worker_executes_openai_compatible_branch_through_router_without_acpx(
+    tmp_path: Path,
+):
+    manager = FakeManager()
+    runtime = FakeRuntime()
+    routed = []
+    loop_calls = []
+
+    async def unbrowse_adapter(request):
+        routed.append(request)
+        assert request.context.profile_id == "profile-1"
+        assert request.context.task_run_id == "run-1"
+        assert request.context.allowed_origins == ("https://app.local",)
+        assert request.context.capability_token == "cbm_run_private_capability"
+        assert request.context.capability_file.read_text(encoding="utf-8") == (
+            "cbm_run_private_capability"
+        )
+        return BrowserToolResult(
+            outcome="succeeded",
+            classification="ok",
+            payload={"title": "Managed"},
+        )
+
+    def controller_factory(context):
+        assert context.profile_id == "profile-1"
+        assert context.task_run_id == "run-1"
+        assert context.allowed_origins == ("https://app.local",)
+        assert context.capability_token == "cbm_run_private_capability"
+        return SimpleNamespace(_router_adapters={"unbrowse": unbrowse_adapter})
+
+    async def openai_loop(user_task, router, *, model_alias, base_url, run_timeout_seconds):
+        loop_calls.append(
+            {
+                "user_task": user_task,
+                "model_alias": model_alias,
+                "base_url": base_url,
+                "run_timeout_seconds": run_timeout_seconds,
+            }
+        )
+        result = await router("inspect", {"selector": "body"})
+        assert result["ok"] is True
+        assert result["tool_id"] == "unbrowse"
+        serialized_inputs = json.dumps(loop_calls)
+        assert "cbm_run_private_capability" not in serialized_inputs
+        assert "CBM_RUN_CAPABILITY_FILE" not in serialized_inputs
+        assert "CBM_ROUTING_CONTRACT_JSON" not in serialized_inputs
+        return SimpleNamespace(
+            final_text="OpenAI-compatible completed",
+            model=model_alias,
+            turns=1,
+            tool_calls=1,
+        )
+
+    worker = AcpxWorker(
+        manager,
+        make_config(tmp_path),
+        runtime=runtime,
+        openai_tool_loop=openai_loop,
+        controller_factory=controller_factory,
+    )
+
+    result = asyncio.run(
+        worker.execute_claim(
+            openai_routing_claim(allowed_origins=["https://app.local"], timeout_seconds=45)
+        )
+    )
+
+    assert result == {"status": "succeeded"}
+    assert loop_calls == [
+        {
+            "user_task": "Inspect the browser",
+            "model_alias": "grok-build-0.1",
+            "base_url": "http://127.0.0.1:8317",
+            "run_timeout_seconds": 45.0,
+        }
+    ]
+    assert routed and routed[0].tool_id == "unbrowse"
+    assert runtime.version_checked is False
+    assert runtime.ensure_calls == []
+    assert runtime.prompt_calls == []
+    assert runtime.cancel_calls == []
+    assert runtime.close_calls == []
+    assert manager.outputs == [
+        (
+            "run-1",
+            {
+                "kind": "summary",
+                "summary": "OpenAI-compatible completed",
+                "payload": {
+                    "text": "OpenAI-compatible completed",
+                    "model": "grok-build-0.1",
+                    "turns": 1,
+                    "tool_calls": 1,
+                },
+                "idempotency_key": "openai-compatible-final-summary",
+            },
+        )
+    ]
+    assert manager.completed == ["run-1"]
+    assert manager.failed == []
+    assert manager.revoked == ["run-1"]
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_openai_compatible_tool_loop_errors_are_redacted(tmp_path: Path):
+    from scripts.openai_compatible_toolloop import ToolLoopError
+
+    manager = FakeManager()
+    runtime = FakeRuntime()
+
+    async def failing_loop(*_args, **_kwargs):
+        raise ToolLoopError(
+            "auth_required",
+            "provider rejected Bearer cbm_run_private_capability",
+        )
+
+    worker = AcpxWorker(
+        manager,
+        make_config(tmp_path),
+        runtime=runtime,
+        openai_tool_loop=failing_loop,
+        controller_factory=lambda context: SimpleNamespace(_router_adapters={}),
+    )
+
+    result = asyncio.run(worker.execute_claim(openai_routing_claim()))
+
+    assert result == {"status": "failed"}
+    assert manager.failed == [("run-1", "auth_required", "provider rejected [REDACTED]")]
+    assert "cbm_run_private_capability" not in manager.failed[0][2]
+    assert runtime.ensure_calls == []
+    assert runtime.close_calls == []
+    assert manager.revoked == ["run-1"]
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_openai_compatible_cancel_cancels_tool_task_without_acpx(
+    tmp_path: Path,
+):
+    manager = FakeManager(
+        heartbeats=[{"cancel_requested": True, "heartbeat_interval_seconds": 1}]
+    )
+    runtime = FakeRuntime()
+    loop_cancelled = False
+
+    async def slow_loop(*_args, **_kwargs):
+        nonlocal loop_cancelled
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            loop_cancelled = True
+            raise
+
+    worker = AcpxWorker(
+        manager,
+        make_config(tmp_path),
+        runtime=runtime,
+        openai_tool_loop=slow_loop,
+        controller_factory=lambda context: SimpleNamespace(_router_adapters={}),
+    )
+
+    result = asyncio.run(worker.execute_claim(openai_routing_claim()))
+
+    assert result == {"status": "cancelled"}
+    assert loop_cancelled is True
+    assert runtime.cancel_calls == []
+    assert runtime.ensure_calls == []
+    assert runtime.close_calls == []
+    assert manager.completed == []
+    assert manager.failed == []
+    assert manager.revoked == ["run-1"]
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_openai_compatible_claim_loss_cancels_tool_task_without_acpx(
+    tmp_path: Path,
+):
+    class LostClaimManager(FakeManager):
+        def heartbeat(self, run_id):
+            self.heartbeat_calls += 1
+            raise ManagerHTTPError("not found", status_code=404)
+
+    manager = LostClaimManager()
+    runtime = FakeRuntime()
+    loop_cancelled = False
+
+    async def slow_loop(*_args, **_kwargs):
+        nonlocal loop_cancelled
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            loop_cancelled = True
+            raise
+
+    worker = AcpxWorker(
+        manager,
+        make_config(tmp_path),
+        runtime=runtime,
+        openai_tool_loop=slow_loop,
+        controller_factory=lambda context: SimpleNamespace(_router_adapters={}),
+    )
+
+    result = asyncio.run(worker.execute_claim(openai_routing_claim()))
+
+    assert result == {"status": "cancelled"}
+    assert loop_cancelled is True
+    assert runtime.cancel_calls == []
+    assert runtime.ensure_calls == []
+    assert runtime.close_calls == []
+    assert manager.revoked == ["run-1"]
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
 def test_worker_wraps_browser_task_with_run_scoped_mcp_contract(tmp_path: Path):
     manager = FakeManager()
     runtime = FakeRuntime()
@@ -1197,9 +1579,12 @@ def test_build_worker_config_requires_private_files_and_absolute_worktree(tmp_pa
             str(mcp),
             "--capability-dir",
             str(cap),
+            "--openai-compatible-base-url",
+            "http://127.0.0.1:9321",
         ]
     )
     assert config.worktree == tmp_path.resolve()
+    assert config.openai_compatible_base_url == "http://127.0.0.1:9321"
 
     with pytest.raises(ValueError, match="absolute directory"):
         build_worker_config(
@@ -1218,6 +1603,62 @@ def test_build_worker_config_requires_private_files_and_absolute_worktree(tmp_pa
                 str(cap),
             ]
         )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8317",
+        "https://127.0.0.1:8317",
+        "http://10.0.0.1:8317",
+        "http://user:pass@127.0.0.1:8317",
+        "http://127.0.0.1:8317/v1",
+        "http://127.0.0.1:8317?token=secret",
+        "http://127.0.0.1:8317#fragment",
+        "http://127.0.0.1",
+    ],
+)
+def test_build_worker_config_rejects_non_loopback_openai_base_url(
+    tmp_path: Path,
+    url: str,
+):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"defaultAction":"deny"}', encoding="utf-8")
+    os.chmod(policy, 0o600)
+    mcp = tmp_path / "mcp.json"
+    mcp.write_text(
+        json.dumps(
+            {"mcpServers": [{"name": "cloakbrowser", "command": "cbm-mcp", "args": []}]}
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(mcp, 0o600)
+    cap = tmp_path / "cap"
+    cap.mkdir(mode=0o700)
+    token_file = write_worker_key(tmp_path)
+
+    with pytest.raises(ValueError) as exc:
+        build_worker_config(
+            [
+                "--manager-url",
+                "https://manager.local",
+                "--token-file",
+                str(token_file),
+                "--worktree",
+                str(tmp_path),
+                "--permission-policy",
+                str(policy),
+                "--mcp-config",
+                str(mcp),
+                "--capability-dir",
+                str(cap),
+                "--openai-compatible-base-url",
+                url,
+            ]
+        )
+
+    assert url not in str(exc.value)
+    assert "secret" not in str(exc.value)
 
 
 def test_build_worker_config_rejects_inline_cli_token_and_env_fallback(

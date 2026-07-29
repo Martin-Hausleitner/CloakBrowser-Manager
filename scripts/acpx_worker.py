@@ -19,10 +19,10 @@ import signal
 import stat
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from scripts.acpx_runner import (
     SUPPORTED_AGENTS,
@@ -48,7 +48,27 @@ from scripts.browser_use_worker import (
     sanitize_output_payload,
     validate_worker_token,
 )
-from scripts.browser_tool_router import routing_contract_from_claim
+from scripts.browser_tool_router import (
+    BrowserRoutingContract,
+    BrowserToolConfig,
+    ROUTING_BROWSER_TOOL_ORDER,
+    RunScopedBrowserContext,
+    route_browser_action,
+    routing_contract_from_claim,
+)
+from scripts.cbm_mcp import CbmMcpController, RunContext
+from scripts.openai_compatible_toolloop import (
+    DEFAULT_BASE_URL as DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    DEFAULT_MODEL_ALIAS as DEFAULT_OPENAI_COMPATIBLE_MODEL_ALIAS,
+    ToolLoopError,
+    run_openai_compatible_tool_loop,
+)
+from scripts.provider_readiness import (
+    PROVIDER_TARGETS,
+    ProviderReadinessResult,
+    acp_agent_for_provider,
+    probe_provider_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +147,83 @@ def build_routing_contract_json(
     return json.dumps(contract.public_json(), separators=(",", ":"), sort_keys=True)
 
 
+def _is_openai_compatible_grok_provider(claim: dict[str, Any]) -> bool:
+    provider = claim.get("provider")
+    return (
+        isinstance(provider, dict)
+        and provider.get("id") == "grok"
+        and provider.get("transport") == "openai-compatible"
+    )
+
+
+def _selected_openai_model_alias(claim: dict[str, Any]) -> str:
+    provider = claim.get("provider")
+    if isinstance(provider, dict):
+        model_alias = str(provider.get("model_alias") or "").strip()
+        if model_alias:
+            return model_alias[:80]
+    model_alias = str(claim.get("model_alias") or "").strip()
+    if model_alias:
+        return model_alias[:80]
+    return DEFAULT_OPENAI_COMPATIBLE_MODEL_ALIAS
+
+
+def _routing_contract_for_openai_compatible(
+    claim: dict[str, Any],
+    capability: dict[str, Any],
+) -> BrowserRoutingContract:
+    """Parse the strict public contract while preserving openai-compatible transport."""
+    source = dict(claim)
+    if "provider" not in source and "provider" in capability:
+        source["provider"] = capability["provider"]
+    if "browser_tools" not in source and "browser_tools" in capability:
+        source["browser_tools"] = capability["browser_tools"]
+    if "routing_policy" not in source and "routing_policy" in capability:
+        source["routing_policy"] = capability["routing_policy"]
+    provider = source.get("provider")
+    browser_tools = source.get("browser_tools")
+    routing_policy = source.get("routing_policy")
+    if (
+        not isinstance(provider, dict)
+        or provider.get("id") != "grok"
+        or provider.get("transport") != "openai-compatible"
+        or not isinstance(browser_tools, list)
+        or not isinstance(routing_policy, dict)
+    ):
+        raise ValueError("provider, browser_tools, and routing_policy are required")
+    tool_ids = [str(tool.get("id")) for tool in browser_tools if isinstance(tool, dict)]
+    if tuple(tool_ids) != tuple(ROUTING_BROWSER_TOOL_ORDER):
+        raise ValueError(
+            "browser_tools must be ordered as unbrowse, stagehand, browser-harness"
+        )
+    if len(browser_tools) != len(ROUTING_BROWSER_TOOL_ORDER) or any(
+        not isinstance(tool, dict) or not isinstance(tool.get("enabled"), bool)
+        for tool in browser_tools
+    ):
+        raise ValueError("browser_tools entries require explicit boolean enabled")
+    if not any(bool(tool.get("enabled")) for tool in browser_tools):
+        raise ValueError("browser_tools must contain at least one enabled tool")
+    if routing_policy.get("mode") != "ordered-fallback":
+        raise ValueError("routing mode must be ordered-fallback")
+    if routing_policy.get("allow_second_browser") is not False:
+        raise ValueError("allow_second_browser is not supported")
+    max_tool_attempts = routing_policy.get("max_tool_attempts")
+    if not isinstance(max_tool_attempts, int) or isinstance(max_tool_attempts, bool):
+        raise ValueError("max_tool_attempts must be an integer between 1 and 3")
+    if max_tool_attempts < 1 or max_tool_attempts > 3:
+        raise ValueError("max_tool_attempts must be between 1 and 3")
+    return BrowserRoutingContract(
+        provider={"id": "grok", "transport": "openai-compatible"},
+        browser_tools=tuple(
+            BrowserToolConfig(id=str(tool["id"]), enabled=bool(tool["enabled"]))
+            for tool in browser_tools
+        ),
+        max_tool_attempts=max_tool_attempts,
+        allow_second_browser=False,
+        mode="ordered-fallback",
+    )
+
+
 class AcpxRuntimeError(RuntimeError):
     """Redacted runtime failure safe to map to a Manager terminal state."""
 
@@ -149,6 +246,17 @@ class AcpxWorkerConfig:
     preflight_interval_seconds: float = 240.0
     token: str | None = None
     token_file: str | None = None
+    openai_compatible_base_url: str = field(
+        default=DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "openai_compatible_base_url",
+            _validate_openai_compatible_base_url(self.openai_compatible_base_url),
+        )
 
 
 class AcpxManagerClient(ManagerClient):
@@ -165,6 +273,27 @@ class AcpxManagerClient(ManagerClient):
             "POST",
             "/internal/task-harnesses/acpx/preflights",
             json={"agent": agent, "ready": ready, "reason_code": reason_code},
+        )
+
+    def report_provider_preflight(
+        self,
+        *,
+        provider: str,
+        transport: str,
+        ready: bool,
+        reason_code: str,
+        model_aliases: list[str] | None = None,
+    ) -> None:
+        self.request(
+            "POST",
+            "/internal/providers/readiness",
+            json={
+                "provider": provider,
+                "transport": transport,
+                "ready": ready,
+                "reason_code": reason_code,
+                "model_aliases": list(model_aliases or []),
+            },
         )
 
 
@@ -571,10 +700,16 @@ class AcpxWorker:
         config: AcpxWorkerConfig,
         *,
         runtime: Any | None = None,
+        provider_probe: Any | None = None,
+        openai_tool_loop: Callable[..., Awaitable[Any]] | None = None,
+        controller_factory: Callable[[RunContext], CbmMcpController] | None = None,
     ) -> None:
         self.client = client
         self.config = config
         self.runtime = runtime or AcpxRuntime(config)
+        self.provider_probe = provider_probe or probe_provider_target
+        self.openai_tool_loop = openai_tool_loop or run_openai_compatible_tool_loop
+        self.controller_factory = controller_factory or CbmMcpController
 
     async def _emit(self, run_id: str, output: dict[str, Any]) -> None:
         idempotency_key = str(output["idempotency_key"])
@@ -600,6 +735,96 @@ class AcpxWorker:
                 idempotency_key=idempotency_key,
             )
 
+    async def _run_openai_compatible_claim(
+        self,
+        *,
+        claim: dict[str, Any],
+        capability: dict[str, Any],
+        capability_file: Path,
+        run_environment: dict[str, str],
+        cancel_event: asyncio.Event,
+        claim_lost: asyncio.Event,
+    ) -> str | None:
+        run_id = str(claim.get("id") or "")
+        contract = _routing_contract_for_openai_compatible(claim, capability)
+        context = RunContext.from_environment(run_environment)
+        controller = self.controller_factory(context)
+        router_context = RunScopedBrowserContext(
+            manager_url=context.manager_url,
+            profile_id=context.profile_id,
+            task_run_id=context.task_run_id,
+            allowed_origins=context.allowed_origins,
+            capability_file=capability_file,
+            capability_token=context.capability_token,
+            lease_id=(
+                str(capability.get("lease_id"))
+                if capability.get("lease_id")
+                else None
+            ),
+        )
+
+        async def router(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            result = await route_browser_action(
+                contract=contract,
+                context=router_context,
+                action=action,
+                arguments=arguments,
+                adapters=controller._router_adapters,
+            )
+            return result.public_json()
+
+        loop_task = asyncio.create_task(
+            self.openai_tool_loop(
+                str(claim.get("task") or ""),
+                router,
+                model_alias=_selected_openai_model_alias(claim),
+                base_url=self.config.openai_compatible_base_url,
+                run_timeout_seconds=float(claim.get("timeout_seconds") or 300),
+            )
+        )
+        cancel_task = asyncio.create_task(cancel_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {loop_task, cancel_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_task in done and cancel_event.is_set() and not loop_task.done():
+                loop_task.cancel()
+                try:
+                    await loop_task
+                except asyncio.CancelledError:
+                    pass
+                return None
+            result = await loop_task
+        finally:
+            cancel_task.cancel()
+            if not loop_task.done():
+                loop_task.cancel()
+                try:
+                    await loop_task
+                except asyncio.CancelledError:
+                    pass
+        if cancel_event.is_set() or claim_lost.is_set():
+            return None
+        final_text = str(getattr(result, "final_text", "") or "").strip()
+        if not final_text:
+            raise ToolLoopError("protocol_error", "final assistant content is empty")
+        await self._emit(
+            run_id,
+            {
+                "idempotency_key": "openai-compatible-final-summary",
+                "kind": "summary",
+                "summary": final_text[:500],
+                "payload": {
+                    "text": final_text[:500],
+                    "model": str(getattr(result, "model", ""))[:80],
+                    "turns": int(getattr(result, "turns", 0) or 0),
+                    "tool_calls": int(getattr(result, "tool_calls", 0) or 0),
+                },
+            },
+        )
+        return final_text
+
     async def _heartbeat_loop(
         self,
         *,
@@ -610,6 +835,7 @@ class AcpxWorker:
         stop_event: asyncio.Event,
         cancel_event: asyncio.Event,
         claim_lost: asyncio.Event,
+        runtime_cancel_enabled: bool = True,
     ) -> None:
         while not stop_event.is_set() and not cancel_event.is_set():
             try:
@@ -618,14 +844,16 @@ class AcpxWorker:
                 if exc.status_code in {404, 410}:
                     claim_lost.set()
                     cancel_event.set()
-                    await self.runtime.cancel(cwd=cwd, agent=agent, session_name=session_name)
+                    if runtime_cancel_enabled:
+                        await self.runtime.cancel(cwd=cwd, agent=agent, session_name=session_name)
                     return
                 body = {}
             except Exception:  # noqa: BLE001 - retry transient heartbeat failures
                 body = {}
             if body.get("cancel_requested"):
                 cancel_event.set()
-                await self.runtime.cancel(cwd=cwd, agent=agent, session_name=session_name)
+                if runtime_cancel_enabled:
+                    await self.runtime.cancel(cwd=cwd, agent=agent, session_name=session_name)
                 return
             interval = float(
                 body.get("heartbeat_interval_seconds")
@@ -725,26 +953,33 @@ class AcpxWorker:
         environment = {
             "CBM_MANAGER_URL": self.config.manager_url,
         }
+        agent_results: dict[str, dict[str, Any]] = {}
         try:
             try:
                 await self.runtime.validate_version()
             except AcpxRuntimeError as exc:
                 for agent in sorted(SUPPORTED_AGENTS):
+                    result = {"ready": False, "reason_code": exc.reason_code}
+                    agent_results[agent] = result
                     await asyncio.to_thread(
                         self.client.report_preflight,
                         agent=agent,
-                        ready=False,
-                        reason_code=exc.reason_code,
+                        ready=bool(result["ready"]),
+                        reason_code=str(result["reason_code"]),
                     )
+                await self._report_provider_preflights(agent_results)
                 return
             except Exception:  # noqa: BLE001 - publish only redacted reason codes
                 for agent in sorted(SUPPORTED_AGENTS):
+                    result = {"ready": False, "reason_code": "protocol_error"}
+                    agent_results[agent] = result
                     await asyncio.to_thread(
                         self.client.report_preflight,
                         agent=agent,
-                        ready=False,
-                        reason_code="protocol_error",
+                        ready=bool(result["ready"]),
+                        reason_code=str(result["reason_code"]),
                     )
+                await self._report_provider_preflights(agent_results)
                 return
 
             for agent in sorted(SUPPORTED_AGENTS):
@@ -757,14 +992,52 @@ class AcpxWorker:
                     environment=environment,
                     mcp_config=mcp_config,
                 )
+                agent_results[agent] = {"ready": ready, "reason_code": reason_code}
                 await asyncio.to_thread(
                     self.client.report_preflight,
                     agent=agent,
                     ready=ready,
                     reason_code=reason_code,
                 )
+            await self._report_provider_preflights(agent_results)
         finally:
             mcp_config.unlink(missing_ok=True)
+
+    async def _report_provider_preflights(
+        self,
+        agent_results: dict[str, dict[str, Any]],
+    ) -> None:
+        for provider, transport in PROVIDER_TARGETS:
+            acp_result = None
+            if transport == "acp":
+                agent = acp_agent_for_provider(provider)
+                acp_result = agent_results.get(agent) if agent else None
+            try:
+                kwargs: dict[str, Any] = {"acp_result": acp_result}
+                if (provider, transport) == ("grok", "openai-compatible"):
+                    kwargs["base_url"] = self.config.openai_compatible_base_url
+                result = await asyncio.to_thread(
+                    self.provider_probe,
+                    provider,
+                    transport,
+                    **kwargs,
+                )
+            except Exception:  # noqa: BLE001 - publish only public reason code
+                result = ProviderReadinessResult(
+                    provider=provider,
+                    transport=transport,
+                    ready=False,
+                    reason_code="protocol_unavailable",
+                    model_aliases=[],
+                )
+            await asyncio.to_thread(
+                self.client.report_provider_preflight,
+                provider=result.provider,
+                transport=result.transport,
+                ready=result.ready,
+                reason_code=result.reason_code,
+                model_aliases=result.model_aliases,
+            )
 
     async def execute_claim(self, claim: dict[str, Any]) -> dict[str, str]:
         run_id = str(claim.get("id") or "")
@@ -795,6 +1068,7 @@ class AcpxWorker:
         session_ensured = False
         heartbeat_task: asyncio.Task[None] | None = None
         try:
+            is_openai_compatible = _is_openai_compatible_grok_provider(claim)
             capability = await asyncio.to_thread(self.client.issue_capability, run_id)
             capability_issued = True
             token = validate_worker_token(str(capability.get("token") or ""))
@@ -808,10 +1082,20 @@ class AcpxWorker:
                     list(claim.get("allowed_origins") or []), separators=(",", ":")
                 ),
             }
-            routing_contract_json = build_routing_contract_json(
-                claim=claim,
-                capability=capability,
-            )
+            if is_openai_compatible:
+                routing_contract_json = json.dumps(
+                    _routing_contract_for_openai_compatible(
+                        claim,
+                        capability,
+                    ).public_json(),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            else:
+                routing_contract_json = build_routing_contract_json(
+                    claim=claim,
+                    capability=capability,
+                )
             if routing_contract_json is not None:
                 run_environment["CBM_ROUTING_CONTRACT_JSON"] = routing_contract_json
             heartbeat_task = asyncio.create_task(
@@ -823,8 +1107,24 @@ class AcpxWorker:
                     stop_event=stop_event,
                     cancel_event=cancel_event,
                     claim_lost=claim_lost,
+                    runtime_cancel_enabled=not is_openai_compatible,
                 )
             )
+            if is_openai_compatible:
+                summary = await self._run_openai_compatible_claim(
+                    claim=claim,
+                    capability=capability,
+                    capability_file=capability_file,
+                    run_environment=run_environment,
+                    cancel_event=cancel_event,
+                    claim_lost=claim_lost,
+                )
+                if cancel_event.is_set() or claim_lost.is_set():
+                    return {"status": "cancelled"}
+                if not summary:
+                    raise ToolLoopError("protocol_error", "final assistant content is empty")
+                result = await asyncio.to_thread(self.client.complete, run_id)
+                return {"status": str(result.get("status") or "succeeded")}
             await self.runtime.validate_version()
             await self.runtime.ensure_session(
                 cwd=self.config.worktree,
@@ -850,6 +1150,17 @@ class AcpxWorker:
             # The ACP event stream already persisted the final summary.
             result = await asyncio.to_thread(self.client.complete, run_id)
             return {"status": str(result.get("status") or "succeeded")}
+        except ToolLoopError as exc:
+            if cancel_event.is_set() or claim_lost.is_set():
+                return {"status": "cancelled"}
+            await asyncio.to_thread(
+                self.client.fail,
+                run_id,
+                error_code=exc.code[:64],
+                message=sanitize_manager_error_message(exc.reason)
+                or "OpenAI-compatible tool loop failed",
+            )
+            return {"status": "failed"}
         except Exception as exc:  # noqa: BLE001 - sanitized terminal boundary
             if cancel_event.is_set() or claim_lost.is_set():
                 return {"status": "cancelled"}
@@ -978,6 +1289,26 @@ def _read_private_worker_token_file(raw: str) -> tuple[str, str]:
     return token, str(path)
 
 
+def _validate_openai_compatible_base_url(raw: str) -> str:
+    value = str(raw or "").strip()
+    parsed = urlparse(value)
+    if parsed.scheme != "http" or parsed.hostname != "127.0.0.1":
+        raise ValueError("OpenAI-compatible base URL must be loopback http://127.0.0.1")
+    if parsed.username or parsed.password:
+        raise ValueError("OpenAI-compatible base URL must not include credentials")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError(
+            "OpenAI-compatible base URL must not include path, query, or fragment"
+        )
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("OpenAI-compatible base URL port is invalid") from exc
+    if not port:
+        raise ValueError("OpenAI-compatible base URL must include a port")
+    return f"http://127.0.0.1:{port}"
+
+
 class _ArgumentParserExit(Exception):
     def __init__(self, status: int) -> None:
         super().__init__("argument parser exit")
@@ -1011,6 +1342,11 @@ def build_worker_config(argv: list[str] | None = None) -> AcpxWorkerConfig:
         default=os.environ.get("CBM_ACPX_CAPABILITY_DIR") or "",
     )
     parser.add_argument("--acpx", default=os.environ.get("CBM_ACPX_EXECUTABLE") or "acpx")
+    parser.add_argument(
+        "--openai-compatible-base-url",
+        default=os.environ.get("CBM_ACPX_OPENAI_COMPATIBLE_BASE_URL")
+        or DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    )
     parser.add_argument("--poll-interval", type=float, default=2.0)
     parser.add_argument("--preflight-interval", type=float, default=240.0)
     args = parser.parse_args(raw_argv)
@@ -1032,6 +1368,9 @@ def build_worker_config(argv: list[str] | None = None) -> AcpxWorkerConfig:
     executable = str(args.acpx or "").strip()
     if not executable or any(ch.isspace() for ch in executable):
         raise ValueError("ACPX executable must be one command name or path")
+    openai_compatible_base_url = _validate_openai_compatible_base_url(
+        str(args.openai_compatible_base_url or "")
+    )
     return AcpxWorkerConfig(
         manager_url=manager_url,
         worker_id=str(args.worker_id or "acpx-worker"),
@@ -1044,6 +1383,7 @@ def build_worker_config(argv: list[str] | None = None) -> AcpxWorkerConfig:
         preflight_interval_seconds=max(30.0, float(args.preflight_interval)),
         token=token,
         token_file=token_file,
+        openai_compatible_base_url=openai_compatible_base_url,
     )
 
 

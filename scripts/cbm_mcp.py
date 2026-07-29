@@ -32,6 +32,13 @@ from scripts.cbm_browser_ctl import (
     validate_selector,
     validate_text,
 )
+from scripts.browser_tool_router import (
+    BrowserToolAdapter,
+    BrowserToolResult,
+    RunScopedBrowserContext,
+    route_browser_action,
+    routing_contract_from_claim,
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,7 @@ class RunContext:
     allowed_origins: tuple[str, ...]
     capability_file: Path
     capability_token: str = field(repr=False)
+    routing_contract: dict[str, Any] | None = field(default=None, repr=False)
 
     @classmethod
     def from_environment(cls, environment: dict[str, str] | None = None) -> "RunContext":
@@ -69,6 +77,16 @@ class RunContext:
             not isinstance(item, str) for item in raw_origins
         ):
             raise ValueError("CBM_ALLOWED_ORIGINS must be a JSON string array")
+        raw_routing_contract = str(env.get("CBM_ROUTING_CONTRACT_JSON") or "").strip()
+        routing_contract = None
+        if raw_routing_contract:
+            try:
+                parsed = json.loads(raw_routing_contract)
+            except json.JSONDecodeError as exc:
+                raise ValueError("CBM_ROUTING_CONTRACT_JSON must be JSON") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("CBM_ROUTING_CONTRACT_JSON must be a JSON object")
+            routing_contract = parsed
         return cls(
             manager_url=manager_url,
             profile_id=profile_id,
@@ -76,6 +94,7 @@ class RunContext:
             allowed_origins=tuple(raw_origins),
             capability_file=capability_file.resolve(),
             capability_token=token,
+            routing_contract=routing_contract,
         )
 
 
@@ -87,9 +106,11 @@ class CbmMcpController:
         context: RunContext,
         *,
         connect_over_cdp: Callable[..., Any] | None = None,
+        router_adapters: dict[str, BrowserToolAdapter] | None = None,
     ) -> None:
         self.context = context
         self._connect_over_cdp = connect_over_cdp
+        self._router_adapters = router_adapters or _default_router_adapters()
 
     def _require_allowed_url(self, url: str) -> None:
         if not self.context.allowed_origins:
@@ -225,6 +246,61 @@ class CbmMcpController:
             "resources": {"orca-web": payload["resources"]["orca-web"]},
         }
 
+    async def route_browser_action(
+        self,
+        action: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Route one browser action through the ordered normalized browser-tool chain."""
+        try:
+            contract = routing_contract_from_claim(self.context.routing_contract)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "outcome": "failed",
+                "classification": "policy_denied",
+                "tool_id": None,
+                "result": {},
+                "telemetry": [],
+                "message": str(exc),
+            }
+        result = await route_browser_action(
+            contract=contract,
+            context=self._router_context(),
+            action=action,
+            arguments=arguments or {},
+            adapters=self._router_adapters,
+        )
+        return result.public_json()
+
+    def _router_context(self) -> RunScopedBrowserContext:
+        return RunScopedBrowserContext(
+            manager_url=self.context.manager_url,
+            profile_id=self.context.profile_id,
+            task_run_id=self.context.task_run_id,
+            allowed_origins=self.context.allowed_origins,
+            capability_file=self.context.capability_file,
+            capability_token=self.context.capability_token,
+            lease_id=(
+                str(self.context.routing_contract.get("context", {}).get("lease_id"))
+                if isinstance(self.context.routing_contract, dict)
+                and isinstance(self.context.routing_contract.get("context"), dict)
+                and self.context.routing_contract.get("context", {}).get("lease_id")
+                else None
+            ),
+        )
+
+
+def _default_router_adapters() -> dict[str, BrowserToolAdapter]:
+    async def unavailable(_request):
+        return BrowserToolResult(outcome="failed", classification="tool_unavailable")
+
+    return {
+        "unbrowse": unavailable,
+        "stagehand": unavailable,
+        "browser-harness": unavailable,
+    }
+
 
 def _import_fastmcp():
     try:
@@ -273,6 +349,14 @@ def build_server(controller: CbmMcpController | None = None):
     async def browser_read_text(selector: str | None = None) -> dict[str, Any]:
         """Read bounded visible text, never raw HTML or DOM snapshots."""
         return await asyncio.to_thread(ctl.read_text, selector)
+
+    @server.tool()
+    async def cbm_route_browser_action(
+        action: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Route one browser action through Manager-approved browser tools."""
+        return await ctl.route_browser_action(action, arguments or {})
 
     @server.tool()
     def control_plane_capabilities() -> dict[str, Any]:

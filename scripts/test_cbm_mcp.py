@@ -80,6 +80,26 @@ def make_run_context(tmp_path: Path, **overrides) -> RunContext:
     return RunContext.from_environment(env)
 
 
+def make_routing_context(tmp_path: Path) -> RunContext:
+    routing_contract = {
+        "provider": {"id": "grok", "transport": "acp"},
+        "browser_tools": [
+            {"id": "unbrowse", "enabled": True},
+            {"id": "stagehand", "enabled": True},
+            {"id": "browser-harness", "enabled": True},
+        ],
+        "routing_policy": {
+            "mode": "ordered-fallback",
+            "allow_second_browser": False,
+            "max_tool_attempts": 2,
+        },
+    }
+    return make_run_context(
+        tmp_path,
+        CBM_ROUTING_CONTRACT_JSON=json.dumps(routing_contract),
+    )
+
+
 def controller(tmp_path: Path):
     page = FakePage()
     browser = FakeBrowser(page)
@@ -225,6 +245,7 @@ def test_server_factory_registers_only_bounded_tools(tmp_path: Path, monkeypatch
         "browser_click",
         "browser_fill",
         "browser_read_text",
+        "cbm_route_browser_action",
         "control_plane_capabilities",
         "control_plane_resource_schema",
         "orca_web_capabilities",
@@ -294,3 +315,66 @@ def test_mcp_resource_tools_return_bounded_envelopes_without_secret_paths(tmp_pa
         "skill": False,
     }
     assert orca["resources"]["orca-web"]["reason_code"] == "capability_unavailable"
+
+
+def test_router_facade_routes_with_run_context_and_redacted_attempt_telemetry(
+    tmp_path: Path,
+):
+    seen = []
+
+    async def unbrowse(request):
+        seen.append((request.tool_id, request.context))
+        from scripts.browser_tool_router import BrowserToolResult
+
+        return BrowserToolResult(
+            outcome="failed",
+            classification="route_miss",
+            message="Bearer cbm_run_private_capability route miss",
+        )
+
+    async def stagehand(request):
+        seen.append((request.tool_id, request.context))
+        from scripts.browser_tool_router import BrowserToolResult
+
+        return BrowserToolResult(
+            outcome="succeeded",
+            classification="ok",
+            payload={"title": "Example"},
+        )
+
+    ctl = CbmMcpController(
+        make_routing_context(tmp_path),
+        router_adapters={"unbrowse": unbrowse, "stagehand": stagehand},
+    )
+
+    result = asyncio.run(ctl.route_browser_action("inspect", {}))
+
+    assert [item[0] for item in seen] == ["unbrowse", "stagehand"]
+    assert seen[0][1] == seen[1][1]
+    assert result["ok"] is True
+    assert result["tool_id"] == "stagehand"
+    assert result["result"] == {"title": "Example"}
+    assert [set(item) for item in result["telemetry"]] == [
+        {"tool_id", "action_class", "duration_ms", "result_class", "fallback_reason"},
+        {"tool_id", "action_class", "duration_ms", "result_class", "fallback_reason"},
+    ]
+    assert result["telemetry"][0]["fallback_reason"] == "route_miss"
+    assert result["telemetry"][1]["fallback_reason"] is None
+    serialized = json.dumps(result)
+    assert "cbm_run_private_capability" not in serialized
+    assert "Bearer" not in serialized
+    assert "manager_url" not in serialized
+    assert "allowed_origins" not in serialized
+    assert "capability_file" not in serialized
+    assert "lease-1" not in serialized
+
+
+def test_router_facade_is_explicitly_unavailable_without_normalized_contract(
+    tmp_path: Path,
+):
+    ctl = CbmMcpController(make_run_context(tmp_path))
+
+    result = asyncio.run(ctl.route_browser_action("inspect", {}))
+    assert result["ok"] is False
+    assert result["classification"] == "tool_unavailable"
+    assert "telemetry" in result

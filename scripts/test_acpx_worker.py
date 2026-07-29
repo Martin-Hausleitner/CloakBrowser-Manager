@@ -193,6 +193,24 @@ def claim(**overrides):
     return body
 
 
+def routing_claim(**overrides):
+    return claim(
+        agent="grok-build",
+        provider={"id": "grok", "transport": "acp"},
+        browser_tools=[
+            {"id": "unbrowse", "enabled": True},
+            {"id": "stagehand", "enabled": True},
+            {"id": "browser-harness", "enabled": True},
+        ],
+        routing_policy={
+            "mode": "ordered-fallback",
+            "allow_second_browser": False,
+            "max_tool_attempts": 2,
+        },
+        **overrides,
+    )
+
+
 def test_checked_in_acpx_config_only_overrides_opencode_to_pure_local_acp():
     parsed = json.loads((ROOT / ".acpxrc.json").read_text(encoding="utf-8"))
 
@@ -960,6 +978,84 @@ def test_worker_execute_claim_uses_manager_capability_and_real_mcp_config(tmp_pa
 
     assert result == {"status": "succeeded"}
     assert manager.revoked == ["run-1"]
+
+
+def test_worker_passes_normalized_routing_contract_to_acpx_without_secrets(
+    tmp_path: Path,
+):
+    manager = FakeManager()
+
+    class RoutingRuntime(FakeRuntime):
+        async def ensure_session(self, *, environment, **kwargs):
+            routing = json.loads(environment["CBM_ROUTING_CONTRACT_JSON"])
+            assert routing["provider"] == {"id": "grok", "transport": "acp"}
+            assert [tool["id"] for tool in routing["browser_tools"]] == [
+                "unbrowse",
+                "stagehand",
+                "browser-harness",
+            ]
+            assert routing["routing_policy"]["max_tool_attempts"] == 2
+            serialized = json.dumps(routing)
+            assert "context" not in routing
+            assert "manager_url" not in serialized
+            assert "allowed_origins" not in serialized
+            assert "capability_file" not in serialized
+            assert "lease_id" not in serialized
+            assert "cbm_run_private_capability" not in serialized
+            assert "STAGEHAND" not in json.dumps(environment)
+            await super().ensure_session(environment=environment, **kwargs)
+
+    runtime = RoutingRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    result = asyncio.run(
+        worker.execute_claim(routing_claim(allowed_origins=["https://app.local"]))
+    )
+
+    assert result == {"status": "succeeded"}
+    prompt = runtime.prompt_calls[0][3]
+    assert "cbm_route_browser_action" in prompt
+    assert "Stagehand model" not in prompt
+
+
+def test_worker_fails_malformed_partial_routing_contract_before_acpx_env_injection(
+    tmp_path: Path,
+):
+    manager = FakeManager()
+    runtime = FakeRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    result = asyncio.run(
+        worker.execute_claim(
+            claim(
+                agent="grok-build",
+                provider={"id": "grok", "transport": "acp"},
+                browser_tools=[],
+                routing_policy=None,
+            )
+        )
+    )
+
+    assert result == {"status": "failed"}
+    assert runtime.ensure_calls == []
+    assert runtime.prompt_calls == []
+    assert manager.completed == []
+    assert manager.failed and "provider, browser_tools" in manager.failed[0][2]
+
+
+def test_worker_omits_routing_contract_env_for_legacy_acpx_claim(tmp_path: Path):
+    manager = FakeManager()
+
+    class LegacyRuntime(FakeRuntime):
+        async def ensure_session(self, *, environment, **kwargs):
+            assert "CBM_ROUTING_CONTRACT_JSON" not in environment
+            await super().ensure_session(environment=environment, **kwargs)
+
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=LegacyRuntime())
+
+    result = asyncio.run(worker.execute_claim(claim(agent="grok-build")))
+
+    assert result == {"status": "succeeded"}
 
 
 def test_worker_wraps_browser_task_with_run_scoped_mcp_contract(tmp_path: Path):

@@ -9,7 +9,9 @@ from scripts.unbrowse_worker import (
     UnbrowseClient,
     UnbrowseWorker,
     _snapshot_title,
+    _validated_browser_endpoint,
     select_task_target,
+    start_unbrowse_gateway,
 )
 
 
@@ -71,6 +73,42 @@ def test_snapshot_title_reads_unbrowse_page_title_shape():
     assert _snapshot_title({"page_title": "Example Domain"}) == "Example Domain"
 
 
+def test_validated_browser_endpoint_requires_same_nonce_gateway():
+    gateway = "ws://127.0.0.1:45678/nonce"
+    endpoint = "ws://127.0.0.1:45678/nonce/devtools/browser/browser-id"
+    assert _validated_browser_endpoint(
+        gateway,
+        {"webSocketDebuggerUrl": endpoint},
+    ) == endpoint
+
+    with pytest.raises(ValueError, match="gateway"):
+        _validated_browser_endpoint(
+            gateway,
+            {"webSocketDebuggerUrl": "ws://127.0.0.1:49999/devtools/browser/other"},
+        )
+
+
+def test_unbrowse_gateway_uses_kuri_discovery_port_range():
+    calls = []
+
+    async def starter(*, upstream_http, headers, bind_port):
+        calls.append((upstream_http, headers, bind_port))
+        if bind_port == 9222:
+            raise OSError("busy")
+        return "runner", f"ws://127.0.0.1:{bind_port}/nonce"
+
+    result = asyncio.run(
+        start_unbrowse_gateway(
+            upstream_http="http://manager/internal/cdp",
+            headers={"X-CBM-Run": "opaque"},
+            gateway_starter=starter,
+        )
+    )
+
+    assert result == ("runner", "ws://127.0.0.1:9223/nonce")
+    assert [call[2] for call in calls] == [9222, 9223]
+
+
 def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():
     class FakeClient:
         def __init__(self):
@@ -125,13 +163,17 @@ def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():
     async def gateway_factory(**_kwargs):
         return FakeGateway(), "ws://127.0.0.1:45678/nonce"
 
-    title_reads = []
+    page_reads = []
 
-    async def title_reader(browser_ws, expected_url):
+    async def page_reader(browser_ws, expected_url):
         assert browser_ws == "ws://127.0.0.1:45678/nonce"
         assert expected_url == "https://example.com/"
-        title_reads.append((browser_ws, expected_url))
-        return "Example Domain" if len(title_reads) > 1 else ""
+        page_reads.append((browser_ws, expected_url))
+        return (
+            {"url": "https://example.com/", "title": "Example Domain"}
+            if len(page_reads) > 1
+            else {}
+        )
 
     client = FakeClient()
     worker = UnbrowseWorker(
@@ -139,7 +181,7 @@ def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():
         unbrowse_bin="unbrowse",
         mcp_factory=mcp_factory,
         gateway_factory=gateway_factory,
-        title_reader=title_reader,
+        page_reader=page_reader,
     )
 
     result = asyncio.run(worker.execute_claim(claim_fixture()))
@@ -164,7 +206,7 @@ def test_execute_claim_attaches_snaps_emits_typed_output_and_cleans_up():
     assert client.failed == []
     assert client.revoked == ["run-unbrowse-1"]
     assert cleanup == ["mcp", "gateway"]
-    assert len(title_reads) == 2
+    assert len(page_reads) == 2
 
 
 def test_execute_claim_fails_closed_and_revokes_capability():

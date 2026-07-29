@@ -41,7 +41,8 @@ MAX_MCP_LINE_BYTES = 1_048_576
 
 GatewayFactory = Callable[..., Awaitable[tuple[Any, str]]]
 MCPFactory = Callable[..., Awaitable[Any]]
-TitleReader = Callable[[str, str], Awaitable[str]]
+PageReader = Callable[[str, str], Awaitable[dict[str, str]]]
+GatewayStarter = Callable[..., Awaitable[tuple[Any, str]]]
 
 
 class RunCancelled(RuntimeError):
@@ -109,34 +110,76 @@ def _http_discovery_url(browser_ws: str) -> str:
     return urlunsplit((scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
 
-async def read_cdp_title(browser_ws: str, expected_url: str) -> str:
+def _validated_browser_endpoint(browser_ws: str, version: dict[str, Any]) -> str:
+    candidate = str(version.get("webSocketDebuggerUrl") or "")
+    base = urlsplit(browser_ws)
+    endpoint = urlsplit(candidate)
+    nonce_path = base.path.rstrip("/")
+    if (
+        endpoint.scheme != "ws"
+        or endpoint.netloc != base.netloc
+        or not nonce_path
+        or not endpoint.path.startswith(f"{nonce_path}/")
+    ):
+        raise ValueError("Unbrowse browser endpoint is outside the nonce gateway")
+    return candidate
+
+
+async def read_browser_endpoint(browser_ws: str) -> str:
+    discovery = _http_discovery_url(browser_ws)
+    async with ClientSession(timeout=ClientTimeout(total=5)) as session:
+        async with session.get(discovery) as response:
+            if response.status != 200:
+                raise UnbrowseMCPError("Managed browser discovery failed")
+            raw = await response.read()
+    if len(raw) > MAX_MCP_LINE_BYTES:
+        raise UnbrowseMCPError("Managed browser discovery exceeds size bound")
+    try:
+        version = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise UnbrowseMCPError("Managed browser discovery is malformed") from exc
+    if not isinstance(version, dict):
+        raise UnbrowseMCPError("Managed browser discovery is malformed")
+    return _validated_browser_endpoint(browser_ws, version)
+
+
+async def read_cdp_page(browser_ws: str, expected_url: str) -> dict[str, str]:
     discovery = f"{_http_discovery_url(browser_ws).rstrip('/')}/json/list"
     async with ClientSession(timeout=ClientTimeout(total=5)) as session:
         async with session.get(discovery) as response:
             if response.status != 200:
-                return ""
+                return {}
             raw = await response.read()
     if len(raw) > MAX_MCP_LINE_BYTES:
-        return ""
+        return {}
     try:
         targets = json.loads(raw)
     except json.JSONDecodeError:
-        return ""
+        return {}
     if not isinstance(targets, list):
-        return ""
-    expected_origin = normalized_origin(expected_url)
+        return {}
+    expected_navigation = normalized_navigation_url(expected_url)
     for target in reversed(targets):
         if not isinstance(target, dict) or target.get("type") != "page":
             continue
         try:
-            if normalized_origin(str(target.get("url") or "")) != expected_origin:
+            current_url = normalized_navigation_url(str(target.get("url") or ""))
+            if current_url != expected_navigation:
                 continue
         except ValueError:
             continue
         title = redact_text(str(target.get("title") or "")).strip()
-        if title:
-            return title[:200]
-    return ""
+        return {"url": current_url, "title": title[:200]}
+    return {}
+
+
+def _direct_mcp_command(binary: str) -> list[str]:
+    resolved = Path(binary).resolve()
+    runtime = resolved.parent.parent / "runtime" / "mcp.js"
+    node = shutil.which("node")
+    if node and runtime.is_file():
+        return [node, str(runtime)]
+    return [binary, "mcp"]
 
 
 def decode_mcp_tool_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -176,12 +219,13 @@ class UnbrowseMCPClient:
     @classmethod
     async def start(cls, *, binary: str, browser_ws: str) -> "UnbrowseMCPClient":
         discovery_url = _http_discovery_url(browser_ws)
+        browser_endpoint = await read_browser_endpoint(browser_ws)
         env = dict(os.environ)
         env.update(
             {
                 "KURI_ATTACH_EXISTING_CHROME": "1",
                 "KURI_DISABLE_CDP_ATTACH": "0",
-                "PUPPETEER_BROWSER_WS_ENDPOINT": browser_ws,
+                "PUPPETEER_BROWSER_WS_ENDPOINT": browser_endpoint,
                 "CHROME_DEBUG_URL": discovery_url,
                 "PLAYWRIGHT_CHROMIUM_REMOTE_DEBUGGING_URL": discovery_url,
                 "UNBROWSE_NON_INTERACTIVE": "1",
@@ -193,13 +237,13 @@ class UnbrowseMCPClient:
             }
         )
         process = await asyncio.create_subprocess_exec(
-            binary,
-            "mcp",
+            *_direct_mcp_command(binary),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
             limit=MAX_MCP_LINE_BYTES + 1,
+            start_new_session=True,
         )
         client = cls(process)
         response = await client._request(
@@ -289,7 +333,7 @@ class UnbrowseMCPClient:
 
     async def navigate(self, url: str) -> dict[str, Any]:
         return await self._call_tool(
-            "unbrowse_breath_navigate",
+            "unbrowse_act_navigate",
             {"url": url},
             timeout=90,
         )
@@ -305,16 +349,40 @@ class UnbrowseMCPClient:
         if self.process.stdin is not None:
             self.process.stdin.close()
         if self.process.returncode is None:
-            self.process.terminate()
+            if os.name == "posix":
+                os.killpg(self.process.pid, signal.SIGTERM)
+            else:
+                self.process.terminate()
             try:
                 await asyncio.wait_for(self.process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                self.process.kill()
+                if os.name == "posix":
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                else:
+                    self.process.kill()
                 await self.process.wait()
 
 
 async def start_unbrowse_mcp(*, binary: str, browser_ws: str) -> UnbrowseMCPClient:
     return await UnbrowseMCPClient.start(binary=binary, browser_ws=browser_ws)
+
+
+async def start_unbrowse_gateway(
+    *,
+    upstream_http: str,
+    headers: dict[str, str],
+    gateway_starter: GatewayStarter = start_cdp_gateway,
+) -> tuple[Any, str]:
+    for bind_port in range(9222, 9226):
+        try:
+            return await gateway_starter(
+                upstream_http=upstream_http,
+                headers=headers,
+                bind_port=bind_port,
+            )
+        except OSError:
+            continue
+    raise RuntimeError("No loopback CDP relay port is available for Unbrowse")
 
 
 @dataclass
@@ -323,30 +391,31 @@ class UnbrowseWorker:
     unbrowse_bin: str = "unbrowse"
     poll_interval_seconds: float = 2.0
     mcp_factory: MCPFactory = field(default=start_unbrowse_mcp, repr=False)
-    gateway_factory: GatewayFactory = field(default=start_cdp_gateway, repr=False)
-    title_reader: TitleReader = field(default=read_cdp_title, repr=False)
+    gateway_factory: GatewayFactory = field(default=start_unbrowse_gateway, repr=False)
+    page_reader: PageReader = field(default=read_cdp_page, repr=False)
 
-    async def _read_observed_title(
+    async def _read_observed_page(
         self,
         browser_ws: str,
         expected_url: str,
         *,
         cancelled: asyncio.Event,
-    ) -> str:
+    ) -> dict[str, str]:
+        observed: dict[str, str] = {}
         for attempt in range(6):
-            title = await self._await_guarded(
-                self.title_reader(browser_ws, expected_url),
+            observed = await self._await_guarded(
+                self.page_reader(browser_ws, expected_url),
                 cancelled=cancelled,
             )
-            if title:
-                return title
+            if observed.get("title"):
+                return observed
             if attempt < 5:
                 try:
                     await asyncio.wait_for(cancelled.wait(), timeout=0.25)
                 except asyncio.TimeoutError:
                     continue
                 raise RunCancelled("run cancelled")
-        return ""
+        return observed
 
     async def _heartbeat(self, run_id: str, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -436,14 +505,16 @@ class UnbrowseWorker:
             snapshot = await self._await_guarded(
                 mcp.snap(session_id), cancelled=cancelled
             )
-            title = _snapshot_title(snapshot)
+            observed = await self._read_observed_page(
+                local_ws,
+                safe_url,
+                cancelled=cancelled,
+            )
+            if not observed:
+                raise RuntimeError("Unbrowse did not navigate the managed profile")
+            title = observed.get("title") or _snapshot_title(snapshot)
             if title == "Unbrowse opened the managed page":
-                observed_title = await self._read_observed_title(
-                    local_ws,
-                    safe_url,
-                    cancelled=cancelled,
-                )
-                title = observed_title or title
+                title = observed["url"]
             await asyncio.to_thread(
                 self.client.output,
                 run_id,

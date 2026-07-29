@@ -178,6 +178,7 @@ async def start_cdp_gateway(
     *,
     upstream_http: str,
     headers: dict[str, str],
+    bind_port: int = 0,
 ) -> tuple[web.AppRunner, str]:
     upstream_parts = urlsplit(upstream_http)
     upstream_path = upstream_parts.path.rstrip("/")
@@ -252,8 +253,12 @@ async def start_cdp_gateway(
     app.router.add_route("*", "/{tail:.*}", gateway)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
+    site = web.TCPSite(runner, "127.0.0.1", bind_port)
+    try:
+        await site.start()
+    except Exception:
+        await runner.cleanup()
+        raise
     sockets = getattr(site, "_server").sockets
     port = int(sockets[0].getsockname()[1])
     return runner, f"ws://127.0.0.1:{port}/{nonce}"

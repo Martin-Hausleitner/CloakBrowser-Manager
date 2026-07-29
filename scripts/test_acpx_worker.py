@@ -536,6 +536,58 @@ def test_worker_keeps_claim_polling_while_preflight_runs_in_background(tmp_path:
     assert asyncio.run(scenario()) > 0
 
 
+def test_worker_cancels_background_preflight_before_executing_a_claim(tmp_path: Path):
+    class ClaimingManager(FakeManager):
+        def __init__(self):
+            super().__init__()
+            self.claim_calls = 0
+
+        def claim(self):
+            self.claim_calls += 1
+            return None if self.claim_calls == 1 else claim()
+
+    class ContendedRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.preflight_started = asyncio.Event()
+            self.preflight_cancelled = False
+            self.execute_saw_preflight_cancelled = False
+
+        async def preflight_agent(self, **_kwargs):
+            self.preflight_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.preflight_cancelled = True
+                raise
+
+        async def ensure_session(self, **kwargs):
+            self.execute_saw_preflight_cancelled = self.preflight_cancelled
+            await super().ensure_session(**kwargs)
+
+    async def scenario():
+        manager = ClaimingManager()
+        runtime = ContendedRuntime()
+        worker = AcpxWorker(
+            manager,
+            replace(make_config(tmp_path), poll_interval_seconds=0.01),
+            runtime=runtime,
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(worker.run_forever(stop_event=stop))
+        await asyncio.wait_for(runtime.preflight_started.wait(), timeout=1)
+        await asyncio.wait_for(_wait_for(lambda: bool(manager.completed)), timeout=1)
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+        return runtime, manager
+
+    runtime, manager = asyncio.run(scenario())
+    assert runtime.preflight_cancelled is True
+    assert runtime.execute_saw_preflight_cancelled is True
+    assert runtime.prompt_calls
+    assert manager.completed == ["run-1"]
+
+
 def test_real_preflight_fails_closed_when_cleanup_fails(tmp_path: Path):
     executable = tmp_path / "fake-acpx-preflight"
     executable.write_text(
@@ -1145,7 +1197,7 @@ frames = [
     {'jsonrpc': '2.0', 'id': 'req-1', 'method': 'session/prompt'},
     {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'user_message_chunk', 'content': {'type': 'text', 'text': 'Open example'}}}},
     {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_thought_chunk', 'content': {'type': 'text', 'text': 'https'}}}},
-    {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_thought_chunk', 'content': {'type': 'text', 'text': '://'}}}},
+    {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_thought_chunk', 'content': {'type': 'text', 'text': '/'}}}},
     {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_thought_chunk', 'content': {'type': 'text', 'text': 'example.com/'}}}},
     {'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'Example Domain'}}}},
     {'jsonrpc': '2.0', 'id': 'req-1', 'result': {'stopReason': 'end_turn'}},

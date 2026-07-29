@@ -858,6 +858,15 @@ class AcpxWorker:
                 except Exception:  # noqa: BLE001 - continue after transient claim errors
                     claim = None
                 if claim:
+                    if preflight_task is not None and not preflight_task.done():
+                        preflight_task.cancel()
+                        try:
+                            await preflight_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:  # noqa: BLE001 - real work takes priority
+                            logger.warning("ACPX preflight refresh failed before claim execution")
+                        preflight_task = None
                     await self.execute_claim(claim)
                 try:
                     await asyncio.wait_for(

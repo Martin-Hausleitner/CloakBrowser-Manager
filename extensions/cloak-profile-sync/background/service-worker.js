@@ -12,8 +12,11 @@ import {
   sanitizeUrl,
 } from "../lib/action-recorder.js";
 import { openInCloud, openLocal } from "../lib/open-links.js";
+import { runLocalControlLoop } from "../lib/local-control.js";
 
 const RECORDER_KEY = "secureActionRecorder";
+
+runLocalControlLoop((message) => handleRecorderMessage(message, {})).catch(() => {});
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!changeInfo.url && changeInfo.status !== "complete") return;

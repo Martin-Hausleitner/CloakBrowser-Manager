@@ -14,9 +14,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import threading
-import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -26,9 +26,17 @@ from urllib.request import Request, urlopen
 
 DEFAULT_PORT = 18765
 DEFAULT_DATA_ROOT = Path.home() / ".cloakbrowser" / "profile-sync" / "profiles"
+DEFAULT_MANAGER_BASE = "http://127.0.0.1:18117"
+DEFAULT_MANAGER_TOKEN_FILE = Path.home() / ".config" / "cloakbrowser" / "vcvm-auth-token"
+EXTENSION_ID = "fjcjfaeimhopmpnoemigapegahhjnbkl"
+ALLOWED_EXTENSION_ORIGIN = f"chrome-extension://{EXTENSION_ID}"
 
 _lock = threading.Lock()
 _running: dict[str, dict[str, Any]] = {}
+
+
+def _allowed_cors_origin(origin: str) -> str | None:
+    return ALLOWED_EXTENSION_ORIGIN if origin == ALLOWED_EXTENSION_ORIGIN else None
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -36,9 +44,12 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    allowed_origin = _allowed_cors_origin(handler.headers.get("Origin") or "")
+    if allowed_origin:
+        handler.send_header("Access-Control-Allow-Origin", allowed_origin)
+        handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-CBM-Extension-Id")
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        handler.send_header("Vary", "Origin")
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -79,27 +90,26 @@ def _manager_request(
         raise RuntimeError(f"Manager unreachable: {exc.reason}") from exc
 
 
-def _ensure_auth(base: str, payload: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
-    token = (payload.get("token") or "").strip() or None
-    username = (payload.get("username") or "").strip() or None
-    password = payload.get("password") or None
-    if token:
-        return token, None, None
-    if username and password:
-        # Cookie auth is awkward from urllib; prefer token. Attempt login for
-        # deployments that accept repeated username/password on each call is N/A.
-        # Ask Manager login — if it only sets cookies, require token instead.
-        raise RuntimeError(
-            "local_bridge requires a bearer token (password login cookies are not portable). "
-            "Paste the Manager auth token into the extension."
-        )
-    # Fall back to local token file used by VCVM tunnel workflows.
-    token_path = Path.home() / ".config" / "cloakbrowser" / "vcvm-auth-token"
-    if token_path.is_file():
-        file_token = token_path.read_text(encoding="utf-8").strip()
-        if file_token:
-            return file_token, None, None
-    raise RuntimeError("No auth token provided for Manager fetch")
+def _validate_manager_base(raw: str) -> str:
+    value = str(raw or "").strip().rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Manager base must be an HTTP(S) origin")
+    if parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+        raise ValueError("Manager base must contain only scheme, host, and optional port")
+    return value
+
+
+def _load_manager_token(token_path: Path) -> str:
+    path = Path(token_path)
+    if path.is_symlink() or not path.is_file() or not stat.S_ISREG(path.stat().st_mode):
+        raise ValueError("Manager token must be a regular private file")
+    if path.stat().st_mode & 0o077:
+        raise ValueError("Manager token file must use mode 0600")
+    token = path.read_text(encoding="utf-8").strip()
+    if not token or any(ch.isspace() for ch in token) or not token.isprintable():
+        raise ValueError("Manager token file is invalid")
+    return token
 
 
 def _normalize_proxy(raw: str) -> str:
@@ -243,6 +253,9 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("[bridge] " + (fmt % args) + "\n")
 
     def do_OPTIONS(self) -> None:  # noqa: N802
+        if _allowed_cors_origin(self.headers.get("Origin") or "") is None:
+            _json_response(self, 403, {"ok": False, "detail": "Origin denied"})
+            return
         _json_response(self, 204, {})
 
     def do_GET(self) -> None:  # noqa: N802
@@ -266,19 +279,23 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path != "/launch":
             _json_response(self, 404, {"ok": False, "detail": "Not found"})
             return
+        if _allowed_cors_origin(self.headers.get("Origin") or "") is None:
+            _json_response(self, 403, {"ok": False, "detail": "Origin denied"})
+            return
+        if self.headers.get("X-CBM-Extension-Id") != EXTENSION_ID:
+            _json_response(self, 403, {"ok": False, "detail": "Extension denied"})
+            return
         try:
             payload = _read_json(self)
             profile_id = str(payload.get("profile_id") or "").strip()
             if not profile_id:
                 raise ValueError("profile_id is required")
-            manager_base = str(payload.get("manager_base") or "http://127.0.0.1:18117").rstrip("/")
-            token, username, password = _ensure_auth(manager_base, payload)
+            manager_base = self.server.manager_base  # type: ignore[attr-defined]
+            token = self.server.manager_token  # type: ignore[attr-defined]
             profile = _manager_request(
                 manager_base,
                 f"/api/profiles/{profile_id}",
                 token=token,
-                username=username,
-                password=password,
             )
             result = _launch_profile(
                 profile,
@@ -286,22 +303,27 @@ class Handler(BaseHTTPRequestHandler):
             )
             # Never echo proxy credentials back to the extension.
             _json_response(self, 200, result)
-        except Exception as exc:
-            traceback.print_exc()
-            _json_response(self, 400, {"ok": False, "detail": str(exc)})
+        except Exception:
+            _json_response(self, 400, {"ok": False, "detail": "Profile launch failed"})
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="CloakBrowser Profile Sync local bridge")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--manager-base", default=DEFAULT_MANAGER_BASE)
+    parser.add_argument("--manager-token-file", type=Path, default=DEFAULT_MANAGER_TOKEN_FILE)
     args = parser.parse_args()
 
     if args.host not in {"127.0.0.1", "localhost", "::1"}:
         print("Refusing to bind non-loopback host", file=sys.stderr)
         return 2
 
+    manager_base = _validate_manager_base(args.manager_base)
+    manager_token = _load_manager_token(args.manager_token_file)
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    httpd.manager_base = manager_base  # type: ignore[attr-defined]
+    httpd.manager_token = manager_token  # type: ignore[attr-defined]
     print(f"CloakBrowser local bridge on http://{args.host}:{args.port}", flush=True)
     print(f"Profile data root: {DEFAULT_DATA_ROOT}", flush=True)
     try:

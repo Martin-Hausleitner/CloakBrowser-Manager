@@ -323,7 +323,11 @@ export async function bridgeLaunch(bridgeBase, payload) {
   const base = String(bridgeBase || DEFAULT_BRIDGE).replace(/\/$/, "");
   const res = await fetch(`${base}/launch`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-CBM-Extension-Id": chrome.runtime.id,
+    },
     body: JSON.stringify(payload),
   });
   const body = await res.json().catch(() => ({ detail: res.statusText }));

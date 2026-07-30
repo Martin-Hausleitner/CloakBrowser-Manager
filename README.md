@@ -57,6 +57,8 @@ Status date: **29 July 2026**. This section describes the active development bra
 <img src="docs/evidence/phonefit-mobile-live-2026-07-29.png" width="390" alt="Live VCVM CloakBrowser PhoneFit viewport rendering IANA at 390 by 844">
 </p>
 
+> **PhoneFit idempotency checkpoint (31 July 2026):** choosing Phone fit for an already matching live framebuffer no longer performs `update -> stop -> launch`. The TDD slice passed **152 relevant frontend tests**, production build, independent review and Gitleaks. An isolated VCVM UI drove the real `390 x 844` profile with one canvas, zero console/page errors and the identical CloakBrowser PID before/after. The public release remains unchanged until the fail-closed transaction/rollback deploy gate is reviewed. See the [VCVM E2E report and screenshot](docs/reports/PHONEFIT-IDEMPOTENT-VCVM-E2E-2026-07-31.md).
+
 > **Full-view operator checkpoint:** the existing four-group desktop full view now exposes private, on-demand **Screenshot** and **Metrics** actions inside `View`, without adding persistent toolbar clutter. Screenshot capture is profile-scoped, permission-checked, audited, PNG-validated, bounded to 16 MiB and returned with `private, no-store` plus `nosniff`. The live VCVM acceptance run entered full view, opened the metrics overlay, downloaded the active `390 x 711` browser frame, and produced zero browser-console errors. Full suites: **850 backend** and **211 frontend tests**, production build and secret scan passed. Live UI proof:
 
 <p align="center">
@@ -138,6 +140,7 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 ### Development timeline
 
+- **31 July 2026 (PhoneFit idempotency)** — reproduced the unnecessary live-browser restart for an unchanged `390 x 844` PhoneFit apply, locked it with a RED regression, added the minimal no-op guard, and proved on the VCVM candidate UI that PID, canvas, dimensions and connection stay stable with zero page/console errors.
 - **29 July 2026 (full-view tools)** — added a permission-checked, audited and non-cacheable live-profile PNG endpoint plus compact Screenshot and Metrics actions inside the existing desktop `View` disclosure. The deployed VCVM browser completed the real download and displayed the Live Dev overlay with no console errors; 850 backend tests, 211 frontend tests, production build and gitleaks passed.
 - **29 July 2026** — PhoneFit was closed at the runtime boundary: portrait and landscape phone framebuffers now pass `screen`, `is_mobile`, `has_touch`, and a bounded device scale into the persistent CloakBrowser context. Live VCVM proof showed a real 390×844 responsive IANA view, coarse pointer/touch semantics, and unchanged 100/100 fingerprint and BrowserScan scores. The mobile User-Agent/device persona remains an explicit follow-up instead of a hidden heuristic.
 - **26 July 2026 (ACPX/ACP)** — added explicit per-run ACPX agent selection, SQLite migration, filtered worker claims, pinned ACPX worker lifecycle, strict NDJSON/error handling, private run-capability files, official FastMCP stdio server, five bounded browser tools, origin enforcement, systemd template, TypeScript parity, and local runtime/contract tests. A real Codex ACP initialize handshake succeeded but provider authentication remains deliberately unconfigured, so VCVM browser E2E is still open.

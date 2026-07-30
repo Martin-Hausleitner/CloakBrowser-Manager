@@ -1,0 +1,95 @@
+name: ACPX Agent Family
+description: Propose or change an ACPX agent-family pipeline, gate, budget, or extension skin with fail-closed evidence.
+title: "[acpx-agent-family]: "
+labels:
+  - acpx-agent-family
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for agent-family work only. Keep reports metrics-only.
+        Do not attach traces, videos, HAR, storage state, raw prompts, or secrets.
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea
+      description: What should the agent-family pipeline or gate do? One concrete outcome.
+      placeholder: Add a deterministic soniox-contract gate that fails closed without network or secrets.
+    validations:
+      required: true
+
+  - type: textarea
+    id: threat-model
+    attributes:
+      label: Threat model
+      description: Assets, attackers, trust boundaries, and fail-closed requirements.
+      placeholder: |
+        Assets: ACPX session, extension skin, auth benchmark metrics, budget meter.
+        Attackers: unpinned runtime, secret leakage into reports, profile mutation, shell injection.
+        Boundary: deterministic gates never call LLM, never install extensions, never read env secrets.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acpx-owner-stages
+    attributes:
+      label: ACPX owner stages
+      description: Which Plan/Forge/IDR/Tribunal/Release stages own this change, and which agents (grok-build|opencode) may run them.
+      placeholder: |
+        plan → grok-build
+        forge → opencode
+        idr → grok-build
+        tribunal → grok-build
+        release → grok-build
+        Parallel deterministic gates: skill-benchmark, auth-benchmark, extension-skin, soniox-contract, token-cost
+    validations:
+      required: true
+
+  - type: textarea
+    id: deterministic-tests
+    attributes:
+      label: Deterministic tests
+      description: Exact test modules and commands that prove the change without live credentials or browser traces.
+      placeholder: |
+        PYTHONPATH=. python -m pytest scripts/test_agent_family_quality_gate.py -q
+        PYTHONPATH=. python scripts/agent_family_quality_gate.py --output artifacts/agent-family/quality-report.json
+    validations:
+      required: true
+
+  - type: textarea
+    id: budgets
+    attributes:
+      label: Budgets
+      description: Token, cost (integer microusd), concurrency, and wall-time budgets. Metrics-only.
+      placeholder: |
+        max_tokens_per_run: 1000000
+        max_cost_microusd_per_run: 1000000000
+        max_concurrency: 4
+        p95_budget_ms: (auth lanes only)
+    validations:
+      required: true
+
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback
+      description: How to disable the gate or revert the pipeline safely without stranded state.
+      placeholder: |
+        1. Revert the quality-gate / pipeline PR.
+        2. Leave package-artifact and deploy-rollback dry-run jobs green.
+        3. Do not apply live VCVM deploy or rollback for this change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Metrics-only evidence paths (junit, quality-report.json, redacted gate receipts). No traces/videos/HAR/storage state.
+      placeholder: |
+        artifacts/ci/agent-family/quality-report.json
+        artifacts/ci/agent-family/quality-gate-junit.xml
+        passed=true checks=8 failed=0
+    validations:
+      required: true

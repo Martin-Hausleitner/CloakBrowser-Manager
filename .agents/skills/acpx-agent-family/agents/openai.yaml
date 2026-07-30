@@ -1,0 +1,4 @@
+interface:
+  display_name: "ACPX Agent Family"
+  short_description: "Orca-supervised ACPX DAGs with OpenCode/Grok Build, deterministic gates, and Tribunal-before-Release."
+  default_prompt: "Use $acpx-agent-family to plan or verify an Orca ACPX agent-family pipeline (ACPX-only stages, parallel skill/auth/extension/Soniox/cost gates, fail-closed secrets, Tribunal before Release)."

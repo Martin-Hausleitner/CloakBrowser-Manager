@@ -10,6 +10,34 @@
 
 ---
 
+## 0. Execution Audit Addendum — 2026-07-30 (authoritative vs §2 percentages)
+
+> **Read this before treating §2 feature-matrix percentages or “Ready” labels as current truth.**
+
+| Field | Value |
+| --- | --- |
+| **Final IDR / Tribunal report** | [`docs/reports/MASTERPLAN-EXECUTION-IDR-TRIBUNAL-2026-07-30.md`](../../reports/MASTERPLAN-EXECUTION-IDR-TRIBUNAL-2026-07-30.md) |
+| **Audit HEAD (worktree)** | `c0d4f10139dab9d0eb4c76d73268375df88c98b3` on `Martin-Hausleitner/cbm-acpx-agent-family` |
+| **This plan commit** | `1e1617e447f28887b6d2560614a5abb2e0ba52b8` |
+| **Plan “verified head” (§2)** | `827c0f087a8d2e1228f29f0c4225bb539d7795af` — historical baseline when the plan was written; **not** proof that later HEADs or the public VCVM route match it |
+| **Evidence-weighted plan-execution index** | **49.6%** unweighted (26 features × 0–10; sum **129/260**); value-weighted **≈45.9%** with \(\sum v=154\), \(\sum(v\cdot s)=707\) — see IDR §3 |
+| **Production decision** | **HARD NO-GO** for full production of this plan’s goal until the IDR release tree is green |
+| **Task checkboxes (Tasks 1–11 + DoD)** | **Exactly 66 open**, **0 checked** (line-start list markers only). Tracking tools only — **do not** mark them done from this addendum; reopen evidence must be fresh and commit-bound |
+| **Requirements matrix (audit body SoT)** | **80** unique rows from `/tmp/cbm-plan-audit/01` **body** (header counts are contradictory and ignored): 69 must / 9 should / 2 research-only; 50 partial / 18 missing / 5 contradicted / 5 unknown / 2 research |
+| **Worktree cleanliness** | Audit base HEAD may carry **dirty intentional pending deliverables** (e.g. uncommitted agent-family); that is **not** a clean release worktree and does **not** satisfy Task 11 |
+
+**What §2 percentages are:** snapshot estimates at plan finalization (`827c0f0` era), useful for prioritization history.
+
+**What §2 percentages are not:** a live scorecard for `c0d4f10`, remote CI, or `https://vcvm.tail6a40cd.ts.net/`. Deployed runtime was audited as an **older** release (manifest/source SHAs diverge from this plan’s HEADs); live browser processes were observed with **`--disable-extensions`**.
+
+**Highest-leverage remaining work (Pareto):** Task 3 (provider ≠ harness) → Task 4 (Antigravity → Browser Use adapter) → Task 10 (same-profile E2E proof), then security E2E (Tasks 6–7) and ship (Task 1 residual + Task 11). Full ticket list: IDR §12 (TKT-01…TKT-20).
+
+**Orthogonal side-lane (not Tasks 1–11):** uncommitted ACPX agent-family quality gate / Soniox adapter / skill under this worktree — see IDR §9. Treat as **pending intentional deliverables**, not masterplan DoD completion and not release readiness.
+
+**NotebookLM:** optional secondary synthesis only (notebook `270598c3-713d-4188-81b8-0f0567c71572`, proof `/tmp/cbm-plan-audit/15-notebooklm-notebook-proof.json`, 98 sources at proof time). Reject catalog or risk claims that lack repo/runtime audit evidence — IDR §4.
+
+---
+
 ## 1. Executive decision
 
 The fastest stable path is not to make every tool a peer. The product needs one control plane and several adapters:

@@ -735,3 +735,43 @@ jobs:
         with:
           name: auth-benchmark-metrics
           path: artifacts/auth-benchmark/report.json
+
+  agent-family-quality-gate:
+    name: Agent family quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: benchmarks/auth/requirements.txt
+
+      - name: Install fully pinned test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install -r benchmarks/auth/requirements.txt
+
+      - name: Prepare metrics-only artifacts
+        run: mkdir -p "${CI_ARTIFACT_DIR}/agent-family"
+
+      - name: Run agent-family quality gate unit tests
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python -m pytest scripts/test_agent_family_quality_gate.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/agent-family/quality-gate-junit.xml"
+
+      - name: Run deterministic agent-family quality gate
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python scripts/agent_family_quality_gate.py \
+            --output "${CI_ARTIFACT_DIR}/agent-family/quality-report.json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-family-quality-metrics
+          path: |
+            artifacts/ci/agent-family/quality-report.json
+            artifacts/ci/agent-family/quality-gate-junit.xml

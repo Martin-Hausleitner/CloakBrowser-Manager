@@ -1,0 +1,136 @@
+{
+  "schema": "cloakbrowser.agent-family-pipeline.v1",
+  "mode": "plan",
+  "would_execute": false,
+  "max_concurrency": 4,
+  "harness": "acpx",
+  "allowed_agents": ["grok-build", "opencode"],
+  "parallel_gates": [
+    "skill-benchmark",
+    "auth-benchmark",
+    "extension-skin",
+    "soniox-contract",
+    "token-cost"
+  ],
+  "stages": [
+    {
+      "name": "release",
+      "kind": "agent",
+      "harness": "acpx",
+      "agent": "grok-build",
+      "route": "acpx:grok-build",
+      "parallel_group": null,
+      "output": "artifacts/agent-family/private/release-report.json",
+      "uses_browser": false
+    },
+    {
+      "name": "plan",
+      "kind": "agent",
+      "harness": "acpx",
+      "agent": "grok-build",
+      "route": "acpx:grok-build",
+      "parallel_group": null,
+      "output": "artifacts/agent-family/private/plan-report.json",
+      "uses_browser": false
+    },
+    {
+      "name": "forge",
+      "kind": "agent",
+      "harness": "acpx",
+      "agent": "grok-build",
+      "route": "acpx:grok-build",
+      "parallel_group": null,
+      "output": "artifacts/agent-family/private/forge-report.json",
+      "uses_browser": false
+    },
+    {
+      "name": "skill-benchmark",
+      "kind": "deterministic",
+      "harness": null,
+      "agent": null,
+      "route": null,
+      "parallel_group": "family_gates",
+      "output": "artifacts/agent-family/private/skill-benchmark-report.json",
+      "uses_browser": false
+    },
+    {
+      "name": "auth-benchmark",
+      "kind": "deterministic",
+      "harness": null,
+      "agent": null,
+      "route": null,
+      "parallel_group": "family_gates",
+      "output": "artifacts/agent-family/private/auth-benchmark-report.json",
+      "uses_browser": true
+    },
+    {
+      "name": "extension-skin",
+      "kind": "deterministic",
+      "harness": null,
+      "agent": null,
+      "route": null,
+      "parallel_group": "family_gates",
+      "output": "artifacts/agent-family/private/extension-skin-report.json",
+      "uses_browser": false
+    },
+    {
+      "name": "soniox-contract",
+      "kind": "deterministic",
+      "harness": null,
+      "agent": null,
+      "route": null,
+      "parallel_group": "family_gates",
+      "output": "artifacts/agent-family/private/soniox-contract-report.json",
+      "uses_browser": false
+    },
+    {
+      "name": "token-cost",
+      "kind": "deterministic",
+      "harness": null,
+      "agent": null,
+      "route": null,
+      "parallel_group": "family_gates",
+      "output": "artifacts/agent-family/private/token-cost-report.json",
+      "uses_browser": false
+    },
+    {
+      "name": "idr",
+      "kind": "agent",
+      "harness": "acpx",
+      "agent": "grok-build",
+      "route": "acpx:grok-build",
+      "parallel_group": null,
+      "output": "artifacts/agent-family/private/idr-report.json",
+      "uses_browser": false
+    },
+    {
+      "name": "tribunal",
+      "kind": "agent",
+      "harness": "acpx",
+      "agent": "grok-build",
+      "route": "acpx:grok-build",
+      "parallel_group": null,
+      "output": "artifacts/agent-family/private/tribunal-report.json",
+      "uses_browser": false
+    }
+  ],
+  "edges": {
+    "release": ["plan"],
+    "plan": ["forge"],
+    "forge": [
+      "skill-benchmark",
+      "auth-benchmark",
+      "extension-skin",
+      "soniox-contract",
+      "token-cost"
+    ],
+    "skill-benchmark": ["idr"],
+    "auth-benchmark": ["idr"],
+    "extension-skin": ["idr"],
+    "soniox-contract": ["idr"],
+    "token-cost": ["idr"],
+    "idr": ["tribunal"],
+    "tribunal": []
+  },
+  "notes": ["NEGATIVE: release appears before plan; tribunal does not precede release"]
+}

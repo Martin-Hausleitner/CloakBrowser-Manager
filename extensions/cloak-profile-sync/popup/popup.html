@@ -52,6 +52,19 @@
       <button type="button" class="tab" data-tab="proxies">Proxies</button>
     </nav>
 
+    <section class="recorder" id="recorderPanel">
+      <div>
+        <div class="label">Action recorder</div>
+        <div class="recorder-status" id="recorderStatus">Stopped</div>
+      </div>
+      <div class="row">
+        <button type="button" class="btn tiny primary" id="recordStartBtn">Start</button>
+        <button type="button" class="btn tiny" id="recordStopBtn" disabled>Stop</button>
+        <button type="button" class="btn tiny" id="recordExportBtn" disabled>Export</button>
+      </div>
+    </section>
+    <textarea id="recordingExport" class="recording-export hidden" readonly spellcheck="false"></textarea>
+
     <main id="main" class="main">
       <div id="errorBox" class="error hidden"></div>
       <div id="profilesView" class="view"></div>

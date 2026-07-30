@@ -41,6 +41,7 @@ if __package__:
     from . import database as db
     from . import extensions
     from . import live_diagnostics
+    from . import secure_action_recorder
     from . import worker_runtime as worker_runtime_mod
     from . import workspace_maintenance as workspace_maintenance_mod
     from .browser_manager import BrowserManager
@@ -146,6 +147,7 @@ else:  # Support `uvicorn main:app` from the backend directory.
     import database as db
     import extensions
     import live_diagnostics
+    import secure_action_recorder
     import worker_runtime as worker_runtime_mod
     import workspace_maintenance as workspace_maintenance_mod
     import orca_adapter as orca_adapter_mod
@@ -336,6 +338,7 @@ worker_runtime_service = worker_runtime_mod.WorkerRuntimeService(
     worker_id_env=lambda: CBM_WORKER_ID,
     worker_token_env=lambda: CBM_WORKER_TOKEN,
 )
+secure_action_recorder_nonce_cache: dict[str, float] = {}
 DEFAULT_GROK_OPENAI_COMPATIBLE_MODEL_ALIAS = "grok-build-0.1"
 direct_cdp_socket_registry = cdp_gateway.DirectCdpSocketRegistry(
     poll_interval_seconds=0.25
@@ -1982,6 +1985,14 @@ def _require_worker(request: Request) -> access.WorkerIdentity:
     raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def _worker_bearer_from_request(request: Request) -> str:
+    auth = request.headers.get("authorization") or ""
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not access.is_valid_worker_key(token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return token
+
+
 def _worker_not_found() -> HTTPException:
     return HTTPException(status_code=404, detail="Not found")
 
@@ -3386,6 +3397,48 @@ async def append_internal_task_run_output(run_id: str, request: Request):
             kind=body.kind,
             summary=body.summary,
             payload=dict(body.payload),
+        )
+    except KeyError as exc:
+        raise _worker_not_found() from exc
+    except db.TaskOutputConflictError as exc:
+        raise HTTPException(status_code=409, detail="Output idempotency conflict") from exc
+    return TaskOutputResponse(**output)
+
+
+@app.post(
+    "/internal/task-runs/{run_id}/recorder-batches",
+    response_model=TaskOutputResponse,
+    status_code=201,
+)
+async def append_internal_secure_action_recorder_batch(run_id: str, request: Request):
+    worker = _require_worker(request)
+    worker_key = _worker_bearer_from_request(request)
+    try:
+        run = worker_runtime_service.require_bound_claim(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    raw_body = await request.body()
+    try:
+        redacted = secure_action_recorder.ingest_secure_action_recorder_batch(
+            run_id=run_id,
+            worker_id=worker.id,
+            profile_id=str(run.get("profile_id") or run.get("profile_id_snapshot") or ""),
+            raw_body=raw_body,
+            worker_key=worker_key,
+            allowed_origins=list(run.get("allowed_origins") or []),
+            nonce_cache=secure_action_recorder_nonce_cache,
+        )
+    except secure_action_recorder.RecorderBatchError as exc:
+        if "nonce replay" in str(exc):
+            raise HTTPException(status_code=409, detail="Recorder nonce replay") from exc
+        raise HTTPException(status_code=422, detail="Invalid recorder batch") from exc
+    try:
+        output = db.append_task_output(
+            run_id,
+            idempotency_key=str(redacted["idempotency_key"]),
+            kind="action",
+            summary=str(redacted["summary"]),
+            payload=dict(redacted["payload"]),
         )
     except KeyError as exc:
         raise _worker_not_found() from exc

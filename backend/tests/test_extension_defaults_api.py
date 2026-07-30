@@ -81,6 +81,73 @@ def test_catalog_does_not_resolve_symlinked_extension_outside_catalog(tmp_path, 
     assert item["path"] is None
 
 
+def test_catalog_resolves_repo_bundled_extension_inside_trusted_root(tmp_path, monkeypatch):
+    from backend import extension_catalog
+
+    bundled = tmp_path / "extensions" / "cloak-profile-sync"
+    bundled.mkdir(parents=True)
+    (bundled / "manifest.json").write_text(
+        json.dumps({"name": "CloakBrowser Profile Sync", "version": "0.1.0", "manifest_version": 3}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "extension-catalog.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "extensions": [
+                    {
+                        "id": "fjcjfaeimhopmpnoemigapegahhjnbkl",
+                        "name": "CloakBrowser Profile Sync",
+                        "bundled_path": "extensions/cloak-profile-sync",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(extension_catalog, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(extension_catalog, "catalog_dir", lambda: tmp_path / "missing-catalog")
+    monkeypatch.setenv("EXTENSION_CATALOG_CONFIG", str(config_path))
+
+    item = extension_catalog.list_catalog_extensions()[0]
+    assert item["available"] is True
+    assert item["path"] == str(bundled.resolve())
+
+
+def test_catalog_rejects_repo_bundled_symlink_escape(tmp_path, monkeypatch):
+    from backend import extension_catalog
+
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (outside / "manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "extensions").mkdir()
+    (tmp_path / "extensions" / "escape").symlink_to(outside, target_is_directory=True)
+    config_path = tmp_path / "extension-catalog.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "extensions": [
+                    {
+                        "id": "fjcjfaeimhopmpnoemigapegahhjnbkl",
+                        "name": "CloakBrowser Profile Sync",
+                        "bundled_path": "extensions/escape",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(extension_catalog, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(extension_catalog, "catalog_dir", lambda: tmp_path / "missing-catalog")
+    monkeypatch.setenv("EXTENSION_CATALOG_CONFIG", str(config_path))
+
+    item = extension_catalog.list_catalog_extensions()[0]
+    assert item["available"] is False
+    assert item["path"] is None
+
+
 def test_profile_templates_create_applies_defaults(admin_client, tmp_path, monkeypatch):
     from backend import extension_catalog
     from backend import profile_templates

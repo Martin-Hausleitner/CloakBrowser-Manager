@@ -29,6 +29,11 @@ const els = {
   bridgeLine: document.getElementById("bridgeLine"),
   sourceLine: document.getElementById("sourceLine"),
   tabs: document.getElementById("tabs"),
+  recorderStatus: document.getElementById("recorderStatus"),
+  recordStartBtn: document.getElementById("recordStartBtn"),
+  recordStopBtn: document.getElementById("recordStopBtn"),
+  recordExportBtn: document.getElementById("recordExportBtn"),
+  recordingExport: document.getElementById("recordingExport"),
 };
 
 let settings = null;
@@ -62,6 +67,9 @@ function wireUi() {
     fillSettingsForm(settings);
     showError("Secrets cleared.");
   });
+  els.recordStartBtn.addEventListener("click", startRecording);
+  els.recordStopBtn.addEventListener("click", stopRecording);
+  els.recordExportBtn.addEventListener("click", exportRecording);
 
   document.querySelectorAll('input[name="authMode"]').forEach((input) => {
     input.addEventListener("change", syncAuthModeUi);
@@ -75,6 +83,7 @@ function wireUi() {
     els.profilesView.classList.toggle("hidden", tab !== "profiles");
     els.proxiesView.classList.toggle("hidden", tab !== "proxies");
   });
+  refreshRecorderStatus();
 }
 
 function fillSettingsForm(s) {
@@ -109,6 +118,74 @@ function showError(msg) {
   els.errorBox.textContent = msg;
   els.errorBox.classList.remove("hidden");
 }
+
+async function startRecording() {
+  showError("");
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "RECORDER_START" });
+    if (!res?.ok) throw new Error(res?.error || "Recorder start failed");
+    els.recordingExport.classList.add("hidden");
+    renderRecorderStatus(res.result);
+  } catch (err) {
+    showError(err.message || String(err));
+  }
+}
+
+async function stopRecording() {
+  showError("");
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "RECORDER_STOP" });
+    if (!res?.ok) throw new Error(res?.error || "Recorder stop failed");
+    renderRecorderStatus(res.result);
+    renderRecordingExport(res.result?.export);
+  } catch (err) {
+    showError(err.message || String(err));
+  }
+}
+
+async function exportRecording() {
+  showError("");
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "RECORDER_EXPORT" });
+    if (!res?.ok) throw new Error(res?.error || "Recorder export failed");
+    renderRecordingExport(res.result);
+  } catch (err) {
+    showError(err.message || String(err));
+  }
+}
+
+async function refreshRecorderStatus() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "RECORDER_GET_STATUS" });
+    if (res?.ok) renderRecorderStatus(res.result);
+  } catch {
+    renderRecorderStatus(null);
+  }
+}
+
+function renderRecorderStatus(status) {
+  const active = Boolean(status?.active);
+  const count = status?.eventCount || 0;
+  const secrets = status?.secretCount || 0;
+  els.recorderStatus.textContent = active
+    ? `Recording · ${count} events · ${secrets} secret refs`
+    : count
+      ? `Stopped · ${count} events · ${secrets} secret refs`
+      : "Stopped";
+  els.recordStartBtn.disabled = active;
+  els.recordStopBtn.disabled = !active;
+  els.recordExportBtn.disabled = active || !count;
+}
+
+function renderRecordingExport(flow) {
+  if (!flow) return;
+  els.recordingExport.value = JSON.stringify(flow, null, 2);
+  els.recordingExport.classList.remove("hidden");
+  els.recordingExport.focus();
+  els.recordingExport.select();
+}
+
+setInterval(refreshRecorderStatus, 1500);
 
 async function saveAuth() {
   const mode = document.querySelector('input[name="authMode"]:checked')?.value || "token";

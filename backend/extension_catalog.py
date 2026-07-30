@@ -16,7 +16,8 @@ from typing import Any
 
 from backend.database import DATA_DIR
 
-_REPO_CATALOG = Path(__file__).resolve().parent.parent / "config" / "extension-catalog.json"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_CATALOG = _REPO_ROOT / "config" / "extension-catalog.json"
 _DEFAULTS_FILENAME = "extension-defaults.json"
 _CHROME_EXTENSION_ID = re.compile(r"^[a-p]{32}$")
 
@@ -53,30 +54,38 @@ def load_catalog_config() -> dict[str, Any]:
     return payload
 
 
-def _resolve_extension_path(ext_id: str) -> str | None:
+def _resolve_extension_path(ext_id: str, bundled_path: str | None = None) -> str | None:
     root = catalog_dir()
-    if not root.exists():
-        return None
-    resolved_root = root.resolve()
+    if root.exists():
+        resolved_root = root.resolve()
 
-    def is_contained(candidate: Path) -> bool:
+        def is_contained(candidate: Path) -> bool:
+            try:
+                candidate.resolve().relative_to(resolved_root)
+            except ValueError:
+                return False
+            return True
+
+        direct = root / ext_id
+        if is_contained(direct) and (direct / "manifest.json").exists():
+            return str(direct.resolve())
+        if direct.is_dir():
+            versions = sorted(
+                (child for child in direct.iterdir() if child.is_dir()),
+                key=lambda child: child.name,
+            )
+            for version in reversed(versions):
+                if is_contained(version) and (version / "manifest.json").exists():
+                    return str(version.resolve())
+
+    if bundled_path:
+        candidate = (_REPO_ROOT / bundled_path).resolve()
         try:
-            candidate.resolve().relative_to(resolved_root)
+            candidate.relative_to(_REPO_ROOT.resolve())
         except ValueError:
-            return False
-        return True
-
-    direct = root / ext_id
-    if is_contained(direct) and (direct / "manifest.json").exists():
-        return str(direct.resolve())
-    if direct.is_dir():
-        versions = sorted(
-            (child for child in direct.iterdir() if child.is_dir()),
-            key=lambda child: child.name,
-        )
-        for version in reversed(versions):
-            if is_contained(version) and (version / "manifest.json").exists():
-                return str(version.resolve())
+            return None
+        if (candidate / "manifest.json").is_file():
+            return str(candidate)
     return None
 
 
@@ -89,7 +98,8 @@ def list_catalog_extensions(*, include_paths: bool = True) -> list[dict[str, Any
         ext_id = str(raw.get("id") or "").strip()
         if not ext_id:
             continue
-        path = _resolve_extension_path(ext_id) if include_paths else None
+        bundled_path = raw.get("bundled_path") if isinstance(raw.get("bundled_path"), str) else None
+        path = _resolve_extension_path(ext_id, bundled_path) if include_paths else None
         rows.append(
             {
                 "id": ext_id,

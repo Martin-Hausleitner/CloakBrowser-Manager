@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloakbrowser.io/contracts/local-vault-connector-v1.json",
+  "api_version": "cloakbrowser.io/v1",
+  "kind": "ContractSchema",
+  "metadata": {
+    "id": "local-vault-connector-v1",
+    "resource_version": 1,
+    "title": "Provider-neutral local vault connector"
+  },
+  "spec": {
+    "summary": "Discovery and status for installed local vault tooling. Agents and MCP receive opaque secret references, capabilities, and status only — never raw values.",
+    "contract_version": "local-vault-connector-v1",
+    "providers": [
+      "bitwarden-cli",
+      "vaultwarden",
+      "keepassxc",
+      "gopass",
+      "fake"
+    ],
+    "discovery": {
+      "default": "binary_path_only",
+      "optional_probes": {
+        "env": "CBM_VAULT_CONNECTOR_PROBES",
+        "command": "--version",
+        "timeout_seconds": 2,
+        "requires_accounts": false
+      },
+      "fake_provider_env": "CBM_VAULT_CONNECTOR_FAKE"
+    },
+    "agent_safe_operations": [
+      "discover",
+      "status",
+      "health",
+      "list_references",
+      "capabilities",
+      "authorize_use",
+      "revoke_use",
+      "receipt"
+    ],
+    "forbidden_operations": [
+      "reveal",
+      "export_raw",
+      "dump",
+      "unlock_and_print",
+      "get_password",
+      "get_totp_seed",
+      "export_passkey"
+    ],
+    "secret_reference": {
+      "pattern": "^secretref-[A-Za-z0-9][A-Za-z0-9._-]{2,143}$",
+      "public_fields": [
+        "secret_ref",
+        "kind",
+        "provider_id",
+        "label",
+        "origin",
+        "passkey_handoff"
+      ],
+      "never_public_fields": [
+        "value",
+        "raw_value",
+        "password",
+        "token",
+        "cookie",
+        "totp_seed",
+        "private_key"
+      ]
+    },
+    "passkey_policy": {
+      "default_mode": "user_presence_handoff",
+      "note": "Device-bound passkeys require human user-presence handoff; material is never exported through Manager, agents, or MCP."
+    },
+    "statuses": [
+      "ready",
+      "installed",
+      "degraded",
+      "unavailable",
+      "misconfigured",
+      "not_installed"
+    ],
+    "rest": {
+      "list": "GET /api/v2/vault-connectors",
+      "capabilities": "GET /api/v2/capabilities → resources.secret-references"
+    }
+  }
+}

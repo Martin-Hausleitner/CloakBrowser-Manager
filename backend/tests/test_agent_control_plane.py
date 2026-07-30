@@ -257,7 +257,6 @@ def test_v2_capabilities_and_resource_schema_are_bounded(client_access: TestClie
         "runtimes",
         "local-mac",
         "orca-web",
-        "secret-references",
         "approvals",
         "operations",
     ):
@@ -268,7 +267,13 @@ def test_v2_capabilities_and_resource_schema_are_bounded(client_access: TestClie
             "skill": False,
         }
     assert "raw_cdp" not in str(body).lower()
-    assert body["resources"]["secret-references"]["reason_code"] == "secret_broker_not_implemented"
+    secret_refs = body["resources"]["secret-references"]
+    assert secret_refs["available"]["rest"] is True
+    assert secret_refs["available"]["mcp"] is True
+    assert secret_refs["reveal"] is False
+    assert secret_refs["secrets"] == "reference-only"
+    assert "discover" in secret_refs["rest_operations"]
+    assert "reveal" not in secret_refs["rest_operations"]
 
     schema = client_access.get("/api/v2/schemas/control-plane-resource-v1", headers=headers)
     assert schema.status_code == 200, schema.text

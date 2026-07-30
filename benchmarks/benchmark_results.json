@@ -1,0 +1,22 @@
+{
+  "local_extension_bridge": {
+    "p50_seconds": 1.5699537470936775e-05,
+    "p95_seconds": 0.00027369100134819744
+  },
+  "tokscale_aggregate_export": {
+    "p50_seconds": 0.00922052701935172,
+    "p95_seconds": 0.011661239573732019
+  },
+  "bitwarden_cli_status_startup": {
+    "p50_seconds": 3.7656185212545097,
+    "p95_seconds": 4.351129906903952
+  },
+  "chromium_extension_startup": {
+    "p50_seconds": 1.139392409939319,
+    "p95_seconds": 1.4900002134032548
+  },
+  "acpx_routing_overhead": {
+    "p50_seconds": 0.12134353397414088,
+    "p95_seconds": 0.1996458343230188
+  }
+}

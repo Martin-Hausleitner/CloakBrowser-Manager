@@ -362,6 +362,7 @@ jobs:
           node --check extensions/cloak-profile-sync/content/recorder-content.js
           node --check extensions/cloak-profile-sync/lib/action-recorder.js
           node --check extensions/cloak-profile-sync/lib/api.js
+          node --check extensions/cloak-profile-sync/lib/local-control.js
           node --check extensions/cloak-profile-sync/lib/mask.js
           node --check extensions/cloak-profile-sync/lib/open-links.js
           node --check extensions/cloak-profile-sync/popup/popup.js
@@ -369,6 +370,9 @@ jobs:
           python -m json.tool extensions/cloak-profile-sync/manifest.json > "${CI_ARTIFACT_DIR}/acpx-secure-recorder/extension-manifest.json"
           python -m py_compile extensions/cloak-profile-sync/host/local_bridge.py
           python -m py_compile extensions/cloak-profile-sync/scripts/verify_against_manager.py
+          python -m py_compile scripts/cbm_extension_bridge.py
+          python -m py_compile scripts/cbm_extension_ctl.py
+          python -m py_compile scripts/cbm_extension_mcp.py
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -421,7 +425,7 @@ jobs:
       - name: Run Browser Use smoke contract tests
         run: |
           mkdir -p "${CI_ARTIFACT_DIR}/acpx-secure-recorder"
-          python -m pytest scripts/test_secure_recording_compiler.py scripts/test_browser_use_worker.py scripts/test_browser_harness_adapter.py scripts/test_browser_tool_router.py scripts/test_provider_readiness.py -q \
+          python -m pytest scripts/test_secure_recording_compiler.py scripts/test_browser_use_worker.py scripts/test_browser_harness_adapter.py scripts/test_browser_tool_router.py scripts/test_provider_readiness.py scripts/test_cbm_extension_bridge.py scripts/test_cbm_extension_ctl.py scripts/test_cbm_extension_mcp.py scripts/test_extension_local_bridge_security.py -q \
             --junitxml="${CI_ARTIFACT_DIR}/acpx-secure-recorder/browser-use-smoke-contract-junit.xml"
 
       - uses: actions/upload-artifact@v4

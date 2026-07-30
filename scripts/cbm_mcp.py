@@ -34,7 +34,9 @@ from scripts.cbm_browser_ctl import (
 )
 from scripts.browser_tool_router import (
     BrowserToolAdapter,
+    ROUTING_BROWSER_TOOL_ORDER,
     RunScopedBrowserContext,
+    STOP_CLASSIFICATIONS,
     route_browser_action,
     routing_contract_from_claim,
 )
@@ -52,6 +54,7 @@ class RunContext:
     capability_file: Path
     capability_token: str = field(repr=False)
     routing_contract: dict[str, Any] | None = field(default=None, repr=False)
+    router_terminal_failure_file: Path | None = field(default=None, repr=False)
 
     @classmethod
     def from_environment(cls, environment: dict[str, str] | None = None) -> "RunContext":
@@ -80,6 +83,9 @@ class RunContext:
         ):
             raise ValueError("CBM_ALLOWED_ORIGINS must be a JSON string array")
         raw_routing_contract = str(env.get("CBM_ROUTING_CONTRACT_JSON") or "").strip()
+        router_terminal_failure_file = _private_marker_file_from_env(
+            env.get("CBM_ROUTER_TERMINAL_FAILURE_FILE")
+        )
         routing_contract = None
         if raw_routing_contract:
             try:
@@ -97,7 +103,20 @@ class RunContext:
             capability_file=capability_file.resolve(),
             capability_token=token,
             routing_contract=routing_contract,
+            router_terminal_failure_file=router_terminal_failure_file,
         )
+
+
+def _private_marker_file_from_env(raw: str | None) -> Path | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute() or not path.is_file() or path.is_symlink():
+        raise ValueError("CBM_ROUTER_TERMINAL_FAILURE_FILE must be an existing absolute file")
+    if path.stat().st_mode & 0o077:
+        raise ValueError("CBM_ROUTER_TERMINAL_FAILURE_FILE must use mode 0600")
+    return path.resolve()
 
 
 class CbmMcpController:
@@ -278,7 +297,7 @@ class CbmMcpController:
         try:
             contract = routing_contract_from_claim(self.context.routing_contract)
         except ValueError as exc:
-            return {
+            public = {
                 "ok": False,
                 "outcome": "failed",
                 "classification": "policy_denied",
@@ -287,6 +306,8 @@ class CbmMcpController:
                 "telemetry": [],
                 "message": str(exc),
             }
+            self._record_router_terminal_failure(public)
+            return public
         result = await route_browser_action(
             contract=contract,
             context=self._router_context(),
@@ -294,7 +315,37 @@ class CbmMcpController:
             arguments=arguments or {},
             adapters=self._router_adapters,
         )
-        return result.public_json()
+        public = result.public_json()
+        self._record_router_terminal_failure(public)
+        return public
+
+    def _record_router_terminal_failure(self, result: dict[str, Any]) -> None:
+        path = self.context.router_terminal_failure_file
+        if path is None:
+            return
+        if result.get("ok") is True or result.get("outcome") != "failed":
+            return
+        classification = str(result.get("classification") or "").strip()
+        if classification not in STOP_CLASSIFICATIONS:
+            return
+        tool_id = result.get("tool_id")
+        safe_tool_id = str(tool_id) if tool_id in ROUTING_BROWSER_TOOL_ORDER else None
+        body = json.dumps(
+            {"classification": classification, "tool_id": safe_tool_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if len(body) > 256:
+            raise BrowserCtlError("policy_denied", "router terminal marker exceeded size bound")
+        flags = os.O_WRONLY | os.O_TRUNC
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if nofollow:
+            flags |= nofollow
+        fd = os.open(path, flags)
+        try:
+            os.write(fd, body)
+        finally:
+            os.close(fd)
 
     def _router_context(self) -> RunScopedBrowserContext:
         return RunScopedBrowserContext(

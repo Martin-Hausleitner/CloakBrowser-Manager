@@ -21,6 +21,7 @@ from scripts.acpx_worker import (
     AcpxWorker,
     AcpxWorkerConfig,
     build_worker_config,
+    CbmMcpController,
 )
 from scripts.browser_use_worker import ManagerHTTPError
 from scripts.browser_tool_router import BrowserToolResult
@@ -121,6 +122,7 @@ class FakeRuntime:
 
     async def ensure_session(self, *, cwd, agent, session_name, environment):
         assert "CBM_RUN_CAPABILITY_FILE" in environment
+        assert "CBM_ROUTER_TERMINAL_FAILURE_FILE" not in environment
         self.ensure_calls.append((cwd, agent, session_name))
 
     async def run_prompt(
@@ -137,6 +139,9 @@ class FakeRuntime:
     ):
         capability_file = Path(environment["CBM_RUN_CAPABILITY_FILE"])
         assert capability_file.read_text(encoding="utf-8") == "cbm_run_private_capability"
+        router_failure_file = Path(environment["CBM_ROUTER_TERMINAL_FAILURE_FILE"])
+        assert router_failure_file.is_file()
+        assert router_failure_file.stat().st_mode & 0o077 == 0
         assert "cbm_run_private_capability" not in json.dumps(environment)
         self.prompt_calls.append((cwd, agent, session_name, prompt, timeout_seconds))
         if self.wait_for_cancel:
@@ -372,6 +377,140 @@ def test_worker_replaces_a_manager_rejected_adapter_output_with_safe_status(tmp_
         "payload": {"status": "running", "detail": "ACP output omitted"},
         "idempotency_key": "acpx-jsonrpc-19",
     }
+
+
+def test_worker_fails_when_router_terminal_marker_exists_despite_truthy_summary(
+    tmp_path: Path,
+):
+    manager = FakeManager()
+
+    class MarkingRuntime(FakeRuntime):
+        async def run_prompt(self, **kwargs):
+            marker = Path(kwargs["environment"]["CBM_ROUTER_TERMINAL_FAILURE_FILE"])
+            assert marker.is_file()
+            assert marker.stat().st_mode & 0o077 == 0
+            marker.write_text(
+                json.dumps({"classification": "policy_denied", "tool_id": "unbrowse"}),
+                encoding="utf-8",
+            )
+            await kwargs["emit"]({
+                "idempotency_key": "acpx-summary",
+                "kind": "summary",
+                "summary": "I hit a blocker but reported it clearly",
+                "payload": {"text": "I hit a blocker but reported it clearly"},
+            })
+            return "I hit a blocker but reported it clearly"
+
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=MarkingRuntime())
+
+    result = asyncio.run(worker.execute_claim(routing_claim()))
+
+    assert result == {"status": "failed"}
+    assert manager.completed == []
+    assert manager.failed == [(
+        "run-1",
+        "internal_error",
+        "browser router terminal failure: policy_denied",
+    )]
+    assert manager.revoked == ["run-1"]
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_cleans_empty_router_terminal_marker_after_success(tmp_path: Path):
+    seen_marker: list[Path] = []
+
+    class MarkerSeeingRuntime(FakeRuntime):
+        async def run_prompt(self, **kwargs):
+            marker = Path(kwargs["environment"]["CBM_ROUTER_TERMINAL_FAILURE_FILE"])
+            seen_marker.append(marker)
+            assert marker.is_file()
+            assert marker.stat().st_mode & 0o077 == 0
+            assert marker.read_text(encoding="utf-8") == ""
+            return await super().run_prompt(**kwargs)
+
+    manager = FakeManager()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=MarkerSeeingRuntime())
+
+    result = asyncio.run(worker.execute_claim(claim()))
+
+    assert result == {"status": "succeeded"}
+    assert seen_marker and {path.exists() for path in seen_marker} == {False}
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_cancellation_is_not_overridden_by_router_terminal_marker(
+    tmp_path: Path,
+):
+    class CancellingManager(FakeManager):
+        def __init__(self):
+            super().__init__(heartbeats=[
+                {"heartbeat_interval_seconds": 0.01},
+                {"cancel_requested": True, "heartbeat_interval_seconds": 0.01},
+            ])
+
+    class MarkingCancelledRuntime(FakeRuntime):
+        async def run_prompt(self, **kwargs):
+            marker = Path(kwargs["environment"]["CBM_ROUTER_TERMINAL_FAILURE_FILE"])
+            marker.write_text(
+                json.dumps({"classification": "policy_denied", "tool_id": "unbrowse"}),
+                encoding="utf-8",
+            )
+            await asyncio.wait_for(kwargs["cancel_event"].wait(), timeout=1)
+            return "truthy summary after cancel"
+
+    manager = CancellingManager()
+    runtime = MarkingCancelledRuntime()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=runtime)
+
+    result = asyncio.run(worker.execute_claim(routing_claim()))
+
+    assert result == {"status": "cancelled"}
+    assert manager.completed == []
+    assert manager.failed == []
+    assert runtime.cancel_calls
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_rejects_terminal_error_output_422_without_safe_status(
+    tmp_path: Path,
+):
+    class RejectingErrorManager(FakeManager):
+        def output(self, run_id, **body):
+            if body["kind"] == "error":
+                raise ManagerHTTPError("Invalid output payload", status_code=422)
+            return super().output(run_id, **body)
+
+    worker = AcpxWorker(RejectingErrorManager(), make_config(tmp_path), runtime=FakeRuntime())
+
+    with pytest.raises(AcpxRuntimeError, match="terminal ACP output rejected"):
+        asyncio.run(worker._emit("run-1", {
+            "idempotency_key": "acpx-error",
+            "kind": "error",
+            "summary": "terminal error",
+            "payload": {"error": "terminal error"},
+        }))
+
+
+def test_worker_fails_when_manager_rejects_terminal_summary_output(
+    tmp_path: Path,
+):
+    class RejectingSummaryManager(FakeManager):
+        def output(self, run_id, **body):
+            if body["kind"] == "summary":
+                raise ManagerHTTPError("Invalid output payload", status_code=422)
+            return super().output(run_id, **body)
+
+    manager = RejectingSummaryManager()
+    worker = AcpxWorker(manager, make_config(tmp_path), runtime=FakeRuntime())
+
+    result = asyncio.run(worker.execute_claim(claim()))
+
+    assert result == {"status": "failed"}
+    assert manager.completed == []
+    assert manager.failed
+    assert manager.failed[0][1] == "internal_error"
+    assert "terminal ACP output rejected" in manager.failed[0][2]
+    assert list((tmp_path / "capabilities").iterdir()) == []
 
 
 def test_worker_fails_clean_acpx_prompt_that_emits_no_outputs(tmp_path: Path):
@@ -1530,6 +1669,49 @@ def test_worker_executes_openai_compatible_branch_through_router_without_acpx(
     assert manager.completed == ["run-1"]
     assert manager.failed == []
     assert manager.revoked == ["run-1"]
+    assert list((tmp_path / "capabilities").iterdir()) == []
+
+
+def test_worker_openai_compatible_router_terminal_marker_fails_claim(
+    tmp_path: Path,
+):
+    async def unbrowse_adapter(_request):
+        return BrowserToolResult(
+            outcome="failed",
+            classification="policy_denied",
+            message="Bearer cbm_run_private_capability unauthorized /tmp/secret",
+        )
+
+    async def openai_loop(_user_task, router, **_kwargs):
+        result = await router("inspect", {})
+        assert result["ok"] is False
+        assert result["classification"] == "policy_denied"
+        return SimpleNamespace(final_text="truthy blocker summary")
+
+    def controller_factory(context):
+        return CbmMcpController(
+            context,
+            router_adapters={"unbrowse": unbrowse_adapter},
+        )
+
+    manager = FakeManager()
+    worker = AcpxWorker(
+        manager,
+        make_config(tmp_path),
+        runtime=FakeRuntime(),
+        openai_tool_loop=openai_loop,
+        controller_factory=controller_factory,
+    )
+
+    result = asyncio.run(worker.execute_claim(openai_routing_claim()))
+
+    assert result == {"status": "failed"}
+    assert manager.completed == []
+    assert manager.failed == [(
+        "run-1",
+        "internal_error",
+        "browser router terminal failure: policy_denied",
+    )]
     assert list((tmp_path / "capabilities").iterdir()) == []
 
 

@@ -54,6 +54,7 @@ from scripts.browser_tool_router import (
     BrowserRoutingContract,
     BrowserToolConfig,
     ROUTING_BROWSER_TOOL_ORDER,
+    STOP_CLASSIFICATIONS,
     RunScopedBrowserContext,
     route_browser_action,
     routing_contract_from_claim,
@@ -95,12 +96,15 @@ BROWSER_TOOL_READINESS_REASON_CODES = frozenset(
         "internal_error",
     }
 )
+ROUTER_TERMINAL_FAILURE_ENV = "CBM_ROUTER_TERMINAL_FAILURE_FILE"
+
 PREFLIGHT_SCRUBBED_ENV_KEYS = frozenset(
     {
         "CBM_RUN_CAPABILITY_FILE",
         "CBM_PROFILE_ID",
         "CBM_TASK_RUN_ID",
         "CBM_ALLOWED_ORIGINS",
+        ROUTER_TERMINAL_FAILURE_ENV,
     }
 )
 
@@ -819,6 +823,8 @@ class AcpxWorker:
         except ManagerHTTPError as exc:
             if exc.status_code != 422:
                 raise
+            if str(output.get("kind")) in {"summary", "error"}:
+                raise AcpxRuntimeError("terminal ACP output rejected") from exc
             logger.warning("Manager rejected one ACPX adapter output; emitting safe status")
             await asyncio.to_thread(
                 self.client.output,
@@ -865,7 +871,11 @@ class AcpxWorker:
                 arguments=arguments,
                 adapters=controller._router_adapters,
             )
-            return result.public_json()
+            public = result.public_json()
+            record_failure = getattr(controller, "_record_router_terminal_failure", None)
+            if callable(record_failure):
+                record_failure(public)
+            return public
 
         loop_task = asyncio.create_task(
             self.openai_tool_loop(
@@ -974,6 +984,54 @@ class AcpxWorker:
             path.unlink(missing_ok=True)
             raise
         return path
+
+    def _write_router_terminal_failure_file(self) -> Path:
+        fd, raw_path = tempfile.mkstemp(
+            prefix="cbm-router-terminal-failure-",
+            suffix=".json",
+            dir=self.config.capability_dir,
+        )
+        path = Path(raw_path)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8", closefd=True) as handle:
+                handle.write("")
+                handle.flush()
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            path.unlink(missing_ok=True)
+            raise
+        return path
+
+    def _router_terminal_failure(self, path: Path | None) -> dict[str, str | None] | None:
+        if path is None or not path.is_file():
+            return None
+        raw = path.read_text(encoding="utf-8")[:512].strip()
+        if not raw:
+            return None
+        try:
+            marker = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise AcpxRuntimeError("browser router terminal failure marker invalid") from exc
+        if not isinstance(marker, dict):
+            raise AcpxRuntimeError("browser router terminal failure marker invalid")
+        classification = str(marker.get("classification") or "").strip()
+        if classification not in STOP_CLASSIFICATIONS:
+            raise AcpxRuntimeError("browser router terminal failure marker invalid")
+        tool_id = marker.get("tool_id")
+        if tool_id is not None and tool_id not in ROUTING_BROWSER_TOOL_ORDER:
+            raise AcpxRuntimeError("browser router terminal failure marker invalid")
+        return {"classification": classification, "tool_id": tool_id}
+
+    def _raise_router_terminal_failure_if_present(self, path: Path | None) -> None:
+        marker = self._router_terminal_failure(path)
+        if marker is None:
+            return
+        classification = str(marker["classification"])
+        raise AcpxRuntimeError(f"browser router terminal failure: {classification}")
 
     def _write_preflight_mcp_config(self) -> Path:
         fd, raw_path = tempfile.mkstemp(
@@ -1188,6 +1246,7 @@ class AcpxWorker:
         cancel_event = asyncio.Event()
         claim_lost = asyncio.Event()
         capability_file: Path | None = None
+        router_terminal_failure_file: Path | None = None
         capability_issued = False
         session_ensured = False
         heartbeat_task: asyncio.Task[None] | None = None
@@ -1197,6 +1256,7 @@ class AcpxWorker:
             capability_issued = True
             token = validate_worker_token(str(capability.get("token") or ""))
             capability_file = self._write_capability_file(token)
+            router_terminal_failure_file = self._write_router_terminal_failure_file()
             run_environment = {
                 "CBM_MANAGER_URL": self.config.manager_url,
                 "CBM_RUN_CAPABILITY_FILE": str(capability_file),
@@ -1223,6 +1283,8 @@ class AcpxWorker:
                 )
             if routing_contract_json is not None:
                 run_environment["CBM_ROUTING_CONTRACT_JSON"] = routing_contract_json
+            prompt_environment = dict(run_environment)
+            prompt_environment[ROUTER_TERMINAL_FAILURE_ENV] = str(router_terminal_failure_file)
             heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(
                     run_id=run_id,
@@ -1240,12 +1302,13 @@ class AcpxWorker:
                     claim=claim,
                     capability=capability,
                     capability_file=capability_file,
-                    run_environment=run_environment,
+                    run_environment=prompt_environment,
                     cancel_event=cancel_event,
                     claim_lost=claim_lost,
                 )
                 if cancel_event.is_set() or claim_lost.is_set():
                     return {"status": "cancelled"}
+                self._raise_router_terminal_failure_if_present(router_terminal_failure_file)
                 if not summary:
                     raise ToolLoopError("protocol_error", "final assistant content is empty")
                 result = await asyncio.to_thread(self.client.complete, run_id)
@@ -1263,12 +1326,13 @@ class AcpxWorker:
                 session_name=session_name,
                 prompt=build_run_scoped_browser_prompt(claim, capability),
                 timeout_seconds=float(claim.get("timeout_seconds") or 300),
-                environment=run_environment,
+                environment=prompt_environment,
                 emit=lambda output: self._emit(run_id, output),
                 cancel_event=cancel_event,
             )
             if cancel_event.is_set() or claim_lost.is_set():
                 return {"status": "cancelled"}
+            self._raise_router_terminal_failure_if_present(router_terminal_failure_file)
             if not summary:
                 raise AcpxRuntimeError("ACPX prompt produced no terminal assistant output")
             # The ACP event stream already persisted the final summary.
@@ -1313,6 +1377,8 @@ class AcpxWorker:
                     )
                 except Exception:  # noqa: BLE001 - best-effort terminal cleanup
                     logger.warning("ACPX session cleanup failed for run %s", run_id)
+            if router_terminal_failure_file is not None:
+                router_terminal_failure_file.unlink(missing_ok=True)
             if capability_file is not None:
                 capability_file.unlink(missing_ok=True)
             if capability_issued:

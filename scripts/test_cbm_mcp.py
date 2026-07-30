@@ -101,6 +101,26 @@ def make_routing_context(tmp_path: Path) -> RunContext:
     )
 
 
+def make_routing_context_with_marker(tmp_path: Path, marker: Path) -> RunContext:
+    return make_run_context(
+        tmp_path,
+        CBM_ROUTING_CONTRACT_JSON=json.dumps({
+            "provider": {"id": "grok", "transport": "acp"},
+            "browser_tools": [
+                {"id": "unbrowse", "enabled": True},
+                {"id": "stagehand", "enabled": True},
+                {"id": "browser-harness", "enabled": True},
+            ],
+            "routing_policy": {
+                "mode": "ordered-fallback",
+                "allow_second_browser": False,
+                "max_tool_attempts": 2,
+            },
+        }),
+        CBM_ROUTER_TERMINAL_FAILURE_FILE=str(marker),
+    )
+
+
 def controller(tmp_path: Path):
     page = FakePage()
     browser = FakeBrowser(page)
@@ -414,6 +434,92 @@ def test_mcp_resource_tools_return_bounded_envelopes_without_secret_paths(tmp_pa
         "skill": False,
     }
     assert orca["resources"]["orca-web"]["reason_code"] == "capability_unavailable"
+
+
+def _private_marker(tmp_path: Path) -> Path:
+    marker = tmp_path / "router-terminal-failure.json"
+    marker.write_text("", encoding="utf-8")
+    os.chmod(marker, 0o600)
+    return marker
+
+
+def test_router_facade_writes_private_terminal_marker_for_stop_classification(
+    tmp_path: Path,
+):
+    marker = _private_marker(tmp_path)
+
+    async def unbrowse(_request):
+        from scripts.browser_tool_router import BrowserToolResult
+
+        return BrowserToolResult(
+            outcome="failed",
+            classification="policy_denied",
+            message="Bearer cbm_run_private_capability 401 Unauthorized /tmp/secret",
+        )
+
+    ctl = CbmMcpController(
+        make_routing_context_with_marker(tmp_path, marker),
+        router_adapters={"unbrowse": unbrowse},
+    )
+
+    result = asyncio.run(ctl.route_browser_action("inspect", {}))
+
+    assert result["ok"] is False
+    assert result["classification"] == "policy_denied"
+    marker_body = json.loads(marker.read_text(encoding="utf-8"))
+    assert marker_body == {
+        "classification": "policy_denied",
+        "tool_id": "unbrowse",
+    }
+    serialized = json.dumps(marker_body)
+    assert "cbm_run_private_capability" not in serialized
+    assert "Unauthorized" not in serialized
+    assert "/tmp/secret" not in serialized
+
+
+def test_router_facade_does_not_mark_success_or_failover_classification(
+    tmp_path: Path,
+):
+    marker = _private_marker(tmp_path)
+
+    async def unbrowse(_request):
+        from scripts.browser_tool_router import BrowserToolResult
+
+        return BrowserToolResult(
+            outcome="failed",
+            classification="route_miss",
+            message="Bearer cbm_run_private_capability route miss",
+        )
+
+    async def stagehand(_request):
+        from scripts.browser_tool_router import BrowserToolResult
+
+        return BrowserToolResult(
+            outcome="succeeded",
+            classification="ok",
+            payload={"title": "Example"},
+        )
+
+    ctl = CbmMcpController(
+        make_routing_context_with_marker(tmp_path, marker),
+        router_adapters={"unbrowse": unbrowse, "stagehand": stagehand},
+    )
+
+    result = asyncio.run(ctl.route_browser_action("inspect", {}))
+
+    assert result["ok"] is True
+    assert marker.read_text(encoding="utf-8") == ""
+
+    failover_only = CbmMcpController(
+        make_routing_context_with_marker(tmp_path, marker),
+        router_adapters={"unbrowse": unbrowse},
+    )
+
+    result = asyncio.run(failover_only.route_browser_action("inspect", {}))
+
+    assert result["ok"] is False
+    assert result["classification"] == "tool_unavailable"
+    assert marker.read_text(encoding="utf-8") == ""
 
 
 def test_router_facade_routes_with_run_context_and_redacted_attempt_telemetry(

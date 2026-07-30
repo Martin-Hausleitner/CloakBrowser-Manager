@@ -380,8 +380,7 @@ describe("AgentBrowserWorkspace", () => {
     expect(screen.getByTestId("orca-cap-resume").textContent).toMatch(/unavailable/i);
   });
 
-  it("opens Settings from the compact identity row", async () => {
-    const onOpenSettings = vi.fn();
+  it("keeps Settings out of chat and collapses the chat pane to a narrow rail", async () => {
     render(
       <AgentBrowserWorkspace
         profiles={[runningProfile]}
@@ -389,13 +388,26 @@ describe("AgentBrowserWorkspace", () => {
         canAutomate
         canInteract
         onSelectProfile={vi.fn()}
-        onOpenSettings={onOpenSettings}
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open Settings" }));
+    const pane = await screen.findByTestId("agent-session-pane");
+    expect(screen.queryByRole("button", { name: "Open Settings" })).toBeNull();
+    expect(pane.getAttribute("data-collapsed")).toBe("false");
+    expect(pane.className).toContain("w-[19rem]");
 
-    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse chat panel" }));
+
+    expect(pane.getAttribute("data-collapsed")).toBe("true");
+    expect(pane.className).toContain("w-10");
+    expect(screen.queryByTestId("workspace-run-bar")).toBeNull();
+    expect(screen.queryByTestId("orca-prompt")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand chat panel" }));
+
+    expect(pane.getAttribute("data-collapsed")).toBe("false");
+    expect(screen.getByTestId("workspace-run-bar")).toBeTruthy();
+    expect(screen.getByTestId("orca-prompt")).toBeTruthy();
   });
 
   it("keeps provider and browser-tool controls out of the live workspace", async () => {

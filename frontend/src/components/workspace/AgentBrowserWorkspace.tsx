@@ -4,9 +4,10 @@ import {
   Activity,
   Camera,
   MonitorSmartphone,
+  PanelLeftClose,
+  PanelLeftOpen,
   SendHorizontal,
   Square,
-  Settings2,
   TerminalSquare,
 } from "lucide-react";
 import {
@@ -162,7 +163,6 @@ export interface AgentBrowserWorkspaceProps {
     status: "connecting" | "connected" | "reconnecting" | "failed",
   ) => void;
   onViewerDisconnect?: () => void;
-  onOpenSettings?: () => void;
   onRunActivityChange?: (active: boolean) => void;
 }
 
@@ -197,7 +197,6 @@ export function AgentBrowserWorkspace({
   onSelectProfile,
   onConnectionStatusChange,
   onViewerDisconnect,
-  onOpenSettings,
   onRunActivityChange,
 }: AgentBrowserWorkspaceProps) {
   const { config: runtimeConfig, setConfig: setRuntimeConfig } = useWorkspaceRuntimeConfig();
@@ -235,6 +234,7 @@ export function AgentBrowserWorkspace({
   const [transcript, setTranscript] = useState("");
   const [cursor, setCursor] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [chatCollapsed, setChatCollapsed] = useState(false);
   const [viewerZoom, setViewerZoom] = useState(100);
   const [viewerFullscreen, setViewerFullscreen] = useState(false);
   const [fullViewPanel, setFullViewPanel] = useState<FullViewPanel>(null);
@@ -1116,39 +1116,46 @@ export function AgentBrowserWorkspace({
       data-ui-state={UI_STATE.agentWorkspace}
     >
       <section
-        className="flex min-w-[20rem] w-[34%] max-w-[26rem] flex-col border-r border-[#35353b] bg-[#0d0d0f]"
+        className={`flex shrink-0 flex-col border-r border-[#35353b] bg-[#0d0d0f] transition-[width] duration-150 ${
+          chatCollapsed ? "w-10 min-w-10" : "w-[19rem] min-w-[18rem] max-w-[24vw]"
+        }`}
         aria-label="Orca agent session"
         aria-hidden={viewerFullscreen || undefined}
         inert={viewerFullscreen || undefined}
+        data-testid="agent-session-pane"
+        data-collapsed={chatCollapsed ? "true" : "false"}
         data-ui-state={UI_STATE.agentSessionPane}
       >
-        <header className="border-b border-[#35353b] bg-[#111113] px-2.5 py-1.5">
+        <header className={`border-b border-[#35353b] bg-[#111113] ${chatCollapsed ? "px-1 py-1" : "px-2.5 py-1.5"}`}>
           <div className="flex min-w-0 items-center gap-2">
-            <TerminalSquare className="h-3.5 w-3.5 shrink-0 text-[#c4c4cc]" />
-            <div className="min-w-0 flex-1 truncate text-[11px] font-semibold tracking-tight">
-              {selectedProfile?.name ?? "Agent workspace"}
-            </div>
-            <span
-              className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
-                sessionActive ? "bg-emerald-950 text-emerald-300" : "bg-[#29292e] text-[#c4c4cc]"
-              }`}
-              data-testid="orca-run-status"
-            >
-              {managedRunMode ? taskRun?.status ?? "idle" : session?.status ?? "idle"}
-            </span>
-            {onOpenSettings ? (
-              <button
-                type="button"
-                className="inline-flex h-6 w-6 items-center justify-center rounded border border-[#333] text-[#a1a1aa] hover:bg-[#202024] hover:text-white"
-                onClick={onOpenSettings}
-                aria-label="Open Settings"
-                title="Settings"
-              >
-                <Settings2 className="h-3 w-3" />
-              </button>
+            {!chatCollapsed ? (
+              <>
+                <TerminalSquare className="h-3.5 w-3.5 shrink-0 text-[#c4c4cc]" />
+                <div className="min-w-0 flex-1 truncate text-[11px] font-semibold tracking-tight">
+                  {selectedProfile?.name ?? "Agent workspace"}
+                </div>
+                <span
+                  className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
+                    sessionActive ? "bg-emerald-950 text-emerald-300" : "bg-[#29292e] text-[#c4c4cc]"
+                  }`}
+                  data-testid="orca-run-status"
+                >
+                  {managedRunMode ? taskRun?.status ?? "idle" : session?.status ?? "idle"}
+                </span>
+              </>
             ) : null}
+            <button
+              type="button"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[#333] text-[#a1a1aa] hover:bg-[#202024] hover:text-white"
+              onClick={() => setChatCollapsed((collapsed) => !collapsed)}
+              aria-label={chatCollapsed ? "Expand chat panel" : "Collapse chat panel"}
+              aria-expanded={!chatCollapsed}
+              title={chatCollapsed ? "Expand chat" : "Collapse chat"}
+            >
+              {chatCollapsed ? <PanelLeftOpen className="h-3 w-3" /> : <PanelLeftClose className="h-3 w-3" />}
+            </button>
           </div>
-          <div
+          {!chatCollapsed ? <><div
             className="mt-1.5 flex min-w-0 items-center gap-1"
             data-testid="workspace-run-bar"
           >
@@ -1226,10 +1233,10 @@ export function AgentBrowserWorkspace({
                 : statusLabel(session, caps)}
               {!managedRunMode && session ? ` · ${session.terminal_handle}` : ""}
             </div>
-          </details>
+          </details></> : null}
         </header>
 
-        <div className="sr-only" aria-live="polite">
+        {!chatCollapsed ? <><div className="sr-only" aria-live="polite">
           <span data-testid="orca-cap-pause">{managedRunMode ? "outputs: typed" : "pause: unavailable"}</span>
           <span data-testid="orca-cap-resume">{managedRunMode ? (acpxBackedMode ? "session: ACP" : "worker: managed") : "resume: unavailable"}</span>
         </div>
@@ -1401,7 +1408,7 @@ export function AgentBrowserWorkspace({
             <SendHorizontal className="h-3.5 w-3.5" />
             {managedRunMode ? "Run" : submitStartsSession ? "Launch" : "Send"}
           </button>
-        </form>
+        </form></> : null}
       </section>
 
       <section

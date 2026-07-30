@@ -951,7 +951,6 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                   if (profile?.harness) setHarness(profile.harness);
                 }}
                 onConnectionStatusChange={setMobileConnectionStatus}
-                onOpenSettings={() => setView("settings")}
                 onRunActivityChange={handleWorkspaceRunActivityChange}
                 initialPromptDraft={
                   initialPromptDraft?.profileId === selected.id ? initialPromptDraft : null

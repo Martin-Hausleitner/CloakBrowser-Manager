@@ -2435,6 +2435,54 @@ async def get_control_plane_capabilities(request: Request):
     return control_plane_capabilities_payload(local_mac_available=local_mac_available)
 
 
+@app.get("/api/v2/vault-connectors")
+async def get_local_vault_connectors(request: Request):
+    """Provider-neutral local vault connector discovery (references/status only).
+
+    Discovery/probes run in a worker thread and are TTL-cached so PATH binaries
+    are not re-executed on every request.
+    """
+    _require_identity(request.scope)
+    try:
+        from .vault_connectors import LocalVaultConnectorService
+    except ImportError:  # pragma: no cover
+        from vault_connectors import LocalVaultConnectorService
+
+    include_fake = os.environ.get("CBM_VAULT_CONNECTOR_FAKE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    run_probes = os.environ.get("CBM_VAULT_CONNECTOR_PROBES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    snapshot = await LocalVaultConnectorService(
+        include_fake=include_fake,
+        run_probes=run_probes,
+    ).agent_snapshot_async()
+    return {
+        "api_version": "cloakbrowser.io/v1",
+        "kind": "LocalVaultConnectorSet",
+        "metadata": {
+            "id": "local-vault-connectors",
+            "resource_version": 1,
+        },
+        "spec": snapshot,
+        "status": {
+            "reveal_available": False,
+            "connector_count": len(snapshot.get("connectors", [])),
+        },
+        "links": [
+            {"rel": "self", "href": "/api/v2/vault-connectors"},
+            {"rel": "capabilities", "href": "/api/v2/capabilities"},
+        ],
+    }
+
+
 @app.get("/api/v2/schemas/control-plane-resource-v1")
 async def get_control_plane_resource_schema(request: Request):
     """Canonical resource-envelope contract; contains no secrets or raw endpoints."""

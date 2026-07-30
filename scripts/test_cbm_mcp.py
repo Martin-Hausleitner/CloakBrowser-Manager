@@ -415,7 +415,9 @@ def test_mcp_resource_tools_return_bounded_envelopes_without_secret_paths(tmp_pa
     assert capabilities["kind"] == "CapabilitySet"
     assert capabilities["resources"]["profiles"]["available"]["rest"] is True
     assert capabilities["resources"]["profiles"]["available"]["mcp"] is False
-    assert capabilities["resources"]["secret-references"]["available"]["mcp"] is False
+    assert capabilities["resources"]["secret-references"]["available"]["mcp"] is True
+    assert capabilities["resources"]["secret-references"]["reveal"] is False
+    assert capabilities["resources"]["secret-references"]["secrets"] == "reference-only"
     assert capabilities["resources"]["orca-web"]["available"]["mcp"] is False
     assert capabilities["mcp_contract"]["manager_resource_tools"] is False
     assert "fallback" not in json.dumps(capabilities).lower()

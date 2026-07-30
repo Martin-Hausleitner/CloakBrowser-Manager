@@ -215,6 +215,15 @@ def _channel(rest: bool, cli: bool, mcp: bool, skill: bool) -> dict[str, bool]:
     return {"rest": rest, "cli": cli, "mcp": mcp, "skill": skill}
 
 
+def _secret_references_capability() -> dict[str, object]:
+    """Discovery/status for local vault connectors; never reveal raw secrets."""
+    try:
+        from .vault_connectors import agent_capability_block
+    except ImportError:  # pragma: no cover - direct script import path
+        from vault_connectors import agent_capability_block
+    return agent_capability_block(include_fake=False, run_probes=False)
+
+
 def control_plane_capabilities_payload(*, local_mac_available: bool = False) -> dict[str, object]:
     """Truthful capability discovery; unavailable targets never silently fall back."""
     unavailable = _channel(False, False, False, False)
@@ -302,7 +311,7 @@ def control_plane_capabilities_payload(*, local_mac_available: bool = False) -> 
             "secrets": "reference-digest-only",
             "mcp_note": "discovery_schema_only",
         },
-        "secret-references": {"available": unavailable, "reason_code": "secret_broker_not_implemented"},
+        "secret-references": _secret_references_capability(),
         "approvals": {"available": unavailable, "reason_code": "approval_queue_pending"},
         "operations": {"available": unavailable, "reason_code": "operation_store_pending"},
         "boxes": {"available": unavailable, "reason_code": "box_resource_not_implemented"},

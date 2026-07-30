@@ -6,6 +6,10 @@
 
 **Architecture:** the extension captures and redacts locally, the Manager validates/persists bounded artifacts, vault providers are used only through opaque references, and adapters replay canonical flows under Manager leases. CI/CD and the watchdog fail closed and emit redacted receipts.
 
+**Deployment invariant:** `localhost`, self-owned LAN/Tailnet, and private
+vCloud/VCVM are first-class modes. No CI, runtime, recorder, vault, Browser Use,
+or ACPX gate may require a SaaS API key. Hosted services are optional adapters.
+
 ## Task 1 — Baseline and contracts
 
 **Files:** design spec, active-plan links, issue/ticket receipts.
@@ -106,4 +110,4 @@
 3. Deploy staging, run Agent Browser/Browser Use verification, and capture fresh screenshots.
 4. Commit with the repository smart-commit workflow and push only to Martin's fork.
 5. Verify remote commit bytes/SHA and report immutable links, URL, test credentials only if they are non-secret disposable demo credentials, and explicit blockers.
-
+6. Prove that configuration and tests run without Browser Use Cloud or hosted-vault credentials; label any optional hosted-provider test separately.

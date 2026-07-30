@@ -34,6 +34,23 @@ flowchart LR
   Browser --> Live["CDP/VNC live view"]
 ```
 
+## Deployment Modes: No SaaS Required
+
+The complete control plane must remain usable without Browser Use Cloud, a
+hosted vault, or a hosted agent API. The same contracts support three modes:
+
+| Mode | Runtime |
+| --- | --- |
+| `localhost` | Manager, Browser Use worker, ACPX, Chromium, Vaultwarden/Infisical or gopass, and an optional local ACP/model provider on one machine |
+| `tailnet-lan` | Self-owned machines discover/connect over LAN or Tailscale; every browser/profile remains Manager-leased and every secret remains reference-only |
+| `private-vcloud` | The same self-hosted stack runs on VCVM/private vCloud with local volumes, backups, and optional Tailnet ingress |
+
+Hosted Browser Use, hosted Infisical, hosted LLMs, or other SaaS providers are
+optional adapters only. A release gate must not require their keys. The local
+fallback may use self-hosted Vaultwarden/Infisical/gopass plus an ACP-compatible
+local harness/provider. Export, backup, shutdown, and migration remain owner
+controlled in every mode.
+
 ### Product authority
 
 - CloakBrowser Manager owns projects, profiles, tasks, runs, leases, outputs, approvals, recorder artifacts, provider metadata, and audit receipts.
@@ -157,4 +174,3 @@ Restart policy is capped and backoff-based. Repeated failure transitions to `blo
 ## Stop Conditions
 
 Stop and label `blocked` when a test requires unavailable computer-use runtime, missing authorized credentials, inaccessible VM, incompatible browser runtime, or a policy-unsafe secret path. Do not substitute an unmanaged local browser, raw credential injection, fake event fixture, historical screenshot, or health override for the missing proof.
-

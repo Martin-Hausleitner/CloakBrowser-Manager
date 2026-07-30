@@ -1,0 +1,7 @@
+# Pinned test + browser deps for the loopback auth benchmark CI gate.
+# Keep exact pins; do not float versions in CI.
+pytest==8.3.5
+pytest-asyncio==0.25.3
+playwright==1.61.0
+cryptography==49.0.0
+PyYAML==6.0.3

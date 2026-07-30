@@ -681,3 +681,57 @@ jobs:
         with:
           name: acpx-deploy-rollback-gates
           path: artifacts/ci/acpx-secure-recorder/
+
+  auth-benchmark:
+    name: Loopback auth benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: benchmarks/auth/requirements.txt
+
+      - name: Install auth benchmark dependencies
+        run: python -m pip install -r benchmarks/auth/requirements.txt
+
+      - name: Install Playwright Chromium and export binary path
+        run: |
+          set -euo pipefail
+          python -m playwright install --with-deps chromium
+          CHROME_BIN="$(
+            python - <<'PY'
+          from playwright.sync_api import sync_playwright
+
+          with sync_playwright() as playwright:
+              print(playwright.chromium.executable_path)
+          PY
+          )"
+          test -n "${CHROME_BIN}"
+          test -x "${CHROME_BIN}"
+          echo "CBM_AUTH_CHROMIUM_BINARY=${CHROME_BIN}" >> "${GITHUB_ENV}"
+          echo "Resolved Playwright Chromium: ${CHROME_BIN}"
+
+      - name: Run auth benchmark unit and contract tests
+        run: |
+          set -euo pipefail
+          test -n "${CBM_AUTH_CHROMIUM_BINARY}"
+          test -x "${CBM_AUTH_CHROMIUM_BINARY}"
+          PYTHONPATH=. python -m pytest benchmarks/auth -q
+
+      - name: Run live loopback auth scenarios
+        run: |
+          set -euo pipefail
+          test -n "${CBM_AUTH_CHROMIUM_BINARY}"
+          test -x "${CBM_AUTH_CHROMIUM_BINARY}"
+          PYTHONPATH=. python benchmarks/auth/run_auth_benchmark.py \
+            --parallel 4 \
+            --output artifacts/auth-benchmark/report.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: auth-benchmark-metrics
+          path: artifacts/auth-benchmark/report.json

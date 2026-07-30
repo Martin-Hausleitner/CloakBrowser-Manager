@@ -75,6 +75,7 @@ export async function applyProfileViewport({
 }: ApplyProfileViewportOptions) {
   if (!profile || !canManageProfiles) return false;
   if (profile.status === "running" && !canOperateProfile) return false;
+  if (profile.screen_width === width && profile.screen_height === height) return true;
 
   const updatedProfile = await update(profile.id, { screen_width: width, screen_height: height });
   if (!updatedProfile) return false;

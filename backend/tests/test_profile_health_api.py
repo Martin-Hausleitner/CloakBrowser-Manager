@@ -301,6 +301,96 @@ async def test_profile_health_probe_requeues_waiting_run_after_passing_measureme
 
 
 @pytest.mark.asyncio
+async def test_profile_health_probe_cleans_released_claim_socket_after_measurement(
+    tmp_db,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend import main
+
+    profile = db.create_profile("Claimed health gate", proxy="http://proxy.example:8080")
+    running = SimpleNamespace(context=AsyncMock())
+    main.automation_lease_service.ensure_schema()
+    db.upsert_profile_health(
+        profile["id"],
+        state="running",
+        proxy_configured=True,
+        warnings=[],
+        blockers=[],
+        sources={},
+    )
+    run = _create_health_waiting_run(profile["id"])
+    lease = main.automation_lease_service.acquire_direct(
+        profile_id=profile["id"],
+        owner_kind="worker",
+        owner_id="worker-health",
+    )
+    with db.get_db() as conn:
+        conn.execute(
+            """UPDATE task_runs
+            SET claimed_by = ?,
+                worker_id = ?,
+                claim_expires_at = ?,
+                lease_id = ?
+            WHERE id = ?""",
+            (
+                "worker-health",
+                "worker-health",
+                lease.expires_at.isoformat(),
+                lease.lease_id,
+                run["id"],
+            ),
+        )
+        conn.commit()
+    handle = main.direct_cdp_socket_registry.register(
+        lease_id=lease.lease_id,
+        profile_id=profile["id"],
+        owner_kind="worker",
+        owner_id="worker-health",
+        expires_at=lease.expires_at,
+    )
+    refresh_claims = MagicMock()
+    monkeypatch.setattr(
+        main.worker_runtime_service, "refresh_claim_eligibility", refresh_claims
+    )
+    monkeypatch.setattr(
+        main.profile_health_probe,
+        "run",
+        AsyncMock(
+            return_value=ProfileHealthResult(
+                state="passed",
+                checked_at=db._now(),
+                proxy_configured=True,
+                proxy_reachable=True,
+                outbound_ip_masked="203.0.113.x",
+                proxy_latency_ms=20.0,
+                proxy_risk_score=0,
+                proxy_authenticity_score=100,
+                fingerprint_consistency_score=100,
+                browser_scan_score=100,
+                warnings=(),
+                blockers=(),
+                error_code=None,
+                sources={
+                    "browser_network": "measured",
+                    "proxy_authenticity": "measured",
+                },
+            )
+        ),
+    )
+
+    try:
+        await main._run_profile_health_probe(profile, running)
+
+        updated = db.get_task_run(run["id"])
+        assert updated["status"] == "queued"
+        assert updated["lease_id"] is None
+        assert handle.revoked.is_set()
+        refresh_claims.assert_called_once_with()
+    finally:
+        main.direct_cdp_socket_registry.unregister(handle)
+
+
+@pytest.mark.asyncio
 async def test_profile_health_probe_blocks_waiting_run_after_failed_measurement(
     tmp_db,
     monkeypatch: pytest.MonkeyPatch,

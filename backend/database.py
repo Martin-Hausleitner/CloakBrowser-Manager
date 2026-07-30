@@ -11,6 +11,7 @@ import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -2349,6 +2350,12 @@ TASK_RUN_TERMINAL_STATUSES = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class HealthRunReconciliationResult:
+    reconciled_count: int = 0
+    lease_ids: tuple[str, ...] = ()
+
+
 class TaskOutputConflictError(Exception):
     """Raised when an idempotency key is reused with a conflicting payload."""
 
@@ -3023,15 +3030,18 @@ def _release_task_run_claim_on_conn(
     return lease_ids
 
 
-def reconcile_profile_health_waiting_task_runs(profile_id: str) -> int:
+def reconcile_profile_health_waiting_task_runs(
+    profile_id: str,
+) -> HealthRunReconciliationResult:
     """Re-evaluate health_check task runs for a profile after a fresh measurement."""
     safe_profile_id = str(profile_id)
     if not safe_profile_id:
-        return 0
+        return HealthRunReconciliationResult()
     snapshot, decision = build_run_health_gate(safe_profile_id)
     status = _status_from_health_decision(decision)
     now = _now()
     updated_count = 0
+    lease_ids: list[str] = []
     with get_db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
@@ -3043,7 +3053,7 @@ def reconcile_profile_health_waiting_task_runs(profile_id: str) -> int:
             (safe_profile_id, "health_check"),
         ).fetchall()
         for row in rows:
-            _release_task_run_claim_on_conn(
+            released = _release_task_run_claim_on_conn(
                 conn,
                 row,
                 now=now,
@@ -3071,6 +3081,7 @@ def reconcile_profile_health_waiting_task_runs(profile_id: str) -> int:
                 ),
             )
             updated_count += int(cursor.rowcount or 0)
+            lease_ids.extend(released)
         if updated_count:
             _refresh_profile_claim_eligibility_on_conn(
                 conn,
@@ -3078,7 +3089,10 @@ def reconcile_profile_health_waiting_task_runs(profile_id: str) -> int:
                 now=now,
             )
         conn.commit()
-    return updated_count
+    return HealthRunReconciliationResult(
+        reconciled_count=updated_count,
+        lease_ids=tuple(dict.fromkeys(lease_ids)),
+    )
 
 
 def retry_task_run_health(run_id: str) -> dict[str, Any] | None:

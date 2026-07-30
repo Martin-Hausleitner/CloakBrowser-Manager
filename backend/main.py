@@ -1611,8 +1611,12 @@ class _RfbClientStreamFilter:
 
 def _reconcile_profile_health_waiting_runs(profile_id: str) -> None:
     try:
-        reconciled = db.reconcile_profile_health_waiting_task_runs(profile_id)
-        if reconciled:
+        result = db.reconcile_profile_health_waiting_task_runs(profile_id)
+        if result.lease_ids:
+            _apply_terminal_cleanup(
+                worker_runtime_mod.TerminalCleanup(lease_ids=result.lease_ids)
+            )
+        if result.reconciled_count:
             worker_runtime_service.refresh_claim_eligibility()
     except Exception as exc:
         logger.error(

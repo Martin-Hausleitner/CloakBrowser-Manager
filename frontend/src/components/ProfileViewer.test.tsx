@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../lib/api";
+import { UI_STATE, expectUiState } from "../lib/uiFlowRegistry";
 import { ProfileViewer } from "./ProfileViewer";
 
 const rfbMock = vi.hoisted(() => {
@@ -137,12 +138,16 @@ describe("ProfileViewer", () => {
   it("keeps the viewer in reconnecting state after a transient noVNC disconnect", async () => {
     const { onDisconnect } = await renderProfileViewer();
 
+    expectUiState(document.body, UI_STATE.profileViewer);
+    expectUiState(document.body, UI_STATE.profileViewerConnecting);
     act(() => rfbMock.instances[0]?.emit("connect"));
+    expectUiState(document.body, UI_STATE.profileViewerConnected);
     expect(screen.getByText("Connected")).toBeTruthy();
 
     act(() => rfbMock.instances[0]?.emit("disconnect"));
 
     expect(onDisconnect).not.toHaveBeenCalled();
+    expectUiState(document.body, UI_STATE.profileViewerReconnecting);
     expect(screen.getByText("Reconnecting...")).toBeTruthy();
 
     await act(async () => {
@@ -193,6 +198,80 @@ describe("ProfileViewer", () => {
     expect(onDisconnect).not.toHaveBeenCalled();
   });
 
+  it("keeps the VNC connection when the parent replaces its disconnect callback", async () => {
+    const firstDisconnect = vi.fn();
+    const secondDisconnect = vi.fn();
+    const view = render(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        onDisconnect={firstDisconnect}
+      />,
+    );
+    await flushAsyncWork();
+    expect(rfbMock.instances).toHaveLength(1);
+
+    view.rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        onDisconnect={secondDisconnect}
+      />,
+    );
+    await flushAsyncWork();
+
+    expect(rfbMock.instances).toHaveLength(1);
+    expect(rfbMock.instances[0]?.disconnectCalls).toBe(0);
+  });
+
+  it("updates view-only mode without reconnecting the VNC session", async () => {
+    const view = render(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        canInteract
+        onDisconnect={vi.fn()}
+      />,
+    );
+    await flushAsyncWork();
+    expect(rfbMock.instances).toHaveLength(1);
+    const instance = rfbMock.instances[0];
+    expect(instance?.viewOnly).toBe(false);
+
+    view.rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        canInteract={false}
+        onDisconnect={vi.fn()}
+      />,
+    );
+    await flushAsyncWork();
+
+    expect(rfbMock.instances).toHaveLength(1);
+    expect(instance?.disconnectCalls).toBe(0);
+    expect(instance?.viewOnly).toBe(true);
+
+    view.rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        canInteract
+        onDisconnect={vi.fn()}
+      />,
+    );
+    await flushAsyncWork();
+
+    expect(rfbMock.instances).toHaveLength(1);
+    expect(instance?.disconnectCalls).toBe(0);
+    expect(instance?.viewOnly).toBe(false);
+  });
+
   it("notifies the parent only after reconnect attempts are exhausted", async () => {
     const { onDisconnect } = await renderProfileViewer();
 
@@ -219,6 +298,7 @@ describe("ProfileViewer", () => {
     act(() => rfbMock.instances[0]?.emit("securityfailure", { reason: "bad auth" }));
 
     expect(onDisconnect).toHaveBeenCalledTimes(1);
+    expectUiState(document.body, UI_STATE.profileViewerFailed);
     expect(screen.getByText("Connection failed")).toBeTruthy();
     expect(screen.getByText("Security failure: bad auth")).toBeTruthy();
   });
@@ -236,6 +316,7 @@ describe("ProfileViewer", () => {
     await flushAsyncWork();
 
     expect(rfbMock.instances[0]?.viewOnly).toBe(true);
+    expectUiState(document.body, UI_STATE.profileViewerViewOnly);
     expect(screen.getByText("View only")).toBeTruthy();
     expect(screen.queryByLabelText("Paste text into remote browser")).toBeNull();
     expect(screen.queryByLabelText("Enable clipboard sync")).toBeNull();
@@ -419,6 +500,90 @@ describe("ProfileViewer", () => {
     });
 
     expect(originalAutoscale).toHaveBeenLastCalledWith(292.5, 534.75);
+  });
+
+  it("applies fit-width mode through noVNC autoscale dimensions", async () => {
+    const originalResizeObserver = window.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | null = null;
+
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      value: MockResizeObserver,
+    });
+
+    const view = await renderProfileViewer(vi.fn(), { fitMode: "width" });
+    const instance = rfbMock.instances[0]!;
+    instance._display.width = 500;
+    instance._display.height = 1000;
+    vi.spyOn(instance.target, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 1000,
+      height: 600,
+      top: 0,
+      right: 1000,
+      bottom: 600,
+      left: 0,
+      toJSON: () => ({}),
+    });
+
+    act(() => resizeCallback?.([], {} as ResizeObserver));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    const originalAutoscale = (instance._display as any).__cloakOriginalAutoscale;
+    expect(instance.target.getAttribute("data-vnc-fit-mode")).toBe("width");
+    expect(originalAutoscale).toHaveBeenCalledWith(1000, 2000);
+
+    view.unmount();
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      value: originalResizeObserver,
+    });
+  });
+
+  it("applies fit-height mode through noVNC autoscale dimensions while keeping manual zoom", async () => {
+    const view = await renderProfileViewer(vi.fn(), { fitMode: "height", viewportScale: 1.25 });
+    const instance = rfbMock.instances[0]!;
+    instance._display.width = 1000;
+    instance._display.height = 500;
+    const originalAutoscale = (instance._display as any).__cloakOriginalAutoscale;
+
+    act(() => {
+      instance._display.autoscale(600, 1000);
+    });
+
+    expect(instance.target.getAttribute("data-vnc-fit-mode")).toBe("height");
+    expect(originalAutoscale).toHaveBeenCalledWith(2500, 1250);
+
+    view.rerender(
+      <ProfileViewer
+        profileId="profile-1"
+        cdpUrl={null}
+        clipboardSync={true}
+        onDisconnect={view.onDisconnect}
+        fitMode="fit"
+        viewportScale={1.25}
+      />,
+    );
+
+    act(() => {
+      instance._display.autoscale(600, 1000);
+    });
+
+    expect(instance.target.getAttribute("data-vnc-fit-mode")).toBe("fit");
+    expect(originalAutoscale).toHaveBeenLastCalledWith(750, 1250);
   });
 
   it("pauses clipboard polling while hidden", async () => {

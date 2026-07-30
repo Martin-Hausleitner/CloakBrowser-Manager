@@ -1,0 +1,14 @@
+{
+  "name": "@cloakbrowser/acpx-runtime",
+  "private": true,
+  "version": "0.0.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "acpx": "0.12.1"
+  },
+  "overrides": {
+    "@agentclientprotocol/sdk": "1.2.1"
+  }
+}

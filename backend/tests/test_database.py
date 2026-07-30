@@ -49,7 +49,71 @@ def test_init_db_idempotent(tmp_db: Path):
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
+        task_run_columns = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
     assert len(tables) >= 2
+    assert {
+        name: (task_run_columns[name]["type"], task_run_columns[name]["notnull"])
+        for name in (
+            "provider_json",
+            "browser_tools_json",
+            "routing_policy_json",
+        )
+    } == {
+        "provider_json": ("TEXT", 0),
+        "browser_tools_json": ("TEXT", 0),
+        "routing_policy_json": ("TEXT", 0),
+    }
+
+
+def test_list_applied_schema_migrations_returns_sorted_release_ids(tmp_db: Path):
+    assert db.list_applied_schema_migrations() == [
+        "account_metadata_v1",
+        "agent_workspace_v1",
+        "task_run_binding_v1",
+        "task_run_routing_contract_v1",
+        "task_runs_acpx_v1",
+        "task_runs_v1",
+        "worker_harness_preflights_v1",
+        "worker_harness_presence_v1",
+        "worker_provider_preflights_v1",
+        "worker_runtime_v1",
+    ]
+
+
+def test_list_applied_schema_migrations_fails_closed_when_table_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_file = tmp_path / "profiles.db"
+    monkeypatch.setattr(db, "DB_PATH", db_file)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute("CREATE TABLE profiles (id TEXT PRIMARY KEY)")
+        conn.commit()
+
+    assert db.list_applied_schema_migrations() == []
+
+
+def test_list_applied_schema_migrations_raises_sanitized_error_for_db_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def broken_get_db():
+        raise sqlite3.DatabaseError("database disk image is malformed: /tmp/profiles.db")
+
+    monkeypatch.setattr(db, "get_db", broken_get_db)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        db.list_applied_schema_migrations()
+
+    assert type(exc_info.value).__name__ == "SchemaMigrationStatusError"
+    assert str(exc_info.value) == "Schema migration status unavailable"
+    assert "malformed" not in str(exc_info.value)
+    assert "/tmp/profiles.db" not in str(exc_info.value)
 
 
 def test_init_db_adds_profile_health_to_existing_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -78,6 +142,49 @@ def test_init_db_adds_profile_health_to_existing_database(tmp_path: Path, monkey
             "SELECT name FROM sqlite_master WHERE type='table' AND name='profile_health'"
         ).fetchone()
     assert table is not None
+
+
+def test_init_db_adds_provider_preflights_to_legacy_worker_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_file = tmp_path / "profiles.db"
+    monkeypatch.setattr(db, "DB_PATH", db_file)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute("CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+        conn.execute(
+            """
+            CREATE TABLE worker_identities (
+                id TEXT PRIMARY KEY,
+                key_digest TEXT NOT NULL UNIQUE,
+                active BOOLEAN NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES ('worker_runtime_v1', ?)",
+            (now,),
+        )
+        conn.commit()
+
+    db.init_db()
+    db.init_db()
+
+    with db.get_db() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='worker_provider_preflights'"
+        ).fetchone()
+        migration_count = conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 'worker_provider_preflights_v1'"
+        ).fetchone()[0]
+    assert table is not None
+    assert migration_count == 1
 
 
 def test_init_db_migrates_profile_organization_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -221,6 +328,11 @@ def test_create_profile_defaults(tmp_db: Path):
 def test_create_profile_with_launch_args(tmp_db: Path):
     p = db.create_profile("WithArgs", launch_args=["--load-extension=/tmp/ext", "--disable-features=Foo"])
     assert p["launch_args"] == ["--load-extension=/tmp/ext", "--disable-features=Foo"]
+
+
+def test_create_profile_persists_catalog_extension_ids(tmp_db: Path):
+    p = db.create_profile("WithCatalogExtensions", extension_ids=["catalog-extension"])
+    assert p.get("extension_ids") == ["catalog-extension"]
 
 
 def test_create_profile_with_organization_fields(tmp_db: Path):
@@ -467,7 +579,11 @@ def test_profile_health_is_deleted_with_profile(tmp_db: Path):
 
 
 def test_task_session_message_and_event_roundtrip(tmp_db: Path):
-    profile = db.create_profile("Task Browser", sandbox_id="tasks")
+    profile = db.create_profile(
+        "Task Browser",
+        sandbox_id="tasks",
+        project_id="research",
+    )
     session = db.create_task_session(
         profile["id"],
         profile["sandbox_id"],
@@ -493,13 +609,15 @@ def test_task_session_message_and_event_roundtrip(tmp_db: Path):
         {"message_id": message["id"]},
     )
 
-    assert db.get_task_session(session["id"])["metadata"] == {"source": "test"}
+    stored_session = db.get_task_session(session["id"])
+    assert stored_session["project_id"] == "research"
+    assert stored_session["metadata"] == {"source": "test"}
     assert db.list_task_sessions(profile["id"])[0]["id"] == session["id"]
     assert db.list_task_messages(session["id"]) == [message]
     assert db.list_task_events(session["id"]) == [event]
 
 
-def test_task_sessions_are_deleted_with_profile(tmp_db: Path):
+def test_profile_delete_sets_null_and_preserves_task_history(tmp_db: Path):
     profile = db.create_profile("Task Browser")
     session = db.create_task_session(
         profile["id"],
@@ -512,9 +630,9 @@ def test_task_sessions_are_deleted_with_profile(tmp_db: Path):
 
     assert db.delete_profile(profile["id"]) is True
 
-    assert db.get_task_session(session["id"]) is None
-    assert db.list_task_messages(session["id"]) == []
-    assert db.list_task_events(session["id"]) == []
+    assert db.get_task_session(session["id"])["profile_id"] is None
+    assert db.list_task_messages(session["id"])[0]["content"] == "hello"
+    assert db.list_task_events(session["id"])[0]["type"] == "task_session.created"
 
 
 # ── update_profile ───────────────────────────────────────────────────────────

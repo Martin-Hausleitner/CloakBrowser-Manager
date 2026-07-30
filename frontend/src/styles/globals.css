@@ -651,7 +651,7 @@
   }
 
   .mobile-tools-meta {
-    @apply text-[10px] leading-3 text-gray-500;
+    @apply inline-flex w-fit items-center rounded-full border border-border bg-surface-1 px-2 py-0.5 text-[10px] leading-3 text-gray-400;
   }
 
   .mobile-run-settings {

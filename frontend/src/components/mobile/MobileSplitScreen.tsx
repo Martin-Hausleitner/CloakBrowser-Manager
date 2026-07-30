@@ -18,11 +18,12 @@ import {
   RotateCcw,
   Send,
   ShieldCheck,
+  Settings2,
   SlidersHorizontal,
   Shrink,
   Square,
 } from "lucide-react";
-import type { Profile, ProfileHarness } from "../../lib/api";
+import type { Profile, ProfileHarness, TaskOutput } from "../../lib/api";
 import { compareOrganizedProfiles, profileOrganizationLabel } from "../../lib/profileOrganization";
 import {
   cloakServerProvider,
@@ -33,7 +34,9 @@ import {
   type TaskHarnessCapabilities,
   type TaskHarnessMessage,
 } from "../../lib/taskHarness";
+import { UI_STATE, uiStateAttr } from "../../lib/uiFlowRegistry";
 import { StatusIndicator } from "../StatusIndicator";
+import { AgentOutputTimeline } from "../workspace/AgentOutputTimeline";
 
 interface MobileSplitScreenProps {
   profiles: Profile[];
@@ -47,7 +50,9 @@ interface MobileSplitScreenProps {
   canManageAccess: boolean;
   identityName: string | null;
   browserView: ReactNode;
+  liveMetricsView?: ReactNode;
   browserZoom: number;
+  taskOutputs?: TaskOutput[];
   browserConnectionStatus: "connecting" | "connected" | "reconnecting" | "failed" | null;
   remoteToolsOpen: boolean;
   onRemoteToolsOpenChange: (open: boolean) => void;
@@ -61,6 +66,7 @@ interface MobileSplitScreenProps {
   onBrowserZoomChange: (zoom: number) => void;
   onAccessControls: () => void;
   onLogout: () => void;
+  onOpenSettings: () => void;
 }
 
 interface ChatMessage {
@@ -100,6 +106,7 @@ const harnessNames: Record<ProfileHarness, string> = {
   "browser-harness": "Browser Harness",
   unbrowse: "Unbrowse",
   stagehand: "Stagehand",
+  acpx: "ACPX",
 };
 
 type PinnedHarnessAction = Omit<TaskHarnessAction, "kind"> & {
@@ -236,7 +243,9 @@ export function MobileSplitScreen({
   canManageAccess,
   identityName,
   browserView,
+  liveMetricsView = null,
   browserZoom,
+  taskOutputs = [],
   browserConnectionStatus,
   remoteToolsOpen,
   onRemoteToolsOpenChange,
@@ -250,6 +259,7 @@ export function MobileSplitScreen({
   onBrowserZoomChange,
   onAccessControls,
   onLogout,
+  onOpenSettings,
 }: MobileSplitScreenProps) {
   const [viewport, setViewport] = useState({
     width: selected?.screen_width ?? presets[0].width,
@@ -743,7 +753,10 @@ export function MobileSplitScreen({
       height: Math.round(
         Math.max(
           minimumPhoneFitHeight,
-          visualViewport?.height ?? window.innerHeight ?? presets[0].height,
+          visualViewport?.height ?? 0,
+          window.innerHeight ?? 0,
+          keyboardBaselineHeightRef.current,
+          presets[0].height,
         ),
       ),
     };
@@ -787,6 +800,7 @@ export function MobileSplitScreen({
         id={editorId}
         className={`mobile-viewport-editor ${fullscreen ? "mobile-fullscreen-viewport-editor" : ""}`}
         aria-label={fullscreen ? "Fullscreen viewport controls" : "Viewport controls"}
+        data-ui-state={UI_STATE.mobileViewportControls}
       >
         {!fullscreen ? (
           <>
@@ -1153,6 +1167,7 @@ export function MobileSplitScreen({
     <div
       className={`mobile-browser-frame ${isLiveBrowser ? "mobile-browser-frame-live" : ""}`}
       data-testid="mobile-browser-frame"
+      data-ui-state={UI_STATE.mobileBrowserFrame}
     >
       {!isLiveBrowser ? (
         <div className="mobile-browser-chrome">
@@ -1189,11 +1204,16 @@ export function MobileSplitScreen({
       className={`mobile-split-root ${compactWorkspace ? "mobile-workspace-collapsed" : ""} ${detailPanelOpen ? "mobile-detail-panel-open" : ""} ${keyboardOpen ? "mobile-keyboard-open" : ""} bg-surface-0 text-gray-100`}
       style={rootStyle}
       data-keyboard-open={keyboardOpen ? "true" : "false"}
+      data-ui-state={UI_STATE.mobileWorkspace}
     >
       <section
         className={`mobile-live-pane ${isLiveBrowser ? "mobile-live-pane-running" : ""} ${fitLivePaneToBrowser ? "mobile-live-pane-fit" : ""} ${fullscreenOpen ? "mobile-live-pane-fullscreen" : ""}`}
         style={livePaneStyle}
         data-fullscreen-fit={fullscreenOpen ? fullscreenFitMode : undefined}
+        data-ui-state={uiStateAttr(
+          UI_STATE.mobileLivePane,
+          fullscreenOpen && UI_STATE.mobileFullscreenBrowser,
+        )}
         role={fullscreenOpen ? "dialog" : undefined}
         aria-modal={fullscreenOpen ? true : undefined}
         aria-label={fullscreenOpen ? "Fullscreen browser viewer" : undefined}
@@ -1234,6 +1254,8 @@ export function MobileSplitScreen({
           </>
         ) : null}
 
+        {liveMetricsView}
+
         <div className={`mobile-browser-wrap ${isLiveBrowser ? "mobile-browser-wrap-live" : "px-3 pb-2"}`}>
           {fullscreenOpen ? renderFullscreenControls() : null}
           {renderBrowserSurface()}
@@ -1244,6 +1266,7 @@ export function MobileSplitScreen({
         className="mobile-control-pane"
         aria-hidden={fullscreenOpen ? true : undefined}
         inert={fullscreenOpen ? true : undefined}
+        data-ui-state={UI_STATE.mobileControlPane}
       >
         {error ? (
           <div className="mx-3 mt-3 rounded-md border border-red-600/30 bg-red-600/15 px-3 py-2 text-xs text-red-300">
@@ -1252,7 +1275,12 @@ export function MobileSplitScreen({
         ) : null}
 
         {remoteToolsOpen ? (
-          <div id="mobile-tools-sheet" className="mobile-tools-sheet" aria-label="Browser tools">
+          <div
+            id="mobile-tools-sheet"
+            className="mobile-tools-sheet"
+            aria-label="Browser tools"
+            data-ui-state={UI_STATE.mobileToolsSheet}
+          >
             {!toolPanelOpen && canOperate ? (
               <div className="mobile-tools-row mobile-tools-row-primary">
                 {selected?.status === "running" ? (
@@ -1367,7 +1395,12 @@ export function MobileSplitScreen({
             {viewportOpen ? renderViewportEditor("inline") : null}
 
             {adminOpen ? (
-              <div id="mobile-admin-tools" className="mobile-tools-row mobile-admin-tools" aria-label="Browser administration">
+              <div
+                id="mobile-admin-tools"
+                className="mobile-tools-row mobile-admin-tools"
+                aria-label="Browser administration"
+                data-ui-state={UI_STATE.mobileAdminTools}
+              >
                 {canManageProfiles ? (
                   <button type="button" onClick={onNew} className="mobile-tool-action" aria-label="New profile">
                     <Plus className="h-4 w-4" aria-hidden="true" />
@@ -1390,7 +1423,12 @@ export function MobileSplitScreen({
             ) : null}
 
             {gridOpen ? (
-              <div id="mobile-running-grid" className="mobile-grid" aria-label="Running browser grid">
+              <div
+                id="mobile-running-grid"
+                className="mobile-grid"
+                aria-label="Running browser grid"
+                data-ui-state={UI_STATE.mobileSessionGrid}
+              >
                 {(runningProfiles.length > 0 ? runningProfiles : organizedProfiles.slice(0, 4)).map((profile) => (
                   <button
                     key={profile.id}
@@ -1421,13 +1459,17 @@ export function MobileSplitScreen({
               </div>
             ) : null}
 
-            <p className="mobile-tools-meta">
-              {codexHostReady
+            <span
+              className="mobile-tools-meta"
+              aria-label={`Task execution status: ${codexHostReady ? "Host ready" : serverHistoryReady ? "History only" : "Host unavailable"}`}
+              title={codexHostReady
                 ? "Tasks run through the verified Codex Computer Use host; browser credentials stay outside the chat UI."
                 : serverHistoryReady
                   ? "Tasks are saved to scoped server history only. Nothing executes until a verified Codex host attaches."
                   : "A verified Codex Computer Use host or the scoped server history is required."}
-            </p>
+            >
+              {codexHostReady ? "Host ready" : serverHistoryReady ? "History only" : "Host unavailable"}
+            </span>
 
             {authRequired ? (
               <div className="mobile-account-row">
@@ -1450,6 +1492,7 @@ export function MobileSplitScreen({
             id="mobile-task-chat-panel"
             className="mobile-chat-panel"
             aria-label="Task chat"
+            data-ui-state={UI_STATE.mobileTaskChat}
           >
             <div className="mobile-chat-header">
               <MessageSquareText className="h-4 w-4 text-accent" aria-hidden="true" />
@@ -1498,6 +1541,17 @@ export function MobileSplitScreen({
           </section>
         ) : null}
 
+        {taskOutputs.length ? (
+          <section
+            className="mobile-agent-output-panel min-h-0 max-h-48 shrink overflow-y-auto overscroll-contain border-t border-border bg-[#0a0a0a] px-2 py-1.5"
+            role="region"
+            aria-label="Managed task output"
+            tabIndex={0}
+          >
+            <AgentOutputTimeline outputs={taskOutputs} />
+          </section>
+        ) : null}
+
         <form className={`mobile-chat-form ${chatCollapsed ? "mobile-chat-form-collapsed" : ""}`} onSubmit={sendMessage}>
           <div className="mobile-command-dock" aria-label="Browser command dock">
             {isLiveBrowser ? (
@@ -1528,6 +1582,19 @@ export function MobileSplitScreen({
               title="Browser tools (Ctrl+K)"
             >
               <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                closeTools();
+                setChatCollapsed(true);
+                onOpenSettings();
+              }}
+              className="mobile-command-button"
+              aria-label="Open Settings"
+              title="Settings"
+            >
+              <Settings2 className="h-4 w-4" aria-hidden="true" />
             </button>
             <button
               type="button"

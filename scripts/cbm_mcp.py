@@ -1,0 +1,464 @@
+#!/usr/bin/env python3
+"""Run-scoped CloakBrowser MCP server for ACPX agents.
+
+The server exposes only bounded browser interactions for the profile and task
+run granted by the Manager. It cannot list other profiles, reveal credentials,
+acquire arbitrary leases, execute shell commands, or connect to raw external
+CDP endpoints.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+from backend.origin_policy import is_top_level_origin_allowed
+from backend.models import control_plane_capabilities_payload, control_plane_resource_schema
+from scripts.cbm_browser_ctl import (
+    MAX_TEXT_CHARS,
+    BrowserCtlError,
+    _import_playwright_sync,
+    _safe_page_title,
+    _safe_page_url,
+    redact_text,
+    select_page,
+    validate_http_url,
+    validate_profile_id,
+    validate_selector,
+    validate_text,
+)
+from scripts.browser_tool_router import (
+    BrowserToolAdapter,
+    ROUTING_BROWSER_TOOL_ORDER,
+    RunScopedBrowserContext,
+    STOP_CLASSIFICATIONS,
+    route_browser_action,
+    routing_contract_from_claim,
+)
+from scripts.browser_harness_adapter import BrowserHarnessAdapter
+from scripts.stagehand_router_adapter import StagehandRouterAdapter
+from scripts.unbrowse_router_adapter import UnbrowseRouterAdapter
+
+
+@dataclass(frozen=True)
+class RunContext:
+    manager_url: str
+    profile_id: str
+    task_run_id: str
+    allowed_origins: tuple[str, ...]
+    capability_file: Path
+    capability_token: str = field(repr=False)
+    routing_contract: dict[str, Any] | None = field(default=None, repr=False)
+    router_terminal_failure_file: Path | None = field(default=None, repr=False)
+
+    @classmethod
+    def from_environment(cls, environment: dict[str, str] | None = None) -> "RunContext":
+        env = environment if environment is not None else os.environ
+        manager_url = str(env.get("CBM_MANAGER_URL") or "").strip().rstrip("/")
+        if not manager_url.startswith(("http://", "https://")):
+            raise ValueError("CBM_MANAGER_URL must be an http/https URL")
+        profile_id = validate_profile_id(str(env.get("CBM_PROFILE_ID") or ""))
+        task_run_id = str(env.get("CBM_TASK_RUN_ID") or "").strip()
+        if not task_run_id or len(task_run_id) > 128:
+            raise ValueError("CBM_TASK_RUN_ID is required")
+        capability_file = Path(str(env.get("CBM_RUN_CAPABILITY_FILE") or ""))
+        if not capability_file.is_absolute() or not capability_file.is_file():
+            raise ValueError("CBM_RUN_CAPABILITY_FILE must be an existing absolute file")
+        if capability_file.stat().st_mode & 0o077:
+            raise ValueError("CBM_RUN_CAPABILITY_FILE must use mode 0600")
+        token = capability_file.read_text(encoding="utf-8").strip()
+        if not token or any(ch.isspace() for ch in token) or not token.isprintable():
+            raise ValueError("run capability is invalid")
+        try:
+            raw_origins = json.loads(str(env.get("CBM_ALLOWED_ORIGINS") or "[]"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("CBM_ALLOWED_ORIGINS must be a JSON array") from exc
+        if not isinstance(raw_origins, list) or any(
+            not isinstance(item, str) for item in raw_origins
+        ):
+            raise ValueError("CBM_ALLOWED_ORIGINS must be a JSON string array")
+        raw_routing_contract = str(env.get("CBM_ROUTING_CONTRACT_JSON") or "").strip()
+        router_terminal_failure_file = _private_marker_file_from_env(
+            env.get("CBM_ROUTER_TERMINAL_FAILURE_FILE")
+        )
+        routing_contract = None
+        if raw_routing_contract:
+            try:
+                parsed = json.loads(raw_routing_contract)
+            except json.JSONDecodeError as exc:
+                raise ValueError("CBM_ROUTING_CONTRACT_JSON must be JSON") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("CBM_ROUTING_CONTRACT_JSON must be a JSON object")
+            routing_contract = parsed
+        return cls(
+            manager_url=manager_url,
+            profile_id=profile_id,
+            task_run_id=task_run_id,
+            allowed_origins=tuple(raw_origins),
+            capability_file=capability_file.resolve(),
+            capability_token=token,
+            routing_contract=routing_contract,
+            router_terminal_failure_file=router_terminal_failure_file,
+        )
+
+
+def _private_marker_file_from_env(raw: str | None) -> Path | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute() or not path.is_file() or path.is_symlink():
+        raise ValueError("CBM_ROUTER_TERMINAL_FAILURE_FILE must be an existing absolute file")
+    if path.stat().st_mode & 0o077:
+        raise ValueError("CBM_ROUTER_TERMINAL_FAILURE_FILE must use mode 0600")
+    return path.resolve()
+
+
+class CbmMcpController:
+    """Pure bounded browser tool implementation used by FastMCP handlers."""
+
+    def __init__(
+        self,
+        context: RunContext,
+        *,
+        connect_over_cdp: Callable[..., Any] | None = None,
+        router_adapters: dict[str, BrowserToolAdapter] | None = None,
+    ) -> None:
+        self.context = context
+        self._connect_over_cdp = connect_over_cdp
+        self._router_adapters = router_adapters or _default_router_adapters()
+
+    def _require_allowed_url(self, url: str) -> None:
+        if not self.context.allowed_origins:
+            return
+        from urllib.parse import urlparse
+
+        parts = urlparse(str(url or ""))
+        candidate_origin = f"{parts.scheme}://{parts.netloc}"
+        if not is_top_level_origin_allowed(
+            candidate_origin, self.context.allowed_origins
+        ):
+            raise BrowserCtlError(
+                "navigation_blocked", "URL is outside the run allowed origin set"
+            )
+
+    def _require_allowed_page(self, page: Any) -> None:
+        self._require_allowed_url(str(getattr(page, "url", "") or ""))
+
+    def _reject_direct_browser_tool_on_routed_context(self) -> None:
+        if self.context.routing_contract is not None:
+            raise BrowserCtlError(
+                "policy_denied",
+                "direct browser tools are disabled for routed runs; use the router",
+            )
+
+    @contextmanager
+    def _page(self) -> Iterator[Any]:
+        endpoint = (
+            f"{self.context.manager_url}/api/profiles/{self.context.profile_id}/cdp"
+        )
+        headers = {"Authorization": f"Bearer {self.context.capability_token}"}
+        browser = None
+        playwright_cm = None
+        try:
+            if self._connect_over_cdp is not None:
+                browser = self._connect_over_cdp(endpoint, headers=headers)
+            else:
+                sync_playwright = _import_playwright_sync()
+                playwright_cm = sync_playwright()
+                playwright = playwright_cm.__enter__()
+                browser = playwright.chromium.connect_over_cdp(endpoint, headers=headers)
+            yield select_page(browser)
+        finally:
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            if playwright_cm is not None:
+                try:
+                    playwright_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+
+    def inspect(self) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
+        with self._page() as page:
+            self._require_allowed_page(page)
+            return {
+                "ok": True,
+                "command": "inspect",
+                "profile_id": self.context.profile_id,
+                "url": _safe_page_url(page),
+                "title": _safe_page_title(page),
+            }
+
+    def navigate(self, url: str) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
+        safe_url = validate_http_url(url)
+        self._require_allowed_url(safe_url)
+        with self._page() as page:
+            page.goto(safe_url, wait_until="domcontentloaded")
+            self._require_allowed_page(page)
+            return {
+                "ok": True,
+                "command": "navigate",
+                "profile_id": self.context.profile_id,
+                "url": _safe_page_url(page),
+                "title": _safe_page_title(page),
+            }
+
+    def click(self, selector: str) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
+        safe_selector = validate_selector(selector)
+        with self._page() as page:
+            self._require_allowed_page(page)
+            page.click(safe_selector)
+            self._require_allowed_page(page)
+            return {
+                "ok": True,
+                "command": "click",
+                "profile_id": self.context.profile_id,
+                "selector": safe_selector,
+                "url": _safe_page_url(page),
+            }
+
+    def fill(self, selector: str, text: str) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
+        safe_selector = validate_selector(selector)
+        safe_text = validate_text(text)
+        with self._page() as page:
+            self._require_allowed_page(page)
+            page.fill(safe_selector, safe_text)
+            self._require_allowed_page(page)
+            return {
+                "ok": True,
+                "command": "fill",
+                "profile_id": self.context.profile_id,
+                "selector": safe_selector,
+                "text_length": len(safe_text),
+                "url": _safe_page_url(page),
+            }
+
+    def read_text(self, selector: str | None = None) -> dict[str, Any]:
+        self._reject_direct_browser_tool_on_routed_context()
+        safe_selector = validate_selector(selector) if selector else None
+        with self._page() as page:
+            self._require_allowed_page(page)
+            locator = page.locator(safe_selector or "body")
+            visible_text = redact_text(str(locator.inner_text()))[:MAX_TEXT_CHARS]
+            return {
+                "ok": True,
+                "command": "read_text",
+                "profile_id": self.context.profile_id,
+                "selector": safe_selector,
+                "text": visible_text,
+                "url": _safe_page_url(page),
+            }
+
+    def control_plane_capabilities(self) -> dict[str, Any]:
+        """Expose bounded resource semantics; unavailable targets are explicit."""
+        payload = control_plane_capabilities_payload(local_mac_available=False)
+        if self.context.routing_contract is not None:
+            payload = json.loads(json.dumps(payload))
+            payload["mcp_contract"]["tools"] = [
+                "cbm_route_browser_action",
+                "control_plane_capabilities",
+                "control_plane_resource_schema",
+                "orca_web_capabilities",
+            ]
+        return payload
+
+    def control_plane_resource_schema(self) -> dict[str, Any]:
+        """Expose the shared versioned resource envelope schema."""
+        return control_plane_resource_schema()
+
+    def orca_web_capabilities(self) -> dict[str, Any]:
+        """Report Orca-Web availability without falling back to browser tools."""
+        payload = control_plane_capabilities_payload(local_mac_available=False)
+        return {
+            "api_version": payload["api_version"],
+            "kind": "CapabilitySet",
+            "metadata": {"id": "orca-web-capabilities", "resource_version": 1},
+            "resources": {"orca-web": payload["resources"]["orca-web"]},
+        }
+
+    async def route_browser_action(
+        self,
+        action: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Route one browser action through the ordered normalized browser-tool chain."""
+        try:
+            contract = routing_contract_from_claim(self.context.routing_contract)
+        except ValueError as exc:
+            public = {
+                "ok": False,
+                "outcome": "failed",
+                "classification": "policy_denied",
+                "tool_id": None,
+                "result": {},
+                "telemetry": [],
+                "message": str(exc),
+            }
+            self._record_router_terminal_failure(public)
+            return public
+        result = await route_browser_action(
+            contract=contract,
+            context=self._router_context(),
+            action=action,
+            arguments=arguments or {},
+            adapters=self._router_adapters,
+        )
+        public = result.public_json()
+        self._record_router_terminal_failure(public)
+        return public
+
+    def _record_router_terminal_failure(self, result: dict[str, Any]) -> None:
+        path = self.context.router_terminal_failure_file
+        if path is None:
+            return
+        if result.get("ok") is True or result.get("outcome") != "failed":
+            return
+        classification = str(result.get("classification") or "").strip()
+        if classification not in STOP_CLASSIFICATIONS:
+            return
+        tool_id = result.get("tool_id")
+        safe_tool_id = str(tool_id) if tool_id in ROUTING_BROWSER_TOOL_ORDER else None
+        body = json.dumps(
+            {"classification": classification, "tool_id": safe_tool_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if len(body) > 256:
+            raise BrowserCtlError("policy_denied", "router terminal marker exceeded size bound")
+        flags = os.O_WRONLY | os.O_TRUNC
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if nofollow:
+            flags |= nofollow
+        fd = os.open(path, flags)
+        try:
+            os.write(fd, body)
+        finally:
+            os.close(fd)
+
+    def _router_context(self) -> RunScopedBrowserContext:
+        return RunScopedBrowserContext(
+            manager_url=self.context.manager_url,
+            profile_id=self.context.profile_id,
+            task_run_id=self.context.task_run_id,
+            allowed_origins=self.context.allowed_origins,
+            capability_file=self.context.capability_file,
+            capability_token=self.context.capability_token,
+            lease_id=(
+                str(self.context.routing_contract.get("context", {}).get("lease_id"))
+                if isinstance(self.context.routing_contract, dict)
+                and isinstance(self.context.routing_contract.get("context"), dict)
+                and self.context.routing_contract.get("context", {}).get("lease_id")
+                else None
+            ),
+        )
+
+
+def _default_router_adapters() -> dict[str, BrowserToolAdapter]:
+    return {
+        "unbrowse": UnbrowseRouterAdapter(),
+        "stagehand": StagehandRouterAdapter(),
+        "browser-harness": BrowserHarnessAdapter(),
+    }
+
+
+def _import_fastmcp():
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except ImportError as exc:
+        raise RuntimeError(
+            "Official MCP Python SDK is missing; install mcp>=1.27,<2"
+        ) from exc
+    return FastMCP
+
+
+def build_server(controller: CbmMcpController | None = None):
+    """Build the official FastMCP stdio server with an explicit tool allowlist."""
+    FastMCP = _import_fastmcp()
+    ctl = controller or CbmMcpController(RunContext.from_environment())
+    server = FastMCP(
+        "CloakBrowser Run Control",
+        instructions=(
+            "Control only the Manager-granted browser profile for this task run. "
+            "Never request or reveal credentials, tokens, cookies, raw CDP, or shell access."
+        ),
+        json_response=True,
+    )
+
+    routed_context = (
+        getattr(getattr(ctl, "context", None), "routing_contract", None) is not None
+    )
+    if not routed_context:
+
+        @server.tool()
+        async def browser_inspect() -> dict[str, Any]:
+            """Return the current managed tab URL and title."""
+            return await asyncio.to_thread(ctl.inspect)
+
+        @server.tool()
+        async def browser_navigate(url: str) -> dict[str, Any]:
+            """Navigate within the exact Manager-approved origin set."""
+            return await asyncio.to_thread(ctl.navigate, url)
+
+        @server.tool()
+        async def browser_click(selector: str) -> dict[str, Any]:
+            """Click one bounded Playwright selector in the managed tab."""
+            return await asyncio.to_thread(ctl.click, selector)
+
+        @server.tool()
+        async def browser_fill(selector: str, text: str) -> dict[str, Any]:
+            """Fill one bounded selector without returning the submitted text."""
+            return await asyncio.to_thread(ctl.fill, selector, text)
+
+        @server.tool()
+        async def browser_read_text(selector: str | None = None) -> dict[str, Any]:
+            """Read bounded visible text, never raw HTML or DOM snapshots."""
+            return await asyncio.to_thread(ctl.read_text, selector)
+
+    if routed_context:
+
+        @server.tool()
+        async def cbm_route_browser_action(
+            action: str,
+            arguments: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            """Route one browser action through Manager-approved browser tools."""
+            return await ctl.route_browser_action(action, arguments or {})
+
+    @server.tool()
+    def control_plane_capabilities() -> dict[str, Any]:
+        """Discover bounded Manager resource classes and unavailable capabilities."""
+        return ctl.control_plane_capabilities()
+
+    @server.tool()
+    def control_plane_resource_schema() -> dict[str, Any]:
+        """Return the versioned CloakBrowser resource envelope contract."""
+        return ctl.control_plane_resource_schema()
+
+    @server.tool()
+    def orca_web_capabilities() -> dict[str, Any]:
+        """Return Orca-Web capability status without silent fallback."""
+        return ctl.orca_web_capabilities()
+
+    return server
+
+
+def main() -> int:
+    server = build_server()
+    server.run(transport="stdio")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

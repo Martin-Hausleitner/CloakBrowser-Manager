@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
+from backend import extension_catalog
+
 
 TrustState = Literal["valid", "untrusted_manifest", "missing_manifest", "invalid_path"]
 
@@ -124,29 +126,44 @@ def extract_load_extension_paths(launch_args: list[str]) -> list[str]:
 
 
 def inspect_profile_extensions(profile: dict[str, Any]) -> list[dict[str, Any]]:
-    """Inspect all extensions configured via --load-extension for a profile."""
-    launch_args = profile.get("launch_args") or []
-    if isinstance(launch_args, str):
+    """Inspect only catalog-owned extension directories assigned to a profile."""
+    extension_ids = profile.get("extension_ids") or []
+    if isinstance(extension_ids, str):
         try:
-            launch_args = json.loads(launch_args)
+            extension_ids = json.loads(extension_ids)
         except Exception:
-            launch_args = []
+            extension_ids = []
 
-    ext_paths = extract_load_extension_paths(launch_args)
+    catalog_by_id = {
+        str(item.get("id") or ""): item
+        for item in extension_catalog.list_catalog_extensions(include_paths=True)
+        if isinstance(item, dict)
+    }
     results = []
-    for p in ext_paths:
+    for extension_id in [str(item) for item in extension_ids]:
+        catalog_item = catalog_by_id.get(extension_id)
+        if not catalog_item:
+            continue
+        p = catalog_item.get("path")
+        if not isinstance(p, str) or not p:
+            continue
         info = parse_extension_manifest(p)
+        display_name = info.name
+        if display_name.startswith("__MSG_"):
+            display_name = str(catalog_item.get("name") or display_name)
         results.append(
             {
-                "id": info.id,
+                "id": extension_id,
                 "path": info.path,
-                "name": info.name,
+                "name": display_name,
                 "version": info.version,
                 "manifest_version": info.manifest_version,
                 "description": info.description,
                 "permissions": info.permissions,
                 "trust_state": info.trust_state,
                 "error": info.error,
+                "icon_url": catalog_item.get("icon_url"),
+                "store_url": catalog_item.get("store_url"),
             }
         )
     return results

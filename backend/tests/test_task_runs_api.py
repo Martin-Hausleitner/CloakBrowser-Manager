@@ -1,0 +1,1280 @@
+"""API tests for task runs: create, health gates, cancel, retry, override."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
+
+import pytest
+from starlette.testclient import TestClient
+
+from backend import database as db
+from backend.run_health import NON_OVERRIDABLE_REASON_CODES
+
+
+@pytest.fixture()
+def client_access(tmp_db, monkeypatch):
+    from backend import main
+
+    monkeypatch.setattr(main, "AUTH_TOKEN", "bootstrap-test-secret")
+    monkeypatch.setattr(main, "ACCESS_CONTROL_ENABLED", True)
+    monkeypatch.setattr(main, "CBM_WORKER_ID", "browser-use-worker-1")
+    monkeypatch.setattr(main, "CBM_WORKER_TOKEN", "cbm_worker_" + ("ab" * 32))
+    main._login_failures.clear()
+    monkeypatch.setattr(main.browser_mgr, "cleanup_stale", AsyncMock())
+    monkeypatch.setattr(main.browser_mgr, "cleanup_all", AsyncMock())
+    monkeypatch.setattr(main.browser_mgr.vnc, "cleanup_stale", AsyncMock())
+    with TestClient(main.app) as client:
+        yield client
+
+
+def bootstrap_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer bootstrap-test-secret"}
+
+
+def worker_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer cbm_worker_" + ("ab" * 32)}
+
+
+def create_user(
+    client: TestClient,
+    username: str,
+    sandbox_id: str,
+    *permissions: str,
+) -> str:
+    password = f"{username}-password-123"
+    response = client.post(
+        "/api/access/users",
+        headers=bootstrap_headers(),
+        json={
+            "username": username,
+            "password": password,
+            "grants": [
+                {"sandbox_id": sandbox_id, "permission": permission}
+                for permission in permissions
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    return password
+
+
+def login(client: TestClient, username: str, password: str) -> None:
+    client.cookies.clear()
+    response = client.post(
+        "/api/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert response.status_code == 200
+
+
+def seed_passed_health(profile_id: str) -> None:
+    checked_at = datetime.now(timezone.utc).isoformat()
+    db.upsert_profile_health(
+        profile_id,
+        state="passed",
+        checked_at=checked_at,
+        proxy_configured=False,
+        proxy_reachable=True,
+        proxy_authenticity_score=88,
+        fingerprint_consistency_score=100,
+        browser_scan_score=90,
+        warnings=[],
+        blockers=[],
+        error_code=None,
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+        },
+    )
+
+
+def seed_failed_health(profile_id: str, *, measurement_error: bool = False) -> None:
+    checked_at = datetime.now(timezone.utc).isoformat()
+    db.upsert_profile_health(
+        profile_id,
+        state="failed",
+        checked_at=checked_at,
+        proxy_configured=True,
+        proxy_reachable=False,
+        proxy_authenticity_score=10,
+        warnings=["platform_mismatch"],
+        blockers=["network_timeout"] if measurement_error else ["proxy_unreachable"],
+        error_code="network_timeout" if measurement_error else "proxy_unreachable",
+        sources={"proxy_authenticity": "measured"},
+    )
+
+
+def seed_pending_health(profile_id: str) -> None:
+    db.upsert_profile_health(
+        profile_id,
+        state="pending",
+        checked_at=None,
+        proxy_configured=False,
+        proxy_reachable=None,
+        warnings=[],
+        blockers=[],
+        sources={},
+    )
+
+
+def create_session(profile_id: str, sandbox_id: str = "alpha") -> dict:
+    return db.create_task_session(profile_id, sandbox_id, "bootstrap")
+
+
+def run_body(**overrides):
+    body = {
+        "harness": "browser-use",
+        "task": "Navigate to the target and return the page title",
+        "profile_id": overrides.pop("profile_id", None),
+        "launch_if_stopped": False,
+        "allowed_origins": ["https://example.com"],
+        "max_steps": 20,
+        "timeout_seconds": 300,
+        "model_alias": "default",
+    }
+    body.update(overrides)
+    return body
+
+
+def routing_run_body(
+    profile_id: str,
+    *,
+    provider: str = "grok",
+    agent: str = "grok-build",
+    transport: str = "openai-compatible",
+    provider_model_alias=None,
+    run_model_alias=None,
+):
+    return run_body(
+        profile_id=profile_id,
+        harness="acpx",
+        agent=agent,
+        model_alias=run_model_alias,
+        provider={
+            "id": provider,
+            "transport": transport,
+            "model_alias": provider_model_alias,
+        },
+        browser_tools=[
+            {"id": "unbrowse", "enabled": True},
+            {"id": "stagehand", "enabled": True},
+            {"id": "browser-harness", "enabled": True},
+        ],
+        routing_policy={
+            "mode": "ordered-fallback",
+            "allow_second_browser": False,
+            "max_tool_attempts": 2,
+        },
+    )
+
+
+def seed_provider_preflight(
+    client: TestClient,
+    *,
+    provider: str = "grok",
+    transport: str = "openai-compatible",
+    ready: bool = True,
+    reason_code: str = "ready",
+    model_aliases: list[str] | None = None,
+) -> None:
+    response = client.post(
+        "/internal/providers/readiness",
+        headers=worker_headers(),
+        json={
+            "provider": provider,
+            "transport": transport,
+            "ready": ready,
+            "reason_code": reason_code,
+            "model_aliases": model_aliases if model_aliases is not None else ["grok-build-0.1"],
+        },
+    )
+    assert response.status_code == 204, response.text
+
+
+def create_run(client: TestClient, session_id: str, profile_id: str, **overrides) -> dict:
+    response = client.post(
+        f"/api/task-sessions/{session_id}/runs",
+        json=run_body(profile_id=profile_id, **overrides),
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_create_run_stores_prompt_once_and_copies_immutable_health(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    created = create_run(client_access, session["id"], profile["id"])
+    assert created["status"] == "queued"
+    assert created["task_message_id"]
+    assert created["profile_id"] == profile["id"]
+    assert created["profile_id_snapshot"] == profile["id"]
+    assert created["allowed_origins"] == ["https://example.com"]
+    assert created["viewport_revision"] == (
+        f"{profile['screen_width']}x{profile['screen_height']}"
+    )
+    assert created["launch_evidence"] == {}
+    assert created["retry_count"] == 0
+    assert created["first_action_sequence"] is None
+    assert created["health_snapshot"]["state"] == "passed"
+    assert created["health_decision"]["allowed"] is True
+    assert "task" not in created
+    assert created.get("claimed_by") is None
+
+    messages = db.list_task_messages(session["id"])
+    assert len(messages) == 1
+    assert messages[0]["id"] == created["task_message_id"]
+    assert messages[0]["content"] == "Navigate to the target and return the page title"
+
+    # Mutating live profile health must not change the frozen run copy.
+    seed_failed_health(profile["id"], measurement_error=True)
+    fetched = client_access.get(f"/api/task-runs/{created['id']}")
+    assert fetched.status_code == 200
+    assert fetched.json()["health_snapshot"]["state"] == "passed"
+    assert fetched.json()["health_decision"]["allowed"] is True
+    assert db.get_task_session(session["id"])["profile_id"] == profile["id"]
+
+
+def test_create_run_rejects_incompatible_explicit_profile_harness(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="browser-use"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Profile harness is not compatible with run harness"
+
+
+def test_create_run_allows_default_codex_profile_as_universal_binding(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Default universal", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="browser-use"),
+    )
+
+    assert response.status_code == 201, response.text
+
+
+def test_create_run_allows_antigravity_profile_only_as_acpx_grok_build_preset(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Antigravity preset", sandbox_id="alpha", harness="antigravity")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    acpx_response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="acpx", agent="grok-build", model_alias=None),
+    )
+    assert acpx_response.status_code == 201, acpx_response.text
+    assert acpx_response.json()["provider"] is None
+    assert acpx_response.json()["browser_tools"] == []
+    assert acpx_response.json()["routing_policy"] is None
+
+    browser_use_response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="browser-use"),
+    )
+    assert browser_use_response.status_code == 422
+    assert browser_use_response.json()["detail"] == "Profile harness is not compatible with run harness"
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude", "cursor", "opencode"])
+def test_create_run_rejects_antigravity_acpx_with_non_grok_build_agent(
+    client_access: TestClient,
+    agent: str,
+):
+    profile = db.create_profile("Antigravity preset", sandbox_id="alpha", harness="antigravity")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="acpx", agent=agent, model_alias=None),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Antigravity profiles require ACPX with Grok Build"
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude", "cursor", "grok-build", "opencode"])
+def test_create_run_allows_acpx_profile_with_any_acpx_agent(
+    client_access: TestClient,
+    agent: str,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], harness="acpx", agent=agent, model_alias=None),
+    )
+
+    assert response.status_code == 201, response.text
+
+
+def test_create_run_persists_and_claims_grok_openai_compatible_routing_contract(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-openai", "alpha", "automate")
+    login(client_access, "alpha-openai", password)
+    seed_provider_preflight(client_access, transport="openai-compatible")
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            transport="openai-compatible",
+            provider_model_alias="grok-build-0.1",
+        ),
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["provider"] == {
+        "id": "grok",
+        "transport": "openai-compatible",
+        "model_alias": "grok-build-0.1",
+    }
+    assert [tool["id"] for tool in created["browser_tools"]] == [
+        "unbrowse",
+        "stagehand",
+        "browser-harness",
+    ]
+    assert created["routing_policy"]["max_tool_attempts"] == 2
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim?harness=acpx",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+    body = claimed.json()
+    assert body["id"] == created["id"]
+    assert body["harness"] == "acpx"
+    assert body["agent"] == "grok-build"
+    assert body["provider"] == created["provider"]
+    assert body["browser_tools"] == created["browser_tools"]
+    assert body["routing_policy"] == created["routing_policy"]
+
+
+def test_create_run_allows_grok_acp_routing_when_exact_transport_ready(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-acp", "alpha", "automate")
+    login(client_access, "alpha-acp", password)
+    seed_provider_preflight(
+        client_access,
+        transport="acp",
+        model_aliases=[],
+    )
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(profile["id"], transport="acp"),
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["provider"] == {
+        "id": "grok",
+        "transport": "acp",
+        "model_alias": None,
+    }
+
+
+def test_create_and_claim_dynamic_acp_routing_requires_exact_fresh_provider_agent(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX Gemini", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-gemini", "alpha", "automate")
+    login(client_access, "alpha-gemini", password)
+    seed_provider_preflight(
+        client_access,
+        provider="gemini",
+        transport="acp",
+        model_aliases=["gemini-2.5-pro"],
+    )
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider="gemini",
+            agent="gemini",
+            transport="acp",
+            provider_model_alias="gemini-2.5-pro",
+        ),
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["agent"] == "gemini"
+    assert created["provider"] == {
+        "id": "gemini",
+        "transport": "acp",
+        "model_alias": "gemini-2.5-pro",
+    }
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim?harness=acpx",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["provider"] == created["provider"]
+
+
+def test_create_run_rejects_dynamic_acp_provider_agent_mismatch_without_persistence(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX Gemini mismatch", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-gemini-mismatch", "alpha", "automate")
+    login(client_access, "alpha-gemini-mismatch", password)
+    seed_provider_preflight(client_access, provider="gemini", transport="acp", model_aliases=[])
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider="gemini",
+            agent="codex",
+            transport="acp",
+        ),
+    )
+
+    assert response.status_code == 422
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+def test_create_run_rejects_unreported_dynamic_acp_provider_without_persistence(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX Gemini missing", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-gemini-missing", "alpha", "automate")
+    login(client_access, "alpha-gemini-missing", password)
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider="gemini",
+            agent="gemini",
+            transport="acp",
+        ),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "provider_transport_not_ready"
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+@pytest.mark.parametrize(
+    ("provider", "agent"),
+    [
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("cursor", "cursor"),
+        ("grok", "grok-build"),
+        ("opencode", "opencode"),
+    ],
+)
+def test_create_and_claim_normalized_acp_routing_for_exact_provider_agent_mapping(
+    client_access: TestClient,
+    provider: str,
+    agent: str,
+):
+    profile = db.create_profile(f"ACPX {provider}", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, f"alpha-{provider}", "alpha", "automate")
+    login(client_access, f"alpha-{provider}", password)
+    seed_provider_preflight(
+        client_access,
+        provider=provider,
+        transport="acp",
+        model_aliases=["grok-build-0.1"] if provider == "grok" else [],
+    )
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider=provider,
+            agent=agent,
+            transport="acp",
+        ),
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["provider"] == {
+        "id": provider,
+        "transport": "acp",
+        "model_alias": None,
+    }
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim?harness=acpx",
+        headers=worker_headers(),
+    )
+    assert claimed.status_code == 200, claimed.text
+    body = claimed.json()
+    assert body["id"] == created["id"]
+    assert body["harness"] == "acpx"
+    assert body["agent"] == agent
+    assert body["provider"] == created["provider"]
+
+    cancelled = client_access.post(f"/api/task-runs/{created['id']}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+
+
+@pytest.mark.parametrize(
+    ("provider", "agent"),
+    [
+        ("codex", "grok-build"),
+        ("claude", "codex"),
+        ("cursor", "claude"),
+        ("grok", "cursor"),
+        ("opencode", "grok-build"),
+    ],
+)
+def test_create_run_rejects_mismatched_acp_provider_agent_without_persistence(
+    client_access: TestClient,
+    provider: str,
+    agent: str,
+):
+    profile = db.create_profile(f"ACPX mismatch {provider}", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, f"alpha-bad-{provider}", "alpha", "automate")
+    login(client_access, f"alpha-bad-{provider}", password)
+    seed_provider_preflight(client_access, provider=provider, transport="acp", model_aliases=[])
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider=provider,
+            agent=agent,
+            transport="acp",
+        ),
+    )
+
+    assert response.status_code == 422
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+def test_create_run_rejects_antigravity_cli_normalized_contract_without_persistence(
+    client_access: TestClient,
+):
+    profile = db.create_profile("ACPX antigravity", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-antigravity-cli", "alpha", "automate")
+    login(client_access, "alpha-antigravity-cli", password)
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            provider="antigravity",
+            agent="grok-build",
+            transport="cli",
+        ),
+    )
+
+    assert response.status_code == 422
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+@pytest.mark.parametrize(
+    ("preflight_transport", "preflight_ready", "reason_code", "expected_status"),
+    [
+        (None, True, "ready", 409),
+        ("acp", True, "ready", 409),
+        ("openai-compatible", False, "proxy_unavailable", 409),
+    ],
+)
+def test_create_run_rejects_normalized_provider_when_transport_not_ready_without_persistence(
+    client_access: TestClient,
+    preflight_transport: str | None,
+    preflight_ready: bool,
+    reason_code: str,
+    expected_status: int,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-blocked", "alpha", "automate")
+    login(client_access, "alpha-blocked", password)
+    if preflight_transport is not None:
+        seed_provider_preflight(
+            client_access,
+            transport=preflight_transport,
+            ready=preflight_ready,
+            reason_code=reason_code,
+        )
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(profile["id"], transport="openai-compatible"),
+    )
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"] == "provider_transport_not_ready"
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+def test_create_run_rejects_normalized_provider_when_preflight_is_stale_without_persistence(
+    client_access: TestClient,
+):
+    from backend import main
+
+    now = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+    main.worker_runtime_service._clock = lambda: now
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-stale", "alpha", "automate")
+    login(client_access, "alpha-stale", password)
+    seed_provider_preflight(client_access, transport="openai-compatible")
+    main.worker_runtime_service._clock = lambda: now + timedelta(seconds=301)
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(profile["id"], transport="openai-compatible"),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "provider_transport_not_ready"
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+@pytest.mark.parametrize(
+    ("provider_model_alias", "run_model_alias"),
+    [
+        ("missing-model", None),
+        (None, "missing-model"),
+        (None, None),
+    ],
+)
+def test_create_run_rejects_openai_compatible_when_selected_model_is_not_ready_without_persistence(
+    client_access: TestClient,
+    provider_model_alias: str | None,
+    run_model_alias: str | None,
+):
+    profile = db.create_profile("ACPX pinned", sandbox_id="alpha", harness="acpx")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-model", "alpha", "automate")
+    login(client_access, "alpha-model", password)
+    seed_provider_preflight(
+        client_access,
+        transport="openai-compatible",
+        model_aliases=["other-model"],
+    )
+    with db.get_db() as conn:
+        before_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        before_messages = conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0]
+
+    response = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=routing_run_body(
+            profile["id"],
+            transport="openai-compatible",
+            provider_model_alias=provider_model_alias,
+            run_model_alias=run_model_alias,
+        ),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "provider_model_not_ready"
+    with db.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before_runs
+        assert conn.execute("SELECT COUNT(*) FROM task_messages").fetchone()[0] == before_messages
+
+
+def test_initial_status_follows_health_decision(client_access: TestClient):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    seed_pending_health(profile["id"])
+    waiting = create_run(
+        client_access,
+        session["id"],
+        profile["id"],
+        task="waiting health",
+    )
+    assert waiting["status"] == "health_check"
+    assert waiting["health_decision"]["waiting"] is True
+
+    seed_failed_health(profile["id"])
+    blocked = create_run(
+        client_access,
+        session["id"],
+        profile["id"],
+        task="blocked health",
+    )
+    assert blocked["status"] == "blocked_health"
+    assert blocked["health_decision"]["allowed"] is False
+    assert blocked["status"] != "running"
+
+
+def test_missing_health_row_becomes_unavailable_measurement_error(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    created = create_run(client_access, session["id"], profile["id"])
+    assert created["status"] == "blocked_health"
+    assert created["health_snapshot"]["state"] == "unavailable"
+    assert created["health_snapshot"]["measurement_error"] is True
+    assert "measurement_error" in created["health_decision"]["non_overridable_reasons"]
+
+
+def test_run_creation_requires_automate_and_same_sandbox_profile(
+    client_access: TestClient,
+):
+    alpha = db.create_profile("Alpha browser", sandbox_id="alpha")
+    beta = db.create_profile("Beta browser", sandbox_id="beta")
+    seed_passed_health(alpha["id"])
+    seed_passed_health(beta["id"])
+    session = create_session(alpha["id"], "alpha")
+
+    view_password = create_user(client_access, "alpha-view", "alpha", "view")
+    login(client_access, "alpha-view", view_password)
+    denied_view = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=alpha["id"]),
+    )
+    assert denied_view.status_code == 404
+
+    auto_password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", auto_password)
+    cross = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=beta["id"]),
+    )
+    assert cross.status_code == 404
+
+    missing = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id="missing-profile"),
+    )
+    assert missing.status_code == 404
+
+    beta_session = create_session(beta["id"], "beta")
+    foreign = client_access.post(
+        f"/api/task-sessions/{beta_session['id']}/runs",
+        json=run_body(profile_id=beta["id"]),
+    )
+    assert foreign.status_code == 404
+
+
+def test_launch_if_stopped_and_empty_origins_require_operate(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    auto_password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", auto_password)
+
+    launch_denied = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], launch_if_stopped=True),
+    )
+    assert launch_denied.status_code == 404
+
+    empty_denied = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(profile_id=profile["id"], allowed_origins=[]),
+    )
+    assert empty_denied.status_code == 403
+
+    malformed = client_access.post(
+        f"/api/task-sessions/{session['id']}/runs",
+        json=run_body(
+            profile_id=profile["id"],
+            allowed_origins=["https://example.com/path"],
+        ),
+    )
+    assert malformed.status_code == 422
+
+    operate_password = create_user(
+        client_access, "alpha-ops", "alpha", "automate", "operate"
+    )
+    login(client_access, "alpha-ops", operate_password)
+    launched = create_run(
+        client_access,
+        session["id"],
+        profile["id"],
+        launch_if_stopped=True,
+        task="launch allowed",
+    )
+    assert launched["launch_if_stopped"] is True
+
+    unrestricted = create_run(
+        client_access,
+        session["id"],
+        profile["id"],
+        allowed_origins=[],
+        task="unrestricted",
+    )
+    assert unrestricted["allowed_origins"] == []
+
+
+def test_allowed_origins_are_normalized_and_deduped(client_access: TestClient):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    created = create_run(
+        client_access,
+        session["id"],
+        profile["id"],
+        allowed_origins=[
+            "https://Example.com",
+            "https://example.com:443",
+            "https://EXAMPLE.com",
+        ],
+    )
+    assert created["allowed_origins"] == ["https://example.com"]
+
+
+def test_cancel_is_idempotent_and_preserves_terminals(client_access: TestClient):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"])
+
+    first = client_access.post(f"/api/task-runs/{run['id']}/cancel")
+    assert first.status_code == 200
+    assert first.json()["status"] == "cancelled"
+
+    second = client_access.post(f"/api/task-runs/{run['id']}/cancel")
+    assert second.status_code == 200
+    assert second.json()["status"] == "cancelled"
+    assert second.json()["cancelled_at"] == first.json()["cancelled_at"]
+
+
+def test_cancelled_claim_clears_worker_ownership(client_access: TestClient):
+    """A cancelled run must not look owned after its lease has been revoked."""
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"])
+
+    claimed = client_access.post(
+        "/internal/task-runs/claim",
+        headers={"Authorization": "Bearer cbm_worker_" + ("ab" * 32)},
+    )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["id"] == run["id"]
+    assert claimed.json()["worker_id"] == "browser-use-worker-1"
+
+    cancelled = client_access.post(f"/api/task-runs/{run['id']}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["worker_id"] is None
+
+    with db.get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT claimed_by, worker_id, claim_expires_at, lease_id, capability_digest
+            FROM task_runs WHERE id = ?
+            """,
+            (run["id"],),
+        ).fetchone()
+    assert row is not None
+    assert dict(row) == {
+        "claimed_by": None,
+        "worker_id": None,
+        "claim_expires_at": None,
+        "lease_id": None,
+        "capability_digest": None,
+    }
+
+
+def test_retry_health_refreshes_snapshot_without_duplicating_prompt(
+    client_access: TestClient,
+):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_failed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"])
+    assert run["status"] == "blocked_health"
+    message_id = run["task_message_id"]
+
+    seed_passed_health(profile["id"])
+    retried = client_access.post(f"/api/task-runs/{run['id']}/retry-health")
+    assert retried.status_code == 200
+    body = retried.json()
+    assert body["status"] == "queued"
+    assert body["retry_count"] == 1
+    assert body["task_message_id"] == message_id
+    assert body["health_snapshot"]["state"] == "passed"
+    assert len(db.list_task_messages(session["id"])) == 1
+
+
+def test_override_health_blocks_non_overridable_reasons(client_access: TestClient):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_failed_health(profile["id"], measurement_error=True)
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"])
+    assert run["status"] == "blocked_health"
+    assert set(run["health_decision"]["non_overridable_reasons"]) & NON_OVERRIDABLE_REASON_CODES
+
+    blocked = client_access.post(
+        f"/api/task-runs/{run['id']}/override-health",
+        json={"reason": "temporary exception"},
+    )
+    assert blocked.status_code == 200
+    assert blocked.json()["status"] == "blocked_health"
+    assert blocked.json().get("health_override") is None or blocked.json()[
+        "health_override"
+    ].get("applied") is not True
+
+
+def test_override_health_allows_overridable_reasons(client_access: TestClient):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    # Fresh warning with overridable authenticity failure only.
+    checked_at = datetime.now(timezone.utc).isoformat()
+    db.upsert_profile_health(
+        profile["id"],
+        state="warning",
+        checked_at=checked_at,
+        proxy_configured=False,
+        proxy_reachable=True,
+        proxy_authenticity_score=10,
+        fingerprint_consistency_score=100,
+        browser_scan_score=10,
+        warnings=[],
+        blockers=[],
+        error_code=None,
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+        },
+    )
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"])
+    assert run["status"] == "blocked_health"
+    assert run["health_decision"]["non_overridable_reasons"] == []
+
+    empty = client_access.post(
+        f"/api/task-runs/{run['id']}/override-health",
+        json={"reason": "   "},
+    )
+    assert empty.status_code == 422
+
+    overridden = client_access.post(
+        f"/api/task-runs/{run['id']}/override-health",
+        json={"reason": "approved temporary authenticity exception"},
+    )
+    assert overridden.status_code == 200
+    body = overridden.json()
+    assert body["status"] == "queued"
+    assert body["health_override"]["reason"] == "approved temporary authenticity exception"
+    assert body["health_override"]["actor_kind"] == "user"
+    assert body["health_override"]["applied"] is True
+
+
+def test_profile_deletion_preserves_run_history_snapshot(client_access: TestClient):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"])
+    profile_id = profile["id"]
+
+    assert db.delete_profile(profile_id) is True
+    fetched = client_access.get(f"/api/task-runs/{run['id']}")
+    assert fetched.status_code == 200
+    assert fetched.json()["profile_id"] is None
+    assert fetched.json()["profile_id_snapshot"] == profile_id
+
+
+def test_get_run_requires_view_and_hides_cross_sandbox(client_access: TestClient):
+    alpha = db.create_profile("Alpha browser", sandbox_id="alpha")
+    beta = db.create_profile("Beta browser", sandbox_id="beta")
+    seed_passed_health(alpha["id"])
+    seed_passed_health(beta["id"])
+    alpha_session = create_session(alpha["id"], "alpha")
+    beta_session = create_session(beta["id"], "beta")
+
+    beta_password = create_user(client_access, "beta-auto", "beta", "automate")
+    login(client_access, "beta-auto", beta_password)
+    beta_run = create_run(client_access, beta_session["id"], beta["id"])
+
+    alpha_password = create_user(client_access, "alpha-view", "alpha", "view")
+    login(client_access, "alpha-view", alpha_password)
+    denied = client_access.get(f"/api/task-runs/{beta_run['id']}")
+    assert denied.status_code == 404
+
+    # Alpha automate creates a run; alpha view can read it.
+    auto_password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", auto_password)
+    alpha_run = create_run(client_access, alpha_session["id"], alpha["id"])
+    login(client_access, "alpha-view", alpha_password)
+    allowed = client_access.get(f"/api/task-runs/{alpha_run['id']}")
+    assert allowed.status_code == 200
+    assert allowed.json()["id"] == alpha_run["id"]
+
+
+def test_retry_and_override_cross_sandbox_are_404(client_access: TestClient):
+    beta = db.create_profile("Beta browser", sandbox_id="beta")
+    seed_failed_health(beta["id"])
+    session = create_session(beta["id"], "beta")
+    beta_password = create_user(client_access, "beta-auto", "beta", "automate")
+    login(client_access, "beta-auto", beta_password)
+    run = create_run(client_access, session["id"], beta["id"])
+
+    alpha_password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", alpha_password)
+    assert client_access.post(f"/api/task-runs/{run['id']}/retry-health").status_code == 404
+    assert (
+        client_access.post(
+            f"/api/task-runs/{run['id']}/override-health",
+            json={"reason": "nope"},
+        ).status_code
+        == 404
+    )
+    assert client_access.post(f"/api/task-runs/{run['id']}/cancel").status_code == 404
+
+
+def seed_overridable_blocked_health(profile_id: str) -> None:
+    checked_at = datetime.now(timezone.utc).isoformat()
+    db.upsert_profile_health(
+        profile_id,
+        state="warning",
+        checked_at=checked_at,
+        proxy_configured=False,
+        proxy_reachable=True,
+        proxy_authenticity_score=10,
+        fingerprint_consistency_score=100,
+        browser_scan_score=10,
+        warnings=[],
+        blockers=[],
+        error_code=None,
+        sources={
+            "fingerprint_consistency": "measured",
+            "browser_scan": "measured",
+        },
+    )
+
+
+def _force_run_status(run_id: str, status: str, *, cancelled_at: str | None = None) -> None:
+    with db.get_db() as conn:
+        conn.execute(
+            """UPDATE task_runs
+            SET status = ?, cancelled_at = ?, updated_at = ?
+            WHERE id = ?""",
+            (status, cancelled_at, datetime.now(timezone.utc).isoformat(), run_id),
+        )
+        conn.commit()
+
+
+def test_override_health_does_not_resurrect_terminal_runs(client_access: TestClient):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_overridable_blocked_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"], task="override terminal")
+    assert run["status"] == "blocked_health"
+    assert run["health_decision"]["non_overridable_reasons"] == []
+
+    cancelled = client_access.post(f"/api/task-runs/{run['id']}/cancel")
+    assert cancelled.status_code == 200
+    before = cancelled.json()
+    assert before["status"] == "cancelled"
+    assert before["cancelled_at"]
+    assert before.get("health_override") is None
+
+    overridden = client_access.post(
+        f"/api/task-runs/{run['id']}/override-health",
+        json={"reason": "should not resurrect cancelled run"},
+    )
+    assert overridden.status_code == 200
+    after = overridden.json()
+    assert after["status"] == before["status"]
+    assert after["cancelled_at"] == before["cancelled_at"]
+    assert after.get("health_override") == before.get("health_override")
+    assert after["health_decision"] == before["health_decision"]
+    assert after["updated_at"] == before["updated_at"]
+
+    for terminal in ("succeeded", "failed", "revoked"):
+        blocked = create_run(
+            client_access,
+            session["id"],
+            profile["id"],
+            task=f"terminal-{terminal}",
+        )
+        assert blocked["status"] == "blocked_health"
+        _force_run_status(blocked["id"], terminal)
+        frozen = client_access.get(f"/api/task-runs/{blocked['id']}").json()
+        response = client_access.post(
+            f"/api/task-runs/{blocked['id']}/override-health",
+            json={"reason": f"should not resurrect {terminal}"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == frozen["status"] == terminal
+        assert body.get("health_override") == frozen.get("health_override")
+        assert body["health_decision"] == frozen["health_decision"]
+        assert body["cancelled_at"] == frozen["cancelled_at"]
+        assert body["updated_at"] == frozen["updated_at"]
+
+
+def test_retry_health_loses_to_concurrent_cancel(client_access: TestClient, monkeypatch):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_failed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+    run = create_run(client_access, session["id"], profile["id"], task="retry race")
+    assert run["status"] == "blocked_health"
+    run_id = run["id"]
+    before_snapshot = run["health_snapshot"]
+    before_decision = run["health_decision"]
+
+    real_build = db.build_run_health_gate
+    cancelled_at_holder: dict[str, str] = {}
+
+    def cancel_during_health_build(profile_id: str):
+        cancelled = db.cancel_task_run(run_id)
+        assert cancelled is not None
+        assert cancelled["status"] == "cancelled"
+        cancelled_at_holder["cancelled_at"] = cancelled["cancelled_at"]
+        seed_passed_health(profile_id)
+        return real_build(profile_id)
+
+    monkeypatch.setattr(db, "build_run_health_gate", cancel_during_health_build)
+
+    retried = db.retry_task_run_health(run_id)
+    assert retried is not None
+    assert retried["status"] == "cancelled"
+    assert retried["cancelled_at"] == cancelled_at_holder["cancelled_at"]
+    assert retried["retry_count"] == 0
+    assert retried["health_snapshot"] == before_snapshot
+    assert retried["health_decision"] == before_decision
+    assert retried["health_decision"]["allowed"] is False
+
+
+def test_create_run_is_atomic_when_run_insert_fails(
+    client_access: TestClient,
+    monkeypatch,
+):
+    profile = db.create_profile("Alpha browser", sandbox_id="alpha")
+    seed_passed_health(profile["id"])
+    session = create_session(profile["id"])
+    password = create_user(client_access, "alpha-auto", "alpha", "automate")
+    login(client_access, "alpha-auto", password)
+
+    def fail_run_insert(*_args, **_kwargs):
+        raise RuntimeError("injected run insert failure")
+
+    if hasattr(db, "_insert_task_run_on_conn"):
+        monkeypatch.setattr(db, "_insert_task_run_on_conn", fail_run_insert)
+    else:
+        monkeypatch.setattr(db, "create_task_run", fail_run_insert)
+
+    with pytest.raises(RuntimeError, match="injected run insert failure"):
+        client_access.post(
+            f"/api/task-sessions/{session['id']}/runs",
+            json=run_body(profile_id=profile["id"], task="atomic prompt"),
+        )
+
+    assert db.list_task_messages(session["id"]) == []
+    with db.get_db() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_session_id = ?",
+            (session["id"],),
+        ).fetchone()[0] == 0

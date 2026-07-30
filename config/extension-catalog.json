@@ -3,6 +3,14 @@
   "source_label": "Comet (MeinComet) Default profile",
   "extensions": [
     {
+      "id": "fjcjfaeimhopmpnoemigapegahhjnbkl",
+      "name": "CloakBrowser Profile Sync",
+      "description": "Manager profile/proxy controls and explicit secure action recording",
+      "default_selected": false,
+      "bundled_path": "extensions/cloak-profile-sync",
+      "tags": ["automation", "manager"]
+    },
+    {
       "id": "ddkjiahejlhfcafbddmgiahcphecmpfh",
       "name": "uBlock Origin Lite",
       "description": "Content blocker (MV3)",

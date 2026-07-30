@@ -1,8 +1,9 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
-import { api, type Profile } from "../../lib/api";
+import { api, type Profile, type TaskOutput } from "../../lib/api";
 import { codexComputerUseProvider, taskHarnessReadyEvent } from "../../lib/taskHarness";
+import { UI_STATE, expectUiState } from "../../lib/uiFlowRegistry";
 import { MobileSplitScreen } from "./MobileSplitScreen";
 
 const stoppedProfile: Profile = {
@@ -64,6 +65,19 @@ const secondRunningProfile: Profile = {
   harness: "opencode",
 };
 
+const typedOutput = (overrides: Partial<TaskOutput>): TaskOutput => ({
+  id: "output-1",
+  run_id: "run-1",
+  sequence: 1,
+  idempotency_key: "output-1",
+  kind: "status",
+  summary: "Working",
+  payload: {},
+  created_at: "2026-07-26T00:00:00Z",
+  artifact_expired: false,
+  ...overrides,
+});
+
 function installTaskHarness() {
   const send = vi.fn().mockResolvedValue({
     id: "host-1",
@@ -112,6 +126,7 @@ function renderMobileSplit(overrides: Partial<Parameters<typeof MobileSplitScree
     onBrowserZoomChange: vi.fn(),
     onAccessControls: vi.fn(),
     onLogout: vi.fn(),
+    onOpenSettings: vi.fn(),
     ...overrides,
   };
 
@@ -173,9 +188,28 @@ afterEach(() => {
 });
 
 describe("MobileSplitScreen", () => {
+  it("exposes one compact Settings action without rendering settings matrices in mobile chat", async () => {
+    const onOpenSettings = vi.fn();
+    renderMobileSplit({ onOpenSettings });
+
+    const settingsButtons = await screen.findAllByRole("button", { name: "Open Settings" });
+    expect(settingsButtons).toHaveLength(1);
+    expect(screen.queryByText("Task chat")).toBeNull();
+    expect(screen.queryByTestId("provider-tool-control")).toBeNull();
+    expect(screen.queryByLabelText("Model alias")).toBeNull();
+
+    fireEvent.click(settingsButtons[0]);
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Task chat")).toBeNull();
+  });
+
   it("renders the default Codex Computer Use composer with browser tools and chat collapsed", async () => {
     renderMobileSplit();
 
+    expectUiState(document.body, UI_STATE.mobileWorkspace);
+    expectUiState(document.body, UI_STATE.mobileLivePane);
+    expectUiState(document.body, UI_STATE.mobileControlPane);
+    expectUiState(document.body, UI_STATE.mobileBrowserFrame);
     expect(await screen.findByText("Codex Computer Use")).toBeTruthy();
     expect(await screen.findByPlaceholderText("Ask Codex Computer Use...")).toBeTruthy();
     expect(screen.getByLabelText("Open browser tools")).toBeTruthy();
@@ -234,6 +268,17 @@ describe("MobileSplitScreen", () => {
     expect(await screen.findByText("OpenCode · saved only")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Open browser tools"));
     expect(screen.getByText("OpenCode · saved only")).toBeTruthy();
+  });
+
+  it("keeps the ACPX preference visible on the compact mobile task surface", async () => {
+    delete window.cloakBrowserHarness;
+    renderMobileSplit({
+      selected: { ...stoppedProfile, harness: "acpx" },
+      profiles: [{ ...stoppedProfile, harness: "acpx" }],
+    });
+
+    expect(await screen.findByText("ACPX · saved only")).toBeTruthy();
+    expect(screen.getByPlaceholderText("Save task to server history...")).toBeTruthy();
   });
 
   it("includes preferred harness and bridge metadata when sending tasks", async () => {
@@ -305,7 +350,8 @@ describe("MobileSplitScreen", () => {
 
     openBrowserTools();
     expect(screen.getByText("Save only")).toBeTruthy();
-    expect(screen.getByText("Tasks are saved to scoped server history only. Nothing executes until a verified Codex host attaches.")).toBeTruthy();
+    expect(screen.getByText("History only")).toBeTruthy();
+    expect(screen.getByTitle("Tasks are saved to scoped server history only. Nothing executes until a verified Codex host attaches.")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Close browser tools"));
 
     fireEvent.change(input, { target: { value: "Save this task" } });
@@ -645,13 +691,15 @@ describe("MobileSplitScreen", () => {
     const dock = container.querySelector(".mobile-command-dock");
     expect(dock).toBeTruthy();
     expect(dock?.closest("form")).toBe(screen.getByRole("textbox", { name: "Browser task" }).closest("form"));
-    expect(dock?.querySelectorAll("button")).toHaveLength(3);
+    expect(dock?.querySelectorAll("button")).toHaveLength(4);
     expect(within(dock as HTMLElement).getByTitle("Fullscreen browser (Ctrl+B)")).toBeTruthy();
     expect(within(dock as HTMLElement).getByTitle("Browser tools (Ctrl+K)")).toBeTruthy();
+    expect(within(dock as HTMLElement).getByTitle("Settings")).toBeTruthy();
     expect(within(dock as HTMLElement).getByTitle("Toggle chat (Ctrl+J)")).toBeTruthy();
     expect(within(dock as HTMLElement).queryByText("Full")).toBeNull();
     expect(within(dock as HTMLElement).queryByText("Tools")).toBeNull();
     expect(within(dock as HTMLElement).queryByText("Chat")).toBeNull();
+    expect(within(dock as HTMLElement).queryByText("Settings")).toBeNull();
     expect(screen.getByLabelText("Run task")).toBeTruthy();
     expect(screen.queryByText("Task chat")).toBeNull();
     expect(screen.queryByText("Benchmarks")).toBeNull();
@@ -659,6 +707,47 @@ describe("MobileSplitScreen", () => {
     expect(screen.queryByText("Profile health")).toBeNull();
     expect(screen.queryByRole("button", { name: "Run health check" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Proxy check" })).toBeNull();
+  });
+
+  it("renders canonical managed task output cards above the composer in a scrollable region", async () => {
+    const { container } = runningSplit({
+      taskOutputs: [
+        typedOutput({
+          kind: "action",
+          summary: "Opened checkout",
+          payload: { name: "navigate", url: "https://example.test/checkout", step: 1 },
+        }),
+        typedOutput({
+          id: "shot-1",
+          sequence: 2,
+          kind: "screenshot",
+          summary: "Checkout screenshot",
+        }),
+        typedOutput({
+          id: "summary-1",
+          sequence: 3,
+          kind: "summary",
+          summary: "Task complete",
+          payload: { text: "Checkout is ready for review." },
+        }),
+      ],
+    });
+    expect(await screen.findByText("Codex Computer Use")).toBeTruthy();
+
+    const outputRegion = screen.getByRole("region", { name: "Managed task output" });
+    const composer = screen.getByRole("textbox", { name: "Browser task" }).closest("form");
+
+    expect(outputRegion.compareDocumentPosition(composer as HTMLElement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(outputRegion.className).toContain("mobile-agent-output-panel");
+    expect(outputRegion.getAttribute("tabindex")).toBe("0");
+    expect(within(outputRegion).getByRole("list", { name: /agent output/i })).toBeTruthy();
+    expect(within(outputRegion).getByText("navigate")).toBeTruthy();
+    expect(within(outputRegion).getByRole("img", { name: "Checkout screenshot" }).getAttribute("src")).toBe(
+      "/api/task-outputs/shot-1/screenshot",
+    );
+    expect(within(outputRegion).getByText("Checkout is ready for review.")).toBeTruthy();
+    expect(screen.getAllByText("VNC stream")).toHaveLength(1);
+    expect(container.querySelectorAll(".mobile-command-button")).toHaveLength(4);
   });
 
   it("lets the browser consume unused workspace until chat or tools are opened", () => {
@@ -688,9 +777,11 @@ describe("MobileSplitScreen", () => {
     openBrowserTools();
 
     const tools = screen.getByLabelText("Browser tools");
+    expectUiState(document.body, UI_STATE.mobileToolsSheet);
     expect(within(tools).getByRole("button", { name: /Stop/i })).toBeTruthy();
     expect(within(tools).queryByLabelText("New profile")).toBeNull();
     fireEvent.click(within(tools).getByLabelText("Toggle browser administration"));
+    expectUiState(document.body, UI_STATE.mobileAdminTools);
     expect(within(tools).getByLabelText("New profile")).toBeTruthy();
     expect(within(tools).getByLabelText("Edit selected profile")).toBeTruthy();
     expect(within(tools).getByLabelText("Browser access controls")).toBeTruthy();
@@ -748,11 +839,13 @@ describe("MobileSplitScreen", () => {
 
     fireEvent.click(screen.getByLabelText("Toggle grid view"));
     expect(screen.getByLabelText("Running browser grid")).toBeTruthy();
+    expectUiState(document.body, UI_STATE.mobileSessionGrid);
     expect(screen.queryByLabelText("Viewport controls")).toBeNull();
     expect(workspace.classList.contains("mobile-detail-panel-open")).toBe(true);
 
     fireEvent.click(screen.getByLabelText("Edit browser viewport"));
     expect(screen.getByLabelText("Viewport controls")).toBeTruthy();
+    expectUiState(document.body, UI_STATE.mobileViewportControls);
     expect(screen.queryByLabelText("Running browser grid")).toBeNull();
     expect(screen.queryByLabelText("Pinned browser actions")).toBeNull();
     expect(workspace.classList.contains("mobile-detail-panel-open")).toBe(true);
@@ -846,6 +939,29 @@ describe("MobileSplitScreen", () => {
     await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(390, 844));
   });
 
+  it("keeps the full device height for inline Phone fit while the keyboard shrinks visual viewport", async () => {
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    vi.stubGlobal("visualViewport", {
+      width: 390,
+      height: 420,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+
+    try {
+      const { props } = runningSplit();
+      openBrowserTools();
+      fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+      fireEvent.click(screen.getByText("Phone fit"));
+
+      await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(390, 844));
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      fireEvent(window, new Event("resize"));
+    }
+  });
+
   it("shows live viewport restart state and prevents duplicate apply submissions", async () => {
     const apply = deferred<boolean>();
     const onViewportApply = vi.fn().mockReturnValue(apply.promise);
@@ -884,6 +1000,7 @@ describe("MobileSplitScreen", () => {
     const { props } = runningSplit();
 
     fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
+    expectUiState(document.body, UI_STATE.mobileFullscreenBrowser);
 
     const fullscreenDialog = screen.getByRole("dialog", { name: "Fullscreen browser viewer" }) as HTMLElement;
     expect(fullscreenDialog).toBeTruthy();
@@ -950,6 +1067,29 @@ describe("MobileSplitScreen", () => {
     fireEvent.click(within(screen.getByLabelText("Fullscreen viewport controls")).getByText("Phone fit"));
 
     await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(412, 892));
+  });
+
+  it("keeps the full device height for fullscreen Phone fit while the keyboard is open", async () => {
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    vi.stubGlobal("visualViewport", {
+      width: 390,
+      height: 420,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+
+    try {
+      const { props } = runningSplit();
+      fireEvent.click(screen.getByLabelText("Open fullscreen browser"));
+      fireEvent.click(screen.getByLabelText("Edit fullscreen browser viewport"));
+      fireEvent.click(within(screen.getByLabelText("Fullscreen viewport controls")).getByText("Phone fit"));
+
+      await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(390, 844));
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      fireEvent(window, new Event("resize"));
+    }
   });
 
   it("does not offer fullscreen when no browser is live", () => {

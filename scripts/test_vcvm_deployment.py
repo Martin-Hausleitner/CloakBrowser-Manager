@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import subprocess
 import tempfile
 
@@ -12,8 +13,17 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "docker-compose.vcvm.yml"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy_vcvm.sh"
+ROLLBACK_SCRIPT = ROOT / "scripts" / "rollback_vcvm_release.sh"
+RELEASE_MANIFEST_SCRIPT = ROOT / "scripts" / "cbm_release_manifest.py"
+RELEASE_TRANSACTION_SCRIPT = ROOT / "scripts" / "vcvm_release_transaction.py"
+RELEASE_CONTRACT = ROOT / "docs" / "contracts" / "vcvm-release-v1.json"
 DOC_FILE = ROOT / "docs" / "VCVM-DEPLOYMENT.md"
+WORKER_DOC_FILE = ROOT / "docs" / "BROWSER_USE_WORKER.md"
 DOCKERIGNORE_FILE = ROOT / ".dockerignore"
+
+# Synthetic fixture only — never print this value in pass/fail summaries.
+_DUMMY_WORKER_TOKEN = "cbm_worker_" + ("a1" * 32)
+_WORKER_TOKEN_LEAK_RE = re.compile(r"cbm_worker_[0-9a-fA-F]{16,}")
 
 
 def run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -32,16 +42,26 @@ def assert_true(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def compose_config() -> dict:
+def _write_env(lines: list[str]) -> pathlib.Path:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as env_file:
-        env_file.write("AUTH_TOKEN=unit-test-token-with-safe-length\n")
-        env_file.write("MANAGER_PORT=18115\n")
-        env_file.write("VCVM_CPUS=16.0\n")
-        env_file.write("VCVM_MEMORY_LIMIT=32g\n")
-        env_file.write("VCVM_SHM_SIZE=2gb\n")
-        env_file.write("PROXYCHECKER_URL=http://host.docker.internal:18899\n")
-        env_file.write("PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal\n")
-        env_path = pathlib.Path(env_file.name)
+        for line in lines:
+            env_file.write(line if line.endswith("\n") else line + "\n")
+        return pathlib.Path(env_file.name)
+
+
+def compose_config(extra_env_lines: list[str] | None = None) -> dict:
+    lines = [
+        "AUTH_TOKEN=unit-test-token-with-safe-length",
+        "MANAGER_PORT=18115",
+        "VCVM_CPUS=16.0",
+        "VCVM_MEMORY_LIMIT=32g",
+        "VCVM_SHM_SIZE=2gb",
+        "PROXYCHECKER_URL=http://host.docker.internal:18899",
+        "PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal",
+    ]
+    if extra_env_lines:
+        lines.extend(extra_env_lines)
+    env_path = _write_env(lines)
     try:
         result = run(
             "docker",
@@ -60,9 +80,7 @@ def compose_config() -> dict:
 
 
 def compose_quiet() -> None:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as env_file:
-        env_file.write("AUTH_TOKEN=unit-test-token-with-safe-length\n")
-        env_path = pathlib.Path(env_file.name)
+    env_path = _write_env(["AUTH_TOKEN=unit-test-token-with-safe-length"])
     try:
         run(
             "docker",
@@ -78,6 +96,199 @@ def compose_quiet() -> None:
         env_path.unlink(missing_ok=True)
 
 
+def _manager_env(config: dict) -> dict:
+    return config.get("services", {}).get("manager", {}).get("environment", {})
+
+
+def _compose_config_in_project(
+    project_dir: pathlib.Path,
+    *,
+    worker_env_lines: list[str] | None = None,
+) -> tuple[dict, str]:
+    """Render compose config from an isolated project dir; return (config, raw_stdout)."""
+    project_dir.mkdir(parents=True, exist_ok=True)
+    target_compose = project_dir / "docker-compose.vcvm.yml"
+    target_compose.write_text(COMPOSE_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+    worker_env_path = project_dir / ".env.worker.vcvm"
+    if worker_env_lines is None:
+        worker_env_path.unlink(missing_ok=True)
+    else:
+        worker_env_path.write_text(
+            "\n".join(line if line.endswith("\n") else line + "\n" for line in worker_env_lines),
+            encoding="utf-8",
+        )
+        worker_env_path.chmod(0o600)
+
+    auth_env = _write_env(
+        [
+            "AUTH_TOKEN=unit-test-token-with-safe-length",
+            "MANAGER_PORT=18115",
+            "VCVM_CPUS=16.0",
+            "VCVM_MEMORY_LIMIT=32g",
+            "VCVM_SHM_SIZE=2gb",
+            "PROXYCHECKER_URL=http://host.docker.internal:18899",
+            "PROXYCHECKER_ALLOWED_HOSTS=host.docker.internal",
+        ]
+    )
+    try:
+        result = run(
+            "docker",
+            "compose",
+            "--env-file",
+            str(auth_env),
+            "-f",
+            str(target_compose),
+            "config",
+            "--format",
+            "json",
+        )
+    finally:
+        auth_env.unlink(missing_ok=True)
+    return json.loads(result.stdout), result.stdout
+
+
+def test_deploy_vcvm_sh_fails_closed_before_remote_writes() -> None:
+    """Release preflight must preserve its secret and low-space safeguards."""
+    deploy_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    assert_true("CBM_WORKER" not in deploy_text, "deploy_vcvm.sh must not mention CBM_WORKER_*")
+    assert_true("remote_env_merge_script" not in deploy_text, "fragile env merge must stay removed")
+    assert_true(
+        "VCVM_MIN_FREE_DISK_GIB" in deploy_text,
+        "deploy must make the minimum free-space gate configurable",
+    )
+    assert_true("apply=0" in deploy_text, "deploy must be dry-run by default")
+    assert_true("--apply" in deploy_text, "live deploy flag must exist and fail closed")
+    assert_true("cbm_release_manifest.py" in deploy_text, "deploy must generate a release manifest")
+    assert_true('exec python3 "$repo_root/scripts/vcvm_release_transaction.py"' not in deploy_text, "deploy --apply must not delegate while re-review is open")
+    assert_true("--disk-free-bytes" in deploy_text, "manifest must record measured VCVM free capacity")
+    assert_true(
+        deploy_text.index('if [[ "$apply" == "1" ]]') < deploy_text.index("manifest_args=("),
+        "deploy apply must fail closed before dry-run manifest generation",
+    )
+    for mutation in ('ssh "$target_host"', "rsync -az", "docker compose", "mkdir -p \"\\$remote_path/releases\""):
+        assert_true(mutation not in deploy_text, f"deploy wrapper must not contain partial mutation logic: {mutation}")
+
+
+def test_release_manifest_and_rollback_files_are_documented() -> None:
+    assert_true(RELEASE_MANIFEST_SCRIPT.exists(), "missing scripts/cbm_release_manifest.py")
+    assert_true(RELEASE_TRANSACTION_SCRIPT.exists(), "missing scripts/vcvm_release_transaction.py")
+    assert_true(ROLLBACK_SCRIPT.exists(), "missing scripts/rollback_vcvm_release.sh")
+    assert_true(RELEASE_CONTRACT.exists(), "missing docs/contracts/vcvm-release-v1.json")
+    deploy_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    rollback_text = ROLLBACK_SCRIPT.read_text(encoding="utf-8")
+    doc_text = DOC_FILE.read_text(encoding="utf-8")
+    contract = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
+    assert_true(contract["metadata"]["id"] == "vcvm-release-v1", "unexpected release contract id")
+    assert_true("release_min_free_gib" in RELEASE_MANIFEST_SCRIPT.read_text(encoding="utf-8"), "manifest must record release disk gate")
+    assert_true("new_worktree_min_free_gib" in RELEASE_MANIFEST_SCRIPT.read_text(encoding="utf-8"), "manifest must record worktree disk gate")
+    assert_true("SECRET_PATTERNS" in RELEASE_MANIFEST_SCRIPT.read_text(encoding="utf-8"), "manifest must fail closed on secrets")
+    assert_true("run_release" in RELEASE_TRANSACTION_SCRIPT.read_text(encoding="utf-8"), "transaction engine must expose release execution")
+    assert_true("run_rollback" in RELEASE_TRANSACTION_SCRIPT.read_text(encoding="utf-8"), "transaction engine must expose rollback execution")
+    assert_true("apply=0" in rollback_text, "rollback must be dry-run by default")
+    assert_true("release_id_re" in rollback_text, "rollback must validate release ID shape")
+    assert_true("rollback is unavailable" in rollback_text, "rollback --apply must fail closed while re-review is open")
+    for phrase in (
+        "Release manifest dry-run gate",
+        "dry-run by default",
+        "at least 8 GiB",
+        "`--apply` remains unavailable",
+        "contracts/vcvm-release-v1.json",
+    ):
+        assert_true(phrase in doc_text, f"deployment docs missing {phrase}")
+    assert_true("prune" not in deploy_text.lower() or "no SSH, rsync, compose, restart, cleanup, prune" in deploy_text, "deploy must not prune shared-host resources")
+
+
+def test_compose_attaches_optional_worker_env_file_without_interpolation() -> None:
+    compose_text = COMPOSE_FILE.read_text(encoding="utf-8")
+    assert_true("env_file:" in compose_text, "compose must declare env_file for worker bootstrap")
+    assert_true(".env.worker.vcvm" in compose_text, "compose must reference .env.worker.vcvm")
+    assert_true("required: false" in compose_text, "worker env_file must be optional (required: false)")
+    assert_true(
+        "CBM_WORKER_ID:" not in compose_text and "CBM_WORKER_TOKEN:" not in compose_text,
+        "compose must not interpolate CBM_WORKER_* in environment:",
+    )
+    assert_true("${CBM_WORKER_ID" not in compose_text, "no CBM_WORKER_ID interpolation defaults")
+    assert_true("${CBM_WORKER_TOKEN" not in compose_text, "no CBM_WORKER_TOKEN interpolation defaults")
+    assert_true("cbm_worker_" not in compose_text, "compose must not embed worker token material")
+    assert_true(
+        ".env.dev.vcvm" in compose_text,
+        "compose must support an optional local development environment file",
+    )
+    assert_true(
+        "CBM_DEV_AUTO_ADMIN:" not in compose_text
+        and "CBM_DEPLOYMENT_ENV:" not in compose_text,
+        "compose must not hard-code development auto-admin into production environment",
+    )
+
+
+def test_worker_env_absent_keeps_manager_valid_without_defaults(tmp_path: pathlib.Path) -> None:
+    """Missing .env.worker.vcvm stays valid; backend treats absence as disabled."""
+    config, raw = _compose_config_in_project(tmp_path / "absent", worker_env_lines=None)
+    env = _manager_env(config)
+    assert_true(
+        env.get("CBM_WORKER_ID") in (None, ""),
+        "absent worker env must not invent CBM_WORKER_ID",
+    )
+    assert_true(
+        env.get("CBM_WORKER_TOKEN") in (None, ""),
+        "absent worker env must not invent CBM_WORKER_TOKEN",
+    )
+    assert_true(_DUMMY_WORKER_TOKEN not in raw, "compose stdout must not contain dummy token")
+
+
+def test_worker_env_configured_passes_into_manager_without_printing_token(
+    tmp_path: pathlib.Path,
+) -> None:
+    config, raw = _compose_config_in_project(
+        tmp_path / "configured",
+        worker_env_lines=[
+            "CBM_WORKER_ID=browser-use-worker",
+            f"CBM_WORKER_TOKEN={_DUMMY_WORKER_TOKEN}",
+        ],
+    )
+    env = _manager_env(config)
+    assert_true(
+        env.get("CBM_WORKER_ID") == "browser-use-worker",
+        "configured CBM_WORKER_ID must reach the Manager service",
+    )
+    assert_true(
+        env.get("CBM_WORKER_TOKEN") == _DUMMY_WORKER_TOKEN,
+        "configured CBM_WORKER_TOKEN must reach the Manager service",
+    )
+    # Handle compose config output without printing the token in test chatter.
+    redacted = {
+        "CBM_WORKER_ID": env.get("CBM_WORKER_ID"),
+        "CBM_WORKER_TOKEN": (
+            f"<set:{len(str(env.get('CBM_WORKER_TOKEN') or ''))}chars>"
+            if env.get("CBM_WORKER_TOKEN")
+            else env.get("CBM_WORKER_TOKEN")
+        ),
+    }
+    assert_true(redacted["CBM_WORKER_ID"] == "browser-use-worker", "redacted view keeps worker id")
+    assert_true(str(redacted["CBM_WORKER_TOKEN"]).startswith("<set:"), "token must be redacted in reports")
+    assert_true(_DUMMY_WORKER_TOKEN not in str(redacted), "redacted report must omit token")
+
+    checked_in = (
+        COMPOSE_FILE,
+        DEPLOY_SCRIPT,
+        DOC_FILE,
+        WORKER_DOC_FILE,
+        ROOT / "scripts" / "provision_browser_use_worker.py",
+        ROOT / "deploy" / "systemd" / "cloakbrowser-browser-use-worker.service.template",
+    )
+    for path in checked_in:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert_true(
+            _DUMMY_WORKER_TOKEN not in text,
+            f"checked-in file must not contain dummy worker token: {path.name}",
+        )
+        assert_true(
+            _WORKER_TOKEN_LEAK_RE.search(text) is None,
+            f"checked-in file must not embed cbm_worker_ token material: {path.name}",
+        )
+
 def main() -> None:
     assert_true(COMPOSE_FILE.exists(), "missing docker-compose.vcvm.yml")
     assert_true(DEPLOY_SCRIPT.exists(), "missing scripts/deploy_vcvm.sh")
@@ -86,6 +297,14 @@ def main() -> None:
 
     run("bash", "-n", str(DEPLOY_SCRIPT))
     compose_quiet()
+
+    # Focused Browser-Use worker env wiring (absence + configured).
+    test_deploy_vcvm_sh_fails_closed_before_remote_writes()
+    test_compose_attaches_optional_worker_env_file_without_interpolation()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = pathlib.Path(tmp)
+        test_worker_env_absent_keeps_manager_valid_without_defaults(tmp_path)
+        test_worker_env_configured_passes_into_manager_without_printing_token(tmp_path)
 
     config = compose_config()
     services = config.get("services", {})
@@ -102,6 +321,29 @@ def main() -> None:
     assert_true(manager.get("healthcheck") is not None, "missing healthcheck")
     assert_true(env.get("ACCESS_CONTROL_ENABLED") == "1", "access control must be forced on")
     assert_true(env.get("AUTH_TOKEN") == "unit-test-token-with-safe-length", "AUTH_TOKEN must come from env")
+    assert_true(env.get("HOME") == "/home/coder", "manager must use host coder HOME for Orca")
+    assert_true(
+        env.get("CBM_ORCA_BIN") == "/home/coder/.local/bin/orca-ide",
+        "manager must point at host orca-ide",
+    )
+    assert_true(
+        env.get("CBM_ORCA_WORKTREE")
+        == "path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use",
+        "manager must use the Orca-registered vk-repos worktree",
+    )
+    assert_true(
+        env.get("CBM_ORCA_AGENT_WRAPPER")
+        == "/home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh",
+        "manager must launch agents through the vk-repos wrapper script",
+    )
+    assert_true(
+        str(env.get("CBM_BASE_URL", "")).startswith("http://127.0.0.1:"),
+        "agent base URL must be host-loopback",
+    )
+    assert_true(
+        env.get("CBM_AGENT_KEY_FILE") == "/home/coder/.config/cloakbrowser/orca-agent-key",
+        "agent key must be a host file path, never an inline secret",
+    )
     assert_true(
         env.get("PROXYCHECKER_URL") == "http://host.docker.internal:18899",
         "proxychecker URL must remain explicit and environment-controlled",
@@ -118,6 +360,38 @@ def main() -> None:
     assert_true(str(manager.get("mem_limit")) == str(32 * 1024 * 1024 * 1024), "unexpected memory limit default")
     assert_true(str(manager.get("cpus")) in {"16.0", "16"}, "unexpected CPU limit default")
 
+    volume_json = json.dumps(manager.get("volumes", []))
+    bind_mounts = {
+        (item.get("source"), item.get("target"), bool(item.get("read_only")))
+        for item in manager.get("volumes", [])
+        if isinstance(item, dict) and item.get("type") == "bind"
+    }
+    for source, target in (
+        ("/home/coder/orca", "/home/coder/orca"),
+        ("/home/coder/.local", "/home/coder/.local"),
+        ("/home/coder/.config/orca", "/home/coder/.config/orca"),
+    ):
+        assert_true(
+            (source, target, True) in bind_mounts,
+            f"missing read-only Orca mount {source}:{target}",
+        )
+    assert_true(
+        "/home/coder/.config/cloakbrowser" not in volume_json,
+        "agent key directory must not be mounted into the container image path list as rw secret store",
+    )
+    assert_true(
+        "/home/coder/vk-repos/CloakBrowser-Manager-browser-use" not in volume_json,
+        "vk-repos checkout/wrapper must not be mounted into the Manager container",
+    )
+    assert_true(
+        "orca_agent_cli.sh" not in volume_json,
+        "host agent wrapper must not be bind-mounted into the Manager container",
+    )
+    assert_true(
+        "orca-agent-key" not in volume_json,
+        "scoped agent key file must not be bind-mounted into the Manager container",
+    )
+
     port_json = json.dumps(ports)
     assert_true("127.0.0.1" in port_json, "manager must bind to loopback")
     assert_true("0.0.0.0" not in port_json, "manager must not bind to all interfaces")
@@ -127,22 +401,25 @@ def main() -> None:
 
     deploy_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     dockerignore_text = DOCKERIGNORE_FILE.read_text(encoding="utf-8")
-    assert_true("ACCESS_CONTROL_ENABLED=1" in deploy_text, "deploy script must force access control")
     assert_true("PROXYCHECKER_URL" in deploy_text, "deploy script must support optional proxychecker configuration")
     assert_true(
         "host.docker.internal" in deploy_text,
         "deploy script must restrict the proxychecker boundary to the Docker host gateway",
     )
-    assert_true("tailscale serve --bg --https" in deploy_text, "deploy script must use private HTTPS Serve")
-    assert_true("timeout 30s tailscale serve" in deploy_text, "Tailscale Serve must not hang indefinitely")
-    assert_true("<tailscale-admin-enable-url>" in deploy_text, "Tailscale admin URLs must be scrubbed")
+    assert_true("cbm_release_manifest.py" in deploy_text, "deploy script must generate manifest dry-runs")
+    assert_true("transaction engine re-review is complete" in deploy_text, "deploy --apply must fail closed while re-review is open")
+    assert_true("rsync -az" not in deploy_text, "deploy must not carry partial rsync release logic")
+    assert_true("docker compose" not in deploy_text, "deploy must not carry partial compose release logic")
+    assert_true('ssh "$target_host"' not in deploy_text, "deploy wrapper must not open SSH")
+    preflight_text = (ROOT / "scripts" / "vcvm_orca_preflight.py").read_text(encoding="utf-8")
+    assert_true("worktree show" in preflight_text, "preflight must verify worktree show")
+    assert_true("check_agent_key_file" in preflight_text, "preflight must validate agent key file")
+    assert_true("--agent-key-file" in preflight_text, "preflight must accept agent key file flag")
+    assert_true("0600" in preflight_text or "0o600" in (ROOT / "backend" / "orca_agent_key.py").read_text(encoding="utf-8"), "agent key mode must be exactly 0600")
+    assert_true("CBM_AGENT_KEY=" not in deploy_text, "deploy script must never write inline agent keys")
     assert_true("tailscale funnel" not in deploy_text.lower(), "deploy script must not use public funnel")
     assert_true("Refusing unexpected target host" in deploy_text, "deploy script must validate host")
     assert_true("Expected exactly: $DEFAULT_REMOTE_PATH" in deploy_text, "deploy script must validate path")
-    assert_true(".cloakbrowser-manager-vcvm-managed" in deploy_text, "deploy script must use a managed marker")
-    assert_true("--delete" in deploy_text and "--exclude \"$MANAGED_MARKER\"" in deploy_text, "rsync delete must preserve marker")
-    assert_true("(.TCP // {}) | has(\\$port)" in deploy_text, "Serve collision check must inspect TCP map")
-    assert_true("(.Web // {}) | keys" in deploy_text, "Serve collision check must inspect Web map")
 
     for pattern in (
         ".git",
@@ -164,8 +441,59 @@ def main() -> None:
         "*token*",
     ):
         assert_true(pattern in dockerignore_text, f".dockerignore missing {pattern}")
-        assert_true(pattern in deploy_text, f"rsync excludes missing {pattern}")
 
+    wrapper = ROOT / "scripts" / "orca_agent_cli.sh"
+    preflight = ROOT / "scripts" / "vcvm_orca_preflight.py"
+    assert_true(wrapper.exists(), "missing scripts/orca_agent_cli.sh")
+    assert_true(preflight.exists(), "missing scripts/vcvm_orca_preflight.py")
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert_true("cursor-agent|grok|agy|codex" in wrapper_text, "wrapper must allowlist agent CLIs")
+    assert_true("CBM_AGENT_KEY_FILE" in wrapper_text, "wrapper must export key file path")
+    assert_true("CBM_AGENT_KEY=" not in wrapper_text, "wrapper must not export inline agent keys")
+    assert_true("exec grok --no-alt-screen" in wrapper_text, "Grok must remain visible in browser terminals")
+    assert_true("exec agy" in wrapper_text, "AGY must start as an interactive terminal CLI")
+    doc_text = DOC_FILE.read_text(encoding="utf-8")
+    assert_true("Orca host bridge" in doc_text, "deployment docs must describe Orca host bridge")
+    assert_true("orca-agent-key" in doc_text, "deployment docs must document key file path")
+    assert_true("0600" in doc_text or "mode-`600`" in doc_text or "mode `0600`" in doc_text, "docs must document key file mode")
+    assert_true("owner-only" in doc_text, "docs must document owner-only Orca close")
+    assert_true("vcvm_orca_preflight.py" in doc_text, "deployment docs must mention preflight")
+    assert_true(
+        "Do not mount" in doc_text or "do not mount" in doc_text,
+        "docs must forbid mounting key/wrapper into the Manager container",
+    )
+    assert_true(
+        "capabilities.available" in doc_text,
+        "docs must describe container capabilities.available contract",
+    )
+    assert_true(
+        "check_agent_key_file" in preflight.read_text(encoding="utf-8"),
+        "host preflight must validate agent key readiness",
+    )
+    assert_true(
+        "check_agent_wrapper" in preflight.read_text(encoding="utf-8"),
+        "host preflight must validate host agent wrapper readiness",
+    )
+    assert_true(
+        "BROWSER_USE_WORKER.md" in doc_text or WORKER_DOC_FILE.exists(),
+        "deployment docs must mention or link Browser-Use worker guidance",
+    )
+    if WORKER_DOC_FILE.exists():
+        worker_doc = WORKER_DOC_FILE.read_text(encoding="utf-8")
+        assert_true("CBM_WORKER_ID" in worker_doc, "worker docs must mention CBM_WORKER_ID")
+        assert_true("CBM_WORKER_TOKEN" in worker_doc, "worker docs must mention CBM_WORKER_TOKEN")
+        assert_true(
+            ".env.worker.vcvm" in worker_doc,
+            "worker docs must document the separate .env.worker.vcvm file",
+        )
+        assert_true(
+            "env_file" in worker_doc or "compose" in worker_doc.lower(),
+            "worker docs must explain compose env_file attachment",
+        )
+        assert_true(
+            _WORKER_TOKEN_LEAK_RE.search(worker_doc) is None,
+            "worker docs must not embed real worker token material",
+        )
     print("VCVM deployment surface checks passed")
 
 

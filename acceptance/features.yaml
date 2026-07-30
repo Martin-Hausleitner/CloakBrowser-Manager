@@ -1,0 +1,112 @@
+env_flags:
+  - VITE_BENCHMARK_REPORT_URL
+
+features:
+  - id: projects
+    route: /
+    role: admin
+    required_apis: [/api/projects, /api/profiles]
+    locator: app.desktop.home
+    mobile_locator: mobile.workspace
+    screenshot_state: app.desktop.home
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: pinned-profiles
+    route: /
+    role: admin
+    required_apis: [/api/profiles, /api/profiles/{profile_id}, /api/profiles/bulk-organize]
+    locator: app.desktop.profiles
+    mobile_locator: mobile.session-grid
+    screenshot_state: app.desktop.profiles
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: proxy-overview
+    route: /
+    role: admin
+    required_apis: [/api/proxies, /api/proxies/ingest, /api/proxies/{proxy_id}/check, /api/proxies/{proxy_id}/profiles]
+    locator: proxy.overview
+    mobile_locator: mobile.admin-tools
+    screenshot_state: proxy.overview
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: phone-fit
+    route: /
+    role: operator
+    required_apis: [/api/profiles/{profile_id}, /api/profiles/{profile_id}/open-links, /api/profiles/{profile_id}/live-metrics]
+    locator: mobile.fullscreen-browser
+    mobile_locator: mobile.fullscreen-browser
+    screenshot_state: mobile.fullscreen-browser
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: fullscreen-viewport-controls
+    route: /
+    role: operator
+    required_apis: [/api/profiles/{profile_id}, /api/profiles/{profile_id}/launch, /api/profiles/{profile_id}/stop]
+    locator: agent.viewer-fullscreen
+    mobile_locator: mobile.viewport-controls
+    screenshot_state: agent.viewer-fullscreen
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: desktop-full-view-phone-fit
+    route: /
+    role: operator
+    required_apis: [/api/profiles/{profile_id}]
+    locator: agent.viewer-fullscreen
+    mobile_locator: mobile.fullscreen-browser
+    screenshot_state: agent.viewer-fullscreen
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: sessions
+    route: /
+    role: operator
+    required_apis: [/api/task-sessions, /api/task-sessions/{session_id}, /api/task-sessions/{session_id}/messages, /api/task-sessions/{session_id}/events]
+    locator: agent.session-pane
+    mobile_locator: mobile.session-grid
+    screenshot_state: agent.session-pane
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: typed-outputs
+    route: /
+    role: operator
+    required_apis: [/api/task-sessions/{session_id}/runs, /api/task-runs/{run_id}, /api/task-runs/{run_id}/outputs, /api/task-outputs/{output_id}/screenshot]
+    locator: agent.managed-output
+    mobile_locator: mobile.task-chat
+    screenshot_state: agent.managed-output
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: acpx-selector
+    route: /
+    role: operator
+    required_apis: [/api/task-sessions/{session_id}/runs, /api/task-harnesses/{harness}/presence, /api/task-harnesses/acpx/preflights]
+    locator: agent.session-pane
+    mobile_locator: mobile.tools-sheet
+    screenshot_state: agent.session-pane
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: extension-catalog
+    route: /
+    role: admin
+    required_apis: [/api/extension/catalog, /api/extension/defaults, /api/extension/templates, /api/profiles/{profile_id}/extensions]
+    locator: app.desktop.profiles
+    mobile_locator: mobile.admin-tools
+    screenshot_state: app.desktop.profiles
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: access-dashboard
+    route: /
+    role: admin
+    required_apis: [/api/access/me, /api/access/users, /api/access/groups, /api/access/agents, /api/access/sandboxes]
+    locator: access.dashboard
+    mobile_locator: mobile.admin-tools
+    screenshot_state: access.dashboard
+    feature_flags: []
+    forbidden_feature_flags: []
+  - id: screenshot-action
+    route: /
+    role: operator
+    required_apis: [/api/task-sessions/{session_id}/messages, /api/task-runs/{run_id}/outputs, /api/task-outputs/{output_id}/screenshot]
+    locator: mobile.tools-sheet
+    mobile_locator: mobile.tools-sheet
+    screenshot_state: mobile.tools-sheet
+    feature_flags: []
+    forbidden_feature_flags: []

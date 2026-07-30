@@ -18,6 +18,13 @@ export const HARNESS_OPTIONS: HarnessOption[] = [
     description: "Excerpt-style agent shell · CDP browser control",
   },
   {
+    value: "acpx",
+    label: "ACPX / ACP",
+    short: "ACP",
+    approach: "agent-bridge",
+    description: "Persistent ACP sessions · Codex, Claude, Cursor, Grok Build or OpenCode",
+  },
+  {
     value: "browser-harness",
     label: "Browser Harness",
     short: "BH",
@@ -50,7 +57,7 @@ export const HARNESS_OPTIONS: HarnessOption[] = [
     label: "Antigravity",
     short: "AG",
     approach: "agent-bridge",
-    description: "Preferred agent metadata (non-executing)",
+    description: "Managed ACPX/Grok Build workflow preset",
   },
   {
     value: "claude-code",

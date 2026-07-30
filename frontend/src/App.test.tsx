@@ -1,8 +1,82 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-import { applyProfileViewport, toggleProfilePin } from "./App";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import App, { applyProfileViewport, toggleProfilePin } from "./App";
 import { ProfileForm } from "./components/ProfileForm";
-import type { Profile } from "./lib/api";
+import type { Profile, TaskOutput, TaskRun } from "./lib/api";
+import { rememberBrowserUseRun } from "./lib/managedTaskRunStorage";
+import { codexComputerUseProvider } from "./lib/taskHarness";
+import { UI_STATE, expectUiState } from "./lib/uiFlowRegistry";
+
+const profileViewerMounts = vi.hoisted(() => [] as string[]);
+
+const apiMock = vi.hoisted(() => ({
+  authStatus: vi.fn(),
+  logout: vi.fn(),
+  setOnUnauthorized: vi.fn(),
+  getOrcaCapabilities: vi.fn(),
+  getProviderReadiness: vi.fn(),
+  getTaskHarnessPresence: vi.fn(),
+  getTaskHarnessPreflights: vi.fn(),
+  createTaskSession: vi.fn(),
+  createTaskRun: vi.fn(),
+  cancelTaskRun: vi.fn(),
+  listProxies: vi.fn(),
+  listAccounts: vi.fn(),
+  listTaskSessions: vi.fn(),
+  getTaskRun: vi.fn(),
+  listTaskRunOutputs: vi.fn(),
+}));
+
+const useProfilesMock = vi.hoisted(() => vi.fn());
+
+vi.mock("./lib/api", async () => {
+  const actual = await vi.importActual<typeof import("./lib/api")>("./lib/api");
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      authStatus: apiMock.authStatus,
+      logout: apiMock.logout,
+      getOrcaCapabilities: apiMock.getOrcaCapabilities,
+      getProviderReadiness: apiMock.getProviderReadiness,
+      getTaskHarnessPresence: apiMock.getTaskHarnessPresence,
+      getTaskHarnessPreflights: apiMock.getTaskHarnessPreflights,
+      createTaskSession: apiMock.createTaskSession,
+      createTaskRun: apiMock.createTaskRun,
+      cancelTaskRun: apiMock.cancelTaskRun,
+      listProxies: apiMock.listProxies,
+      listAccounts: apiMock.listAccounts,
+      listTaskSessions: apiMock.listTaskSessions,
+      getTaskRun: apiMock.getTaskRun,
+      listTaskRunOutputs: apiMock.listTaskRunOutputs,
+    },
+    setOnUnauthorized: apiMock.setOnUnauthorized,
+  };
+});
+
+vi.mock("./hooks/useProfiles", () => ({
+  useProfiles: useProfilesMock,
+}));
+
+vi.mock("./components/ProfileViewer", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+  return {
+    ProfileViewer: ({ profileId }: { profileId: string }) => {
+      React.useEffect(() => {
+        profileViewerMounts.push(profileId);
+      }, [profileId]);
+      return <div data-testid="mock-profile-viewer">viewer:{profileId}</div>;
+    },
+  };
+});
+
+vi.mock("./components/LiveDevPanel", () => ({
+  LiveDevPanel: () => <div data-testid="mock-live-dev-panel" />,
+}));
+
+vi.mock("./components/SessionStreamButtons", () => ({
+  SessionStreamButtons: () => <div data-testid="mock-session-stream-buttons" />,
+}));
 
 const stoppedProfile: Profile = {
   id: "profile-1",
@@ -50,6 +124,623 @@ const runningProfile: Profile = {
   status: "running",
   vnc_ws_port: 5901,
 };
+
+const taskRun = (overrides: Partial<TaskRun>): TaskRun => ({
+  id: "run-1",
+  task_session_id: "session-1",
+  task_message_id: "message-1",
+  profile_id: runningProfile.id,
+  profile_id_snapshot: runningProfile.id,
+  sandbox_id: runningProfile.sandbox_id,
+  harness: "browser-use",
+  agent: null,
+  status: "succeeded",
+  launch_if_stopped: false,
+  allowed_origins: ["https://example.test"],
+  max_steps: 20,
+  timeout_seconds: 360,
+  model_alias: null,
+  deadline_at: "2026-07-26T00:10:00Z",
+  health_snapshot: {},
+  health_decision: {},
+  health_override: null,
+  retry_count: 0,
+  first_action_sequence: 1,
+  first_action_at: "2026-07-26T00:00:01Z",
+  cancelled_at: null,
+  error_code: null,
+  error_message: null,
+  created_by_kind: "user",
+  created_by_id: "user-1",
+  created_at: "2026-07-26T00:00:00Z",
+  updated_at: "2026-07-26T00:00:05Z",
+  ...overrides,
+});
+
+const taskOutput = (overrides: Partial<TaskOutput>): TaskOutput => ({
+  id: "output-1",
+  run_id: "run-1",
+  sequence: 1,
+  idempotency_key: "output-1",
+  kind: "status",
+  summary: "Working",
+  payload: {},
+  created_at: "2026-07-26T00:00:00Z",
+  artifact_expired: false,
+  ...overrides,
+});
+
+beforeEach(() => {
+  apiMock.authStatus.mockResolvedValue({
+    auth_required: false,
+    access_control_enabled: false,
+    authenticated: true,
+    identity: { kind: "anonymous", display_name: "Local operator" },
+  });
+  apiMock.logout.mockResolvedValue(undefined);
+  apiMock.getOrcaCapabilities.mockResolvedValue({
+    available: true,
+    orca_bin: "/usr/local/bin/orca",
+    agents: ["cursor-agent", "grok", "codex"],
+    operations: ["terminal.create"],
+    actions: {
+      start: true,
+      read: true,
+      send: true,
+      close: true,
+      pause: false,
+      resume: false,
+    },
+    notes: [],
+  });
+  apiMock.listProxies.mockResolvedValue([]);
+  apiMock.getProviderReadiness.mockResolvedValue({ providers: [] });
+  apiMock.getTaskHarnessPresence.mockResolvedValue({ harness: "browser-use", worker_seen_recently: false, state: "unavailable", last_seen_at: null, reason: "Not checked" });
+  apiMock.getTaskHarnessPreflights.mockResolvedValue({ harness: "acpx", agents: [] });
+  apiMock.createTaskSession.mockResolvedValue({ id: "session-1" });
+  apiMock.createTaskRun.mockResolvedValue(taskRun({}));
+  apiMock.cancelTaskRun.mockResolvedValue(taskRun({ status: "cancelled", cancelled_at: "2026-07-26T00:00:04Z" }));
+  apiMock.listAccounts.mockResolvedValue([]);
+  apiMock.listTaskSessions.mockResolvedValue([]);
+  apiMock.getTaskRun.mockRejectedValue(new Error("unexpected getTaskRun call"));
+  apiMock.listTaskRunOutputs.mockRejectedValue(new Error("unexpected listTaskRunOutputs call"));
+  useProfilesMock.mockReset();
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: vi.fn().mockImplementation(() => ({
+      matches: false,
+      media: "",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+  window.sessionStorage.clear();
+  profileViewerMounts.length = 0;
+});
+
+afterEach(() => {
+  delete window.cloakBrowserHarness;
+});
+
+describe("App Browser Use home handoff", () => {
+  it("keeps mobile Settings controls inert while a remembered run is active", async () => {
+    const browserUseRunningProfile: Profile = {
+      ...runningProfile,
+      id: "profile-browser-use-active",
+      name: "Browser Use Active",
+      harness: "browser-use",
+      cdp_url: "ws://example",
+    };
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockImplementation(() => ({
+        matches: true,
+        media: "",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    window.cloakBrowserHarness = {
+      capabilities: {
+        chat: true,
+        streaming: true,
+        clipboard: true,
+        browser_actions: ["copy", "paste", "screenshot", "fullscreen"],
+        metadata: { provider: codexComputerUseProvider },
+      },
+      send: vi.fn(),
+      listConversations: vi.fn().mockResolvedValue([]),
+      listMessages: vi.fn().mockResolvedValue([]),
+    };
+    rememberBrowserUseRun(browserUseRunningProfile.id, "run-mobile-active");
+    apiMock.getTaskRun.mockResolvedValue(taskRun({
+      id: "run-mobile-active",
+      status: "running",
+      profile_id: browserUseRunningProfile.id,
+      profile_id_snapshot: browserUseRunningProfile.id,
+      harness: "browser-use",
+    }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+    apiMock.getTaskHarnessPresence.mockImplementation((harness: string) => Promise.resolve({
+      harness,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-30T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({
+      harness: "acpx",
+      agents: [
+        { agent: "grok-build", ready: true, state: "ready", reason_code: "ok", checked_at: "now" },
+        { agent: "codex", ready: true, state: "ready", reason_code: "ok", checked_at: "now" },
+      ],
+    });
+    useProfilesMock.mockReturnValue({
+      profiles: [browserUseRunningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    expect(await screen.findByTestId("mock-profile-viewer")).toBeTruthy();
+    await waitFor(() => expect(apiMock.getTaskRun).toHaveBeenCalledWith(
+      "run-mobile-active",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopSettings));
+
+    for (const name of ["CLI", "ACP", "ACPX"]) {
+      expect(screen.getByRole("button", { name })).toHaveProperty("disabled", true);
+    }
+    expect(screen.getByRole("button", { name: /AGY .*(Detected|Checking)/i })).toHaveProperty("disabled", true);
+    expect(screen.getAllByRole("button", { name: /Codex .*(Detected|Checking|Ready)/i })[0]).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Select Browser Use for next run" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Select ACPX for next run" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Test Browser Use" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Test ACPX" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("combobox", { name: "Selected browser profile for tests" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Toggle KI Provider settings" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Toggle Browser Tools settings" })).toHaveProperty("disabled", true);
+  });
+
+  it("restores remembered mobile Browser Use outputs through the parent wiring", async () => {
+    const browserUseRunningProfile: Profile = {
+      ...runningProfile,
+      id: "profile-browser-use",
+      name: "Browser Use Live",
+      harness: "browser-use",
+      cdp_url: "ws://example",
+    };
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockImplementation(() => ({
+        matches: true,
+        media: "",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    window.cloakBrowserHarness = {
+      capabilities: {
+        chat: true,
+        streaming: true,
+        clipboard: true,
+        browser_actions: ["copy", "paste", "screenshot", "fullscreen"],
+        metadata: { provider: codexComputerUseProvider },
+      },
+      send: vi.fn(),
+      listConversations: vi.fn().mockResolvedValue([
+        {
+          id: "conversation-1",
+          profile_id: browserUseRunningProfile.id,
+          sandbox_id: browserUseRunningProfile.sandbox_id,
+          title: "Remembered run",
+          status: "active",
+          created_at: "2026-07-26T00:00:00Z",
+          updated_at: "2026-07-26T00:00:00Z",
+        },
+      ]),
+      listMessages: vi.fn().mockResolvedValue([
+        {
+          id: "message-1",
+          role: "user",
+          content: "Previous mobile task",
+          created_at: "2026-07-26T00:00:00Z",
+        },
+      ]),
+    };
+    rememberBrowserUseRun(browserUseRunningProfile.id, "run-mobile-1");
+    apiMock.getTaskRun.mockResolvedValue(taskRun({
+      id: "run-mobile-1",
+      profile_id: browserUseRunningProfile.id,
+      profile_id_snapshot: browserUseRunningProfile.id,
+      harness: "browser-use",
+    }));
+    apiMock.listTaskRunOutputs.mockResolvedValue([
+      taskOutput({
+        id: "action-1",
+        run_id: "run-mobile-1",
+        sequence: 1,
+        kind: "action",
+        summary: "Opened checkout",
+        payload: { name: "navigate", url: "https://example.test/checkout" },
+      }),
+      taskOutput({
+        id: "shot-1",
+        run_id: "run-mobile-1",
+        sequence: 2,
+        kind: "screenshot",
+        summary: "Checkout screenshot",
+      }),
+      taskOutput({
+        id: "summary-1",
+        run_id: "run-mobile-1",
+        sequence: 3,
+        kind: "summary",
+        summary: "Task complete",
+        payload: { text: "Checkout is ready for review." },
+      }),
+    ]);
+    useProfilesMock.mockReturnValue({
+      profiles: [browserUseRunningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    const outputRegion = await screen.findByRole("region", { name: "Managed task output" });
+    expect((await screen.findByTestId("mock-profile-viewer")).textContent).toContain("viewer:profile-browser-use");
+    expect(screen.getByTestId("mock-live-dev-panel")).toBeTruthy();
+    expect(apiMock.getTaskRun).toHaveBeenCalledWith("run-mobile-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(apiMock.listTaskRunOutputs).toHaveBeenCalledWith("run-mobile-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(within(outputRegion).getByRole("list", { name: /agent output/i })).toBeTruthy();
+    expect(within(outputRegion).getByText("navigate")).toBeTruthy();
+    expect(within(outputRegion).getByRole("img", { name: "Checkout screenshot" }).getAttribute("src")).toBe(
+      "/api/task-outputs/shot-1/screenshot",
+    );
+    expect(within(outputRegion).getByText("Checkout is ready for review.")).toBeTruthy();
+  });
+
+  it("carries the home task into the selected running Agent Browser workspace once when opening it", async () => {
+    const browserUseRunningProfile: Profile = {
+      ...runningProfile,
+      id: "profile-browser-use",
+      name: "Browser Use Live",
+      project_id: "default",
+      harness: "browser-use",
+      cdp_url: "ws://example",
+    };
+    useProfilesMock.mockReturnValue({
+      profiles: [browserUseRunningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    const task = "Open https://example.com and report the heading";
+    fireEvent.change(
+      await screen.findByPlaceholderText(/give the agent a task/i),
+      { target: { value: task } },
+    );
+    fireEvent.change(screen.getByRole("combobox", { name: "Run with browser profile" }), {
+      target: { value: browserUseRunningProfile.id },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Open or launch selected browser" }));
+
+    const workspacePrompt = await screen.findByTestId("orca-prompt");
+    expect((workspacePrompt as HTMLTextAreaElement).value).toBe(task);
+  });
+
+  it("clears a stale selected browser when the home project changes", async () => {
+    const defaultProfile: Profile = {
+      ...runningProfile,
+      id: "profile-default",
+      name: "Default browser",
+      project_id: "default",
+    };
+    const researchProfile: Profile = {
+      ...runningProfile,
+      id: "profile-research",
+      name: "Research browser",
+      project_id: "research",
+    };
+    useProfilesMock.mockReturnValue({
+      profiles: [defaultProfile, researchProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    fireEvent.change(await screen.findByRole("combobox", { name: "Run with browser profile" }), {
+      target: { value: defaultProfile.id },
+    });
+    expect((screen.getByRole("button", { name: "Open or launch selected browser" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), {
+      target: { value: researchProfile.project_id },
+    });
+
+    expect((screen.getByRole("combobox", { name: "Run with browser profile" }) as HTMLSelectElement).value).toBe("");
+    expect((screen.getByRole("button", { name: "Open or launch selected browser" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("opens a dedicated Settings workspace from the sidebar", async () => {
+    useProfilesMock.mockReturnValue({
+      profiles: [runningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopHome));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopSettings));
+    expect(await screen.findByTestId("harness-settings-workspace")).toBeTruthy();
+    expect(screen.getByText("Harness Settings")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Settings" })).toHaveLength(1);
+  });
+  it("keeps the same desktop agent workspace and viewer mounted while Settings is open", async () => {
+    useProfilesMock.mockReturnValue({
+      profiles: [runningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopHome));
+    fireEvent.click(screen.getAllByText("Live Checkout QA")[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAgentWorkspace));
+    const workspaceHost = await screen.findByTestId("desktop-agent-workspace-host");
+    const viewer = await screen.findByTestId("mock-profile-viewer");
+    expect(profileViewerMounts).toEqual([runningProfile.id]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopSettings));
+    expect(await screen.findByTestId("harness-settings-workspace")).toBeTruthy();
+    expect(screen.getByTestId("desktop-agent-workspace-host")).toBe(workspaceHost);
+    expect(screen.getByTestId("mock-profile-viewer")).toBe(viewer);
+    expect(workspaceHost.getAttribute("aria-hidden")).toBe("true");
+    expect(workspaceHost.hasAttribute("inert")).toBe(true);
+    expect(profileViewerMounts).toEqual([runningProfile.id]);
+
+    fireEvent.click(screen.getAllByText("Live Checkout QA")[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAgentWorkspace));
+    expect(screen.getByTestId("desktop-agent-workspace-host")).toBe(workspaceHost);
+    expect(screen.getByTestId("mock-profile-viewer")).toBe(viewer);
+    expect(workspaceHost.hasAttribute("aria-hidden")).toBe(false);
+    expect(workspaceHost.hasAttribute("inert")).toBe(false);
+    expect(profileViewerMounts).toEqual([runningProfile.id]);
+  });
+
+  it("keeps Settings controls inert while a hidden workspace run is active", async () => {
+    const activeRun = taskRun({
+      id: "run-active-settings",
+      status: "running",
+      harness: "browser-use",
+      profile_id: runningProfile.id,
+      profile_id_snapshot: runningProfile.id,
+    });
+    rememberBrowserUseRun(runningProfile.id, activeRun.id);
+    apiMock.getTaskRun.mockResolvedValue(activeRun);
+    apiMock.listTaskRunOutputs.mockResolvedValue([]);
+    apiMock.getTaskHarnessPresence.mockImplementation((harness: string) => Promise.resolve({
+      harness,
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-30T00:00:00Z",
+      reason: null,
+    }));
+    apiMock.getTaskHarnessPreflights.mockResolvedValue({
+      harness: "acpx",
+      agents: [
+        { agent: "grok-build", ready: true, state: "ready", reason_code: "ok", checked_at: "now" },
+        { agent: "codex", ready: true, state: "ready", reason_code: "ok", checked_at: "now" },
+      ],
+    });
+    useProfilesMock.mockReturnValue({
+      profiles: [runningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopHome));
+    fireEvent.click(screen.getAllByText("Live Checkout QA")[0]);
+    await waitFor(() => expect(screen.getByTestId("orca-run-status").textContent).toContain("running"));
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/Browser Use/i);
+    const stopButton = screen.getByTestId("orca-stop") as HTMLButtonElement;
+    expect(stopButton.disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopSettings));
+
+    for (const name of ["CLI", "ACP", "ACPX"]) {
+      expect(screen.getByRole("button", { name })).toHaveProperty("disabled", true);
+    }
+    expect(screen.getByRole("button", { name: /AGY .*(Detected|Checking)/i })).toHaveProperty("disabled", true);
+    expect(screen.getAllByRole("button", { name: /Codex .*(Detected|Checking|Ready)/i })[0]).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Select Browser Use for next run" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Select ACPX for next run" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Test Browser Use" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Test ACPX" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("combobox", { name: "Selected browser profile for tests" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Toggle KI Provider settings" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Toggle Browser Tools settings" })).toHaveProperty("disabled", true);
+
+    fireEvent.click(screen.getByRole("button", { name: "ACPX" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select ACPX for next run" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test ACPX" }));
+
+    expect(screen.getByTestId("workspace-active-route").textContent).toMatch(/Browser Use/i);
+    expect(screen.getByTestId("workspace-active-route").textContent).not.toMatch(/ACPX|Unbrowse|Stagehand/i);
+    expect((screen.getByTestId("orca-stop") as HTMLButtonElement).disabled).toBe(false);
+    expect(apiMock.cancelTaskRun).not.toHaveBeenCalled();
+    expect(apiMock.createTaskSession).not.toHaveBeenCalled();
+    expect(apiMock.createTaskRun).not.toHaveBeenCalled();
+  });
+
+  it("exposes stable UI states across desktop navigation into the live workspace", async () => {
+    useProfilesMock.mockReturnValue({
+      profiles: [runningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    render(<App />);
+
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopShell));
+    expectUiState(document.body, UI_STATE.appDesktopHome);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Proxies" })[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProxies));
+    expectUiState(document.body, UI_STATE.proxyOverview);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Profiles" })[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProfiles));
+
+    fireEvent.click(screen.getAllByText("Live Checkout QA")[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAgentWorkspace));
+    expectUiState(document.body, UI_STATE.agentWorkspace);
+  });
+
+  it("shows the central table tab strip only inside data table views", async () => {
+    useProfilesMock.mockReturnValue({
+      profiles: [runningProfile],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      launch: vi.fn(),
+      stop: vi.fn(),
+    });
+    apiMock.listTaskSessions.mockResolvedValue([
+      {
+        id: "session-1",
+        profile_id: runningProfile.id,
+        sandbox_id: "default",
+        project_id: "commerce",
+        title: "Checkout run",
+        status: "active",
+        workflow_state: "open",
+        done_at: null,
+        archived_at: null,
+        retention_class: "project",
+        expires_at: null,
+        activity_at: "2026-07-27T10:30:00Z",
+        row_version: 1,
+        created_by_kind: "user",
+        created_by_id: "user-1",
+        created_at: "2026-07-27T10:00:00Z",
+        updated_at: "2026-07-27T10:30:00Z",
+        metadata: {},
+      },
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopHome));
+    expect(screen.queryByRole("tablist", { name: "Tables workspace" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "New profile" })).toHaveLength(1);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Profiles" })[0]);
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProfiles));
+    expect(screen.getByRole("tablist", { name: "Tables workspace" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Profiles" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Accounts & 2FA" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAccounts));
+    await waitFor(() => expect(apiMock.listAccounts).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("tab", { name: "Accounts & 2FA" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Proxies" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopProxies));
+    expect(screen.getByRole("tab", { name: "Proxies" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopSessions));
+    expect(screen.getByRole("tab", { name: "Sessions" }).getAttribute("aria-selected")).toBe("true");
+    expect(await screen.findByText("Checkout run")).toBeTruthy();
+    expect(apiMock.listTaskSessions).toHaveBeenCalledWith(runningProfile.id, expect.objectContaining({ limit: 8 }));
+
+    fireEvent.click(screen.getByText("Checkout run"));
+    const detail = await screen.findByRole("region", { name: "Task chat details for Checkout run" });
+    expect(screen.getByRole("tablist", { name: "Tables workspace" })).toBeTruthy();
+    fireEvent.click(within(detail).getByRole("button", { name: "Open live profile Live Checkout QA" }));
+    await waitFor(() => expectUiState(document.body, UI_STATE.appDesktopAgentWorkspace));
+    expect(screen.queryByRole("tablist", { name: "Tables workspace" })).toBeNull();
+  }, 15000);
+});
 
 describe("applyProfileViewport", () => {
   it("saves stopped profile viewport without restarting", async () => {
@@ -191,6 +882,19 @@ describe("toggleProfilePin", () => {
 });
 
 describe("ProfileForm profile organization", () => {
+  it("keeps raw Chromium arguments out of the operator form", () => {
+    render(
+      <ProfileForm
+        profile={null}
+        onSave={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Launch Args")).toBeNull();
+    expect(screen.getByText(/extensions and browser flags are managed by the control cli/i)).toBeTruthy();
+  });
+
   it("roundtrips organization fields while keeping sandbox as a separate access boundary", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(

@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloakbrowser.io/contracts/control-plane-resource-v1.json",
+  "api_version": "cloakbrowser.io/v1",
+  "kind": "ContractSchema",
+  "metadata": {
+    "id": "control-plane-resource-v1",
+    "resource_version": 1
+  },
+  "spec": {
+    "resources": [
+      "profiles",
+      "projects",
+      "tasks",
+      "runs",
+      "outputs",
+      "sessions",
+      "views",
+      "proxies",
+      "extensions",
+      "accounts",
+      "secret-references",
+      "approvals",
+      "operations",
+      "boxes",
+      "runtimes",
+      "local-mac",
+      "vcvm",
+      "orca-web"
+    ],
+    "mutation_contract": {
+      "client_headers_supported": [
+        "Idempotency-Key",
+        "If-Match"
+      ],
+      "server_enforcement": {
+        "idempotency_key": false,
+        "if_match": false,
+        "notes": "Legacy v1 routes accept client headers but do not enforce global idempotency or If-Match yet."
+      }
+    },
+    "forbidden": [
+      "raw CDP socket or unrestricted DevTools domain access",
+      "vault reveal, password reveal, cookie export, TOTP seed export, or provider token output",
+      "raw proxy credentials or proxy URLs with userinfo",
+      "free-form Chromium launch flags or manager-owned runtime flags",
+      "arbitrary shell execution inside boxes or runtimes"
+    ],
+    "envelope": {
+      "type": "object",
+      "required": [
+        "api_version",
+        "kind",
+        "metadata",
+        "spec",
+        "status",
+        "links"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "cloakbrowser.io/v1"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object",
+          "required": [
+            "id",
+            "resource_version"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "resource_version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_id": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "spec": {
+          "type": "object"
+        },
+        "status": {
+          "type": "object"
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

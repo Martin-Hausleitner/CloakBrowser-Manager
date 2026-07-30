@@ -10,13 +10,23 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from backend.database import DATA_DIR
 
-_REPO_CATALOG = Path(__file__).resolve().parent.parent / "config" / "extension-catalog.json"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_CATALOG = _REPO_ROOT / "config" / "extension-catalog.json"
 _DEFAULTS_FILENAME = "extension-defaults.json"
+_CHROME_EXTENSION_ID = re.compile(r"^[a-p]{32}$")
+
+
+def chrome_web_store_url(ext_id: str) -> str | None:
+    """Return the public store page for a valid Chrome extension id."""
+    if not _CHROME_EXTENSION_ID.fullmatch(ext_id):
+        return None
+    return f"https://chromewebstore.google.com/detail/{ext_id}"
 
 
 def catalog_dir() -> Path:
@@ -44,21 +54,38 @@ def load_catalog_config() -> dict[str, Any]:
     return payload
 
 
-def _resolve_extension_path(ext_id: str) -> str | None:
+def _resolve_extension_path(ext_id: str, bundled_path: str | None = None) -> str | None:
     root = catalog_dir()
-    if not root.exists():
-        return None
-    direct = root / ext_id
-    if (direct / "manifest.json").exists():
-        return str(direct.resolve())
-    if direct.is_dir():
-        versions = sorted(
-            (child for child in direct.iterdir() if child.is_dir()),
-            key=lambda child: child.name,
-        )
-        for version in reversed(versions):
-            if (version / "manifest.json").exists():
-                return str(version.resolve())
+    if root.exists():
+        resolved_root = root.resolve()
+
+        def is_contained(candidate: Path) -> bool:
+            try:
+                candidate.resolve().relative_to(resolved_root)
+            except ValueError:
+                return False
+            return True
+
+        direct = root / ext_id
+        if is_contained(direct) and (direct / "manifest.json").exists():
+            return str(direct.resolve())
+        if direct.is_dir():
+            versions = sorted(
+                (child for child in direct.iterdir() if child.is_dir()),
+                key=lambda child: child.name,
+            )
+            for version in reversed(versions):
+                if is_contained(version) and (version / "manifest.json").exists():
+                    return str(version.resolve())
+
+    if bundled_path:
+        candidate = (_REPO_ROOT / bundled_path).resolve()
+        try:
+            candidate.relative_to(_REPO_ROOT.resolve())
+        except ValueError:
+            return None
+        if (candidate / "manifest.json").is_file():
+            return str(candidate)
     return None
 
 
@@ -71,7 +98,8 @@ def list_catalog_extensions(*, include_paths: bool = True) -> list[dict[str, Any
         ext_id = str(raw.get("id") or "").strip()
         if not ext_id:
             continue
-        path = _resolve_extension_path(ext_id) if include_paths else None
+        bundled_path = raw.get("bundled_path") if isinstance(raw.get("bundled_path"), str) else None
+        path = _resolve_extension_path(ext_id, bundled_path) if include_paths else None
         rows.append(
             {
                 "id": ext_id,
@@ -79,9 +107,14 @@ def list_catalog_extensions(*, include_paths: bool = True) -> list[dict[str, Any
                 "description": str(raw.get("description") or ""),
                 "default_selected": bool(raw.get("default_selected")),
                 "tags": [str(tag) for tag in (raw.get("tags") or []) if isinstance(tag, str)],
-                "available": bool(path),
-                "path": path,
-                "icon_url": raw.get("icon_url") if isinstance(raw.get("icon_url"), str) else None,
+            "available": bool(path),
+            "path": path,
+            "icon_url": raw.get("icon_url") if isinstance(raw.get("icon_url"), str) else None,
+            "store_url": (
+                raw.get("store_url")
+                if isinstance(raw.get("store_url"), str)
+                else chrome_web_store_url(ext_id)
+            ),
             }
         )
     return rows
@@ -140,7 +173,7 @@ def defaults_payload() -> dict[str, Any]:
             "selected": item["id"] in selected,
             "available": bool(item["available"]),
             "icon_url": item["icon_url"],
-            "store_url": None,
+            "store_url": item["store_url"],
         }
         if item.get("path"):
             entry["path"] = item["path"]
@@ -162,11 +195,25 @@ def defaults_payload() -> dict[str, Any]:
 
 def selected_load_extension_arg() -> str | None:
     """Build a single ``--load-extension=a,b`` arg from selected available paths."""
-    selected = set(load_selected_ids())
+    return load_extension_arg_for_ids(load_selected_ids())
+
+
+def catalog_paths_for_ids(extension_ids: list[str] | None) -> list[str]:
+    """Return existing extension directories for known catalog ids only."""
+    requested = {str(extension_id) for extension_id in (extension_ids or [])}
+    if not requested:
+        return []
     paths: list[str] = []
     for item in list_catalog_extensions(include_paths=True):
-        if item["id"] in selected and item.get("path"):
-            paths.append(str(item["path"]))
+        path = item.get("path")
+        if item["id"] in requested and isinstance(path, str) and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def load_extension_arg_for_ids(extension_ids: list[str] | None) -> str | None:
+    """Resolve only catalog-owned extension ids into a Chromium launch argument."""
+    paths = catalog_paths_for_ids(extension_ids)
     if not paths:
         return None
     return "--load-extension=" + ",".join(paths)

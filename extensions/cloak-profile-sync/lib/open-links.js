@@ -83,16 +83,8 @@ export async function openLocal(settings, profile) {
     throw err;
   }
 
-  if (!settings.token && settings.authMode !== "password") {
-    throw new Error("Auth token required for Open Local (bridge fetches the profile securely).");
-  }
-
   const result = await bridgeLaunch(bridgeBase, {
     profile_id: profile.id,
-    manager_base: settings.managerBase,
-    token: settings.token || undefined,
-    username: settings.authMode === "password" ? settings.username : undefined,
-    password: settings.authMode === "password" ? settings.password : undefined,
     // Bridge MUST apply proxy when profile has one (proxy-on-start).
     require_proxy_if_configured: true,
   });

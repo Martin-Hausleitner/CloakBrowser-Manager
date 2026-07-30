@@ -43,7 +43,43 @@ Open [http://localhost:8080](http://localhost:8080) in your browser. Create a pr
 
 ## Fork development status
 
-Status date: **23 July 2026** (late night). This section describes the active development branch `integrate-pr-47-27-26` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
+Status date: **29 July 2026**. This section describes the active development branch `feature/browser-use-agent-workspace` in Martin Hausleitner's fork. It is intentionally stricter than the upstream feature list: a feature is not called complete merely because its component tests pass.
+
+> **Fresh VCVM checkpoint:** Browser Use is now live-proven through the scoped Web UI: visible health gate, explicit audited override, real Browser Use worker, typed action/observation/screenshot/summary output, authenticated 1920×1080 screenshot, and output restoration after reopening the workspace. See [the worker E2E report and screenshot](docs/BROWSER_USE_WORKER.md#verified-web-ui-e2e-evidence-vcvm-2026-07-26). Broader universal-harness, true-mobile-identity and fullscreen-parity work remains open.
+
+> **ACPX/ACP checkpoint:** release `83cad83` now runs the pinned ACPX `0.12.1` host worker on VCVM, exposes explicit Codex/Claude/Cursor/Grok Build/OpenCode selection, and uses the run-scoped `cbm-mcp` boundary. A real Antigravity/Claude browser task against the live `390 x 844` CloakBrowser profile passed after the visible authenticity gate required its explicit test override. The UI rendered typed status, action, observation, metric and summary cards and reported the real `example.com` title `Example Domain`. See the [fresh AG Grid and ACPX VCVM E2E report](docs/AG-GRID-WORKSPACE-VCVM-E2E-2026-07-28.md).
+
+> **AGY/Grok live CLI checkpoint:** the desktop split workspace now defaults to a real **AGY** Orca terminal on the left and the selected live CloakBrowser profile on the right. Manager injects and submits the profile-bound control prompt automatically; a fresh VCVM run navigated the existing profile to `https://www.iana.org/` and returned `AGY_AUTO_OK Internet Assigned Numbers Authority`. Grok starts with visible scrollback/login via `--no-alt-screen`, and the Antigravity managed preset now routes through **ACPX + Grok Build**, not Claude. Backend: **838 passed**; frontend: **208 passed** plus production build.
+
+> **PhoneFit runtime checkpoint:** portrait and landscape phone framebuffers now launch the actual CloakBrowser context with mobile viewport semantics and touch input, rather than only shrinking a desktop window. The deployed `390 x 844` profile reported `innerWidth=390`, `screen=390 x 844`, `maxTouchPoints=1`, `pointer: coarse`, and `hover: none`; a fresh health rerun remained **100/100 fingerprint consistency** and **100/100 BrowserScan authenticity**. The mobile User-Agent/device identity is intentionally still tracked as separate open work instead of being inferred from viewport size. Backend: **844 passed**. Live browser proof:
+
+<p align="center">
+<img src="docs/evidence/phonefit-mobile-live-2026-07-29.png" width="390" alt="Live VCVM CloakBrowser PhoneFit viewport rendering IANA at 390 by 844">
+</p>
+
+> **Full-view operator checkpoint:** the existing four-group desktop full view now exposes private, on-demand **Screenshot** and **Metrics** actions inside `View`, without adding persistent toolbar clutter. Screenshot capture is profile-scoped, permission-checked, audited, PNG-validated, bounded to 16 MiB and returned with `private, no-store` plus `nosniff`. The live VCVM acceptance run entered full view, opened the metrics overlay, downloaded the active `390 x 711` browser frame, and produced zero browser-console errors. Full suites: **850 backend** and **211 frontend tests**, production build and secret scan passed. Live UI proof:
+
+<p align="center">
+<img src="docs/evidence/full-view-screenshot-metrics-live-2026-07-29.png" width="960" alt="Live VCVM desktop full view with compact Screenshot and Metrics controls">
+</p>
+
+> **Central tables checkpoint:** the desktop workspace now keeps the high-density operational views in one AG Grid Community surface: **Profiles**, **Accounts & 2FA**, **Proxies**, and **Sessions**. All four tabs, quick filtering, row selection, pagination controls, redacted proxy data, and the mobile card fallback were tested through the authenticated Tailscale UI. AG Grid Enterprise-only features remain deliberately excluded.
+
+### Vision and current plan
+
+This fork uses a reusable project contract so product intent, agent behavior,
+architecture, current work, tests, security, and release evidence stay connected:
+
+- [Universal vision](VISION.md) and [vision lifecycle](VISION_LIFECYCLE.md)
+- [CloakBrowser project vision](VISION_PROJECTS.md) and [agent/harness vision](VISION_AGENT.md)
+- [Architecture](ARCHITECTURE.md), [testing](TESTING.md), [security](SECURITY.md), and [governance](GOVERNANCE.md)
+- [Current universal agent browser control-plane plan](docs/superpowers/plans/2026-07-27-universal-agent-browser-control-plane-masterplan.md)
+- [Reusable project vision template](docs/templates/PROJECT-VISION-TEMPLATE.md)
+
+Future Martin-owned projects can reuse the same lifecycle while replacing all
+CloakBrowser-specific assumptions, repositories, systems of record, evidence,
+and release gates.
+
 
 ### Repository boundaries
 
@@ -68,18 +104,22 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 - **Redacted profile health foundation** — asynchronous first-launch checks, masked outbound IP, saved-versus-runtime fingerprint consistency, conservative BrowserScan authenticity, optional VCVM-local proxychecker enrichment, access-controlled reruns, and a compact desktop disclosure that does not add mobile clutter.
 - **Fail-closed execution boundary** — a saved harness preference never grants execution. Browser-visible host actions still require a capability-verified `codex-computer-use` bridge; server task history remains persistence only.
 - **Streaming and competitor research** — reproducible redacted benchmark tooling, a VCVM/Tailscale latency audit, a Safari/WebKit gate that reports missing prerequisites honestly, and an official-source competitor feature matrix.
+- **Browser Use managed-worker E2E** — the Web UI creates a bounded Browser Use run against a selected live profile, displays health blockers, requires an explicit audited override when policy permits it, renders typed outputs and authenticated screenshots, and restores the last run after the live workspace remounts.
+- **ACPX/ACP execution foundation** — `harness=acpx` persists an explicit Codex/Claude/Cursor/Grok Build/OpenCode selector, a host worker maps Manager tasks to opaque ACPX sessions and lifecycle events, and `cbm-mcp` exposes only inspect/navigate/click/fill/read-text against the Manager-granted profile and exact allowed origins. Antigravity/Claude is now live-proven on VCVM; the remaining providers keep independent authentication gates.
 
 ### Current verified state
 
 | Area | State | Fresh or historical evidence |
 | --- | --- | --- |
-| Profile schema, migration, API, organization, access, health, extension inventory & proxy pool | Implemented; full local suite passed | **371/371 backend tests passed** on 23 July 2026 (proxy inventory + auto profile + prior suites). |
-| Desktop/mobile organization, Browser-Use shell, access dashboard, harness boundary and compact health UI | Implemented; full local suite passed | **133/133 frontend tests passed** and the production build passed on 23 July 2026. |
+| Profile schema, migration, API, organization, access, health, extension inventory, proxy pool, runs, outputs, artifacts, worker auth, claims, capabilities, PhoneFit mobile launch and private live screenshots | Implemented on the feature branch; full backend suite passed | **850/850 backend tests passed** on 29 July 2026. PhoneFit was verified with mobile viewport/touch measurements; the live screenshot API returned a bounded 390×711 PNG with private no-store headers. |
+| Desktop/mobile organization, Browser-Use shell, central AG Grid workspace, access dashboard, harness boundary, compact health UI and full-view operator tools | Implemented and live-proven on the current VCVM release | **211/211 frontend tests passed** and the production build passed. Authenticated browser acceptance verified the four compact full-view groups, on-demand live metrics, screenshot download and zero console errors. |
 | Release, mobile, streaming and deployment scripts | Full local script suite passed | **26/26 script tests passed**, including an explicit Python 3.11 compilation regression check. |
 | Compact mobile workspace and scoped live browser control | Proven on the current automated VCVM Chromium surface | The authenticated release run passed **316 checks** across five viewports plus the access dashboard and captured **31 screenshots**. |
 | Browser-path profile health | Proven on a live no-proxy VCVM profile | First-launch scheduling, manual rerun, refresh persistence, masked outbound IP, **100/100 fingerprint consistency**, **100/100 BrowserScan authenticity**, and a redacted desktop panel passed. The Manager container also reached the separately bound VCVM-local proxychecker health endpoint. |
 | Admin-only live diagnostics | Implemented; full local suite passed | `GET /api/admin/live-diagnostics` returns launch/VNC counters with measured-or-unavailable metrics, strips ports/paths/URLs/proxy/secrets, rejects non-admin callers with HTTP 403, and leaves the mobile workspace unchanged. |
 | Credentialed proxychecker enrichment | Live-proven on VCVM | Restored VCVM-local proxychecker; Manager launched a disposable credentialed-proxy profile; health sources reported `proxychecker: measured` with risk/authenticity scores, masked outbound IP, and no credentials in the API payload. Local Basic-auth forward proxy is intentionally low-authenticity (`warning`). |
+| Browser Use worker through scoped Web UI | Live-proven on VCVM at commit `3c330ef` | Run `ae877b32-95e1-45e3-b2fd-18855496c1e8` passed with action, two observations, screenshot and summary. Screenshot GET returned 200 `image/png` / 20,445 bytes / 1920×1080. Reload + reopen restored the completed run and all typed cards. |
+| ACPX/ACP + `cbm-mcp` | Live-proven on VCVM for Antigravity/Claude | Run `532dae1a-3775-47d2-9e83-e46bc9464156` reached `succeeded`, opened `https://example.com`, returned `Example Domain`, rendered typed output cards, and closed its browser session cleanly. Cursor/Browser Use provider authentication remains a separate honest blocker. |
 | Proxy inventory + auto geo-aligned profiles | Live-proven on VCVM | Admin ingest of **11** inventory entries (credentials never returned), Proxy-Checker check produced redacted scores, auto profile created under `proxied/auto` with `geoip` + locale/timezone defaults; Browser-Use/Proxies UI verified via headless Chromium screenshots. |
 | CDP `/session/{id}/live` screencast | Live-proven on VCVM tunnel | Root cause: Chromium emits one frame on static pages. Fix: canvas/rAF compositor pulse + immediate `screencastFrameAck` + 2s pulse keepalive. After redeploy: **about:blank avg ~12 / min ~8 fps** (cast), **example.com avg ~21 / min ~14 fps**, RTT p50 **~139–175 ms**, Live Dev **CDP 22 fps**. Before: **~5.7–7 fps** screenshot-poll. |
 | Physical iPhone Safari and private Tailnet HTTPS | Not yet proven | Chromium emulation is not relabeled as Safari evidence; Safari Remote Automation and a physical-device run remain external prerequisites. |
@@ -89,7 +129,8 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 | Priority | Feature | Required completion evidence |
 | --- | --- | --- |
-| P0 | Callable browser backends UI (Browser Use / Browser Harness / Unbrowse / Stagehand) + Proxies / Profiles / Accounts&2FA tabs | Local: harness enum + home settings panel + Accounts derivation tests green. VCVM browser proof of the three tabs and harness cards still required. Execution remains Codex Computer Use only. |
+| P0 | Universal browser backends (Stagehand / Unbrowse / remaining harnesses) behind one Manager lease/control plane | Browser Use is live-proven. Next adapters must reuse Manager CDP capabilities and typed outputs; UI labels alone do not count as execution. |
+| P0 | Expand the proven ACPX + `cbm-mcp` route to the remaining providers | Antigravity/Claude is green. Codex, Cursor, Grok Build and OpenCode must each pass their own provider-auth preflight and one Manager-owned browser task without weakening origin or capability gates. |
 | P0 | Finish the release handoff | Push only the fork branch, verify its SHA and GitHub files, then retain the green release report and screenshot paths as local evidence. |
 | P1 | Direct Tailnet route and real iPhone Safari acceptance | Private HTTPS, physical keyboard behavior, touch interaction, direct-versus-DERP route evidence, and honest latency definitions. |
 | P1 | Profile organization refinements | Search/filter and safe bulk movement implemented; refresh-stable live E2E after redeploy remains. |
@@ -97,6 +138,10 @@ The repo-local continuation workflow for the next developer is [`.agents/skills/
 
 ### Development timeline
 
+- **29 July 2026 (full-view tools)** — added a permission-checked, audited and non-cacheable live-profile PNG endpoint plus compact Screenshot and Metrics actions inside the existing desktop `View` disclosure. The deployed VCVM browser completed the real download and displayed the Live Dev overlay with no console errors; 850 backend tests, 211 frontend tests, production build and gitleaks passed.
+- **29 July 2026** — PhoneFit was closed at the runtime boundary: portrait and landscape phone framebuffers now pass `screen`, `is_mobile`, `has_touch`, and a bounded device scale into the persistent CloakBrowser context. Live VCVM proof showed a real 390×844 responsive IANA view, coarse pointer/touch semantics, and unchanged 100/100 fingerprint and BrowserScan scores. The mobile User-Agent/device persona remains an explicit follow-up instead of a hidden heuristic.
+- **26 July 2026 (ACPX/ACP)** — added explicit per-run ACPX agent selection, SQLite migration, filtered worker claims, pinned ACPX worker lifecycle, strict NDJSON/error handling, private run-capability files, official FastMCP stdio server, five bounded browser tools, origin enforcement, systemd template, TypeScript parity, and local runtime/contract tests. A real Codex ACP initialize handshake succeeded but provider authentication remains deliberately unconfigured, so VCVM browser E2E is still open.
+- **26 July 2026** — managed Browser Use execution was exposed in the compact live workspace with typed action/observation/screenshot/summary cards. A real scoped-user VCVM run succeeded after a visible, explicit health override; the authenticated screenshot rendered at 1920×1080. Session-storage recovery now restores the last Browser Use run after a Manager reload/reopen. Full frontend suite: **149/149**; production build passed; independent code review approved.
 - **23 July 2026 (late night)** — CDP live stream hardened: canvas/rAF compositor dirty-pulse + ack-first cast + pulse keepalive so `Page.startScreencast` sustains frames on static Cloak pages; screenshot-poll remains stall fallback only. VCVM redeploy proof: blank **~12 fps cast**, example.com **~21 fps**, Live Dev synced via `/live-metrics`.
 - **23 July 2026 (night)** — Browser Use home gained first-class preference cards for Browser Harness, Unbrowse, and Stagehand (metadata only); sidebar tabs for Proxies, Profiles, and Accounts & 2FA (redacted session/auth badges + planned Bitwarden/Keypad sync). Focused harness/account tests passed; host execution boundary unchanged.
 - **23 July 2026 (late)** — Browser-Use desktop shell, redacted proxy inventory, Proxy-Checker overview, and auto geo-aligned profile creation landed and redeployed to VCVM; 371 backend / 133 frontend tests and production build passed; inventory ingest + checker + auto-profile proven live without leaking credentials into API payloads.
@@ -190,6 +235,34 @@ uvicorn main:app --reload --port 8080
 ```
 
 By default, Docker stores profile data in `/data`. For local development, if `/data` is not writable, the backend falls back to `backend/.data`. You can override this with `CLOAKBROWSER_MANAGER_DATA_DIR=/path/to/data`.
+
+### Agent Project State Receipt
+
+Agents can publish a strict `ProjectStateV1` handoff receipt without exposing secrets:
+
+```bash
+python3 scripts/cbm_agent_ctl.py project-state \
+  --mode hot_reload \
+  --owner agent-codex \
+  --active-ticket CBM-001 \
+  --completed-receipt "targeted tests passed" \
+  --next-safe-step "Review the generated receipt" \
+  --forbidden-action "Do not commit or push" \
+  --stop-condition "Receipt is present at .cbm/state/project-state-v1.json"
+```
+
+The command prints JSON only to stdout and atomically writes `.cbm/state/project-state-v1.json`. The contract is documented in [docs/contracts/project-state-v1.json](docs/contracts/project-state-v1.json); unknown or missing fields are rejected, modes are limited to `hot_reload`, `staging`, and `vcvm_release`, and token/cookie/auth/password fragments plus credentialed URLs are redacted or rejected before output.
+
+### Feature Manifest Gate
+
+Accepted UI capabilities are tracked in [acceptance/features.yaml](acceptance/features.yaml). The gate is intentionally source-backed: every feature must declare a route, role, required API routes, stable desktop/mobile `data-ui-state` locators, a screenshot state, and any feature flags. Run it locally with:
+
+```bash
+python3 scripts/verify_feature_manifest.py
+python3 -m pytest scripts/test_verify_feature_manifest.py -q
+```
+
+CI uploads manifest reports and optional live-smoke screenshots under `artifacts/ci/`; screenshots are not checked into the repo.
 
 ### Frontend
 

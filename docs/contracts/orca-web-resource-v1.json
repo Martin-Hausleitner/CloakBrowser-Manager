@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloakbrowser.io/contracts/orca-web-resource-v1.json",
+  "api_version": "cloakbrowser.io/v1",
+  "kind": "ContractSchema",
+  "metadata": {
+    "id": "orca-web-resource-v1",
+    "resource_version": 1
+  },
+  "spec": {
+    "resource": "orca-web",
+    "availability": "explicit",
+    "no_silent_fallback": true,
+    "planned_operations": [
+      "capabilities",
+      "session.get",
+      "session.output",
+      "session.send"
+    ],
+    "unavailable_response": {
+      "api_version": "cloakbrowser.io/v1",
+      "kind": "CapabilitySet",
+      "metadata": {
+        "id": "orca-web-capabilities",
+        "resource_version": 1
+      },
+      "resources": {
+        "orca-web": {
+          "available": {
+            "rest": false,
+            "cli": false,
+            "mcp": false,
+            "skill": false
+          },
+          "reason_code": "capability_unavailable"
+        }
+      }
+    },
+    "forbidden": [
+      "fallback to direct shell",
+      "fallback to raw browser CDP",
+      "printing terminal bearer tokens",
+      "embedding credential values in chat messages"
+    ]
+  }
+}

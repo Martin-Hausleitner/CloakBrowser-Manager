@@ -1,0 +1,29 @@
+[Unit]
+Description=CloakBrowser Stagehand managed worker
+Documentation=@DOCUMENTATION@
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKING_DIRECTORY@
+ExecStart=/usr/bin/python3 -m scripts.stagehand_worker \
+  --manager-url @MANAGER_URL@ \
+  --token-file @TOKEN_FILE@ \
+  --node-bin @NODE_EXECUTABLE@ \
+  --script-path @STAGEHAND_RUNNER@
+Restart=on-failure
+RestartSec=5
+UMask=0077
+Environment=@PATH_ENVIRONMENT@
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

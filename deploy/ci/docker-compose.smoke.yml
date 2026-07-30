@@ -1,0 +1,25 @@
+services:
+  manager:
+    image: cloakbrowser-manager:ci-smoke
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - cbm-ci-data:/data
+    environment:
+      AUTH_TOKEN: ""
+      ACCESS_CONTROL_ENABLED: "0"
+      CI: "1"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  cbm-ci-data:

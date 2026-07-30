@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 
 import { createPortal } from "react-dom";
 import { ClipboardCopy, Code2, Ellipsis, Maximize2, Minimize2 } from "lucide-react";
 import { api } from "../lib/api";
+import { UI_STATE, uiStateAttr } from "../lib/uiFlowRegistry";
 
 interface ProfileViewerProps {
   profileId: string;
@@ -11,6 +12,8 @@ interface ProfileViewerProps {
   compactControls?: boolean;
   layoutMode?: "inline" | "fullscreen";
   viewportScale?: number;
+  fitMode?: ViewFitMode;
+  nativeFullscreenEnabled?: boolean;
   remoteToolsOpen?: boolean;
   remoteToolsPortalId?: string;
   onRemoteToolsOpenChange?: (open: boolean) => void;
@@ -25,13 +28,18 @@ const MIN_VIEWPORT_SCALE = 0.75;
 const MAX_VIEWPORT_SCALE = 1.5;
 const ORIGINAL_AUTOSCALE_KEY = "__cloakOriginalAutoscale";
 const AUTOSCALE_SCALE_REF_KEY = "__cloakAutoscaleScaleRef";
+const AUTOSCALE_FIT_MODE_REF_KEY = "__cloakAutoscaleFitModeRef";
 
 type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
+type ViewFitMode = "fit" | "width" | "height";
 type DisplayAutoscale = (width: number, height: number) => void;
 type ScaledAutoscaleDisplay = {
   autoscale?: DisplayAutoscale;
+  width?: number;
+  height?: number;
   [ORIGINAL_AUTOSCALE_KEY]?: DisplayAutoscale;
   [AUTOSCALE_SCALE_REF_KEY]?: MutableRefObject<number>;
+  [AUTOSCALE_FIT_MODE_REF_KEY]?: MutableRefObject<ViewFitMode>;
 };
 
 function supportsClipboardSync() {
@@ -63,17 +71,43 @@ function clampViewportScale(scale: number) {
   return Math.min(MAX_VIEWPORT_SCALE, Math.max(MIN_VIEWPORT_SCALE, scale));
 }
 
-function installScaledAutoscale(display: ScaledAutoscaleDisplay | undefined, scaleRef: MutableRefObject<number>) {
+function fitAutoscaleBounds(
+  display: ScaledAutoscaleDisplay,
+  width: number,
+  height: number,
+  fitMode: ViewFitMode,
+): { width: number; height: number } {
+  const displayWidth = display.width ?? 0;
+  const displayHeight = display.height ?? 0;
+  if (fitMode === "fit" || displayWidth <= 0 || displayHeight <= 0) {
+    return { width, height };
+  }
+
+  const aspectRatio = displayWidth / displayHeight;
+  if (fitMode === "width") {
+    return { width, height: Math.max(height, width / aspectRatio) };
+  }
+  return { width: Math.max(width, height * aspectRatio), height };
+}
+
+function installScaledAutoscale(
+  display: ScaledAutoscaleDisplay | undefined,
+  scaleRef: MutableRefObject<number>,
+  fitModeRef: MutableRefObject<ViewFitMode>,
+) {
   if (typeof display?.autoscale !== "function") return;
 
   display[AUTOSCALE_SCALE_REF_KEY] = scaleRef;
+  display[AUTOSCALE_FIT_MODE_REF_KEY] = fitModeRef;
   if (display[ORIGINAL_AUTOSCALE_KEY]) return;
 
   const originalAutoscale = display.autoscale;
   display[ORIGINAL_AUTOSCALE_KEY] = originalAutoscale;
   display.autoscale = function scaledAutoscale(width: number, height: number) {
     const scale = clampViewportScale(display[AUTOSCALE_SCALE_REF_KEY]?.current ?? 1);
-    return originalAutoscale.call(this, width * scale, height * scale);
+    const fitMode = display[AUTOSCALE_FIT_MODE_REF_KEY]?.current ?? "fit";
+    const fitted = fitAutoscaleBounds(display, width, height, fitMode);
+    return originalAutoscale.call(this, fitted.width * scale, fitted.height * scale);
   };
 }
 
@@ -83,6 +117,7 @@ function restoreScaledAutoscale(display: ScaledAutoscaleDisplay | undefined) {
   display.autoscale = display[ORIGINAL_AUTOSCALE_KEY];
   delete display[ORIGINAL_AUTOSCALE_KEY];
   delete display[AUTOSCALE_SCALE_REF_KEY];
+  delete display[AUTOSCALE_FIT_MODE_REF_KEY];
 }
 
 export function ProfileViewer({
@@ -93,6 +128,8 @@ export function ProfileViewer({
   compactControls = false,
   layoutMode = "inline",
   viewportScale = 1,
+  fitMode = "fit",
+  nativeFullscreenEnabled = true,
   remoteToolsOpen,
   remoteToolsPortalId,
   onRemoteToolsOpenChange,
@@ -101,6 +138,10 @@ export function ProfileViewer({
 }: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<any>(null);
+  const onDisconnectRef = useRef(onDisconnect);
+  onDisconnectRef.current = onDisconnect;
+  const canInteractRef = useRef(canInteract);
+  canInteractRef.current = canInteract;
   const [connected, setConnected] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +160,8 @@ export function ProfileViewer({
   const effectiveViewportScale = clampViewportScale(viewportScale);
   const viewportScaleRef = useRef(effectiveViewportScale);
   viewportScaleRef.current = effectiveViewportScale;
+  const fitModeRef = useRef(fitMode);
+  fitModeRef.current = fitMode;
   const toolsOpen = remoteToolsOpen ?? localToolsOpen;
   const setToolsOpen = useCallback(
     (next: boolean | ((open: boolean) => boolean)) => {
@@ -211,6 +254,12 @@ export function ProfileViewer({
   }, [connected, connectionStatus, onConnectionStatusChange]);
 
   useEffect(() => {
+    if (rfbRef.current) {
+      rfbRef.current.viewOnly = !canInteract;
+    }
+  }, [canInteract]);
+
+  useEffect(() => {
     let rfb: any = null;
     let cancelled = false;
     let connecting = false;
@@ -233,7 +282,7 @@ export function ProfileViewer({
       setConnected(false);
       setConnectionStatus("failed");
       setError(message);
-      if (notifyParent) onDisconnect();
+      if (notifyParent) onDisconnectRef.current();
     };
 
     const scheduleReconnect = () => {
@@ -278,7 +327,7 @@ export function ProfileViewer({
         });
         rfb = instance;
         rfbRef.current = instance;
-        installScaledAutoscale((instance as any)._display, viewportScaleRef);
+        installScaledAutoscale((instance as any)._display, viewportScaleRef, fitModeRef);
 
         instance.scaleViewport = true;
         instance.resizeSession = false;
@@ -286,7 +335,7 @@ export function ProfileViewer({
         // Keep the local interaction model honest as well as server-side. The
         // backend still filters input, so this is a UX guard rather than the
         // authorization boundary.
-        instance.viewOnly = !canInteract;
+        instance.viewOnly = !canInteractRef.current;
 
         instance.addEventListener("connect", () => {
           if (cancelled || rfbRef.current !== instance) return;
@@ -347,7 +396,7 @@ export function ProfileViewer({
       }
       rfbRef.current = null;
     };
-  }, [profileId, canInteract, onDisconnect]);
+  }, [profileId]);
 
   // Host→VNC: intercept Ctrl+V/Cmd+V at keydown (capture phase)
   // Must fire BEFORE noVNC's canvas listener to prevent the race condition
@@ -527,7 +576,7 @@ export function ProfileViewer({
       // visible canvas until the next remote framebuffer update arrives.
       rfb.scaleViewport = true;
       const display = rfb._display;
-      installScaledAutoscale(display, viewportScaleRef);
+      installScaledAutoscale(display, viewportScaleRef, fitModeRef);
       const bounds = container.getBoundingClientRect();
       if (
         bounds.width > 0 &&
@@ -561,7 +610,7 @@ export function ProfileViewer({
       observer.disconnect();
       if (refreshTimer !== null) clearTimeout(refreshTimer);
     };
-  }, [effectiveViewportScale, layoutMode, profileId]);
+  }, [effectiveViewportScale, fitMode, layoutMode, profileId]);
 
   const remoteToolButtons = (
     <>
@@ -680,7 +729,10 @@ export function ProfileViewer({
 
   if (error) {
     return (
-      <div className="flex items-center justify-center h-full">
+      <div
+        className="flex items-center justify-center h-full"
+        data-ui-state={uiStateAttr(UI_STATE.profileViewer, UI_STATE.profileViewerFailed)}
+      >
         <div className="text-center">
           <p className="text-red-400 text-sm mb-2">Connection failed</p>
           <p className="text-gray-500 text-xs">{error}</p>
@@ -690,7 +742,16 @@ export function ProfileViewer({
   }
 
   return (
-    <div className={`profile-viewer relative flex h-full flex-col ${compactControls ? "profile-viewer-compact" : ""}`}>
+    <div
+      className={`profile-viewer relative flex h-full flex-col ${compactControls ? "profile-viewer-compact" : ""}`}
+      data-ui-state={uiStateAttr(
+        UI_STATE.profileViewer,
+        connectionStatus === "connecting" && UI_STATE.profileViewerConnecting,
+        connectionStatus === "connected" && UI_STATE.profileViewerConnected,
+        connectionStatus === "reconnecting" && UI_STATE.profileViewerReconnecting,
+        !canInteract && UI_STATE.profileViewerViewOnly,
+      )}
+    >
       {compactPortalTools}
       <div className={`profile-viewer-toolbar flex items-center justify-between bg-surface-1 px-3 py-1.5 border-b border-border ${compactControls && remoteToolsPortalId ? "profile-viewer-toolbar-hidden" : ""}`}>
         <div className="flex items-center gap-2">
@@ -723,7 +784,7 @@ export function ProfileViewer({
               </button>
             ) : null
           ) : remoteToolButtons}
-          {!compactControls ? (
+          {!compactControls && nativeFullscreenEnabled ? (
             <button
               type="button"
               onClick={toggleFullscreen}
@@ -749,7 +810,8 @@ export function ProfileViewer({
       <div
         ref={containerRef}
         data-vnc-layout={layoutMode}
-        className="flex-1 bg-black overflow-hidden"
+        data-vnc-fit-mode={fitMode}
+        className={`flex-1 bg-black ${fitMode === "fit" ? "overflow-hidden" : "overflow-auto"}`}
         style={{ minHeight: 0 }}
       />
     </div>

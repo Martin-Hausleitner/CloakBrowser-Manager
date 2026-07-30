@@ -10,7 +10,114 @@ export type ProfileHarness =
   | "browser-use"
   | "browser-harness"
   | "unbrowse"
-  | "stagehand";
+  | "stagehand"
+  | "acpx";
+
+export type OrcaAgentCli = "cursor-agent" | "grok" | "agy" | "codex";
+export type KnownAcpxAgent = "codex" | "claude" | "cursor" | "grok-build" | "opencode";
+export type AcpxAgent = KnownAcpxAgent | (string & { readonly __acpxAgent?: never });
+export type KnownProviderId = "antigravity" | "codex" | "claude" | "cursor" | "grok" | "opencode";
+export type ProviderId = KnownProviderId | (string & { readonly __providerId?: never });
+export type ProviderTransport = "cli" | "acp" | "openai-compatible";
+export type BrowserToolId = "unbrowse" | "stagehand" | "browser-harness";
+
+const SAFE_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export function isSafeProviderId(value: unknown): value is ProviderId {
+  return typeof value === "string" && SAFE_PROVIDER_ID_PATTERN.test(value);
+}
+
+export interface BrowserToolSelection {
+  id: BrowserToolId;
+  enabled: boolean;
+}
+
+export interface BrowserToolReadinessTarget {
+  id: BrowserToolId;
+  ready: boolean;
+  state: "ready" | "failed" | "stale" | "unavailable";
+  reason_code: "ready" | "auth_required" | "adapter_unavailable" | "timeout" | "protocol_error" | "internal_error" | "not_checked" | "stale";
+  checked_at: string | null;
+}
+
+export interface BrowserToolReadiness {
+  tools: BrowserToolReadinessTarget[];
+}
+
+export interface ProviderReadinessProvider {
+  provider: ProviderId;
+  transport: ProviderTransport;
+  ready: boolean;
+  state: "ready" | "failed" | "stale" | "unavailable";
+  reason_code: string;
+  checked_at: string | null;
+  model_aliases: string[];
+}
+
+export interface ProviderReadiness {
+  providers: ProviderReadinessProvider[];
+}
+
+export interface TaskRunProviderSelection {
+  id: ProviderId;
+  transport: ProviderTransport;
+  model_alias?: string;
+}
+
+export interface TaskRunRoutingPolicy {
+  mode: "ordered-fallback";
+  allow_second_browser: boolean;
+  max_tool_attempts: number;
+}
+
+export interface OrcaSessionCapabilities {
+  start: boolean;
+  read: boolean;
+  send: boolean;
+  close: boolean;
+  pause: boolean;
+  resume: boolean;
+}
+
+export interface OrcaCapabilities {
+  available: boolean;
+  orca_bin: string;
+  agents: string[];
+  operations: string[];
+  actions: OrcaSessionCapabilities;
+  notes: string[];
+}
+
+export interface OrcaSession {
+  id: string;
+  profile_id: string;
+  sandbox_id: string;
+  agent: OrcaAgentCli;
+  terminal_handle: string;
+  status: "starting" | "running" | "closed" | "error";
+  created_at: number;
+  closed_at?: number | null;
+  last_error?: string | null;
+  capabilities: OrcaSessionCapabilities;
+  connection: Record<string, unknown>;
+}
+
+export interface OrcaSessionOutput {
+  session_id: string;
+  terminal_handle: string;
+  cursor: number;
+  next_cursor: number;
+  output: string;
+  status: OrcaSession["status"];
+  capabilities: OrcaSessionCapabilities;
+}
+
+export interface OrcaSessionSendResult {
+  session_id: string;
+  ok: boolean;
+  status: OrcaSession["status"];
+  capabilities: OrcaSessionCapabilities;
+}
 
 export type ProxyCheckState = "missing" | "passed" | "warning" | "failed" | "unavailable";
 
@@ -122,6 +229,7 @@ export interface Profile {
   harness: ProfileHarness;
   fingerprint_seed: number;
   proxy: string | null;
+  proxy_display: string | null;
   timezone: string | null;
   locale: string | null;
   platform: string;
@@ -139,6 +247,7 @@ export interface Profile {
   auto_launch: boolean;
   color_scheme: string | null;
   search_engine: string | null;
+  extension_ids: string[];
   launch_args: string[];
   notes: string | null;
   user_data_dir: string;
@@ -148,6 +257,80 @@ export interface Profile {
   status: "running" | "stopped";
   vnc_ws_port: number | null;
   cdp_url: string | null;
+}
+
+export type AccountAuthState = "unknown" | "signed_in" | "needs_2fa" | "signed_out" | "locked";
+export type AccountFactorState = "unknown" | "off" | "enrolled" | "required";
+export type AccountEventType =
+  | "created"
+  | "observed"
+  | "signed_in"
+  | "signed_out"
+  | "auth_state_changed"
+  | "two_factor_required"
+  | "two_factor_enrolled"
+  | "passkey_enrolled"
+  | "secret_reference_changed";
+
+export interface Account {
+  id: string;
+  profile_id: string | null;
+  profile_id_snapshot: string;
+  sandbox_id: string;
+  project_id: string;
+  provider: string;
+  subject_label: string;
+  display_name: string | null;
+  origin: string | null;
+  auth_state: AccountAuthState;
+  second_factor_state: AccountFactorState;
+  passkey_state: AccountFactorState;
+  has_secret_reference: boolean;
+  has_totp_reference: boolean;
+  last_seen_at: string | null;
+  row_version: number;
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccountCreateData {
+  profile_id: string;
+  provider: string;
+  subject_label: string;
+  display_name?: string | null;
+  origin?: string | null;
+  auth_state?: AccountAuthState;
+  second_factor_state?: AccountFactorState;
+  passkey_state?: AccountFactorState;
+  secret_ref?: string | null;
+  totp_ref?: string | null;
+  last_seen_at?: string | null;
+}
+
+export interface AccountUpdateData {
+  display_name?: string | null;
+  origin?: string | null;
+  auth_state?: AccountAuthState;
+  second_factor_state?: AccountFactorState;
+  passkey_state?: AccountFactorState;
+  secret_ref?: string | null;
+  totp_ref?: string | null;
+  last_seen_at?: string | null;
+}
+
+export interface AccountAuthEvent {
+  id: string;
+  account_id_snapshot: string;
+  profile_id_snapshot: string;
+  sandbox_id: string;
+  event_type: AccountEventType;
+  auth_state: AccountAuthState | null;
+  actor_kind: string;
+  actor_id: string | null;
+  occurred_at: string;
+  created_at: string;
 }
 
 export interface ProfileCreateData {
@@ -177,6 +360,7 @@ export interface ProfileCreateData {
   auto_launch?: boolean;
   color_scheme?: string | null;
   search_engine?: string | null;
+  extension_ids?: string[];
   launch_args?: string[];
   notes?: string | null;
   tags?: { tag: string; color: string | null }[];
@@ -373,15 +557,32 @@ export interface AccessAgentCreated extends AccessAgent {
 
 export interface TaskHarnessSession {
   id: string;
-  profile_id: string;
+  profile_id: string | null;
   sandbox_id: string;
+  project_id: string;
   title: string | null;
   status: "active" | "archived";
+  workflow_state: "open" | "done";
+  done_at: string | null;
+  archived_at: string | null;
+  retention_class: "temporary" | "project" | "legacy";
+  expires_at: string | null;
+  activity_at: string;
+  row_version: number;
   created_by_kind: string;
   created_by_id: string | null;
   created_at: string;
   updated_at: string;
   metadata: Record<string, unknown>;
+}
+
+export interface TaskSessionUpdateData {
+  row_version: number;
+  title?: string | null;
+  workflow_state?: "open" | "done";
+  archived?: boolean | null;
+  retention_class?: "temporary" | "project";
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface TaskHarnessMessage {
@@ -403,6 +604,110 @@ export interface TaskHarnessEvent {
   created_by_id: string | null;
   created_at: string;
   payload: Record<string, unknown>;
+}
+
+export type TaskRunStatus =
+  | "queued"
+  | "health_check"
+  | "blocked_health"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "revoked";
+
+export type TaskOutputKind =
+  | "status"
+  | "action"
+  | "observation"
+  | "screenshot"
+  | "extracted_data"
+  | "link"
+  | "metric"
+  | "error"
+  | "approval"
+  | "summary";
+
+export interface TaskRun {
+  id: string;
+  task_session_id: string;
+  task_message_id: string;
+  profile_id: string | null;
+  profile_id_snapshot: string;
+  sandbox_id: string;
+  harness: ProfileHarness;
+  agent: AcpxAgent | null;
+  provider?: TaskRunProviderSelection | null;
+  browser_tools?: BrowserToolSelection[];
+  routing_policy?: TaskRunRoutingPolicy | null;
+  status: TaskRunStatus;
+  launch_if_stopped: boolean;
+  allowed_origins: string[];
+  max_steps: number;
+  timeout_seconds: number;
+  model_alias: string | null;
+  deadline_at: string;
+  health_snapshot: Record<string, unknown>;
+  health_decision: Record<string, unknown>;
+  health_override?: Record<string, unknown> | null;
+  retry_count: number;
+  first_action_sequence?: number | null;
+  first_action_at?: string | null;
+  cancelled_at?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_by_kind: string;
+  created_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskRunCreateData {
+  harness?: ProfileHarness;
+  agent?: AcpxAgent | null;
+  task: string;
+  profile_id: string;
+  launch_if_stopped?: boolean;
+  allowed_origins?: string[];
+  max_steps?: number;
+  timeout_seconds?: number;
+  model_alias?: string | null;
+  provider?: TaskRunProviderSelection;
+  browser_tools?: BrowserToolSelection[];
+  routing_policy?: TaskRunRoutingPolicy;
+}
+
+export interface TaskHarnessPresence {
+  harness: ProfileHarness;
+  worker_seen_recently: boolean;
+  state: "polling" | "stale" | "unavailable";
+  last_seen_at: string | null;
+  reason: string | null;
+}
+
+export interface TaskHarnessAgentPreflight {
+  agent: AcpxAgent;
+  ready: boolean;
+  state: "ready" | "failed" | "stale" | "unavailable";
+  reason_code: string;
+  checked_at: string | null;
+}
+
+export interface TaskHarnessPreflights {
+  harness: "acpx";
+  agents: TaskHarnessAgentPreflight[];
+}
+
+export interface TaskOutput {
+  id: string;
+  run_id: string;
+  sequence: number;
+  idempotency_key: string;
+  kind: TaskOutputKind;
+  summary: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+  artifact_expired: boolean;
 }
 
 export interface AccessSandbox {
@@ -458,8 +763,27 @@ async function request<T>(
   return res.json();
 }
 
+async function requestBlob(path: string, options?: RequestInit): Promise<Blob> {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!res.ok) {
+    if (res.status === 401 && _onUnauthorized) {
+      _onUnauthorized();
+      throw new ApiError(401, "Unauthorized");
+    }
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(res.status, body.detail || res.statusText);
+  }
+  return res.blob();
+}
+
 export const api = {
-  authStatus: async () => normalizeAuthStatus(await request<Partial<AuthStatus>>("/api/auth/status")),
+  authStatus: async () => normalizeAuthStatus(await request<Partial<AuthStatus>>("/api/auth/status", {
+    cache: "no-store",
+    credentials: "include",
+  })),
 
   login: (credentials: LoginCredentials | string) =>
     request<{ ok: boolean }>("/api/auth/login", {
@@ -472,7 +796,63 @@ export const api = {
 
   listProfiles: () => request<Profile[]>("/api/profiles"),
 
+  listAccounts: (options?: {
+    profileId?: string;
+    provider?: string;
+    authState?: AccountAuthState;
+  }) => {
+    const params = new URLSearchParams();
+    if (options?.profileId) params.set("profile_id", options.profileId);
+    if (options?.provider) params.set("provider", options.provider);
+    if (options?.authState) params.set("auth_state", options.authState);
+    const query = params.toString();
+    return request<Account[]>(`/api/accounts${query ? `?${query}` : ""}`);
+  },
+
+  getAccount: (id: string) =>
+    request<Account>(`/api/accounts/${encodeURIComponent(id)}`),
+
+  createAccount: (data: AccountCreateData) =>
+    request<Account>("/api/accounts", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateAccount: (id: string, data: AccountUpdateData) =>
+    request<Account>(`/api/accounts/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  listAccountEvents: (id: string, options?: { limit?: number }) => {
+    const query = options?.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
+    return request<AccountAuthEvent[]>(
+      `/api/accounts/${encodeURIComponent(id)}/events${query}`,
+    );
+  },
+
+  appendAccountEvent: (
+    id: string,
+    data: {
+      event_type: Exclude<AccountEventType, "created">;
+      auth_state?: AccountAuthState | null;
+      occurred_at?: string | null;
+    },
+  ) =>
+    request<AccountAuthEvent>(`/api/accounts/${encodeURIComponent(id)}/events`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  deleteAccount: (id: string) =>
+    request<{ ok: boolean }>(`/api/accounts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
   getProfile: (id: string) => request<Profile>(`/api/profiles/${id}`),
+
+  captureProfileScreenshot: (id: string) =>
+    requestBlob(`/api/profiles/${encodeURIComponent(id)}/screenshot`, { method: "POST" }),
 
   createProfile: (data: ProfileCreateData) =>
     request<Profile>("/api/profiles", {
@@ -700,6 +1080,20 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
       { signal: options?.signal },
     ),
 
+  updateTaskSession: (
+    sessionId: string,
+    data: TaskSessionUpdateData,
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<TaskHarnessSession>(
+      `/api/task-sessions/${encodeURIComponent(sessionId)}`,
+      {
+        method: "PATCH",
+        signal: options?.signal,
+        body: JSON.stringify(data),
+      },
+    ),
+
   appendTaskMessage: (sessionId: string, data: {
     text: string;
     profile_id?: string | null;
@@ -742,5 +1136,144 @@ updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
     { signal: options?.signal },
   ),
 
+  createTaskRun: (
+    sessionId: string,
+    data: TaskRunCreateData,
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<TaskRun>(
+      `/api/task-sessions/${encodeURIComponent(sessionId)}/runs`,
+      {
+        method: "POST",
+        signal: options?.signal,
+        body: JSON.stringify(data),
+      },
+    ),
+
+  getTaskHarnessPresence: (
+    harness: ProfileHarness,
+    options?: { signal?: AbortSignal },
+  ) => request<TaskHarnessPresence>(
+    `/api/task-harnesses/${encodeURIComponent(harness)}/presence`,
+    { signal: options?.signal },
+  ),
+
+  getTaskHarnessPreflights: (
+    harness: "acpx",
+    options?: { signal?: AbortSignal },
+  ) => request<TaskHarnessPreflights>(
+    `/api/task-harnesses/${encodeURIComponent(harness)}/preflights`,
+    { signal: options?.signal },
+  ),
+
+  getProviderReadiness: (options?: { signal?: AbortSignal }) =>
+    request<ProviderReadiness>("/api/providers/readiness", { signal: options?.signal }),
+
+  getBrowserToolReadiness: (options?: { signal?: AbortSignal }) =>
+    request<BrowserToolReadiness>("/api/browser-tools/readiness", { signal: options?.signal }),
+
+  getTaskRun: (runId: string, options?: { signal?: AbortSignal }) =>
+    request<TaskRun>(
+      `/api/task-runs/${encodeURIComponent(runId)}`,
+      { signal: options?.signal },
+    ),
+
+  listTaskRunOutputs: (
+    runId: string,
+    options?: { afterSequence?: number; limit?: number; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.afterSequence != null) {
+      params.set("after_sequence", String(options.afterSequence));
+    }
+    if (options?.limit != null) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return request<TaskOutput[]>(
+      `/api/task-runs/${encodeURIComponent(runId)}/outputs${query ? `?${query}` : ""}`,
+      { signal: options?.signal },
+    );
+  },
+
+  cancelTaskRun: (runId: string, options?: { signal?: AbortSignal }) =>
+    request<TaskRun>(
+      `/api/task-runs/${encodeURIComponent(runId)}/cancel`,
+      { method: "POST", signal: options?.signal },
+    ),
+
+  retryTaskRunHealth: (runId: string, options?: { signal?: AbortSignal }) =>
+    request<TaskRun>(
+      `/api/task-runs/${encodeURIComponent(runId)}/retry-health`,
+      { method: "POST", signal: options?.signal },
+    ),
+
+  overrideTaskRunHealth: (
+    runId: string,
+    reason: string,
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<TaskRun>(
+      `/api/task-runs/${encodeURIComponent(runId)}/override-health`,
+      {
+        method: "POST",
+        signal: options?.signal,
+        body: JSON.stringify({ reason }),
+      },
+    ),
+
+  taskOutputScreenshotUrl: (outputId: string) =>
+    `/api/task-outputs/${encodeURIComponent(outputId)}/screenshot`,
+
   listAccessSandboxes: () => request<AccessSandbox[]>("/api/access/sandboxes"),
+
+  getOrcaCapabilities: (options?: { signal?: AbortSignal }) =>
+    request<OrcaCapabilities>("/api/orca/capabilities", { signal: options?.signal }),
+
+  startOrcaSession: (
+    data: { profile_id: string; agent: OrcaAgentCli; prompt?: string | null },
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<OrcaSession>("/api/orca/sessions", {
+      method: "POST",
+      signal: options?.signal,
+      body: JSON.stringify(data),
+    }),
+
+  getOrcaSession: (sessionId: string, options?: { signal?: AbortSignal }) =>
+    request<OrcaSession>(`/api/orca/sessions/${encodeURIComponent(sessionId)}`, {
+      signal: options?.signal,
+    }),
+
+  readOrcaSessionOutput: (
+    sessionId: string,
+    options?: { cursor?: number; limit?: number; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.cursor != null) params.set("cursor", String(options.cursor));
+    if (options?.limit != null) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return request<OrcaSessionOutput>(
+      `/api/orca/sessions/${encodeURIComponent(sessionId)}/output${query ? `?${query}` : ""}`,
+      { signal: options?.signal },
+    );
+  },
+
+  sendOrcaSessionInput: (
+    sessionId: string,
+    data: { text: string; enter?: boolean },
+    options?: { signal?: AbortSignal },
+  ) =>
+    request<OrcaSessionSendResult>(
+      `/api/orca/sessions/${encodeURIComponent(sessionId)}/send`,
+      {
+        method: "POST",
+        signal: options?.signal,
+        body: JSON.stringify(data),
+      },
+    ),
+
+  closeOrcaSession: (sessionId: string, options?: { signal?: AbortSignal }) =>
+    request<OrcaSession>(`/api/orca/sessions/${encodeURIComponent(sessionId)}/close`, {
+      method: "POST",
+      signal: options?.signal,
+    }),
 };

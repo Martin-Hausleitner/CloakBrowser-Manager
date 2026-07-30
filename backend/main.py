@@ -12,11 +12,14 @@ import json
 import logging
 import math
 import os
+import re
+import sqlite3
 import struct
 import shutil
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
@@ -24,20 +27,36 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import starlette.requests
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 if __package__:
     from . import access_control as access
+    from . import artifact_store as artifact_store_mod
+    from . import automation_leases
+    from . import cdp_gateway
     from . import database as db
     from . import extensions
     from . import live_diagnostics
+    from . import secure_action_recorder
+    from . import worker_runtime as worker_runtime_mod
+    from . import workspace_maintenance as workspace_maintenance_mod
     from .browser_manager import BrowserManager
     from .profile_health import ProfileHealthProbe
     from .models import (
+        AutomationLeaseAcquireResponse,
+        AutomationLeaseHeartbeatResponse,
+        AccountAuthEventCreate,
+        AccountAuthEventResponse,
+        AccountCreate,
+        AccountResponse,
+        AccountUpdate,
         ClipboardRequest,
+        control_plane_capabilities_payload,
+        control_plane_resource_schema,
         AccessAgentCreate,
         AccessAgentCreatedResponse,
         AccessAgentResponse,
@@ -55,10 +74,10 @@ if __package__:
         ExtensionTemplatesResponse,
         ExtensionTemplateItem,
         ExtensionInventoryResponse,
-        ExtensionItem,
         ExtensionOpenSessionRequest,
         ExtensionOpenSessionResponse,
         ExtensionProfileSummary,
+        Harness,
         LaunchResponse,
         LiveMetricsResponse,
         LiveMetricsSample,
@@ -72,6 +91,9 @@ if __package__:
         ProfileTemplateCreate,
         ProfileTemplateSummary,
         ProfileUpdate,
+        ProjectCreate,
+        ProjectResponse,
+        ProjectUpdate,
         ProxyAutoProfileCreate,
         ProxyInventoryIngest,
         ProxyInventoryIngestResponse,
@@ -83,8 +105,31 @@ if __package__:
         TaskEventResponse,
         TaskMessageCreate,
         TaskMessageResponse,
+        TaskOutputCreate,
+        TaskOutputResponse,
+        TaskRunCreate,
+        TaskRunHealthOverrideRequest,
+        TaskRunResponse,
+        TaskHarnessPresenceResponse,
+        TaskHarnessPreflightsResponse,
         TaskSessionCreate,
         TaskSessionResponse,
+        TaskSessionUpdate,
+        OrcaCapabilitiesResponse,
+        OrcaSessionOutputResponse,
+        OrcaSessionResponse,
+        OrcaSessionSendRequest,
+        OrcaSessionSendResponse,
+        OrcaSessionStartRequest,
+        BrowserToolReadinessResponse,
+        ProviderReadinessResponse,
+        WorkerCapabilityResponse,
+        WorkerClaimResponse,
+        WorkerFailRequest,
+        WorkerHeartbeatResponse,
+        WorkerAcpxPreflightRequest,
+        WorkerBrowserToolReadinessRequest,
+        WorkerProviderPreflightRequest,
     )
     from . import proxy_inventory
     from . import session_links
@@ -92,15 +137,34 @@ if __package__:
     from . import extension_catalog
     from . import profile_templates
     from . import stream_metrics
+    from . import orca_adapter as orca_adapter_mod
+    from .orca_adapter import orca_adapter
 else:  # Support `uvicorn main:app` from the backend directory.
     import access_control as access
+    import artifact_store as artifact_store_mod
+    import automation_leases
+    import cdp_gateway
     import database as db
     import extensions
     import live_diagnostics
+    import secure_action_recorder
+    import worker_runtime as worker_runtime_mod
+    import workspace_maintenance as workspace_maintenance_mod
+    import orca_adapter as orca_adapter_mod
+    from orca_adapter import orca_adapter
     from browser_manager import BrowserManager
     from profile_health import ProfileHealthProbe
     from models import (
+        AutomationLeaseAcquireResponse,
+        AutomationLeaseHeartbeatResponse,
+        AccountAuthEventCreate,
+        AccountAuthEventResponse,
+        AccountCreate,
+        AccountResponse,
+        AccountUpdate,
         ClipboardRequest,
+        control_plane_capabilities_payload,
+        control_plane_resource_schema,
         AccessAgentCreate,
         AccessAgentCreatedResponse,
         AccessAgentResponse,
@@ -118,10 +182,10 @@ else:  # Support `uvicorn main:app` from the backend directory.
         ExtensionTemplatesResponse,
         ExtensionTemplateItem,
         ExtensionInventoryResponse,
-        ExtensionItem,
         ExtensionOpenSessionRequest,
         ExtensionOpenSessionResponse,
         ExtensionProfileSummary,
+        Harness,
         LaunchResponse,
         LiveMetricsResponse,
         LiveMetricsSample,
@@ -135,6 +199,9 @@ else:  # Support `uvicorn main:app` from the backend directory.
         ProfileTemplateCreate,
         ProfileTemplateSummary,
         ProfileUpdate,
+        ProjectCreate,
+        ProjectResponse,
+        ProjectUpdate,
         ProxyAutoProfileCreate,
         ProxyInventoryIngest,
         ProxyInventoryIngestResponse,
@@ -146,8 +213,31 @@ else:  # Support `uvicorn main:app` from the backend directory.
         TaskEventResponse,
         TaskMessageCreate,
         TaskMessageResponse,
+        TaskOutputCreate,
+        TaskOutputResponse,
+        TaskRunCreate,
+        TaskRunHealthOverrideRequest,
+        TaskRunResponse,
+        TaskHarnessPresenceResponse,
+        TaskHarnessPreflightsResponse,
         TaskSessionCreate,
         TaskSessionResponse,
+        TaskSessionUpdate,
+        OrcaCapabilitiesResponse,
+        OrcaSessionOutputResponse,
+        OrcaSessionResponse,
+        OrcaSessionSendRequest,
+        OrcaSessionSendResponse,
+        OrcaSessionStartRequest,
+        BrowserToolReadinessResponse,
+        ProviderReadinessResponse,
+        WorkerCapabilityResponse,
+        WorkerClaimResponse,
+        WorkerFailRequest,
+        WorkerHeartbeatResponse,
+        WorkerAcpxPreflightRequest,
+        WorkerBrowserToolReadinessRequest,
+        WorkerProviderPreflightRequest,
     )
     import proxy_inventory
     import session_links
@@ -163,6 +253,17 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
+
+def _resolve_dev_auto_admin(flag: str | None, deployment_env: str | None) -> bool:
+    requested = str(flag or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not requested:
+        return False
+    environment = str(deployment_env or "production").strip().lower()
+    if environment not in {"dev", "development", "local", "test"}:
+        raise RuntimeError("CBM_DEV_AUTO_ADMIN is development-only")
+    return True
+
+
 # Optional authentication via AUTH_TOKEN env var. If not set, all routes are
 # open for local development. ``ACCESS_CONTROL_ENABLED=1`` adds named users and
 # scoped Paperclip-agent credentials, but intentionally requires AUTH_TOKEN as
@@ -171,13 +272,30 @@ AUTH_TOKEN: str | None = os.environ.get("AUTH_TOKEN") or None
 ACCESS_CONTROL_ENABLED = bool(AUTH_TOKEN) and access.access_control_enabled(
     os.environ.get("ACCESS_CONTROL_ENABLED")
 )
+DEPLOYMENT_ENV = os.environ.get("CBM_DEPLOYMENT_ENV") or "production"
+DEV_AUTO_ADMIN = _resolve_dev_auto_admin(
+    os.environ.get("CBM_DEV_AUTO_ADMIN"), DEPLOYMENT_ENV
+)
 if os.environ.get("ACCESS_CONTROL_ENABLED") and not AUTH_TOKEN:
     logger.warning("ACCESS_CONTROL_ENABLED ignored because AUTH_TOKEN is not configured")
+
+# Browser-Use worker provisioning inputs (VCVM secrets). Plaintext is never
+# persisted; only SHA-256 digests of valid cbm_worker_ keys are stored.
+CBM_WORKER_ID: str | None = os.environ.get("CBM_WORKER_ID") or None
+CBM_WORKER_TOKEN: str | None = os.environ.get("CBM_WORKER_TOKEN") or None
 
 # Paths that bypass authentication even when AUTH_TOKEN is set.  ``/health``
 # deliberately contains no profile or runtime metadata so Docker can probe the
 # service without turning ``/api/status`` into an information leak.
 _AUTH_EXEMPT = frozenset({"/api/auth/status", "/api/auth/login", "/health"})
+# HTTP run-capability bypass: GET discovery only.
+_CDP_RUN_CAPABILITY_HTTP_PATH = re.compile(
+    r"^/api/profiles/[^/]+/cdp/json/(?:version|list|protocol)/?$"
+)
+# WebSocket run-capability bypass: browser WS + page/devtools WS only.
+_CDP_RUN_CAPABILITY_WS_PATH = re.compile(
+    r"^/api/profiles/[^/]+/cdp(?:/devtools/.+)?$"
+)
 _LOGIN_FAILURE_LIMIT = 5
 _LOGIN_BACKOFF_SECONDS = 60.0
 _LOGIN_FAILURE_TTL_SECONDS = 10 * 60.0
@@ -209,6 +327,59 @@ class _WebSocketAccessLease:
 
 
 _active_websocket_access_leases: set[_WebSocketAccessLease] = set()
+
+automation_lease_service = automation_leases.AutomationLeaseService()
+artifact_store = artifact_store_mod.ArtifactStore()
+workspace_maintenance_service = workspace_maintenance_mod.WorkspaceMaintenance(
+    artifact_store=artifact_store,
+)
+worker_runtime_service = worker_runtime_mod.WorkerRuntimeService(
+    lease_service=automation_lease_service,
+    worker_id_env=lambda: CBM_WORKER_ID,
+    worker_token_env=lambda: CBM_WORKER_TOKEN,
+)
+secure_action_recorder_nonce_cache: dict[str, float] = {}
+DEFAULT_GROK_OPENAI_COMPATIBLE_MODEL_ALIAS = "grok-build-0.1"
+direct_cdp_socket_registry = cdp_gateway.DirectCdpSocketRegistry(
+    poll_interval_seconds=0.25
+)
+_workspace_maintenance_stop: asyncio.Event | None = None
+_workspace_maintenance_task: asyncio.Task | None = None
+_worker_maintenance_stop: asyncio.Event | None = None
+_worker_maintenance_task: asyncio.Task | None = None
+
+
+def _apply_terminal_cleanup(cleanup: worker_runtime_mod.TerminalCleanup) -> None:
+    if cleanup.lease_ids:
+        close_direct_cdp_sockets_for_leases(list(cleanup.lease_ids))
+
+
+def close_direct_cdp_sockets_for_leases(
+    leases: list[tuple[str, str]] | list[str],
+) -> None:
+    """Revoke process-local direct CDP sockets for expired/released leases."""
+    lease_ids: list[str] = []
+    for item in leases:
+        if isinstance(item, tuple):
+            lease_ids.append(item[0])
+        else:
+            lease_ids.append(str(item))
+    direct_cdp_socket_registry.revoke_leases(lease_ids)
+
+
+def retire_direct_automation_lease_on_websocket_close(
+    lease_id: str,
+    *,
+    reason: str = "websocket_closed",
+) -> None:
+    """Atomically retire a direct lease on WS termination and close siblings.
+
+    Idempotent: safe when the lease was already released (explicit release,
+    expiry, access revocation) or when multiple sockets for the same lease
+    close concurrently.
+    """
+    automation_lease_service.release_by_id(lease_id, reason=reason)
+    close_direct_cdp_sockets_for_leases([lease_id])
 
 
 def _register_websocket_access(
@@ -253,6 +424,30 @@ def _revoke_websocket_access(
         if profile_id is not None and lease.profile_id != profile_id:
             continue
         lease.revoked.set()
+
+
+def _revoke_identity_access(
+    *,
+    identity_kind: str,
+    identity_id: str,
+    reason: str = "access_revoked",
+) -> None:
+    """Close live sockets and transactionally retire automation leases for a principal."""
+    _revoke_websocket_access(identity_kind=identity_kind, identity_id=identity_id)
+    lease_ids = automation_lease_service.revoke_by_owner(
+        owner_kind=identity_kind,
+        owner_id=identity_id,
+        reason=reason,
+    )
+    close_direct_cdp_sockets_for_leases(lease_ids)
+
+
+def _revoke_profile_access(profile_id: str, *, reason: str = "profile_revoked") -> None:
+    """Close live sockets and retire automation leases bound to a profile."""
+    _revoke_websocket_access(profile_id=profile_id)
+    lease_ids = automation_lease_service.revoke_by_profile(profile_id, reason=reason)
+    close_direct_cdp_sockets_for_leases(lease_ids)
+    direct_cdp_socket_registry.revoke_profile(profile_id)
 
 _BENCHMARK_REPORT_ENV = "BENCHMARK_REPORT_PATH"
 _DEFAULT_BENCHMARK_REPORT_PATH = Path("/data/benchmark-report.json")
@@ -709,6 +904,11 @@ class AuthMiddleware:
 
     Uses raw ASGI instead of BaseHTTPMiddleware because the latter
     breaks WebSocket routes (wraps request body, preventing WS upgrade).
+
+    ``/internal/*`` always requires an active worker Bearer, regardless of
+    ACCESS_CONTROL_ENABLED / legacy-open mode. Worker keys never authorize
+    normal ``/api/*`` routes. A ``cbm_run_`` capability may bypass ``/api``
+    auth only for exact CDP discovery/WebSocket paths.
     """
 
     def __init__(self, app: ASGIApp):
@@ -721,6 +921,39 @@ class AuthMiddleware:
             return
 
         path = scope["path"]
+
+        # Internal worker API: always fail closed to worker Bearer only.
+        if path.startswith("/internal/"):
+            worker = access.resolve_worker_identity(scope)
+            if worker is None:
+                await _reject_unauthenticated(scope, receive, send)
+                return
+            scope.setdefault("state", {})["worker_identity"] = worker
+            await self.app(scope, receive, send)
+            return
+
+        bearer = _bearer_from_scope(scope)
+
+        # Worker keys are never valid on public APIs.
+        if access.is_valid_worker_key(bearer):
+            await _reject_unauthenticated(scope, receive, send)
+            return
+
+        # Run capability may reach exact CDP discovery (HTTP GET) or CDP WS only.
+        if access.is_run_capability_token(bearer) and _run_capability_path_allowed(scope):
+            scope.setdefault("state", {})["run_capability_token"] = bearer
+            await self.app(scope, receive, send)
+            return
+
+        # Explicit development-only convenience mode. Internal worker APIs,
+        # worker keys, and run capabilities remain governed by their stricter
+        # branches above; every normal public request receives bootstrap admin.
+        if DEV_AUTO_ADMIN:
+            scope.setdefault("state", {})["access_identity"] = (
+                access.bootstrap_identity()
+            )
+            await self.app(scope, receive, send)
+            return
 
         # Scoped policy mode recognizes bootstrap, signed human sessions, and
         # individual agent bearer keys. The resolved identity is placed on the
@@ -753,6 +986,40 @@ class AuthMiddleware:
             return
 
         await _reject_unauthenticated(scope, receive, send)
+
+
+def _run_capability_path_allowed(scope: Scope) -> bool:
+    """Scope/method-aware allowlist for ``cbm_run_`` auth bypass.
+
+    HTTP Bearer may bypass only GET ``.../cdp/json/version`` and
+    ``.../cdp/json/list``. WebSocket may bypass only browser ``.../cdp`` and
+    page ``.../cdp/devtools/{path}``. Helper ``.../cdp`` HTTP and any other
+    method/path must fall through to normal auth rejection.
+    """
+    path = scope.get("path") or ""
+    if scope["type"] == "http":
+        method = str(scope.get("method") or "GET").upper()
+        if method != "GET":
+            return False
+        return _CDP_RUN_CAPABILITY_HTTP_PATH.match(path) is not None
+    if scope["type"] == "websocket":
+        # Exact browser WS is ``.../cdp`` (no /json); page WS under /devtools/.
+        if _CDP_RUN_CAPABILITY_HTTP_PATH.match(path):
+            return False
+        if "/cdp/json" in path:
+            return False
+        return _CDP_RUN_CAPABILITY_WS_PATH.match(path) is not None
+    return False
+
+
+def _bearer_from_scope(scope: Scope) -> str | None:
+    for key, value in scope.get("headers", []):
+        if key.lower() == b"authorization":
+            text = value.decode("latin-1")
+            if text.startswith("Bearer "):
+                token = text[7:]
+                return token or None
+    return None
 
 
 async def _reject_unauthenticated(scope: Scope, receive: Receive, send: Send) -> None:
@@ -1345,6 +1612,23 @@ class _RfbClientStreamFilter:
         return bytes(result)
 
 
+def _reconcile_profile_health_waiting_runs(profile_id: str) -> None:
+    try:
+        result = db.reconcile_profile_health_waiting_task_runs(profile_id)
+        if result.lease_ids:
+            _apply_terminal_cleanup(
+                worker_runtime_mod.TerminalCleanup(lease_ids=result.lease_ids)
+            )
+        if result.reconciled_count:
+            worker_runtime_service.refresh_claim_eligibility()
+    except Exception as exc:
+        logger.error(
+            "Could not reconcile task runs after profile health for %s (%s)",
+            profile_id,
+            type(exc).__name__,
+        )
+
+
 async def _run_profile_health_probe(profile: dict[str, object], running: Any) -> None:
     """Run and persist one normalized probe without exposing provider errors."""
     profile_id = str(profile["id"])
@@ -1374,10 +1658,12 @@ async def _run_profile_health_probe(profile: dict[str, object], running: Any) ->
                 error_code="profile_health_probe_failed",
                 sources={},
             )
+            _reconcile_profile_health_waiting_runs(profile_id)
         return
 
     if db.get_profile(profile_id) is not None:
         db.upsert_profile_health(profile_id, **result.as_record())
+        _reconcile_profile_health_waiting_runs(profile_id)
 
 
 def _schedule_profile_health(
@@ -1435,12 +1721,47 @@ async def _cancel_all_profile_health_tasks() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _workspace_maintenance_stop, _workspace_maintenance_task
+    global _worker_maintenance_stop, _worker_maintenance_task
     db.init_db()
+    automation_lease_service.ensure_schema()
+    # Artifact schema/root/permissions are mandatory; fail closed on init errors.
+    artifact_store.ensure_schema()
+    # Bootstrap configured worker digest from VCVM secrets (never log plaintext).
+    rotated = worker_runtime_service.sync_configured_worker()
+    if rotated.get("lease_ids"):
+        close_direct_cdp_sockets_for_leases(list(rotated["lease_ids"]))
+    worker_runtime_service.refresh_claim_eligibility()
     await browser_mgr.cleanup_stale()
     browser_mgr._auto_launch_task = asyncio.create_task(browser_mgr.auto_launch_all())
+    _workspace_maintenance_stop = asyncio.Event()
+    _workspace_maintenance_task = asyncio.create_task(
+        workspace_maintenance_mod.run_daily_maintenance_loop(
+            workspace_maintenance_service,
+            stop_event=_workspace_maintenance_stop,
+        )
+    )
+    _worker_maintenance_stop = asyncio.Event()
+    _worker_maintenance_task = asyncio.create_task(
+        worker_runtime_mod.run_worker_maintenance_loop(
+            worker_runtime_service,
+            on_cleanup=_apply_terminal_cleanup,
+            stop_event=_worker_maintenance_stop,
+        )
+    )
     logger.info("CloakBrowser Manager started")
     yield
     logger.info("Shutting down — stopping all browsers...")
+    if _worker_maintenance_stop is not None:
+        _worker_maintenance_stop.set()
+    if _worker_maintenance_task is not None and not _worker_maintenance_task.done():
+        _worker_maintenance_task.cancel()
+        await asyncio.gather(_worker_maintenance_task, return_exceptions=True)
+    if _workspace_maintenance_stop is not None:
+        _workspace_maintenance_stop.set()
+    if _workspace_maintenance_task is not None and not _workspace_maintenance_task.done():
+        _workspace_maintenance_task.cancel()
+        await asyncio.gather(_workspace_maintenance_task, return_exceptions=True)
     if browser_mgr._auto_launch_task and not browser_mgr._auto_launch_task.done():
         browser_mgr._auto_launch_task.cancel()
         await asyncio.gather(browser_mgr._auto_launch_task, return_exceptions=True)
@@ -1450,6 +1771,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="CloakBrowser Manager", lifespan=lifespan)
 app.add_middleware(AuthMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def sanitized_validation_error(_request: Request, exc: RequestValidationError):
+    """Return useful validation locations without reflecting submitted secrets."""
+    detail = [
+        {
+            key: value
+            for key, value in error.items()
+            if key not in {"input", "ctx", "url"}
+        }
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 def _require_identity(scope: Scope) -> access.AccessIdentity:
@@ -1507,17 +1842,38 @@ def _require_profile_permission(
     return profile, identity
 
 
-def _can_read_task_sessions(identity: access.AccessIdentity, profile: dict[str, object]) -> bool:
-    sandbox_id = str(profile.get("sandbox_id") or "default")
-    return identity.is_admin or access.has_permission(identity, sandbox_id, "view")
+def _require_account_permission(
+    scope: Scope, account_id: str, permission: access.Permission
+) -> tuple[dict[str, object], access.AccessIdentity]:
+    account = db.get_account_metadata(account_id)
+    if not account or not account.get("profile_id"):
+        raise HTTPException(status_code=404, detail="Account not found")
+    identity = _require_identity(scope)
+    sandbox_id = str(account.get("sandbox_id") or "default")
+    if not access.has_permission(identity, sandbox_id, permission):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            f"account.permission.{permission}",
+            "denied",
+            sandbox_id,
+            str(account.get("profile_id") or ""),
+        )
+        raise HTTPException(status_code=404, detail="Account not found")
+    return account, identity
 
 
-def _can_write_task_sessions(identity: access.AccessIdentity, profile: dict[str, object]) -> bool:
-    sandbox_id = str(profile.get("sandbox_id") or "default")
+def _can_read_task_sessions(identity: access.AccessIdentity, sandbox_id: str) -> bool:
+    sid = str(sandbox_id or "default")
+    return identity.is_admin or access.has_permission(identity, sid, "view")
+
+
+def _can_write_task_sessions(identity: access.AccessIdentity, sandbox_id: str) -> bool:
+    sid = str(sandbox_id or "default")
     return (
         identity.is_admin
-        or access.has_permission(identity, sandbox_id, "interact")
-        or access.has_permission(identity, sandbox_id, "automate")
+        or access.has_permission(identity, sid, "interact")
+        or access.has_permission(identity, sid, "automate")
     )
 
 
@@ -1528,10 +1884,11 @@ def _require_task_profile(
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     identity = _require_identity(scope)
+    sandbox_id = str(profile.get("sandbox_id") or "default")
     allowed = (
-        _can_write_task_sessions(identity, profile)
+        _can_write_task_sessions(identity, sandbox_id)
         if permission == "interact"
-        else _can_read_task_sessions(identity, profile)
+        else _can_read_task_sessions(identity, sandbox_id)
     )
     if not allowed:
         db.record_access_audit_event(
@@ -1539,7 +1896,7 @@ def _require_task_profile(
             identity.id,
             f"task_session.permission.{permission}",
             "denied",
-            str(profile.get("sandbox_id") or "default"),
+            sandbox_id,
             profile_id,
         )
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -1548,31 +1905,205 @@ def _require_task_profile(
 
 def _require_task_session(
     scope: Scope, session_id: str, permission: access.Permission = "view"
-) -> tuple[dict[str, object], dict[str, object], access.AccessIdentity]:
+) -> tuple[dict[str, object], dict[str, object] | None, access.AccessIdentity]:
     session = db.get_task_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Task session not found")
-    profile = db.get_profile(str(session["profile_id"]))
     identity = _require_identity(scope)
-    allowed = False
-    if profile:
-        allowed = (
-            _can_write_task_sessions(identity, profile)
-            if permission == "interact"
-            else _can_read_task_sessions(identity, profile)
+    sandbox_id = str(session.get("sandbox_id") or "default")
+    allowed = (
+        _can_write_task_sessions(identity, sandbox_id)
+        if permission == "interact"
+        else _can_read_task_sessions(identity, sandbox_id)
+    )
+    if not allowed:
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            f"task_session.permission.{permission}",
+            "denied",
+            sandbox_id,
+            str(session.get("profile_id") or ""),
         )
-    if not profile or not allowed:
-        if profile:
-            db.record_access_audit_event(
-                identity.kind,
-                identity.id,
-                f"task_session.permission.{permission}",
-                "denied",
-                str(profile.get("sandbox_id") or "default"),
-                str(profile.get("id") or session["profile_id"]),
-            )
         raise HTTPException(status_code=404, detail="Task session not found")
+    profile = None
+    profile_id = session.get("profile_id")
+    if profile_id:
+        profile = db.get_profile(str(profile_id))
     return session, profile, identity
+
+
+def _can_automate_task_sandbox(identity: access.AccessIdentity, sandbox_id: str) -> bool:
+    sid = str(sandbox_id or "default")
+    return identity.is_admin or access.has_permission(identity, sid, "automate")
+
+
+def _can_operate_task_sandbox(identity: access.AccessIdentity, sandbox_id: str) -> bool:
+    sid = str(sandbox_id or "default")
+    return identity.is_admin or access.has_permission(identity, sid, "operate")
+
+
+def _require_task_run(
+    scope: Scope,
+    run_id: str,
+    permission: access.Permission,
+) -> tuple[dict[str, object], access.AccessIdentity]:
+    run = db.get_task_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    identity = _require_identity(scope)
+    sandbox_id = str(run.get("sandbox_id") or "default")
+    if permission == "view":
+        allowed = _can_read_task_sessions(identity, sandbox_id)
+    elif permission == "automate":
+        allowed = _can_automate_task_sandbox(identity, sandbox_id)
+    else:
+        allowed = access.has_permission(identity, sandbox_id, permission) or identity.is_admin
+    if not allowed:
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            f"task_run.permission.{permission}",
+            "denied",
+            sandbox_id,
+            str(run.get("profile_id") or run.get("profile_id_snapshot") or ""),
+        )
+        raise HTTPException(status_code=404, detail="Task run not found")
+    return run, identity
+
+
+def _task_run_response(run: dict[str, object]) -> TaskRunResponse:
+    return TaskRunResponse(**run)
+
+
+def _require_worker(request: Request) -> access.WorkerIdentity:
+    """Return the middleware-resolved worker identity or 401."""
+    state = request.scope.get("state") or {}
+    worker = state.get("worker_identity")
+    if isinstance(worker, access.WorkerIdentity) and worker.active:
+        return worker
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _worker_bearer_from_request(request: Request) -> str:
+    auth = request.headers.get("authorization") or ""
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not access.is_valid_worker_key(token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return token
+
+
+def _worker_not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail="Not found")
+
+
+def _profile_harness_compatible(profile_harness: object, run_harness: object) -> bool:
+    profile_value = str(profile_harness or "codex")
+    run_value = str(run_harness or "")
+    return (
+        profile_value == run_value
+        or (profile_value == "antigravity" and run_value == "acpx")
+        or profile_value in worker_runtime_mod.UNIVERSAL_PROFILE_HARNESSES
+        or run_value in worker_runtime_mod.UNIVERSAL_PROFILE_HARNESSES
+    )
+
+
+def _selected_provider_model_alias(body: TaskRunCreate) -> str | None:
+    if body.provider:
+        provider_alias = str(body.provider.model_alias or "").strip()
+        if provider_alias:
+            return provider_alias[:80]
+    run_alias = str(body.model_alias or "").strip()
+    if run_alias:
+        return run_alias[:80]
+    if (
+        body.provider
+        and body.provider.id == "grok"
+        and body.provider.transport == "openai-compatible"
+    ):
+        return DEFAULT_GROK_OPENAI_COMPATIBLE_MODEL_ALIAS
+    return None
+
+
+def _require_provider_ready_for_task_run(body: TaskRunCreate) -> None:
+    if body.provider is None:
+        return
+    target = worker_runtime_service.provider_readiness_target(
+        body.provider.id,
+        body.provider.transport,
+    )
+    if not bool(target.get("ready")):
+        raise HTTPException(status_code=409, detail="provider_transport_not_ready")
+
+    selected_alias = _selected_provider_model_alias(body)
+    aliases = target.get("model_aliases")
+    model_aliases = aliases if isinstance(aliases, list) else []
+    if body.provider.transport == "openai-compatible":
+        if selected_alias not in model_aliases:
+            raise HTTPException(status_code=422, detail="provider_model_not_ready")
+        return
+    if selected_alias and model_aliases and selected_alias not in model_aliases:
+        raise HTTPException(status_code=422, detail="provider_model_not_ready")
+
+
+async def _prepare_run_browser_for_capability(worker_id: str, run_id: str) -> None:
+    """Launch/validate Manager-owned CDP before issuing a worker run token."""
+    try:
+        run = worker_runtime_service.require_bound_claim(worker_id, run_id)
+    except worker_runtime_mod.WorkerNotFound:
+        raise
+    worker_runtime_service.require_bound_provider_readiness(worker_id, run_id)
+    profile_id = str(run.get("profile_id") or run.get("profile_id_snapshot") or "")
+    if not profile_id:
+        raise worker_runtime_mod.WorkerNotFound(run_id)
+    profile = db.get_profile(profile_id)
+    if profile is None:
+        raise worker_runtime_mod.WorkerNotFound(run_id)
+
+    # Preserve the legacy unit-test path for claims that did not ask Manager to
+    # launch and have no running browser yet. The launch_if_stopped path and any
+    # already-running profile are strictly checked before token issue.
+    should_probe_cdp = bool(run.get("launch_if_stopped")) or profile_id in browser_mgr.running
+    if not should_probe_cdp:
+        return
+
+    launched = False
+    if profile_id not in browser_mgr.running:
+        try:
+            await browser_mgr.launch(profile)
+            launched = True
+        except RuntimeError as exc:
+            if profile_id not in browser_mgr.running:
+                raise exc
+
+    evidence = await browser_mgr.wait_for_cdp_ready(profile, timeout_seconds=5.0)
+    evidence.update(
+        {
+            "source": "manager",
+            "launched": launched,
+            "validated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    db.record_task_run_launch_evidence(run_id, evidence=evidence)
+
+
+def _require_project_sandbox(
+    scope: Scope, sandbox_id: str, permission: access.Permission
+) -> access.AccessIdentity:
+    """Authorize project access with sandbox-scoped indistinguishable 404."""
+    identity = _require_identity(scope)
+    sid = str(sandbox_id or "default")
+    if access.has_permission(identity, sid, permission) or identity.is_admin:
+        return identity
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        f"project.permission.{permission}",
+        "denied",
+        sid,
+        None,
+    )
+    raise HTTPException(status_code=404, detail="Project not found")
 
 
 def _sanitize_task_value(value: object, depth: int = 0) -> object:
@@ -1626,6 +2157,152 @@ async def _require_websocket_profile_permission(
         await websocket.close(code=4404, reason="Profile not found")
         return None
     return profile, identity
+
+
+def _owner_from_identity(identity: access.AccessIdentity) -> tuple[str, str]:
+    return identity.kind, "" if identity.id is None else str(identity.id)
+
+
+def _reject_token_like_query(request: Request) -> None:
+    if cdp_gateway.query_has_token_like_key(request.query_params.keys()):
+        raise HTTPException(status_code=400, detail="Invalid request")
+
+
+async def _reject_websocket_token_like_query(websocket: WebSocket) -> bool:
+    query = dict(websocket.query_params)
+    if cdp_gateway.query_has_token_like_key(query.keys()):
+        await websocket.close(code=4400, reason="Invalid request")
+        return True
+    return False
+
+
+def _automation_lease_header(headers) -> str | None:
+    for key, value in headers.items():
+        if key.lower() == "x-cbm-automation-lease":
+            text = str(value).strip()
+            return text or None
+    return None
+
+
+def _run_capability_bearer(request: Request) -> str | None:
+    state = request.scope.get("state") or {}
+    token = state.get("run_capability_token")
+    if isinstance(token, str) and token:
+        return token
+    auth = request.headers.get("authorization") or ""
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        if access.is_run_capability_token(token):
+            return token
+    return None
+
+
+def _require_cdp_automation_access(
+    request: Request,
+    *,
+    profile_id: str,
+) -> automation_leases.LeaseRecord:
+    """Accept direct actor lease header OR bound run capability Bearer."""
+    run_token = _run_capability_bearer(request)
+    if run_token:
+        record = worker_runtime_service.validate_run_capability(run_token, profile_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        return record
+
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    return _require_direct_automation_lease(
+        profile_id=profile_id,
+        identity=identity,
+        token=_automation_lease_header(request.headers),
+    )
+
+
+async def _require_websocket_cdp_automation_access(
+    websocket: WebSocket,
+    *,
+    profile_id: str,
+) -> automation_leases.LeaseRecord | None:
+    state = websocket.scope.get("state") or {}
+    run_token = state.get("run_capability_token")
+    if not isinstance(run_token, str) or not run_token:
+        auth = None
+        for key, value in websocket.scope.get("headers", []):
+            if key.lower() == b"authorization":
+                text = value.decode("latin-1")
+                if text.startswith("Bearer "):
+                    auth = text[7:].strip()
+                break
+        if access.is_run_capability_token(auth):
+            run_token = auth
+    if isinstance(run_token, str) and run_token:
+        record = worker_runtime_service.validate_run_capability(run_token, profile_id)
+        if record is None:
+            await websocket.close(code=4403, reason="Automation lease required")
+            return None
+        return record
+    access_result = await _require_websocket_profile_permission(
+        websocket, profile_id, "automate"
+    )
+    if not access_result:
+        return None
+    _profile, identity = access_result
+    return await _require_websocket_direct_automation_lease(
+        websocket, profile_id=profile_id, identity=identity
+    )
+
+
+def _require_direct_automation_lease(
+    *,
+    profile_id: str,
+    identity: access.AccessIdentity,
+    token: str | None,
+    lease_id: str | None = None,
+) -> automation_leases.LeaseRecord:
+    if not token:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    owner_kind, owner_id = _owner_from_identity(identity)
+    if lease_id:
+        record = automation_lease_service.validate(
+            lease_id,
+            token,
+            profile_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+        )
+    else:
+        record = automation_lease_service.validate_for_actor(
+            token,
+            profile_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+        )
+    if record is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return record
+
+
+async def _require_websocket_direct_automation_lease(
+    websocket: WebSocket,
+    *,
+    profile_id: str,
+    identity: access.AccessIdentity,
+) -> automation_leases.LeaseRecord | None:
+    token = _automation_lease_header(dict(websocket.headers))
+    if not token:
+        await websocket.close(code=4403, reason="Automation lease required")
+        return None
+    owner_kind, owner_id = _owner_from_identity(identity)
+    record = automation_lease_service.validate_for_actor(
+        token,
+        profile_id,
+        owner_kind=owner_kind,
+        owner_id=owner_id,
+    )
+    if record is None:
+        await websocket.close(code=4403, reason="Automation lease required")
+        return None
+    return record
 
 
 def _profile_response(profile: dict[str, object], identity: access.AccessIdentity) -> ProfileResponse:
@@ -1746,6 +2423,25 @@ def _access_agent_response(agent: dict[str, object]) -> AccessAgentResponse:
     )
 
 
+@app.get("/api/v2/capabilities")
+async def get_control_plane_capabilities(request: Request):
+    """Versioned capability discovery for CLI/MCP/agent clients."""
+    _require_identity(request.scope)
+    local_mac_available = os.environ.get("CBM_LOCAL_MAC_AVAILABLE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    return control_plane_capabilities_payload(local_mac_available=local_mac_available)
+
+
+@app.get("/api/v2/schemas/control-plane-resource-v1")
+async def get_control_plane_resource_schema(request: Request):
+    """Canonical resource-envelope contract; contains no secrets or raw endpoints."""
+    _require_identity(request.scope)
+    return control_plane_resource_schema()
+
+
 def _normalize_access_grants(grants: list[object]) -> list[dict[str, object]]:
     normalized: list[dict[str, object]] = []
     seen: set[tuple[object, object]] = set()
@@ -1788,19 +2484,24 @@ def _validate_access_group_ids(group_ids: list[str]) -> list[str]:
 
 def _revoke_user_websocket_access(user_ids: list[str]) -> None:
     for user_id in set(user_ids):
-        _revoke_websocket_access(identity_kind="user", identity_id=user_id)
+        _revoke_identity_access(identity_kind="user", identity_id=user_id)
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
 
 
 @app.get("/api/auth/status")
-async def auth_status(request: starlette.requests.Request):
+async def auth_status(
+    request: starlette.requests.Request,
+    response: Response,
+):
     """Check if auth is enabled and if the current request is authenticated.
 
     Exempt from auth middleware so the frontend can always call it.
     """
-    if ACCESS_CONTROL_ENABLED:
+    if DEV_AUTO_ADMIN:
+        identity = access.bootstrap_identity()
+    elif ACCESS_CONTROL_ENABLED:
         identity = _access_identity(request.scope)
     elif AUTH_TOKEN and _check_auth(request.scope):
         identity = access.bootstrap_identity()
@@ -1808,15 +2509,16 @@ async def auth_status(request: starlette.requests.Request):
         identity = _access_identity(request.scope)
     else:
         identity = None
-    authenticated = (
+    authenticated = True if DEV_AUTO_ADMIN else (
         bool(identity)
         if ACCESS_CONTROL_ENABLED
         else _check_auth(request.scope)
         if AUTH_TOKEN
         else False
     )
+    response.headers["Cache-Control"] = "private, no-store"
     return {
-        "auth_required": AUTH_TOKEN is not None,
+        "auth_required": False if DEV_AUTO_ADMIN else AUTH_TOKEN is not None,
         "access_control_enabled": ACCESS_CONTROL_ENABLED,
         "authenticated": authenticated,
         "identity": identity.public() if identity else None,
@@ -1825,6 +2527,8 @@ async def auth_status(request: starlette.requests.Request):
 
 @app.post("/api/auth/login")
 async def auth_login(body: LoginRequest, request: Request, response: Response):
+    if DEV_AUTO_ADMIN:
+        return {"ok": True, "identity": access.bootstrap_identity().public()}
     if not AUTH_TOKEN:
         return {"ok": True}
 
@@ -1902,6 +2606,25 @@ async def auth_logout(request: Request, response: Response):
     response.delete_cookie(
         key="cbm_session", path="/", secure=is_https, samesite="strict",
     )
+    # Legacy principal-only bridge path from the first bridge slice.
+    response.delete_cookie(
+        key=access.BRIDGE_COOKIE_NAME,
+        path=access.BRIDGE_COOKIE_PATH_LEGACY,
+        secure=is_https,
+        samesite="strict",
+    )
+    # Per-profile observer paths: use existing list_profiles (no new persistence).
+    for profile in db.list_profiles():
+        try:
+            path = access.bridge_cookie_path(str(profile["id"]))
+        except ValueError:
+            continue
+        response.delete_cookie(
+            key=access.BRIDGE_COOKIE_NAME,
+            path=path,
+            secure=is_https,
+            samesite="strict",
+        )
     return {"ok": True}
 
 
@@ -1964,7 +2687,7 @@ async def update_access_user(user_id: str, body: AccessUserUpdate, request: Requ
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if {"password_hash", "role", "active", "grants", "group_ids"}.intersection(data):
-        _revoke_websocket_access(identity_kind="user", identity_id=user_id)
+        _revoke_identity_access(identity_kind="user", identity_id=user_id)
     if "group_ids" in data:
         db.record_access_audit_event(
             actor.kind, actor.id, "access_user.groups.update", "allowed"
@@ -2068,7 +2791,7 @@ async def update_access_agent(agent_id: str, body: AccessAgentUpdate, request: R
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     if {"active", "grants"}.intersection(data):
-        _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
+        _revoke_identity_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.update", "allowed")
     return _access_agent_response(agent)
 
@@ -2080,7 +2803,7 @@ async def delete_access_agent(agent_id: str, request: Request):
     deleted = db.delete_access_agent(agent_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agent not found")
-    _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
+    _revoke_identity_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.delete", "allowed")
     return Response(status_code=204)
 
@@ -2092,7 +2815,7 @@ async def rotate_access_agent_key(agent_id: str, request: Request):
     agent = db.update_access_agent(agent_id, key_hash=access.hash_agent_key(key))
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    _revoke_websocket_access(identity_kind="agent", identity_id=agent_id)
+    _revoke_identity_access(identity_kind="agent", identity_id=agent_id)
     db.record_access_audit_event(actor.kind, actor.id, "access_agent.rotate_key", "allowed")
     return AccessAgentCreatedResponse(**_access_agent_response(agent).model_dump(), api_key=key)
 
@@ -2149,6 +2872,85 @@ async def list_access_sandboxes(request: Request):
 # ── Task sessions ───────────────────────────────────────────────────────────
 
 
+@app.post("/api/projects", response_model=ProjectResponse, status_code=201)
+async def create_project(body: ProjectCreate, request: Request):
+    identity = _require_project_sandbox(request.scope, body.sandbox_id, "operate")
+    try:
+        project = db.create_project(
+            body.sandbox_id,
+            body.id,
+            body.name,
+            created_by_kind=identity.kind,
+            created_by_id=identity.id,
+            accent_color=body.accent_color,
+            description=body.description,
+            default_retention=body.default_retention,
+        )
+    except db.ProjectConflictError as exc:
+        raise HTTPException(status_code=409, detail="Project already exists") from exc
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "project.create",
+        "allowed",
+        body.sandbox_id,
+        body.id,
+    )
+    return ProjectResponse(**project)
+
+
+@app.get("/api/projects", response_model=list[ProjectResponse])
+async def list_projects(
+    request: Request,
+    sandbox_id: str = Query(..., min_length=1, max_length=80),
+    limit: int = Query(200, ge=1, le=500),
+):
+    _require_project_sandbox(request.scope, sandbox_id, "view")
+    return [
+        ProjectResponse(**project)
+        for project in db.list_projects(sandbox_id, limit=limit)
+    ]
+
+
+@app.get("/api/projects/{project_id}", response_model=ProjectResponse)
+async def get_project(
+    project_id: str,
+    request: Request,
+    sandbox_id: str = Query(..., min_length=1, max_length=80),
+):
+    _require_project_sandbox(request.scope, sandbox_id, "view")
+    project = db.get_project(sandbox_id, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return ProjectResponse(**project)
+
+
+@app.patch("/api/projects/{project_id}", response_model=ProjectResponse)
+async def update_project(
+    project_id: str,
+    body: ProjectUpdate,
+    request: Request,
+    sandbox_id: str = Query(..., min_length=1, max_length=80),
+):
+    identity = _require_project_sandbox(request.scope, sandbox_id, "operate")
+    project = db.update_project(
+        sandbox_id,
+        project_id,
+        **body.model_dump(exclude_unset=True),
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "project.update",
+        "allowed",
+        sandbox_id,
+        project_id,
+    )
+    return ProjectResponse(**project)
+
+
 @app.post("/api/task-sessions", response_model=TaskSessionResponse, status_code=201)
 async def create_task_session(body: TaskSessionCreate, request: Request):
     profile, identity = _require_task_profile(request.scope, body.profile_id, "interact")
@@ -2184,10 +2986,11 @@ async def list_task_sessions(
     profile_id: str = Query(..., min_length=1, max_length=120),
     limit: int = Query(100, ge=1, le=200),
 ):
-    profile, _identity = _require_task_profile(request.scope, profile_id, "view")
+    profile, identity = _require_task_profile(request.scope, profile_id, "view")
     return [
         TaskSessionResponse(**session)
         for session in db.list_task_sessions(str(profile["id"]), limit=limit)
+        if _can_read_task_sessions(identity, str(session.get("sandbox_id") or "default"))
     ]
 
 
@@ -2195,6 +2998,53 @@ async def list_task_sessions(
 async def get_task_session(session_id: str, request: Request):
     session, _profile, _identity = _require_task_session(request.scope, session_id, "view")
     return TaskSessionResponse(**session)
+
+
+@app.patch("/api/task-sessions/{session_id}", response_model=TaskSessionResponse)
+async def update_task_session(
+    session_id: str,
+    body: TaskSessionUpdate,
+    request: Request,
+):
+    session, _profile, identity = _require_task_session(
+        request.scope, session_id, "interact"
+    )
+    updates = body.model_dump(exclude_unset=True)
+    expected_row_version = int(updates.pop("row_version"))
+    if "metadata" in updates and updates["metadata"] is not None:
+        updates["metadata"] = _sanitize_task_metadata(updates["metadata"])
+    try:
+        updated = db.update_task_session(
+            str(session["id"]),
+            expected_row_version=expected_row_version,
+            **updates,
+        )
+    except db.OptimisticConcurrencyError as exc:
+        raise HTTPException(status_code=409, detail="Task session conflict") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Task session not found")
+    db.record_task_event(
+        str(updated["id"]),
+        "task_session.updated",
+        identity.kind,
+        identity.id,
+        {
+            "workflow_state": updated.get("workflow_state"),
+            "archived_at": updated.get("archived_at"),
+            "row_version": updated.get("row_version"),
+        },
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_session.update",
+        "allowed",
+        str(updated.get("sandbox_id") or "default"),
+        str(updated.get("profile_id") or ""),
+    )
+    return TaskSessionResponse(**updated)
 
 
 def _append_task_user_message(
@@ -2205,8 +3055,8 @@ def _append_task_user_message(
     commands: list[object],
     metadata: dict[str, object],
 ) -> TaskMessageResponse:
-    session, profile, identity = _require_task_session(scope, session_id, "interact")
-    if profile_id and profile_id != str(session["profile_id"]):
+    session, _profile, identity = _require_task_session(scope, session_id, "interact")
+    if profile_id and profile_id != str(session.get("profile_id") or ""):
         requested_profile = db.get_profile(profile_id)
         if requested_profile:
             db.record_access_audit_event(
@@ -2227,14 +3077,19 @@ def _append_task_user_message(
     if command_payload:
         stored_metadata_input["commands"] = command_payload
     stored_metadata = _sanitize_task_metadata(stored_metadata_input)
-    message = db.append_task_message(
-        str(session["id"]),
-        "user",
-        text,
-        identity.kind,
-        identity.id,
-        stored_metadata,
-    )
+    try:
+        message = db.append_task_message(
+            str(session["id"]),
+            "user",
+            text,
+            identity.kind,
+            identity.id,
+            stored_metadata,
+        )
+    except db.TaskArchivedError as exc:
+        raise HTTPException(
+            status_code=409, detail="Task session is archived"
+        ) from exc
     host_command_count = sum(
         1 for command in command_payload
         if isinstance(command, dict) and command.get("scope") == "host"
@@ -2257,8 +3112,8 @@ def _append_task_user_message(
         identity.id,
         "task_message.append",
         "allowed",
-        str(profile.get("sandbox_id") or "default"),
-        str(profile["id"]),
+        str(session.get("sandbox_id") or "default"),
+        str(session.get("profile_id") or ""),
     )
     return TaskMessageResponse(**message)
 
@@ -2319,6 +3174,669 @@ async def list_task_events(
         TaskEventResponse(**event)
         for event in db.list_task_events(str(session["id"]), limit=limit)
     ]
+
+
+@app.post(
+    "/api/task-sessions/{session_id}/runs",
+    response_model=TaskRunResponse,
+    status_code=201,
+)
+async def create_task_run(session_id: str, body: TaskRunCreate, request: Request):
+    session = db.get_task_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Task session not found")
+    identity = _require_identity(request.scope)
+    sandbox_id = str(session.get("sandbox_id") or "default")
+    if not _can_automate_task_sandbox(identity, sandbox_id):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "task_run.permission.automate",
+            "denied",
+            sandbox_id,
+            str(session.get("profile_id") or ""),
+        )
+        raise HTTPException(status_code=404, detail="Task session not found")
+
+    profile = db.get_profile(body.profile_id)
+    if (
+        not profile
+        or str(profile.get("sandbox_id") or "default") != sandbox_id
+        or not access.can_access_profile(identity, profile, "automate")
+    ):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "task_run.permission.automate",
+            "denied",
+            sandbox_id,
+            body.profile_id,
+        )
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if body.launch_if_stopped and not _can_operate_task_sandbox(identity, sandbox_id):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "task_run.permission.operate",
+            "denied",
+            sandbox_id,
+            body.profile_id,
+        )
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if not _profile_harness_compatible(profile.get("harness"), body.harness):
+        raise HTTPException(status_code=422, detail="Profile harness is not compatible with run harness")
+    if (
+        str(profile.get("harness") or "codex") == "antigravity"
+        and body.harness == "acpx"
+        and body.agent != "grok-build"
+    ):
+        raise HTTPException(status_code=422, detail="Antigravity profiles require ACPX with Grok Build")
+
+    if not body.allowed_origins and not _can_operate_task_sandbox(identity, sandbox_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Empty allowed_origins requires operate permission",
+        )
+
+    _require_provider_ready_for_task_run(body)
+
+    snapshot, decision = db.build_run_health_gate(str(profile["id"]))
+    run = db.create_task_run_with_message(
+        task_session_id=str(session["id"]),
+        content=body.task,
+        profile_id=str(profile["id"]),
+        sandbox_id=sandbox_id,
+        harness=body.harness,
+        agent=body.agent,
+        launch_if_stopped=body.launch_if_stopped,
+        allowed_origins=list(body.allowed_origins),
+        max_steps=body.max_steps,
+        timeout_seconds=body.timeout_seconds,
+        model_alias=body.model_alias,
+        health_snapshot=snapshot,
+        health_decision=decision,
+        created_by_kind=identity.kind,
+        created_by_id=identity.id,
+        message_metadata={"source": "task_run"},
+        provider=body.provider.model_dump(exclude_none=True) if body.provider else None,
+        browser_tools=[tool.model_dump() for tool in body.browser_tools],
+        routing_policy=body.routing_policy.model_dump() if body.routing_policy else None,
+    )
+    db.record_task_event(
+        str(session["id"]),
+        "task_run.created",
+        identity.kind,
+        identity.id,
+        {"run_id": run["id"], "status": run["status"]},
+    )
+    worker_runtime_service.refresh_claim_eligibility()
+    return _task_run_response(run)
+
+
+@app.get("/api/task-runs/{run_id}", response_model=TaskRunResponse)
+async def get_task_run(run_id: str, request: Request):
+    run, _identity = _require_task_run(request.scope, run_id, "view")
+    return _task_run_response(run)
+
+
+@app.post("/api/task-runs/{run_id}/cancel", response_model=TaskRunResponse)
+async def cancel_task_run(run_id: str, request: Request):
+    _run, identity = _require_task_run(request.scope, run_id, "automate")
+    cancelled, cleanup = worker_runtime_service.cancel_run(run_id)
+    _apply_terminal_cleanup(cleanup)
+    if cancelled is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_run.cancel",
+        "allowed",
+        str(cancelled.get("sandbox_id") or "default"),
+        str(cancelled.get("profile_id") or cancelled.get("profile_id_snapshot") or ""),
+    )
+    return _task_run_response(cancelled)
+
+
+@app.post("/api/task-runs/{run_id}/retry-health", response_model=TaskRunResponse)
+async def retry_task_run_health(run_id: str, request: Request):
+    _run, identity = _require_task_run(request.scope, run_id, "automate")
+    updated = db.retry_task_run_health(run_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    cleanup_lease_ids = tuple(updated.pop("_cleanup_lease_ids", ()) or ())
+    _apply_terminal_cleanup(
+        worker_runtime_mod.TerminalCleanup(lease_ids=cleanup_lease_ids)
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_run.retry_health",
+        "allowed",
+        str(updated.get("sandbox_id") or "default"),
+        str(updated.get("profile_id") or updated.get("profile_id_snapshot") or ""),
+    )
+    return _task_run_response(updated)
+
+
+@app.post("/api/task-runs/{run_id}/override-health", response_model=TaskRunResponse)
+async def override_task_run_health(
+    run_id: str,
+    body: TaskRunHealthOverrideRequest,
+    request: Request,
+):
+    _run, identity = _require_task_run(request.scope, run_id, "automate")
+    updated = db.override_task_run_health(
+        run_id,
+        reason=body.reason,
+        actor_kind=identity.kind,
+        actor_id=identity.id,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    cleanup_lease_ids = tuple(updated.pop("_cleanup_lease_ids", ()) or ())
+    _apply_terminal_cleanup(
+        worker_runtime_mod.TerminalCleanup(lease_ids=cleanup_lease_ids)
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "task_run.override_health",
+        "allowed",
+        str(updated.get("sandbox_id") or "default"),
+        str(updated.get("profile_id") or updated.get("profile_id_snapshot") or ""),
+    )
+    return _task_run_response(updated)
+
+
+@app.get("/api/task-runs/{run_id}/outputs", response_model=list[TaskOutputResponse])
+async def list_task_run_outputs(
+    run_id: str,
+    request: Request,
+    after_sequence: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+):
+    run, _identity = _require_task_run(request.scope, run_id, "view")
+    return [
+        TaskOutputResponse(**output)
+        for output in db.list_task_outputs(
+            str(run["id"]),
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+    ]
+
+
+@app.post(
+    "/internal/task-runs/{run_id}/outputs",
+    response_model=TaskOutputResponse,
+    status_code=201,
+)
+async def append_internal_task_run_output(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        worker_runtime_service.require_bound_claim(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    try:
+        raw = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid output payload") from exc
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=422, detail="Invalid output payload")
+    try:
+        body = TaskOutputCreate.model_validate(raw)
+    except Exception as exc:
+        # Keep diagnostics generic; never echo rejected secret values.
+        raise HTTPException(status_code=422, detail="Invalid output payload") from exc
+    try:
+        output = db.append_task_output(
+            run_id,
+            idempotency_key=body.idempotency_key,
+            kind=body.kind,
+            summary=body.summary,
+            payload=dict(body.payload),
+        )
+    except KeyError as exc:
+        raise _worker_not_found() from exc
+    except db.TaskOutputConflictError as exc:
+        raise HTTPException(status_code=409, detail="Output idempotency conflict") from exc
+    return TaskOutputResponse(**output)
+
+
+@app.post(
+    "/internal/task-runs/{run_id}/recorder-batches",
+    response_model=TaskOutputResponse,
+    status_code=201,
+)
+async def append_internal_secure_action_recorder_batch(run_id: str, request: Request):
+    worker = _require_worker(request)
+    worker_key = _worker_bearer_from_request(request)
+    try:
+        run = worker_runtime_service.require_bound_claim(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    raw_body = await request.body()
+    try:
+        redacted = secure_action_recorder.ingest_secure_action_recorder_batch(
+            run_id=run_id,
+            worker_id=worker.id,
+            profile_id=str(run.get("profile_id") or run.get("profile_id_snapshot") or ""),
+            raw_body=raw_body,
+            worker_key=worker_key,
+            allowed_origins=list(run.get("allowed_origins") or []),
+            nonce_cache=secure_action_recorder_nonce_cache,
+        )
+    except secure_action_recorder.RecorderBatchError as exc:
+        if "nonce replay" in str(exc):
+            raise HTTPException(status_code=409, detail="Recorder nonce replay") from exc
+        raise HTTPException(status_code=422, detail="Invalid recorder batch") from exc
+    try:
+        output = db.append_task_output(
+            run_id,
+            idempotency_key=str(redacted["idempotency_key"]),
+            kind="action",
+            summary=str(redacted["summary"]),
+            payload=dict(redacted["payload"]),
+        )
+    except KeyError as exc:
+        raise _worker_not_found() from exc
+    except db.TaskOutputConflictError as exc:
+        raise HTTPException(status_code=409, detail="Output idempotency conflict") from exc
+    return TaskOutputResponse(**output)
+
+
+@app.post("/internal/task-runs/claim", response_model=WorkerClaimResponse)
+async def claim_internal_task_run(
+    request: Request,
+    harness: Harness | None = Query(default=None),
+):
+    worker = _require_worker(request)
+    if harness is not None:
+        worker_runtime_service.record_harness_poll(worker.id, harness)
+    claimed = worker_runtime_service.claim_next(
+        worker.id,
+        harnesses={harness} if harness is not None else None,
+    )
+    if claimed is None:
+        return Response(status_code=204)
+    return WorkerClaimResponse(**claimed)
+
+
+@app.get(
+    "/api/task-harnesses/{harness}/presence",
+    response_model=TaskHarnessPresenceResponse,
+)
+async def get_task_harness_presence(harness: Harness, request: Request):
+    _require_identity(request.scope)
+    return TaskHarnessPresenceResponse(
+        **worker_runtime_service.harness_presence(harness)
+    )
+
+
+@app.post("/internal/task-harnesses/acpx/preflights", status_code=204)
+async def report_internal_acpx_preflight(
+    body: WorkerAcpxPreflightRequest,
+    request: Request,
+):
+    worker = _require_worker(request)
+    worker_runtime_service.record_agent_preflight(
+        worker.id,
+        harness="acpx",
+        agent=body.agent,
+        ready=body.ready,
+        reason_code=body.reason_code,
+    )
+    return Response(status_code=204)
+
+
+@app.get(
+    "/api/task-harnesses/acpx/preflights",
+    response_model=TaskHarnessPreflightsResponse,
+)
+async def get_acpx_preflights(request: Request):
+    _require_identity(request.scope)
+    return TaskHarnessPreflightsResponse(
+        **worker_runtime_service.agent_preflights("acpx")
+    )
+
+
+@app.post("/internal/browser-tools/readiness", status_code=204)
+async def report_internal_browser_tool_readiness(
+    body: WorkerBrowserToolReadinessRequest,
+    request: Request,
+):
+    worker = _require_worker(request)
+    worker_runtime_service.record_agent_preflight(
+        worker.id,
+        harness=worker_runtime_mod.BROWSER_TOOL_PREFLIGHT_HARNESS,
+        agent=body.id,
+        ready=body.ready,
+        reason_code=body.reason_code,
+    )
+    return Response(status_code=204)
+
+
+@app.get(
+    "/api/browser-tools/readiness",
+    response_model=BrowserToolReadinessResponse,
+)
+async def get_browser_tool_readiness(request: Request):
+    _require_identity(request.scope)
+    return BrowserToolReadinessResponse(
+        **worker_runtime_service.browser_tool_preflights()
+    )
+
+
+@app.post("/internal/providers/readiness", status_code=204)
+async def report_internal_provider_readiness(
+    body: WorkerProviderPreflightRequest,
+    request: Request,
+):
+    worker = _require_worker(request)
+    worker_runtime_service.record_provider_preflight(
+        worker.id,
+        provider=body.provider,
+        transport=body.transport,
+        ready=body.ready,
+        reason_code=body.reason_code,
+        model_aliases=body.model_aliases,
+    )
+    return Response(status_code=204)
+
+
+@app.get(
+    "/api/providers/readiness",
+    response_model=ProviderReadinessResponse,
+)
+async def get_provider_readiness(request: Request):
+    _require_identity(request.scope)
+    return ProviderReadinessResponse(**worker_runtime_service.provider_preflights())
+
+
+@app.post(
+    "/internal/task-runs/{run_id}/heartbeat",
+    response_model=WorkerHeartbeatResponse,
+)
+async def heartbeat_internal_task_run(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        body = worker_runtime_service.heartbeat(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    return WorkerHeartbeatResponse(**body)
+
+
+@app.post(
+    "/internal/task-runs/{run_id}/capability",
+    response_model=WorkerCapabilityResponse,
+)
+async def issue_internal_task_run_capability(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        await _prepare_run_browser_for_capability(worker.id, run_id)
+        body = worker_runtime_service.issue_capability(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    except RuntimeError as exc:
+        logger.warning("Run capability CDP preparation failed for %s: %s", run_id, exc)
+        raise HTTPException(status_code=409, detail="Not ready") from exc
+    except worker_runtime_mod.CapabilityConflict as exc:
+        raise HTTPException(status_code=409, detail="Not found") from exc
+    except worker_runtime_mod.CapabilityNotReady as exc:
+        # Waiting/blocked: no token; deterministic state without secrets.
+        _apply_terminal_cleanup(
+            worker_runtime_mod.TerminalCleanup(lease_ids=tuple(exc.lease_ids))
+        )
+        raise HTTPException(
+            status_code=409 if exc.blocked else 409,
+            detail="Not ready",
+        ) from exc
+    return WorkerCapabilityResponse(**body)
+
+
+@app.delete("/internal/task-runs/{run_id}/capability")
+async def revoke_internal_task_run_capability(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        cleanup = worker_runtime_service.revoke_capability(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    _apply_terminal_cleanup(cleanup)
+    return Response(status_code=204)
+
+
+@app.put("/internal/task-runs/{run_id}/screenshots/{output_id}")
+async def put_internal_task_run_screenshot(
+    run_id: str, output_id: str, request: Request
+):
+    worker = _require_worker(request)
+    try:
+        worker_runtime_service.require_bound_claim(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    output = db.get_task_output(output_id)
+    if output is None or str(output.get("run_id")) != run_id:
+        raise _worker_not_found()
+    if output.get("kind") != "screenshot":
+        raise HTTPException(status_code=422, detail="Invalid screenshot")
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if content_type not in {"image/png", "image/jpeg"}:
+        raise HTTPException(status_code=422, detail="Invalid screenshot")
+    digest_header = request.headers.get("x-cbm-screenshot-sha256") or ""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > artifact_store_mod.MAX_BYTES:
+            raise HTTPException(status_code=422, detail="Invalid screenshot")
+        chunks.append(chunk)
+    body = b"".join(chunks)
+    run = db.get_task_run(run_id)
+    if run is None:
+        raise _worker_not_found()
+    try:
+        artifact_store.ingest_screenshot(
+            output_id=output_id,
+            body=body,
+            media_type=content_type,
+            sha256=digest_header,
+        )
+    except artifact_store_mod.ArtifactValidationError as exc:
+        raise HTTPException(status_code=422, detail="Invalid screenshot") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid screenshot") from exc
+    return Response(status_code=204)
+
+
+@app.post("/internal/task-runs/{run_id}/complete", response_model=TaskRunResponse)
+async def complete_internal_task_run(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        run, cleanup = worker_runtime_service.complete(worker.id, run_id)
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    _apply_terminal_cleanup(cleanup)
+    return _task_run_response(run)
+
+
+@app.post("/internal/task-runs/{run_id}/fail", response_model=TaskRunResponse)
+async def fail_internal_task_run(run_id: str, request: Request):
+    worker = _require_worker(request)
+    try:
+        raw = await request.json()
+        body = WorkerFailRequest.model_validate(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid request") from exc
+    try:
+        run, cleanup = worker_runtime_service.fail(
+            worker.id,
+            run_id,
+            error_code=body.error_code,
+            message=body.message,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid request") from exc
+    except worker_runtime_mod.WorkerNotFound as exc:
+        raise _worker_not_found() from exc
+    _apply_terminal_cleanup(cleanup)
+    return _task_run_response(run)
+
+
+@app.get("/api/task-outputs/{output_id}/screenshot")
+async def get_task_output_screenshot(output_id: str, request: Request):
+    """Authorized private screenshot bytes. Never exposes storage paths."""
+    identity = _require_identity(request.scope)
+    output = db.get_task_output(output_id)
+    if output is None:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    run = db.get_task_run(str(output["run_id"]))
+    if run is None:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    sandbox_id = str(run.get("sandbox_id") or "default")
+    if not _can_read_task_sessions(identity, sandbox_id):
+        db.record_access_audit_event(
+            identity.kind,
+            identity.id,
+            "task_output.screenshot.view",
+            "denied",
+            sandbox_id,
+            str(run.get("profile_id") or run.get("profile_id_snapshot") or ""),
+        )
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    try:
+        payload = artifact_store.read_for_output(output_id)
+    except (artifact_store_mod.ArtifactNotFound, artifact_store_mod.ArtifactExpired):
+        raise HTTPException(status_code=404, detail="Screenshot not found") from None
+    except Exception:
+        raise HTTPException(status_code=404, detail="Screenshot not found") from None
+    if payload.sandbox_id != sandbox_id:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    return Response(
+        content=payload.body,
+        media_type=payload.media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{payload.filename}"',
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+def _orca_owner_key(identity: access.AccessIdentity) -> str:
+    return f"{identity.kind}:{identity.id or identity.display_name or 'anonymous'}"
+
+
+def _raise_orca_error(exc: orca_adapter_mod.OrcaAdapterError) -> None:
+    raise HTTPException(
+        status_code=exc.status_code,
+        detail={"code": exc.code, "message": exc.message},
+    ) from exc
+
+
+@app.get("/api/orca/capabilities", response_model=OrcaCapabilitiesResponse)
+async def get_orca_capabilities(request: Request):
+    """Honest Orca capability surface (pause/resume intentionally false)."""
+    _require_identity(request.scope)
+    caps = orca_adapter.capabilities()
+    return OrcaCapabilitiesResponse(**caps)
+
+
+@app.post("/api/orca/sessions", response_model=OrcaSessionResponse, status_code=201)
+async def start_orca_session(body: OrcaSessionStartRequest, request: Request):
+    """Start an allowlisted Orca-managed agent CLI bound to a profile."""
+    profile, identity = _require_profile_permission(request.scope, body.profile_id, "automate")
+    # Interactive composer also requires interact on the same profile sandbox.
+    if not access.can_access_profile(identity, profile, "interact"):
+        raise HTTPException(status_code=404, detail="Profile not found")
+    try:
+        session = orca_adapter.start_session(
+            profile_id=str(profile["id"]),
+            sandbox_id=str(profile.get("sandbox_id") or "default"),
+            agent=body.agent,
+            owner_key=_orca_owner_key(identity),
+            prompt=body.prompt,
+        )
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    return OrcaSessionResponse(**orca_adapter.public_session(session))
+
+
+@app.get("/api/orca/sessions/{session_id}", response_model=OrcaSessionResponse)
+async def get_orca_session(session_id: str, request: Request):
+    identity = _require_identity(request.scope)
+    try:
+        session = orca_adapter.get_session(session_id, owner_key=_orca_owner_key(identity))
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    _require_profile_permission(request.scope, session.profile_id, "view")
+    return OrcaSessionResponse(**orca_adapter.public_session(session))
+
+
+@app.get("/api/orca/sessions/{session_id}/output", response_model=OrcaSessionOutputResponse)
+async def read_orca_session_output(
+    session_id: str,
+    request: Request,
+    cursor: int | None = None,
+    limit: int | None = None,
+):
+    identity = _require_identity(request.scope)
+    try:
+        session = orca_adapter.get_session(session_id, owner_key=_orca_owner_key(identity))
+        _require_profile_permission(request.scope, session.profile_id, "view")
+        payload = orca_adapter.read_output(
+            session_id,
+            owner_key=_orca_owner_key(identity),
+            cursor=cursor,
+            limit=limit,
+        )
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    return OrcaSessionOutputResponse(**payload)
+
+
+@app.post("/api/orca/sessions/{session_id}/send", response_model=OrcaSessionSendResponse)
+async def send_orca_session_input(
+    session_id: str,
+    body: OrcaSessionSendRequest,
+    request: Request,
+):
+    identity = _require_identity(request.scope)
+    try:
+        session = orca_adapter.get_session(session_id, owner_key=_orca_owner_key(identity))
+        _require_profile_permission(request.scope, session.profile_id, "interact")
+        payload = orca_adapter.send_input(
+            session_id,
+            owner_key=_orca_owner_key(identity),
+            text=body.text,
+            enter=body.enter,
+        )
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    return OrcaSessionSendResponse(**payload)
+
+
+@app.post("/api/orca/sessions/{session_id}/close", response_model=OrcaSessionResponse)
+async def close_orca_session(session_id: str, request: Request):
+    """Close an Orca session. Owner-only: admins get no cross-owner bypass."""
+    identity = _require_identity(request.scope)
+    try:
+        session = orca_adapter.get_session(session_id, owner_key=_orca_owner_key(identity))
+        # Close needs interact (composer stop) or automate (session owner).
+        # Ownership is already enforced by get_session; do not add an admin bypass.
+        profile, _ = _require_profile_permission(request.scope, session.profile_id, "view")
+        can_close = access.can_access_profile(identity, profile, "interact") or access.can_access_profile(
+            identity, profile, "automate"
+        )
+        if not can_close:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        closed = orca_adapter.close_session(session_id, owner_key=_orca_owner_key(identity))
+    except orca_adapter_mod.OrcaAdapterError as exc:
+        _raise_orca_error(exc)
+    return OrcaSessionResponse(**orca_adapter.public_session(closed))
 
 
 # ── Profile CRUD ──────────────────────────────────────────────────────────────
@@ -2514,6 +4032,133 @@ async def create_profile_from_proxy(
     return _profile_response(profile, identity)
 
 
+@app.get("/api/accounts", response_model=list[AccountResponse])
+async def list_accounts(
+    request: Request,
+    profile_id: str | None = Query(default=None),
+    provider: str | None = Query(default=None),
+    auth_state: str | None = Query(default=None),
+):
+    identity = _require_identity(request.scope)
+    accounts = db.list_account_metadata(profile_id=profile_id)
+    return [
+        account
+        for account in accounts
+        if access.has_permission(
+            identity, str(account.get("sandbox_id") or "default"), "view"
+        )
+        and (provider is None or account.get("provider") == provider)
+        and (auth_state is None or account.get("auth_state") == auth_state)
+    ]
+
+
+@app.post("/api/accounts", response_model=AccountResponse, status_code=201)
+async def create_account(req: AccountCreate, request: Request):
+    profile, identity = _require_profile_permission(request.scope, req.profile_id, "operate")
+    try:
+        account = db.create_account_metadata(
+            **req.model_dump(),
+            actor_kind=identity.kind,
+            actor_id=identity.id,
+        )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Account already exists") from exc
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "account.create",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        req.profile_id,
+    )
+    return account
+
+
+@app.get("/api/accounts/{account_id}", response_model=AccountResponse)
+async def get_account(account_id: str, request: Request):
+    account, _identity = _require_account_permission(request.scope, account_id, "view")
+    return account
+
+
+@app.put("/api/accounts/{account_id}", response_model=AccountResponse)
+async def update_account(account_id: str, req: AccountUpdate, request: Request):
+    account, identity = _require_account_permission(request.scope, account_id, "operate")
+    updated = db.update_account_metadata(
+        account_id,
+        actor_kind=identity.kind,
+        actor_id=identity.id,
+        **req.model_dump(exclude_unset=True),
+    )
+    if updated is None:  # pragma: no cover - protected by the permission lookup
+        raise HTTPException(status_code=404, detail="Account not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "account.update",
+        "allowed",
+        str(account.get("sandbox_id") or "default"),
+        str(account.get("profile_id") or ""),
+    )
+    return updated
+
+
+@app.delete("/api/accounts/{account_id}")
+async def delete_account(account_id: str, request: Request):
+    account, identity = _require_account_permission(request.scope, account_id, "operate")
+    if not db.delete_account_metadata(account_id):  # pragma: no cover
+        raise HTTPException(status_code=404, detail="Account not found")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "account.delete",
+        "allowed",
+        str(account.get("sandbox_id") or "default"),
+        str(account.get("profile_id") or ""),
+    )
+    return {"ok": True}
+
+
+@app.get(
+    "/api/accounts/{account_id}/events",
+    response_model=list[AccountAuthEventResponse],
+)
+async def list_account_events(
+    account_id: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    _account, _identity = _require_account_permission(request.scope, account_id, "view")
+    return db.list_account_auth_events(account_id, limit=limit)
+
+
+@app.post(
+    "/api/accounts/{account_id}/events",
+    response_model=AccountAuthEventResponse,
+    status_code=201,
+)
+async def append_account_event(
+    account_id: str,
+    req: AccountAuthEventCreate,
+    request: Request,
+):
+    account, identity = _require_account_permission(request.scope, account_id, "operate")
+    event = db.append_account_auth_event(
+        account_id,
+        **req.model_dump(),
+        actor_kind=identity.kind,
+        actor_id=identity.id,
+    )
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "account.event.create",
+        "allowed",
+        str(account.get("sandbox_id") or "default"),
+        str(account.get("profile_id") or ""),
+    )
+    return event
+
+
 @app.get("/api/profiles", response_model=list[ProfileResponse])
 async def list_profiles(request: Request):
     identity = _require_identity(request.scope)
@@ -2524,10 +4169,27 @@ async def list_profiles(request: Request):
     ]
 
 
+def _validated_catalog_extension_ids(extension_ids: list[str] | None) -> list[str]:
+    """Accept only deduplicated extension ids published by the server catalog."""
+    requested = list(dict.fromkeys(str(extension_id) for extension_id in (extension_ids or [])))
+    known = {
+        str(item["id"])
+        for item in extension_catalog.list_catalog_extensions(include_paths=False)
+    }
+    unknown = [extension_id for extension_id in requested if extension_id not in known]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown catalog extension ids: {', '.join(unknown)}",
+        )
+    return requested
+
+
 @app.post("/api/profiles", response_model=ProfileResponse, status_code=201)
 async def create_profile(req: ProfileCreate, request: Request):
     """Create a profile in a sandbox the caller can operate (agent/CLI control plane)."""
     data = req.model_dump()
+    data["extension_ids"] = _validated_catalog_extension_ids(data.get("extension_ids"))
     sandbox_id = str(data.get("sandbox_id") or "default")
     identity = _require_sandbox_permission(request.scope, sandbox_id, "operate")
     tags = data.pop("tags", None)
@@ -2603,6 +4265,8 @@ async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
     profile, identity = _require_profile_permission(request.scope, profile_id, "operate")
     # Only pass fields that were explicitly set
     data = req.model_dump(exclude_unset=True)
+    if "extension_ids" in data:
+        data["extension_ids"] = _validated_catalog_extension_ids(data["extension_ids"])
     tags = data.pop("tags", None)
     if tags is not None:
         data["tags"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in tags]
@@ -2615,7 +4279,7 @@ async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
     if not updated:
         raise HTTPException(status_code=404, detail="Profile not found")
     if "sandbox_id" in data:
-        _revoke_websocket_access(profile_id=profile_id)
+        _revoke_profile_access(profile_id, reason="sandbox_moved")
     db.record_access_audit_event(
         identity.kind, identity.id, "profile.update", "allowed", str(updated.get("sandbox_id") or "default"), profile_id
     )
@@ -2955,28 +4619,79 @@ async def cdp_live_session(profile_id: str, request: Request):
     profile, identity = _require_profile_permission(request.scope, profile_id, "view")
     if profile_id not in browser_mgr.running:
         raise HTTPException(status_code=409, detail="Profile is not running")
-    include_cdp = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
-        identity, profile, "automate"
-    )
-    if not include_cdp:
-        raise HTTPException(status_code=403, detail="CDP live view requires automate permission")
-    local_base = _request_local_base(request)
-    ws_base = f"{session_links.ws_scheme_for(local_base)}://{local_base.split('://', 1)[-1]}"
-    cdp_ws = f"{ws_base}/api/profiles/{profile_id}/cdp"
-    cdp_list = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/cdp/json/list"
-    metrics = f"{local_base.rstrip('/')}/api/profiles/{profile_id}/live-metrics"
-    interactive = (not ACCESS_CONTROL_ENABLED) or identity.is_admin or access.can_access_profile(
-        identity, profile, "interact"
-    )
+    # Relative same-origin paths only — client derives WS from window.location.
     html = session_views.render_cdp_live_html(
         profile_id=profile_id,
         profile_name=str(profile.get("name") or profile_id),
-        cdp_ws_url=cdp_ws,
-        cdp_list_url=cdp_list,
-        metrics_url=metrics,
-        interactive=interactive,
+        interactive=False,
     )
-    return HTMLResponse(html)
+    response = HTMLResponse(html)
+    _maybe_set_cbm_bridge_cookie(response, request, identity, profile_id=str(profile_id))
+    return response
+
+
+def _bearer_qualifies_for_bridge(
+    request: Request, identity: access.AccessIdentity
+) -> bool:
+    """True when this HTTP request authenticated via bootstrap/agent Bearer."""
+    if not AUTH_TOKEN or not ACCESS_CONTROL_ENABLED:
+        return False
+    auth = request.headers.get("authorization") or ""
+    if not auth.startswith("Bearer "):
+        return False
+    token = auth[7:].strip()
+    if not token:
+        return False
+    if identity.kind == "bootstrap" and hmac.compare_digest(token, AUTH_TOKEN):
+        return True
+    if identity.kind == "agent" and token.startswith("cbm_agent_"):
+        return True
+    return False
+
+
+def _maybe_set_cbm_bridge_cookie(
+    response: Response,
+    request: Request,
+    identity: access.AccessIdentity,
+    *,
+    profile_id: str,
+) -> None:
+    """Mint profile-bound cbm_bridge for bearer-authenticated live viewers."""
+    if not _bearer_qualifies_for_bridge(request, identity):
+        return
+    if not AUTH_TOKEN:
+        return
+    try:
+        cookie_path = access.bridge_cookie_path(profile_id)
+        if identity.kind == "bootstrap":
+            value = access.create_bridge_session(
+                "bootstrap",
+                None,
+                AUTH_TOKEN,
+                profile_id=profile_id,
+                path_class=access.BRIDGE_PATH_CLASS,
+            )
+        elif identity.kind == "agent" and identity.id:
+            value = access.create_bridge_session(
+                "agent",
+                str(identity.id),
+                AUTH_TOKEN,
+                profile_id=profile_id,
+                path_class=access.BRIDGE_PATH_CLASS,
+            )
+        else:
+            return
+    except ValueError:
+        return
+    response.set_cookie(
+        key=access.BRIDGE_COOKIE_NAME,
+        value=value,
+        max_age=access.BRIDGE_TTL_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=_is_https(request),
+        path=cookie_path,
+    )
 
 
 @app.get("/api/profiles/{profile_id}/open-links", response_model=ProfileOpenLinksResponse)
@@ -3112,6 +4827,18 @@ async def get_live_diagnostics(request: Request) -> dict[str, Any]:
     )
 
 
+@app.get("/api/admin/migrations", response_model=list[str])
+async def get_admin_migrations(request: Request) -> list[str]:
+    _require_admin(request.scope)
+    try:
+        return db.list_applied_schema_migrations()
+    except db.SchemaMigrationStatusError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=db.SCHEMA_MIGRATION_STATUS_UNAVAILABLE,
+        ) from exc
+
+
 @app.get("/api/benchmarks/latest")
 async def get_latest_benchmark_report(request: Request) -> dict[str, Any]:
     """Serve a redacted, administrator-only benchmark summary.
@@ -3129,9 +4856,42 @@ async def get_latest_benchmark_report(request: Request) -> dict[str, Any]:
 # ── Clipboard Relay ──────────────────────────────────────────────────────────
 
 _CLIPBOARD_MAX_READ = 1_048_576  # 1MB cap on GET response
+_PROFILE_SCREENSHOT_MAX_BYTES = 16 * 1024 * 1024
 
 # Track xclip processes per display so we can kill the old one before spawning new
 _xclip_procs: dict[int, asyncio.subprocess.Process] = {}
+
+
+@app.post("/api/profiles/{profile_id}/screenshot")
+async def capture_profile_screenshot(profile_id: str, request: Request):
+    """Return a bounded, non-cacheable screenshot of the selected live page."""
+    profile, identity = _require_profile_permission(request.scope, profile_id, "view")
+    try:
+        screenshot = await browser_mgr.capture_screenshot(profile_id)
+    except RuntimeError as exc:
+        code = str(exc)
+        if code == "profile_not_running":
+            raise HTTPException(status_code=409, detail="Profile is not running") from None
+        raise HTTPException(status_code=503, detail="Profile screenshot is unavailable") from None
+    if len(screenshot) > _PROFILE_SCREENSHOT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Profile screenshot is too large")
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "profile.screenshot",
+        "allowed",
+        str(profile.get("sandbox_id") or "default"),
+        profile_id,
+    )
+    return Response(
+        content=screenshot,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'attachment; filename="cloakbrowser-{profile_id}.png"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/api/profiles/{profile_id}/clipboard")
@@ -3429,15 +5189,104 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
             logger.debug("VNC proxy: websocket.close() failed: %s", exc)
 
 
+# ── Direct automation leases ─────────────────────────────────────────────────
+
+
+@app.post(
+    "/api/profiles/{profile_id}/automation-leases",
+    response_model=AutomationLeaseAcquireResponse,
+)
+async def acquire_automation_lease(profile_id: str, request: Request):
+    _reject_token_like_query(request)
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    owner_kind, owner_id = _owner_from_identity(identity)
+    try:
+        acquired = automation_lease_service.acquire_direct(
+            profile_id, owner_kind=owner_kind, owner_id=owner_id
+        )
+    except automation_leases.AutomationBusy:
+        raise HTTPException(status_code=409, detail="automation_busy")
+    worker_runtime_service.refresh_claim_eligibility()
+    db.record_access_audit_event(
+        identity.kind,
+        identity.id,
+        "automation_lease.acquire",
+        "allowed",
+        str(_profile.get("sandbox_id") or "default"),
+        profile_id,
+    )
+    return AutomationLeaseAcquireResponse(
+        lease_id=acquired.lease_id,
+        token=acquired.token,
+        expires_at=acquired.expires_at.isoformat(),
+        heartbeat_interval_seconds=automation_leases.HEARTBEAT_INTERVAL_SECONDS,
+    )
+
+
+@app.post(
+    "/api/profiles/{profile_id}/automation-leases/{lease_id}/heartbeat",
+    response_model=AutomationLeaseHeartbeatResponse,
+)
+async def heartbeat_automation_lease(profile_id: str, lease_id: str, request: Request):
+    _reject_token_like_query(request)
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    content_length = int(request.headers.get("content-length") or "0")
+    if content_length > 0 or content_type in {"application/json", "application/x-www-form-urlencoded"}:
+        raise HTTPException(status_code=400, detail="Invalid request")
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    token = _automation_lease_header(request.headers)
+    owner_kind, owner_id = _owner_from_identity(identity)
+    try:
+        expires = automation_lease_service.heartbeat(
+            lease_id,
+            token or "",
+            profile_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+        )
+    except automation_leases.AutomationLeaseInvalid:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    direct_cdp_socket_registry.update_expiry(lease_id, expires)
+    return AutomationLeaseHeartbeatResponse(
+        expires_at=expires.isoformat(),
+        heartbeat_interval_seconds=automation_leases.HEARTBEAT_INTERVAL_SECONDS,
+    )
+
+
+@app.delete(
+    "/api/profiles/{profile_id}/automation-leases/{lease_id}",
+    status_code=204,
+)
+async def release_automation_lease(profile_id: str, lease_id: str, request: Request):
+    _reject_token_like_query(request)
+    _profile, identity = _require_profile_permission(request.scope, profile_id, "automate")
+    token = _automation_lease_header(request.headers)
+    owner_kind, owner_id = _owner_from_identity(identity)
+    try:
+        automation_lease_service.release(
+            lease_id,
+            token or "",
+            profile_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            reason="released",
+        )
+    except automation_leases.AutomationLeaseInvalid:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    close_direct_cdp_sockets_for_leases([lease_id])
+    worker_runtime_service.refresh_claim_eligibility()
+    return Response(status_code=204)
+
+
 # ── CDP WebSocket Proxy ──────────────────────────────────────────────────────
-# Simple bidirectional passthrough — CDP is standard JSON over WebSocket,
-# no protocol translation needed (unlike VNC which requires RFB filtering).
+# Direct CDP requires an automation lease. Human live view uses observer routes.
 
 
 @app.get("/api/profiles/{profile_id}/cdp")
 async def cdp_info(profile_id: str, request: Request):
     """Return CDP connection info. Prevents SPA catch-all from serving index.html."""
-    _profile, _identity = _require_profile_permission(request.scope, profile_id, "automate")
+    _reject_token_like_query(request)
+    _require_cdp_automation_access(request, profile_id=profile_id)
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -3452,7 +5301,8 @@ async def cdp_info(profile_id: str, request: Request):
 @app.get("/api/profiles/{profile_id}/cdp/json/version")
 async def cdp_json_version(profile_id: str, request: Request):
     """Proxy Chrome's /json/version, rewriting WS URLs to go through our proxy."""
-    _profile, _identity = _require_profile_permission(request.scope, profile_id, "automate")
+    _reject_token_like_query(request)
+    _require_cdp_automation_access(request, profile_id=profile_id)
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -3467,10 +5317,34 @@ async def cdp_json_version(profile_id: str, request: Request):
         logger.error("CDP proxy: failed to reach Chrome CDP for %s: %s", profile_id, exc)
         raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
 
-    # Rewrite webSocketDebuggerUrl to point through our proxy
     host = request.headers.get("host", "localhost:8080")
     ws_scheme = "wss" if _is_https(request) else "ws"
-    data["webSocketDebuggerUrl"] = f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp"
+    manager_ws = f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp"
+    return cdp_gateway.sanitize_cdp_version_discovery(data, manager_ws_url=manager_ws)
+
+
+@app.get("/api/profiles/{profile_id}/cdp/json/protocol/")
+@app.get("/api/profiles/{profile_id}/cdp/json/protocol")
+async def cdp_json_protocol(profile_id: str, request: Request):
+    """Proxy Chrome's read-only CDP protocol schema for external harnesses."""
+    _reject_token_like_query(request)
+    _require_cdp_automation_access(request, profile_id=profile_id)
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        raise HTTPException(status_code=404, detail="Profile not running")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{running.cdp_port}/json/protocol", timeout=5
+            )
+            data = resp.json()
+    except Exception as exc:
+        logger.error("CDP proxy: failed to read Chrome protocol for %s: %s", profile_id, exc)
+        raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
     return data
 
 
@@ -3480,7 +5354,8 @@ async def cdp_json_version(profile_id: str, request: Request):
 @app.get("/api/profiles/{profile_id}/cdp/json")
 async def cdp_json_list(profile_id: str, request: Request):
     """Proxy Chrome's /json/list, rewriting WS URLs."""
-    _profile, _identity = _require_profile_permission(request.scope, profile_id, "automate")
+    _reject_token_like_query(request)
+    _require_cdp_automation_access(request, profile_id=profile_id)
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
@@ -3497,13 +5372,66 @@ async def cdp_json_list(profile_id: str, request: Request):
 
     host = request.headers.get("host", "localhost:8080")
     ws_scheme = "wss" if _is_https(request) else "ws"
-    for entry in data:
-        if "webSocketDebuggerUrl" in entry:
-            ws_path = entry["webSocketDebuggerUrl"].split("/devtools/")[-1]
-            entry["webSocketDebuggerUrl"] = (
-                f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp/devtools/{ws_path}"
+
+    def _manager_ws_for_entry(entry: dict) -> str | None:
+        raw = entry.get("webSocketDebuggerUrl")
+        if not isinstance(raw, str) or not raw:
+            return None
+        ws_path = raw.split("/devtools/")[-1]
+        return (
+            f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp/devtools/{ws_path}"
+        )
+
+    return cdp_gateway.sanitize_cdp_list_discovery(
+        data, manager_ws_url_for_entry=_manager_ws_for_entry
+    )
+
+
+@app.get("/api/profiles/{profile_id}/cdp-observer/json/list/")
+@app.get("/api/profiles/{profile_id}/cdp-observer/json/list")
+async def cdp_observer_json_list(profile_id: str, request: Request):
+    """Observer discovery: existing page targets only, Manager WS URLs only."""
+    _reject_token_like_query(request)
+    _require_profile_permission(request.scope, profile_id, "view")
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        raise HTTPException(status_code=404, detail="Profile not running")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{running.cdp_port}/json/list", timeout=5
             )
-    return data
+            data = resp.json()
+    except Exception as exc:
+        logger.error("CDP observer: failed to reach Chrome CDP for %s: %s", profile_id, exc)
+        raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
+
+    host = request.headers.get("host", "localhost:8080")
+    ws_scheme = "wss" if _is_https(request) else "ws"
+    pages_raw: list[dict] = []
+    if isinstance(data, list):
+        for entry in data:
+            if not isinstance(entry, dict) or entry.get("type") != "page":
+                continue
+            pages_raw.append(entry)
+
+    def _manager_ws_for_entry(entry: dict) -> str | None:
+        raw = entry.get("webSocketDebuggerUrl")
+        if not isinstance(raw, str) or not raw:
+            return None
+        target_id = str(entry.get("id") or "")
+        ws_tail = raw.split("/devtools/")[-1]
+        if target_id and "/page/" not in f"/devtools/{ws_tail}":
+            ws_tail = f"page/{target_id}"
+        return (
+            f"{ws_scheme}://{host}/api/profiles/{profile_id}/"
+            f"cdp-observer/devtools/{ws_tail}"
+        )
+
+    return cdp_gateway.sanitize_cdp_list_discovery(
+        pages_raw, manager_ws_url_for_entry=_manager_ws_for_entry
+    )
 
 
 async def _proxy_cdp_websocket(
@@ -3511,6 +5439,7 @@ async def _proxy_cdp_websocket(
     target_url: str,
     label: str,
     access_lease: _WebSocketAccessLease | None = None,
+    automation_handle: cdp_gateway.DirectCdpSocketHandle | None = None,
 ) -> None:
     """Bidirectional WebSocket proxy between a FastAPI client and a CDP target.
 
@@ -3555,6 +5484,103 @@ async def _proxy_cdp_websocket(
             d2c = asyncio.create_task(cdp_to_client(), name="d2c")
             proxy_tasks = [c2d, d2c]
             revocation_task = None
+            automation_task = None
+            if access_lease is not None:
+                revocation_task = asyncio.create_task(
+                    access_lease.revoked.wait(), name="access-revocation"
+                )
+                proxy_tasks.append(revocation_task)
+            if automation_handle is not None:
+                automation_task = asyncio.create_task(
+                    direct_cdp_socket_registry.watch_until_revoked_or_expired(
+                        automation_handle
+                    ),
+                    name="automation-lease-watch",
+                )
+                proxy_tasks.append(automation_task)
+            done, pending = await asyncio.wait(
+                proxy_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            access_revoked = revocation_task is not None and revocation_task in done
+            automation_revoked = automation_task is not None and automation_task in done
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if access_revoked:
+                logger.info("%s: access revoked", label)
+                await websocket.close(code=4403, reason="Access revoked")
+            elif automation_revoked:
+                logger.info("%s: automation lease revoked", label)
+                await websocket.close(code=4403, reason="Automation lease revoked")
+            logger.info("%s: disconnected", label)
+
+    except Exception as exc:
+        logger.error("%s error: %s", label, exc)
+    finally:
+        try:
+            await websocket.close()
+        except Exception as exc:
+            logger.debug("%s: websocket.close() failed: %s", label, exc)
+
+
+async def _proxy_observer_cdp_websocket(
+    websocket: WebSocket,
+    target_url: str,
+    label: str,
+    access_lease: _WebSocketAccessLease | None = None,
+) -> None:
+    """Screencast-only observer proxy — never a generic CDP tunnel."""
+    import websockets
+
+    pending_ids = cdp_gateway.ObserverPendingRequests()
+    try:
+        async with websockets.connect(
+            target_url,
+            max_size=cdp_gateway.OBSERVER_UPSTREAM_MAX_BYTES,
+            ping_interval=None,
+            ping_timeout=None,
+        ) as cdp_ws:
+            async def client_to_cdp():
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        if msg.get("type") == "websocket.disconnect":
+                            break
+                        raw = msg.get("text") if "text" in msg else msg.get("bytes")
+                        if raw is None:
+                            continue
+                        try:
+                            sanitized = cdp_gateway.validate_observer_client_message(raw)
+                            pending_ids.register(int(sanitized["id"]), sanitized["method"])
+                        except cdp_gateway.ObserverFrameRejected:
+                            await websocket.close(code=4400, reason="Observer command denied")
+                            return
+                        await cdp_ws.send(json.dumps(sanitized, separators=(",", ":")))
+                except WebSocketDisconnect:
+                    pass
+                except Exception as exc:
+                    logger.warning("%s [c->obs]: %s: %s", label, type(exc).__name__, exc)
+
+            async def cdp_to_client():
+                try:
+                    async for msg in cdp_ws:
+                        filtered = cdp_gateway.filter_observer_upstream_message(
+                            msg if isinstance(msg, (str, bytes)) else str(msg),
+                            pending_ids=pending_ids,
+                        )
+                        if filtered is None:
+                            continue
+                        await websocket.send_text(filtered)
+                except WebSocketDisconnect:
+                    pass
+                except Exception as exc:
+                    logger.warning("%s [obs->c]: %s: %s", label, type(exc).__name__, exc)
+
+            c2d = asyncio.create_task(client_to_cdp(), name="obs-c2d")
+            d2c = asyncio.create_task(cdp_to_client(), name="obs-d2c")
+            proxy_tasks = [c2d, d2c]
+            revocation_task = None
             if access_lease is not None:
                 revocation_task = asyncio.create_task(
                     access_lease.revoked.wait(), name="access-revocation"
@@ -3569,10 +5595,7 @@ async def _proxy_cdp_websocket(
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
             if access_revoked:
-                logger.info("%s: access revoked", label)
                 await websocket.close(code=4403, reason="Access revoked")
-            logger.info("%s: disconnected", label)
-
     except Exception as exc:
         logger.error("%s error: %s", label, exc)
     finally:
@@ -3585,20 +5608,33 @@ async def _proxy_cdp_websocket(
 @app.websocket("/api/profiles/{profile_id}/cdp")
 async def cdp_proxy(websocket: WebSocket, profile_id: str):
     """Proxy WebSocket frames between external tools and Chrome's CDP."""
+    if await _reject_websocket_token_like_query(websocket):
+        return
     if not await _check_websocket_origin(websocket):
         return
 
-    access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
-    if not access_result:
+    lease = await _require_websocket_cdp_automation_access(
+        websocket, profile_id=profile_id
+    )
+    if not lease:
         return
-    _profile, identity = access_result
 
     running = browser_mgr.running.get(profile_id)
     if not running:
         await websocket.close(code=4004, reason="Profile not running")
         return
 
-    access_lease = _register_websocket_access(identity, profile_id)
+    identity = _access_identity(websocket.scope)
+    access_lease = (
+        _register_websocket_access(identity, profile_id) if identity is not None else None
+    )
+    automation_handle = direct_cdp_socket_registry.register(
+        lease_id=lease.lease_id,
+        profile_id=profile_id,
+        owner_kind=lease.owner_kind,
+        owner_id=lease.owner_id,
+        expires_at=lease.expires_at,
+    )
     try:
         await websocket.accept()
 
@@ -3615,22 +5651,91 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
             return
 
         await _proxy_cdp_websocket(
-            websocket, ws_url, f"CDP proxy [{profile_id}]", access_lease
+            websocket,
+            ws_url,
+            f"CDP proxy [{profile_id}]",
+            access_lease,
+            automation_handle,
         )
     finally:
-        _unregister_websocket_access(access_lease)
+        try:
+            # Direct leases retire on socket close; run capabilities stay until
+            # explicit revoke/complete/cancel/heartbeat loss (reconnect window).
+            if lease.owner_kind != automation_leases.RUN_OWNER_KIND:
+                retire_direct_automation_lease_on_websocket_close(lease.lease_id)
+        finally:
+            direct_cdp_socket_registry.unregister(automation_handle)
+            if access_lease is not None:
+                _unregister_websocket_access(access_lease)
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp/devtools/{path:path}")
 async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     """Proxy page-specific CDP WebSocket connections (e.g. /devtools/page/GUID)."""
+    if await _reject_websocket_token_like_query(websocket):
+        return
     if not await _check_websocket_origin(websocket):
         return
 
-    access_result = await _require_websocket_profile_permission(websocket, profile_id, "automate")
+    lease = await _require_websocket_cdp_automation_access(
+        websocket, profile_id=profile_id
+    )
+    if not lease:
+        return
+
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        await websocket.close(code=4004, reason="Profile not running")
+        return
+
+    identity = _access_identity(websocket.scope)
+    access_lease = (
+        _register_websocket_access(identity, profile_id) if identity is not None else None
+    )
+    automation_handle = direct_cdp_socket_registry.register(
+        lease_id=lease.lease_id,
+        profile_id=profile_id,
+        owner_kind=lease.owner_kind,
+        owner_id=lease.owner_id,
+        expires_at=lease.expires_at,
+    )
+    try:
+        await websocket.accept()
+        target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
+        await _proxy_cdp_websocket(
+            websocket,
+            target_url,
+            f"CDP page proxy [{profile_id}]",
+            access_lease,
+            automation_handle,
+        )
+    finally:
+        try:
+            if lease.owner_kind != automation_leases.RUN_OWNER_KIND:
+                retire_direct_automation_lease_on_websocket_close(lease.lease_id)
+        finally:
+            direct_cdp_socket_registry.unregister(automation_handle)
+            if access_lease is not None:
+                _unregister_websocket_access(access_lease)
+
+
+@app.websocket("/api/profiles/{profile_id}/cdp-observer/devtools/{path:path}")
+async def cdp_observer_page_proxy(websocket: WebSocket, profile_id: str, path: str):
+    """Screencast-only observer WebSocket — view permission, no automation lease."""
+    if await _reject_websocket_token_like_query(websocket):
+        return
+    if not await _check_websocket_origin(websocket):
+        return
+
+    access_result = await _require_websocket_profile_permission(websocket, profile_id, "view")
     if not access_result:
         return
     _profile, identity = access_result
+
+    # Only page targets are observably proxied.
+    if not path.startswith("page/"):
+        await websocket.close(code=4403, reason="Observer target denied")
+        return
 
     running = browser_mgr.running.get(profile_id)
     if not running:
@@ -3641,8 +5746,11 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     try:
         await websocket.accept()
         target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
-        await _proxy_cdp_websocket(
-            websocket, target_url, f"CDP page proxy [{profile_id}]", access_lease
+        await _proxy_observer_cdp_websocket(
+            websocket,
+            target_url,
+            f"CDP observer [{profile_id}]",
+            access_lease,
         )
     finally:
         _unregister_websocket_access(access_lease)

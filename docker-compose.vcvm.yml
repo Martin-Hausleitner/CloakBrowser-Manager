@@ -18,10 +18,31 @@ services:
       PROXYCHECKER_URL: ${PROXYCHECKER_URL:-}
       PROXYCHECKER_ALLOWED_HOSTS: ${PROXYCHECKER_ALLOWED_HOSTS:-host.docker.internal}
       EXTENSION_CATALOG_DIR: ${EXTENSION_CATALOG_DIR:-/data/extension-catalog}
+      # Host Orca bridge (read-only mounts below). Agent CLIs run on the host via
+      # orca terminal.create; CBM_BASE_URL is the host-loopback Manager publish.
+      HOME: /home/coder
+      CBM_ORCA_BIN: ${CBM_ORCA_BIN:-/home/coder/.local/bin/orca-ide}
+      CBM_ORCA_WORKTREE: ${CBM_ORCA_WORKTREE:-path:/home/coder/vk-repos/CloakBrowser-Manager-browser-use}
+      CBM_ORCA_AGENT_WRAPPER: ${CBM_ORCA_AGENT_WRAPPER:-/home/coder/vk-repos/CloakBrowser-Manager-browser-use/scripts/orca_agent_cli.sh}
+      CBM_BASE_URL: ${CBM_BASE_URL:-http://127.0.0.1:18115}
+      CBM_AGENT_KEY_FILE: ${CBM_AGENT_KEY_FILE:-/home/coder/.config/cloakbrowser/orca-agent-key}
+    # Optional Browser-Use worker bootstrap. Absent file is valid (required: false).
+    # Provisioner writes only CBM_WORKER_ID/TOKEN here; deploy_vcvm.sh does not manage it.
+    env_file:
+      - path: .env.worker.vcvm
+        required: false
+      # Optional local-only development bypass. Production deployments omit
+      # this file; backend startup also rejects the flag outside dev/local.
+      - path: .env.dev.vcvm
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - cloakbrowser-manager-vcvm-data:/data
+      # Host Orca 1.4.x runtime + CLI (verified path for container→host reachability).
+      - /home/coder/orca:/home/coder/orca:ro
+      - /home/coder/.local:/home/coder/.local:ro
+      - /home/coder/.config/orca:/home/coder/.config/orca:ro
     shm_size: "${VCVM_SHM_SIZE:-2gb}"
     cpus: "${VCVM_CPUS:-16.0}"
     mem_limit: "${VCVM_MEMORY_LIMIT:-32g}"

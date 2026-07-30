@@ -21,6 +21,35 @@ _BROWSERSCAN_SCORE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Stable versioned reason mapping for immutable run-health snapshots.
+HEALTH_GATE_REASON_VERSION = "run-health.v2"
+_MEASUREMENT_ERROR_CODES = frozenset(
+    {
+        "network_timeout",
+        "network_unavailable",
+        "network_invalid_response",
+        "browser_context_unavailable",
+        "profile_health_probe_failed",
+        "proxychecker_unavailable",
+        "proxychecker_invalid_response",
+        "fingerprint_runtime_unavailable",
+        "fingerprint_signals_missing",
+        "browser_scan_timeout",
+        "browser_scan_unavailable",
+        "browser_scan_challenge",
+        "browser_scan_consent",
+        "browser_scan_score_missing",
+    }
+)
+_REASON_CODE_MAP = {
+    "platform_mismatch": "platform_ua_mismatch",
+    "user_agent_family_mismatch": "platform_ua_mismatch",
+    "platform_ua_mismatch": "platform_ua_mismatch",
+    "proxy_unreachable": "proxy_unreachable",
+    "proxy_exit_mismatch": "proxy_exit_mismatch",
+    "mobile_identity_inconsistent": "mobile_identity_inconsistent",
+}
+
 
 @dataclass(frozen=True)
 class NormalizedProxyCheckerResult:
@@ -81,6 +110,63 @@ class ProfileHealthResult:
             "error_code": self.error_code,
             "sources": dict(self.sources),
         }
+
+
+def map_profile_health_gate_fields(result: ProfileHealthResult) -> dict[str, object]:
+    """Expose stable versioned reason/snapshot fields for immutable run health copies."""
+    authenticity_source = result.sources.get("proxy_authenticity")
+    measured_score: int | None = None
+    inferred_score: int | None = None
+    measured_source: str | None = None
+    if result.proxy_configured:
+        score = result.proxy_authenticity_score
+        if score is not None:
+            if authenticity_source == "measured":
+                measured_score = score
+                measured_source = "proxychecker"
+            elif authenticity_source in {"derived", "inferred"}:
+                inferred_score = score
+    else:
+        browser_signals = (
+            result.fingerprint_consistency_score,
+            result.browser_scan_score,
+        )
+        browser_sources_measured = (
+            result.sources.get("fingerprint_consistency") == "measured"
+            and result.sources.get("browser_scan") == "measured"
+        )
+        if browser_sources_measured and all(isinstance(value, int) for value in browser_signals):
+            measured_score = min(value for value in browser_signals if isinstance(value, int))
+            measured_source = "browser_signals"
+
+    reasons: list[str] = []
+    if result.proxy_configured and result.proxy_reachable is not True:
+        reasons.append("proxy_unreachable")
+
+    for item in (*result.warnings, *result.blockers):
+        mapped = _REASON_CODE_MAP.get(item)
+        if mapped is not None:
+            reasons.append(mapped)
+
+    measurement_error = False
+    if result.error_code in _MEASUREMENT_ERROR_CODES:
+        measurement_error = True
+    elif any(blocker in _MEASUREMENT_ERROR_CODES for blocker in result.blockers):
+        measurement_error = True
+
+    return {
+        "state": result.state,
+        "checked_at": result.checked_at,
+        "proxy_configured": result.proxy_configured,
+        "proxy_reachable": result.proxy_reachable,
+        "outbound_ip_masked": result.outbound_ip_masked,
+        "measured_authenticity_score": measured_score,
+        "inferred_authenticity_score": inferred_score,
+        "measured_authenticity_source": measured_source,
+        "reasons": tuple(dict.fromkeys(reasons)),
+        "measurement_error": measurement_error,
+        "policy_version": HEALTH_GATE_REASON_VERSION,
+    }
 
 
 def mask_ip_address(value: str) -> str | None:

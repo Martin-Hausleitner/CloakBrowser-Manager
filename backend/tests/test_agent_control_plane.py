@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
+import json
+from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
 from backend import database as db
+from backend.models import control_plane_resource_schema
 
 
 @pytest.fixture()
@@ -191,3 +194,102 @@ def test_operate_agent_bulk_organize_is_sandbox_scoped(client_access: TestClient
     assert moved.status_code == 200, moved.text
     assert moved.json()[0]["project_id"] == "commerce"
     assert moved.json()[0]["folder_path"] == "ops"
+
+
+def test_v2_capabilities_and_resource_schema_are_bounded(client_access: TestClient):
+    agent = _create_agent(
+        client_access,
+        name="Contract agent",
+        grants=[{"sandbox_id": "agents", "permission": "view"}],
+    )
+    headers = {"Authorization": f"Bearer {agent['api_key']}"}
+
+    capabilities = client_access.get("/api/v2/capabilities", headers=headers)
+    assert capabilities.status_code == 200, capabilities.text
+    body = capabilities.json()
+    assert body["api_version"] == "cloakbrowser.io/v1"
+    assert body["kind"] == "CapabilitySet"
+    assert body["resources"]["profiles"]["available"]["rest"] is True
+    assert body["resources"]["profiles"]["available"]["cli"] is True
+    assert body["resources"]["profiles"]["available"]["mcp"] is False
+    assert body["resources"]["projects"]["available"]["rest"] is True
+    assert body["resources"]["projects"]["available"]["cli"] is False
+    assert body["resources"]["proxies"]["available"]["rest"] is True
+    assert body["resources"]["proxies"]["available"]["cli"] is False
+    assert body["resources"]["extensions"]["available"]["rest"] is True
+    assert body["resources"]["extensions"]["available"]["cli"] is True
+    assert body["resources"]["extensions"]["available"]["skill"] is True
+    assert body["resources"]["extensions"]["cli_operations"] == [
+        "list",
+        "search",
+        "defaults",
+        "set-defaults",
+        "enable",
+        "disable",
+    ]
+    assert body["resources"]["extensions"]["mcp_note"] == "discovery_schema_only"
+    assert body["resources"]["accounts"]["available"] == {
+        "rest": True,
+        "cli": True,
+        "mcp": False,
+        "skill": True,
+    }
+    assert body["resources"]["accounts"]["rest_operations"] == [
+        "list",
+        "get",
+        "create",
+        "update",
+        "history",
+        "event",
+        "delete",
+    ]
+    assert body["resources"]["accounts"]["cli_operations"] == [
+        "list",
+        "get",
+        "create",
+        "update",
+        "history",
+        "event",
+        "delete",
+    ]
+    for unavailable in (
+        "boxes",
+        "runtimes",
+        "local-mac",
+        "orca-web",
+        "secret-references",
+        "approvals",
+        "operations",
+    ):
+        assert body["resources"][unavailable]["available"] == {
+            "rest": False,
+            "cli": False,
+            "mcp": False,
+            "skill": False,
+        }
+    assert "raw_cdp" not in str(body).lower()
+    assert body["resources"]["secret-references"]["reason_code"] == "secret_broker_not_implemented"
+
+    schema = client_access.get("/api/v2/schemas/control-plane-resource-v1", headers=headers)
+    assert schema.status_code == 200, schema.text
+    contract = schema.json()
+    assert contract["api_version"] == "cloakbrowser.io/v1"
+    assert contract["kind"] == "ContractSchema"
+    assert "profiles" in contract["spec"]["resources"]
+    assert contract["spec"]["mutation_contract"]["client_headers_supported"] == [
+        "Idempotency-Key",
+        "If-Match",
+    ]
+    assert contract["spec"]["mutation_contract"]["server_enforcement"]["idempotency_key"] is False
+    assert contract["spec"]["mutation_contract"]["server_enforcement"]["if_match"] is False
+    forbidden = " ".join(contract["spec"]["forbidden"])
+    assert "raw CDP" in forbidden
+    assert "proxy credentials" in forbidden
+
+
+def test_control_plane_contract_json_matches_backend_core_sections():
+    path = Path(__file__).resolve().parents[2] / "docs/contracts/control-plane-resource-v1.json"
+    disk = json.loads(path.read_text(encoding="utf-8"))
+    runtime = control_plane_resource_schema()
+
+    assert disk == runtime

@@ -1,0 +1,375 @@
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Profile, TaskHarnessSession } from "../lib/api";
+import { api } from "../lib/api";
+import { SessionsOverview, MAX_SESSION_PROFILE_CALLS } from "./SessionsOverview";
+
+vi.mock("../lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      listTaskSessions: vi.fn(),
+      updateTaskSession: vi.fn(),
+    },
+  };
+});
+
+const baseProfile: Profile = {
+  id: "profile-1",
+  name: "Checkout QA",
+  sandbox_id: "default",
+  project_id: "commerce",
+  folder_path: "checkout",
+  pinned: false,
+  accent_color: null,
+  harness: "browser-use",
+  fingerprint_seed: 12345,
+  proxy: null,
+  timezone: null,
+  locale: null,
+  platform: "macos",
+  user_agent: null,
+  screen_width: 1280,
+  screen_height: 800,
+  gpu_vendor: null,
+  gpu_renderer: null,
+  hardware_concurrency: null,
+  humanize: false,
+  human_preset: "default",
+  headless: false,
+  geoip: false,
+  clipboard_sync: true,
+  auto_launch: false,
+  color_scheme: null,
+  search_engine: null,
+  extension_ids: [],
+  launch_args: [],
+  notes: null,
+  user_data_dir: "/tmp/profile-1",
+  created_at: "2026-07-20T00:00:00Z",
+  updated_at: "2026-07-20T00:00:00Z",
+  tags: [],
+  status: "stopped",
+  vnc_ws_port: null,
+  cdp_url: null,
+};
+
+function profile(overrides: Partial<Profile>): Profile {
+  return { ...baseProfile, ...overrides };
+}
+
+function session(overrides: Partial<TaskHarnessSession>): TaskHarnessSession {
+  return {
+    id: "session-1",
+    profile_id: "profile-1",
+    sandbox_id: "default",
+    project_id: "commerce",
+    title: "Checkout validation",
+    status: "active",
+    workflow_state: "open",
+    done_at: null,
+    archived_at: null,
+    retention_class: "project",
+    expires_at: null,
+    activity_at: "2026-07-27T10:30:00Z",
+    row_version: 1,
+    created_by_kind: "user",
+    created_by_id: "user-1",
+    created_at: "2026-07-27T10:00:00Z",
+    updated_at: "2026-07-27T10:30:00Z",
+    metadata: { password: "super-secret", api_key: "hidden" },
+    ...overrides,
+  };
+}
+
+function setSessionsMedia(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
+beforeEach(() => {
+  setSessionsMedia(false);
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 1200 });
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 600 });
+  vi.mocked(api.listTaskSessions).mockReset();
+  vi.mocked(api.updateTaskSession).mockReset();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("SessionsOverview", () => {
+  it("filters task chats and updates done archived and retention lifecycle", async () => {
+    setSessionsMedia(true);
+    const openChat = session({
+      id: "chat-open",
+      title: "Open checkout chat",
+      workflow_state: "open",
+      status: "active",
+      retention_class: "project",
+      row_version: 3,
+    });
+    const doneChat = session({
+      id: "chat-done",
+      title: "Done checkout chat",
+      workflow_state: "done",
+      status: "active",
+      retention_class: "temporary",
+      row_version: 4,
+    });
+    const archivedChat = session({
+      id: "chat-archived",
+      title: "Archived checkout chat",
+      workflow_state: "done",
+      status: "archived",
+      retention_class: "temporary",
+      row_version: 5,
+      archived_at: "2026-07-27T11:00:00Z",
+    });
+    const serverState = new Map([
+      [openChat.id, openChat],
+      [doneChat.id, doneChat],
+      [archivedChat.id, archivedChat],
+    ]);
+    vi.mocked(api.listTaskSessions).mockResolvedValue([openChat, doneChat, archivedChat]);
+    vi.mocked(api.updateTaskSession).mockImplementation(async (sessionId, payload) => {
+      const current = serverState.get(sessionId);
+      if (!current) throw new Error("Unknown task chat");
+      const next = session({
+        ...current,
+        row_version: payload.row_version + 1,
+        workflow_state: payload.workflow_state ?? current.workflow_state,
+        done_at: payload.workflow_state === "done"
+          ? "2026-07-27T12:00:00Z"
+          : payload.workflow_state === "open"
+            ? null
+            : current.done_at,
+        status: payload.archived === true ? "archived" : payload.archived === false ? "active" : current.status,
+        archived_at: payload.archived === true ? "2026-07-27T12:00:00Z" : payload.archived === false ? null : current.archived_at,
+        retention_class: payload.retention_class ?? current.retention_class,
+      });
+      serverState.set(sessionId, next);
+      return next;
+    });
+
+    render(
+      <SessionsOverview
+        profiles={[profile({ id: "profile-1", name: "Checkout QA" })]}
+        selectedId={null}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Open checkout chat")).toBeTruthy();
+    expect(screen.queryByText("Done checkout chat")).toBeNull();
+    expect(screen.queryByText("Archived checkout chat")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Open task chats" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show details for Open checkout chat" }));
+    const openDetail = await screen.findByRole("region", { name: "Task chat details for Open checkout chat" });
+    fireEvent.click(within(openDetail).getByRole("button", { name: "Mark Open checkout chat done" }));
+    await waitFor(() => expect(api.updateTaskSession).toHaveBeenCalledWith("chat-open", {
+      row_version: 3,
+      workflow_state: "done",
+    }));
+    await waitFor(() => expect(screen.queryByText("Open checkout chat")).toBeNull());
+
+    fireEvent.click(screen.getByRole("tab", { name: "Done task chats" }));
+    expect(await screen.findByText("Open checkout chat")).toBeTruthy();
+    expect(screen.getByText("Done checkout chat")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show details for Open checkout chat" }));
+    const doneDetail = await screen.findByRole("region", { name: "Task chat details for Open checkout chat" });
+    fireEvent.click(within(doneDetail).getByRole("button", { name: "Make Open checkout chat temporary" }));
+    await waitFor(() => expect(api.updateTaskSession).toHaveBeenCalledWith("chat-open", {
+      row_version: 4,
+      retention_class: "temporary",
+    }));
+
+    fireEvent.click(within(doneDetail).getByRole("button", { name: "Archive Open checkout chat" }));
+    await waitFor(() => expect(api.updateTaskSession).toHaveBeenCalledWith("chat-open", {
+      row_version: 5,
+      archived: true,
+    }));
+
+    fireEvent.click(screen.getByRole("tab", { name: "Archived task chats" }));
+    expect(await screen.findByText("Open checkout chat")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show details for Open checkout chat" }));
+    const archivedDetail = await screen.findByRole("region", { name: "Task chat details for Open checkout chat" });
+    fireEvent.click(within(archivedDetail).getByRole("button", { name: "Restore Open checkout chat" }));
+    await waitFor(() => expect(api.updateTaskSession).toHaveBeenCalledWith("chat-open", {
+      row_version: 6,
+      archived: false,
+    }));
+  });
+
+  it("aggregates bounded per-profile task sessions into a redacted desktop grid", async () => {
+    const onSelectProfile = vi.fn();
+    const profiles = Array.from({ length: MAX_SESSION_PROFILE_CALLS + 2 }, (_, index) =>
+      profile({ id: `profile-${index + 1}`, name: `Profile ${index + 1}`, project_id: index === 0 ? "commerce" : "default" }),
+    );
+    vi.mocked(api.listTaskSessions).mockImplementation(async (profileId) => {
+      if (profileId === "profile-1") {
+        return [session({ id: "session-a", profile_id: profileId })];
+      }
+      return [];
+    });
+
+    render(<SessionsOverview profiles={profiles} selectedId={null} onSelectProfile={onSelectProfile} />);
+
+    await waitFor(() => expect(api.listTaskSessions).toHaveBeenCalledTimes(MAX_SESSION_PROFILE_CALLS));
+    expect(api.listTaskSessions).toHaveBeenCalledWith("profile-1", expect.objectContaining({ limit: 8 }));
+    expect(api.listTaskSessions).not.toHaveBeenCalledWith(`profile-${MAX_SESSION_PROFILE_CALLS + 1}`, expect.anything());
+
+    const grid = await screen.findByTestId("sessions-desktop-grid");
+    expect(screen.getByTestId("sessions-overview").className).toContain("max-w-none");
+    for (const header of ["Profile", "Title", "Project", "Workflow", "Status", "Retention", "Activity"]) {
+      expect(await within(grid).findByText(header)).toBeTruthy();
+    }
+    expect(await within(grid).findByText("Profile 1")).toBeTruthy();
+    expect(within(grid).getByText("Checkout validation")).toBeTruthy();
+    expect(within(grid).getByText("commerce")).toBeTruthy();
+    expect(within(grid).getByText("open")).toBeTruthy();
+    expect(within(grid).getByText("active")).toBeTruthy();
+    expect(within(grid).getByText("project")).toBeTruthy();
+    expect(within(grid).getByText("2026-07-27 10:30")).toBeTruthy();
+    expect(screen.queryByText(/super-secret|api_key|hidden/i)).toBeNull();
+
+    fireEvent.click(within(grid).getByText("Checkout validation"));
+    const detail = await screen.findByRole("region", { name: "Task chat details for Checkout validation" });
+    expect(screen.getByTestId("sessions-desktop-grid")).toBeTruthy();
+    for (const value of ["Profile 1", "commerce", "open", "active", "project", "session-a"]) {
+      expect(within(detail).getAllByText(value).length).toBeGreaterThan(0);
+    }
+    expect(detail.textContent).not.toMatch(/super-secret|api_key|hidden/i);
+    fireEvent.click(within(detail).getByRole("button", { name: "Open live profile Profile 1" }));
+    expect(onSelectProfile).toHaveBeenCalledWith("profile-1");
+
+    fireEvent.change(screen.getByLabelText("Search task chats"), { target: { value: "missing" } });
+    await waitFor(() => expect(within(grid).queryByText("Checkout validation")).toBeNull());
+  }, 15000);
+
+  it("shows loading, empty, and per-profile error states without inventing global sessions", async () => {
+    let resolveList: (items: TaskHarnessSession[]) => void = () => undefined;
+    vi.mocked(api.listTaskSessions).mockReturnValue(
+      new Promise((resolve) => {
+        resolveList = resolve;
+      }),
+    );
+
+    const { unmount } = render(
+      <SessionsOverview
+        profiles={[profile({ id: "profile-pending", name: "Pending Profile" })]}
+        selectedId={null}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Loading sessions/)).toBeTruthy();
+    resolveList([]);
+    expect(await screen.findByText("No task chats found.")).toBeTruthy();
+    unmount();
+
+    vi.mocked(api.listTaskSessions).mockRejectedValue(new Error("Task session API offline"));
+    render(
+      <SessionsOverview
+        profiles={[profile({ id: "profile-error", name: "Error Profile" })]}
+        selectedId={null}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText(/Error Profile: Task session API offline/)).toBeTruthy();
+    expect(screen.getByText("No task chats found.")).toBeTruthy();
+  });
+
+
+  it("aborts stale profile loads and ignores their late responses", async () => {
+    let staleSignal: AbortSignal | null = null;
+    let resolveStale: (items: TaskHarnessSession[]) => void = () => undefined;
+    vi.mocked(api.listTaskSessions).mockImplementation((profileId, options) => {
+      if (profileId === "profile-stale") {
+        staleSignal = options?.signal ?? null;
+        return new Promise((resolve) => {
+          resolveStale = resolve;
+        });
+      }
+      return Promise.resolve([
+        session({
+          id: "session-fresh",
+          profile_id: "profile-fresh",
+          title: "Fresh session",
+          activity_at: "2026-07-27T11:00:00Z",
+        }),
+      ]);
+    });
+
+    const { rerender } = render(
+      <SessionsOverview
+        profiles={[profile({ id: "profile-stale", name: "Stale Profile" })]}
+        selectedId={null}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(staleSignal).not.toBeNull());
+
+    rerender(
+      <SessionsOverview
+        profiles={[profile({ id: "profile-fresh", name: "Fresh Profile" })]}
+        selectedId={null}
+        onSelectProfile={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(staleSignal?.aborted).toBe(true));
+    expect(await screen.findByText("Fresh session")).toBeTruthy();
+
+    resolveStale([
+      session({
+        id: "session-stale",
+        profile_id: "profile-stale",
+        title: "Stale session",
+        activity_at: "2026-07-27T12:00:00Z",
+      }),
+    ]);
+
+    await waitFor(() => expect(screen.queryByText("Stale session")).toBeNull());
+    expect(screen.getByText("Fresh session")).toBeTruthy();
+  }, 15000);
+  it("keeps touch devices on session cards without mounting AG Grid", async () => {
+    setSessionsMedia(true);
+    const onSelectProfile = vi.fn();
+    vi.mocked(api.listTaskSessions).mockResolvedValue([
+      session({ id: "session-mobile", profile_id: "profile-mobile", title: "Mobile session" }),
+    ]);
+
+    render(
+      <SessionsOverview
+        profiles={[profile({ id: "profile-mobile", name: "Mobile Profile" })]}
+        selectedId={null}
+        onSelectProfile={onSelectProfile}
+      />,
+    );
+
+    expect(await screen.findByText("Mobile session")).toBeTruthy();
+    expect(screen.queryByTestId("sessions-desktop-grid")).toBeNull();
+    expect(screen.queryByRole("grid")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show details for Mobile session" }));
+    const detail = await screen.findByRole("region", { name: "Task chat details for Mobile session" });
+    fireEvent.click(within(detail).getByRole("button", { name: "Open live profile Mobile Profile" }));
+    expect(onSelectProfile).toHaveBeenCalledWith("profile-mobile");
+  });
+});

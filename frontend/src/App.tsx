@@ -1,16 +1,24 @@
-import { useState, useCallback, useEffect } from "react";
-import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Plus, Users, KeyRound } from "lucide-react";
+import { useState, useCallback, useEffect, useRef } from "react";
+import { ArrowLeft, Lock, PanelLeftClose, PanelLeft, ShieldCheck, Globe2, LayoutGrid, Users, KeyRound, History, Settings2 } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import {
   api,
   setOnUnauthorized,
+  type Account,
   type AccessIdentity,
   type AccessPermission,
   type Profile,
   type ProfileCreateData,
   type ProfileHarness,
+  type TaskOutput,
 } from "./lib/api";
 import { hasAccessPermission } from "./lib/accessPermissions";
+import {
+  ACTIVE_TASK_RUN_STATES,
+  forgetBrowserUseRun,
+  readRememberedBrowserUseRun,
+} from "./lib/managedTaskRunStorage";
+import { UI_STATE, type UIStateId } from "./lib/uiFlowRegistry";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
 import { CreateProfileFlow } from "./components/CreateProfileFlow";
@@ -25,14 +33,24 @@ import { BrowserUseHome } from "./components/BrowserUseHome";
 import { ProxyOverview } from "./components/ProxyOverview";
 import { ProfilesWorkspace } from "./components/ProfilesWorkspace";
 import { AccountsOverview } from "./components/AccountsOverview";
+import { SessionsOverview } from "./components/SessionsOverview";
 import { LiveDevPanel } from "./components/LiveDevPanel";
 import { SessionStreamButtons } from "./components/SessionStreamButtons";
+import { AgentBrowserWorkspace } from "./components/workspace/AgentBrowserWorkspace";
+import { HarnessSettingsWorkspace } from "./components/HarnessSettingsWorkspace";
+import { WorkspaceRuntimeConfigProvider } from "./components/workspace/WorkspaceRuntimeConfig";
 
 type AuthState = "checking" | "required" | "ok" | "error";
-type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies" | "profiles" | "accounts";
+type View = "home" | "empty" | "create" | "edit" | "view" | "access" | "proxies" | "profiles" | "accounts" | "sessions" | "settings";
 const MOBILE_WORKSPACE_QUERY = "(max-width: 767px), (pointer: coarse) and (max-width: 1024px)";
 type MobileConnectionStatus = "connecting" | "connected" | "reconnecting" | "failed";
 const FIXED_PROJECTS = ["default", "proxied", "mobile", "research"] as const;
+
+interface InitialPromptDraft {
+  id: string;
+  profileId: string;
+  task: string;
+}
 
 interface ApplyProfileViewportOptions {
   profile: Profile | null;
@@ -117,14 +135,14 @@ export default function App() {
   if (authState === "checking") {
     return (
       <div className="h-screen flex items-center justify-center">
-        <div className="text-gray-500 text-sm">Loading...</div>
+        <div className="text-gray-500 text-sm" data-ui-state={UI_STATE.appAuthChecking}>Loading...</div>
       </div>
     );
   }
 
   if (authState === "error") {
     return (
-      <div className="h-screen flex items-center justify-center bg-surface-0">
+      <div className="h-screen flex items-center justify-center bg-surface-0" data-ui-state={UI_STATE.appAuthError}>
         <div className="text-center">
           <p className="text-red-400 text-sm mb-2">Unable to reach the server</p>
           <button
@@ -147,16 +165,18 @@ export default function App() {
   }
 
   return (
-    <AppContent
-      authRequired={authRequired}
-      accessControlEnabled={accessControlEnabled}
-      identity={identity}
-      onLogout={async () => {
-        await api.logout();
-        setIdentity(null);
-        setAuthState(authRequired ? "required" : "ok");
-      }}
-    />
+    <WorkspaceRuntimeConfigProvider>
+      <AppContent
+        authRequired={authRequired}
+        accessControlEnabled={accessControlEnabled}
+        identity={identity}
+        onLogout={async () => {
+          await api.logout();
+          setIdentity(null);
+          setAuthState(authRequired ? "required" : "ok");
+        }}
+      />
+    </WorkspaceRuntimeConfigProvider>
   );
 }
 
@@ -170,27 +190,59 @@ interface AppContentProps {
 function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: AppContentProps) {
   const { profiles, loading, error, refresh, create, update, remove, launch, stop } = useProfiles();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
   const [view, setView] = useState<View>("home");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileFullscreenOpen, setMobileFullscreenOpen] = useState(false);
   const [mobileBrowserZoom, setMobileBrowserZoom] = useState(100);
   const [mobileRemoteToolsOpen, setMobileRemoteToolsOpen] = useState(false);
   const [mobileConnectionStatus, setMobileConnectionStatus] = useState<MobileConnectionStatus>("connecting");
+  const [mobileTaskOutputs, setMobileTaskOutputs] = useState<TaskOutput[]>([]);
+  const [workspaceRunActive, setWorkspaceRunActive] = useState(false);
   const [projectId, setProjectId] = useState<string>("default");
   const [harness, setHarness] = useState<ProfileHarness>("browser-use");
   const [taskDraft, setTaskDraft] = useState("");
+  const [initialPromptDraft, setInitialPromptDraft] = useState<InitialPromptDraft | null>(null);
+  const initialPromptDraftCounter = useRef(0);
   const isMobile = useIsMobile();
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
   const canManageProfiles = isAdministrator(identity);
   const canOperateSelected = Boolean(selected && canAccess(identity, selected, "operate"));
   const canInteractSelected = Boolean(selected && canAccess(identity, selected, "interact"));
+  const canAutomateSelected = Boolean(selected && canAccess(identity, selected, "automate"));
   const projects = Array.from(
     new Set<string>([
       ...FIXED_PROJECTS,
       ...profiles.map((profile) => profile.project_id || "default"),
     ]),
   );
+
+  useEffect(() => {
+    if (view !== "accounts") return;
+
+    let cancelled = false;
+    setAccountsLoading(true);
+    setAccountsError(null);
+    api.listAccounts()
+      .then((items) => {
+        if (!cancelled) setAccounts(items);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setAccountsError(err instanceof Error ? err.message : "Unable to load accounts");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAccountsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [view]);
 
   useEffect(() => {
     if (!isMobile || loading || profiles.length === 0) return;
@@ -206,6 +258,67 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     setSelectedId(nextProfile.id);
     setView("view");
   }, [isMobile, loading, profiles, selectedId]);
+
+  useEffect(() => {
+    setMobileTaskOutputs([]);
+    setWorkspaceRunActive(false);
+
+    if (!isMobile || !selected) return;
+
+    const rememberedRunId = readRememberedBrowserUseRun(selected.id);
+    if (!rememberedRunId) return;
+
+    const controller = new AbortController();
+    let cancelled = false;
+    let pollTimer: number | null = null;
+
+    const stopPolling = () => {
+      if (pollTimer != null) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    };
+
+    const refreshRememberedRun = async () => {
+      try {
+        const [run, outputs] = await Promise.all([
+          api.getTaskRun(rememberedRunId, { signal: controller.signal }),
+          api.listTaskRunOutputs(rememberedRunId, { signal: controller.signal }),
+        ]);
+        if (cancelled) return;
+        if (run.profile_id_snapshot !== selected.id) {
+          forgetBrowserUseRun(selected.id);
+          setMobileTaskOutputs([]);
+          setWorkspaceRunActive(false);
+          stopPolling();
+          return;
+        }
+        setMobileTaskOutputs(outputs);
+        const runActive = ACTIVE_TASK_RUN_STATES.has(run.status);
+        setWorkspaceRunActive(runActive);
+        if (!runActive) {
+          stopPolling();
+        }
+      } catch (err) {
+        if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
+        console.warn("[mobile-task-output] remembered run restore failed:", err);
+        forgetBrowserUseRun(selected.id);
+        setMobileTaskOutputs([]);
+        setWorkspaceRunActive(false);
+        stopPolling();
+      }
+    };
+
+    void refreshRememberedRun();
+    pollTimer = window.setInterval(() => void refreshRememberedRun(), 1500);
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      setWorkspaceRunActive(false);
+      stopPolling();
+    };
+  }, [isMobile, selected?.id, selected?.screen_height, selected?.screen_width]);
 
   // Deep-link from the Cloak Profile Sync extension (?profile=<id>).
   useEffect(() => {
@@ -235,8 +348,9 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     const profile = profiles.find((p) => p.id === id);
     if (profile?.project_id) setProjectId(profile.project_id);
     if (profile?.harness) setHarness(profile.harness);
-    setView(isMobile ? "view" : profile?.status === "running" ? "view" : canManageProfiles ? "edit" : "home");
-  }, [canManageProfiles, isMobile, profiles]);
+    // Desktop and mobile both open the live workspace for the selected profile.
+    setView("view");
+  }, [profiles]);
 
   const handleNew = useCallback(() => {
     if (!canManageProfiles) return;
@@ -275,6 +389,16 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     if (result) setView("view");
   }, [identity, profiles, selectedId, launch]);
 
+  const handOffTaskDraft = useCallback((profileId: string) => {
+    if (!taskDraft) return;
+    initialPromptDraftCounter.current += 1;
+    setInitialPromptDraft({
+      id: `${profileId}:${initialPromptDraftCounter.current}`,
+      profileId,
+      task: taskDraft,
+    });
+  }, [taskDraft]);
+
   const handleStop = useCallback(async () => {
     if (!selectedId || !canAccess(identity, profiles.find((profile) => profile.id === selectedId) ?? null, "operate")) return;
     await stop(selectedId);
@@ -298,6 +422,10 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
     });
   }, [canManageProfiles, canOperateSelected, launch, selected, stop, update]);
 
+  const handleWorkspaceRunActivityChange = useCallback((active: boolean) => {
+    setWorkspaceRunActive(active);
+  }, []);
+
 
   const handleTogglePin = useCallback(async (id: string) => {
     const profile = profiles.find((candidate) => candidate.id === id) ?? null;
@@ -307,6 +435,8 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
       update,
     });
   }, [canManageProfiles, profiles, update]);
+
+  const showTableTabs = isTableView(view);
 
   if (view === "access" && canManageProfiles && accessControlEnabled) {
     return <AccessDashboard onClose={() => setView(selected ? "view" : "home")} />;
@@ -325,7 +455,10 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
       const editing = view === "edit" && selected;
 
       return (
-        <div className="flex h-dvh flex-col overflow-hidden bg-surface-0">
+        <div
+          className="flex h-dvh flex-col overflow-hidden bg-surface-0"
+          data-ui-state={UI_STATE.appMobileProfileForm}
+        >
           <div className="flex items-center justify-between border-b border-border bg-surface-1 px-3 py-2">
             <div className="flex min-w-0 items-center gap-2">
               <button
@@ -365,6 +498,25 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
       );
     }
 
+
+    if (view === "settings") {
+      return (
+        <HarnessSettingsWorkspace
+          mobile
+          profiles={profiles}
+          selectedProfile={selected}
+          onBack={() => setView(selected ? "view" : "home")}
+          runActive={workspaceRunActive}
+          onSelectProfile={(profileId) => {
+            setSelectedId(profileId);
+            const profile = profiles.find((item) => item.id === profileId);
+            if (profile?.project_id) setProjectId(profile.project_id);
+            if (profile?.harness) setHarness(profile.harness);
+          }}
+        />
+      );
+    }
+
     const browserView =
       selected && selected.status === "running" ? (
         <ProfileViewer
@@ -398,7 +550,18 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           canManageAccess={canManageProfiles && accessControlEnabled}
           identityName={identity?.display_name ?? null}
           browserView={browserView}
+          liveMetricsView={
+            selected ? (
+              <LiveDevPanel
+                profileId={selected.id}
+                running={selected.status === "running"}
+                connectionStatus={mobileConnectionStatus}
+                variant="mobile"
+              />
+            ) : null
+          }
           browserZoom={mobileBrowserZoom}
+          taskOutputs={mobileTaskOutputs}
           browserConnectionStatus={selected?.status === "running" ? mobileConnectionStatus : null}
           remoteToolsOpen={mobileRemoteToolsOpen}
           onRemoteToolsOpenChange={setMobileRemoteToolsOpen}
@@ -412,13 +575,14 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           onBrowserZoomChange={setMobileBrowserZoom}
           onAccessControls={() => setView("access")}
           onLogout={onLogout}
+          onOpenSettings={() => setView("settings")}
         />
       </>
     );
   }
 
   return (
-    <div className="h-screen flex">
+    <div className="h-screen flex" data-ui-state={UI_STATE.appDesktopShell}>
       {/* Compact Browser-Use style sidebar */}
       {sidebarOpen && (
         <div className="w-48 border-r border-border bg-surface-1 flex-shrink-0 flex flex-col">
@@ -467,16 +631,26 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
                 <KeyRound className="h-3 w-3" />
                 Accounts
               </button>
-              {canManageProfiles ? (
-                <button
-                  type="button"
-                  onClick={handleNew}
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] text-gray-400 hover:bg-surface-2"
-                >
-                  <Plus className="h-3 w-3" />
-                  New profile
-                </button>
-              ) : null}
+              <button
+                type="button"
+                onClick={() => setView("sessions")}
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                  view === "sessions" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <History className="h-3 w-3" />
+                Sessions
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("settings")}
+                className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-[11px] ${
+                  view === "settings" ? "bg-surface-3 text-gray-100" : "text-gray-400 hover:bg-surface-2"
+                }`}
+              >
+                <Settings2 className="h-3 w-3" />
+                Settings
+              </button>
             </div>
           </div>
           <div className="min-h-0 flex-1">
@@ -506,7 +680,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             >
               {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
             </button>
-            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && (
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && view !== "sessions" && view !== "settings" && (
               <div className="flex items-center gap-2">
                 <StatusIndicator status={selected.status} size="md" />
                 <span className="text-sm font-medium">{selected.name}</span>
@@ -523,7 +697,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             {selected && selected.status === "running" ? (
               <SessionStreamButtons profileId={selected.id} running />
             ) : null}
-            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && (
+            {selected && view !== "home" && view !== "proxies" && view !== "profiles" && view !== "accounts" && view !== "sessions" && view !== "settings" && (
               canOperateSelected && (
               <LaunchButton
                 status={selected.status}
@@ -559,6 +733,32 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           </div>
         </div>
 
+        {showTableTabs ? (
+          <div className="border-b border-border bg-surface-0 px-4 py-2">
+            <div className="inline-flex rounded-lg border border-border bg-surface-1 p-1" role="tablist" aria-label="Tables workspace">
+              {[
+                { id: "profiles", label: "Profiles", available: true },
+                { id: "accounts", label: "Accounts & 2FA", available: true },
+                { id: "proxies", label: "Proxies", available: canManageProfiles },
+                { id: "sessions", label: "Sessions", available: true },
+              ].filter((tab) => tab.available).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={view === tab.id}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium ${
+                    view === tab.id ? "bg-surface-3 text-gray-100" : "text-gray-500 hover:text-gray-200"
+                  }`}
+                  onClick={() => setView(tab.id as View)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         {/* Error banner */}
         {error && (
           <div className="px-4 py-2 bg-red-600/15 border-b border-red-600/30 text-red-400 text-sm">
@@ -575,23 +775,30 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
         ) : null}
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto overscroll-contain">
+        <div
+          className="flex-1 overflow-hidden overscroll-contain"
+          data-ui-state={desktopViewState(view)}
+        >
           {view === "home" && (
             <BrowserUseHome
               projects={projects}
               projectId={projectId}
-              harness={harness}
               profiles={profiles}
               task={taskDraft}
-              canManage={canManageProfiles}
               selectedProfile={selected}
-              onProjectChange={setProjectId}
-              onHarnessChange={setHarness}
+              onProjectChange={(nextProjectId) => {
+                setProjectId(nextProjectId);
+                if (!selected || (selected.project_id || "default") !== nextProjectId) {
+                  setSelectedId(null);
+                }
+              }}
               onTaskChange={setTaskDraft}
-              onOpenProxies={() => setView("proxies")}
-              onOpenProfiles={() => setView("profiles")}
-              onOpenAccounts={() => setView("accounts")}
-              onCreateProjectProfile={handleNew}
+              onSelectProfile={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+              }}
               onOpenSettings={(profileId) => {
                 if (!profileId) {
                   handleNew();
@@ -602,6 +809,7 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
               }}
               onLaunchSelected={async () => {
                 if (!selected) return;
+                handOffTaskDraft(selected.id);
                 if (selected.status === "running") {
                   setView("view");
                   return;
@@ -646,13 +854,44 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
           {view === "accounts" && (
             <AccountsOverview
               profiles={profiles}
+              accounts={accounts}
+              loading={accountsLoading}
+              error={accountsError}
               selectedId={selectedId}
               onSelect={(profileId) => {
                 setSelectedId(profileId);
                 const profile = profiles.find((item) => item.id === profileId);
                 if (profile?.project_id) setProjectId(profile.project_id);
                 if (profile?.harness) setHarness(profile.harness);
-                setView(canManageProfiles ? "edit" : "accounts");
+                setView("view");
+              }}
+            />
+          )}
+
+          {view === "sessions" && (
+            <SessionsOverview
+              profiles={profiles}
+              selectedId={selectedId}
+              onSelectProfile={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
+                setView("view");
+              }}
+            />
+          )}
+
+          {view === "settings" && (
+            <HarnessSettingsWorkspace
+              profiles={profiles}
+              selectedProfile={selected}
+              runActive={workspaceRunActive}
+              onSelectProfile={(profileId) => {
+                setSelectedId(profileId);
+                const profile = profiles.find((item) => item.id === profileId);
+                if (profile?.project_id) setProjectId(profile.project_id);
+                if (profile?.harness) setHarness(profile.harness);
               }}
             />
           )}
@@ -691,15 +930,38 @@ function AppContent({ authRequired, accessControlEnabled, identity, onLogout }: 
             />
           )}
 
-          {view === "view" && selected && selected.status === "running" && (
-            <ProfileViewer
-              key={selected.id}
-              profileId={selected.id}
-              cdpUrl={selected.cdp_url}
-              clipboardSync={selected.clipboard_sync}
-              canInteract={canInteractSelected}
-              onDisconnect={handleVncDisconnect}
-            />
+          {selected && (
+            <div
+              data-testid="desktop-agent-workspace-host"
+              className={view === "view" ? "h-full" : "hidden h-full"}
+              aria-hidden={view === "view" ? undefined : true}
+              inert={view === "view" ? undefined : true}
+            >
+              <AgentBrowserWorkspace
+                profiles={profiles}
+                selectedProfile={selected}
+                canAutomate={canAutomateSelected}
+                canInteract={canInteractSelected}
+                canManageViewport={canManageProfiles && canOperateSelected}
+                onViewportApply={handleViewportApply}
+                onSelectProfile={(profileId) => {
+                  setSelectedId(profileId);
+                  const profile = profiles.find((item) => item.id === profileId);
+                  if (profile?.project_id) setProjectId(profile.project_id);
+                  if (profile?.harness) setHarness(profile.harness);
+                }}
+                onConnectionStatusChange={setMobileConnectionStatus}
+                onRunActivityChange={handleWorkspaceRunActivityChange}
+                initialPromptDraft={
+                  initialPromptDraft?.profileId === selected.id ? initialPromptDraft : null
+                }
+                onInitialPromptDraftApplied={(draftId) => {
+                  setInitialPromptDraft((current) => (
+                    current?.id === draftId ? null : current
+                  ));
+                }}
+              />
+            </div>
           )}
         </div>
       </div>
@@ -715,6 +977,27 @@ function canAccess(identity: AccessIdentity | null, profile: Profile | null, per
   if (!identity || !profile) return false;
   if (isAdministrator(identity)) return true;
   return hasAccessPermission(identity.grants, profile.sandbox_id, permission);
+}
+
+function isTableView(view: View) {
+  return view === "profiles" || view === "accounts" || view === "proxies" || view === "sessions";
+}
+
+function desktopViewState(view: View): UIStateId {
+  const states: Record<View, UIStateId> = {
+    home: UI_STATE.appDesktopHome,
+    empty: UI_STATE.appDesktopEmpty,
+    create: UI_STATE.appDesktopCreate,
+    edit: UI_STATE.appDesktopEdit,
+    view: UI_STATE.appDesktopAgentWorkspace,
+    access: UI_STATE.appAccessDashboard,
+    proxies: UI_STATE.appDesktopProxies,
+    profiles: UI_STATE.appDesktopProfiles,
+    accounts: UI_STATE.appDesktopAccounts,
+    sessions: UI_STATE.appDesktopSessions,
+    settings: UI_STATE.appDesktopSettings,
+  };
+  return states[view];
 }
 
 function useIsMobile() {

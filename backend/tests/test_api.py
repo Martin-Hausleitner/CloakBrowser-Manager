@@ -9,6 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from backend import main
+from backend import database as db
 from backend.browser_manager import RunningProfile
 
 
@@ -63,6 +64,36 @@ def test_create_profile_with_all_fields(app_client: TestClient):
     assert data["accent_color"] == "#1A2B3C"
     assert data["harness"] == "opencode"
     assert len(data["tags"]) == 1
+
+
+def test_profile_responses_do_not_expose_proxy_credentials(app_client: TestClient):
+    raw_proxy = "http://proxy-user:top-secret@proxy.test:8080"
+
+    created = app_client.post(
+        "/api/profiles",
+        json={"name": "Secret Proxy", "proxy": raw_proxy},
+    )
+
+    assert created.status_code == 201
+    created_data = created.json()
+    assert created_data["proxy"] is None
+    assert created_data["proxy_display"] == "http://proxy.test:8080"
+    assert "proxy-user" not in created.text
+    assert "top-secret" not in created.text
+    assert db.get_profile(created_data["id"])["proxy"] == raw_proxy
+
+    fetched = app_client.get(f"/api/profiles/{created_data['id']}")
+    listed = app_client.get("/api/profiles")
+
+    assert fetched.status_code == 200
+    assert listed.status_code == 200
+    assert fetched.json()["proxy"] is None
+    assert fetched.json()["proxy_display"] == "http://proxy.test:8080"
+    assert all(profile["proxy"] is None for profile in listed.json())
+    assert "proxy-user" not in fetched.text
+    assert "top-secret" not in fetched.text
+    assert "proxy-user" not in listed.text
+    assert "top-secret" not in listed.text
 
 
 def test_create_profile_invalid_platform(app_client: TestClient):
@@ -264,13 +295,30 @@ def test_profile_launch_args_default_empty(app_client: TestClient):
     assert resp.json()["launch_args"] == []
 
 
-def test_profile_launch_args_create(app_client: TestClient):
+def test_profile_create_rejects_extension_paths_and_persists_catalog_ids(app_client: TestClient):
     resp = app_client.post("/api/profiles", json={
-        "name": "WithArgs",
-        "launch_args": ["--load-extension=/data/ext", "--disable-features=Foo"],
+        "name": "UnsafePath",
+        "launch_args": ["--load-extension=/data/ext"],
     })
-    assert resp.status_code == 201
-    assert resp.json()["launch_args"] == ["--load-extension=/data/ext", "--disable-features=Foo"]
+    assert resp.status_code == 422
+
+    created = app_client.post("/api/profiles", json={
+        "name": "WithCatalogExtension",
+        "extension_ids": ["ddkjiahejlhfcafbddmgiahcphecmpfh"],
+        "launch_args": ["--disable-features=Foo"],
+    })
+    assert created.status_code == 201
+    assert created.json()["extension_ids"] == ["ddkjiahejlhfcafbddmgiahcphecmpfh"]
+    assert created.json()["launch_args"] == ["--disable-features=Foo"]
+
+
+def test_profile_create_rejects_unknown_catalog_extension_ids(app_client: TestClient):
+    response = app_client.post(
+        "/api/profiles",
+        json={"name": "UnknownExtension", "extension_ids": ["not-in-the-server-catalog"]},
+    )
+    assert response.status_code == 422
+    assert "Unknown catalog extension" in response.json()["detail"]
 
 
 def test_profile_launch_args_update(app_client: TestClient):
@@ -379,6 +427,72 @@ def test_get_clipboard_from_page(app_client: TestClient):
     main.browser_mgr.running.pop(pid, None)
 
 
+def test_capture_profile_screenshot_returns_private_png(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "Screenshot"})
+    pid = create.json()["id"]
+    png = b"\x89PNG\r\n\x1a\nprofile-proof"
+
+    with patch.object(
+        main.browser_mgr,
+        "capture_screenshot",
+        new=AsyncMock(return_value=png),
+    ):
+        resp = app_client.post(f"/api/profiles/{pid}/screenshot")
+
+    assert resp.status_code == 200
+    assert resp.content == png
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.headers["cache-control"] == "private, no-store"
+    assert resp.headers["content-disposition"] == f'attachment; filename="cloakbrowser-{pid}.png"'
+
+
+def test_capture_profile_screenshot_rejects_oversized_png(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "Large Screenshot"})
+    pid = create.json()["id"]
+    oversized = b"\x89PNG\r\n\x1a\n" + (b"x" * (16 * 1024 * 1024))
+
+    with patch.object(
+        main.browser_mgr,
+        "capture_screenshot",
+        new=AsyncMock(return_value=oversized),
+    ):
+        resp = app_client.post(f"/api/profiles/{pid}/screenshot")
+
+    assert resp.status_code == 413
+    assert resp.json() == {"detail": "Profile screenshot is too large"}
+
+
+def test_capture_profile_screenshot_requires_a_running_profile(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "Stopped Screenshot"})
+    pid = create.json()["id"]
+
+    with patch.object(
+        main.browser_mgr,
+        "capture_screenshot",
+        new=AsyncMock(side_effect=RuntimeError("profile_not_running")),
+    ):
+        resp = app_client.post(f"/api/profiles/{pid}/screenshot")
+
+    assert resp.status_code == 409
+    assert resp.json() == {"detail": "Profile is not running"}
+
+
+def test_capture_profile_screenshot_hides_internal_capture_errors(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "Unavailable Screenshot"})
+    pid = create.json()["id"]
+
+    with patch.object(
+        main.browser_mgr,
+        "capture_screenshot",
+        new=AsyncMock(side_effect=RuntimeError("private_backend_path")),
+    ):
+        resp = app_client.post(f"/api/profiles/{pid}/screenshot")
+
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": "Profile screenshot is unavailable"}
+    assert "private_backend_path" not in resp.text
+
+
 # ── Response shape ───────────────────────────────────────────────────────────
 
 
@@ -454,11 +568,19 @@ def _mock_running_profile(pid: str) -> MagicMock:
     return mock
 
 
+def _acquire_direct_lease(app_client: TestClient, profile_id: str) -> dict[str, str]:
+    resp = app_client.post(f"/api/profiles/{profile_id}/automation-leases")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    return {"X-CBM-Automation-Lease": body["token"]}
+
+
 def test_cdp_json_version_rewrites_ws_url(app_client: TestClient):
     """GET /cdp/json/version rewrites webSocketDebuggerUrl through our proxy."""
     create = app_client.post("/api/profiles", json={"name": "CdpVer"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     chrome_response = MagicMock()
     chrome_response.json.return_value = {
@@ -471,7 +593,9 @@ def test_cdp_json_version_rewrites_ws_url(app_client: TestClient):
     mock_client.get = AsyncMock(return_value=chrome_response)
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        resp = app_client.get(f"/api/profiles/{pid}/cdp/json/version")
+        resp = app_client.get(
+            f"/api/profiles/{pid}/cdp/json/version", headers=lease_headers
+        )
 
     assert resp.status_code == 200
     data = resp.json()
@@ -485,6 +609,7 @@ def test_cdp_json_version_uses_wss_behind_https(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "CdpWss"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     chrome_response = MagicMock()
     chrome_response.json.return_value = {
@@ -498,7 +623,7 @@ def test_cdp_json_version_uses_wss_behind_https(app_client: TestClient):
     with patch("httpx.AsyncClient", return_value=mock_client):
         resp = app_client.get(
             f"/api/profiles/{pid}/cdp/json/version",
-            headers={"X-Forwarded-Proto": "https"},
+            headers={**lease_headers, "X-Forwarded-Proto": "https"},
         )
 
     assert resp.status_code == 200
@@ -511,6 +636,7 @@ def test_cdp_json_list_rewrites_page_urls(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "CdpList"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     chrome_response = MagicMock()
     chrome_response.json.return_value = [
@@ -529,7 +655,9 @@ def test_cdp_json_list_rewrites_page_urls(app_client: TestClient):
     mock_client.get = AsyncMock(return_value=chrome_response)
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        resp = app_client.get(f"/api/profiles/{pid}/cdp/json/list")
+        resp = app_client.get(
+            f"/api/profiles/{pid}/cdp/json/list", headers=lease_headers
+        )
 
     assert resp.status_code == 200
     data = resp.json()
@@ -545,6 +673,7 @@ def test_cdp_json_version_chrome_unreachable(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "CdpDown"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -552,10 +681,23 @@ def test_cdp_json_version_chrome_unreachable(app_client: TestClient):
     mock_client.get = AsyncMock(side_effect=ConnectionError("refused"))
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        resp = app_client.get(f"/api/profiles/{pid}/cdp/json/version")
+        resp = app_client.get(
+            f"/api/profiles/{pid}/cdp/json/version", headers=lease_headers
+        )
 
     assert resp.status_code == 502
     main.browser_mgr.running.pop(pid, None)
+
+
+def test_cdp_requires_automation_lease_header(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "CdpLeaseRequired"})
+    pid = create.json()["id"]
+    _mock_running_profile(pid)
+    try:
+        assert app_client.get(f"/api/profiles/{pid}/cdp/json/version").status_code == 404
+        assert app_client.get(f"/api/profiles/{pid}/cdp").status_code == 404
+    finally:
+        main.browser_mgr.running.pop(pid, None)
 
 
 # ── WebSocket Origin Validation ──────────────────────────────────────────────
@@ -581,11 +723,12 @@ def test_cdp_ws_rejects_cross_origin(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "OriginCdp"})
     pid = create.json()["id"]
     _mock_running_profile(pid)
+    lease_headers = _acquire_direct_lease(app_client, pid)
 
     with pytest.raises(Exception):
         with app_client.websocket_connect(
             f"/api/profiles/{pid}/cdp",
-            headers={"origin": "http://evil.com"},
+            headers={**lease_headers, "origin": "http://evil.com"},
         ):
             pass
     main.browser_mgr.running.pop(pid, None)

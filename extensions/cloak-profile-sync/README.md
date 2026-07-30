@@ -20,6 +20,24 @@ python3 extensions/cloak-profile-sync/host/local_bridge.py
 
 Requires `cloakbrowser` installed (`pip install cloakbrowser && cloakbrowser install`).
 
+The manifest carries public `key` material only so unpacked loads have a stable
+extension ID:
+
+```text
+fjcjfaeimhopmpnoemigapegahhjnbkl
+```
+
+For VCVM/Browser Use tests, load the bundled repository path:
+
+```text
+extensions/cloak-profile-sync
+```
+
+If the managed profile is launched with `--disable-extensions`, start the test
+profile without that flag and load this unpacked path or add the path to the
+Manager extension catalog for the profile under test. No private key material is
+stored in this repository.
+
 ## Open Cloud vs Open Local
 
 | Button | What it does | Proxy-on-start |
@@ -79,3 +97,40 @@ python3 extensions/cloak-profile-sync/scripts/verify_against_manager.py
 | Profile create/templates from Manager create-flow | Extension lists whatever catalog/profiles returns; adapt when template list endpoints appear |
 
 Do not commit raw proxy passwords or auth tokens.
+## Secure action recorder
+
+The popup includes a compact **Action recorder** control for Browser Use test setup:
+
+- `Start` begins recording against the active tab and dynamically injects `content/recorder-content.js` using `activeTab` + `scripting`.
+- `Stop` freezes the recording and renders a deterministic JSON flow in the popup export textarea.
+- `Export` re-renders the last stopped flow without changing timestamps or step ordering.
+
+Browser Use E2E tests can drive the same contract through extension runtime messages:
+
+```js
+await chrome.runtime.sendMessage({ type: "RECORDER_START" });
+await chrome.runtime.sendMessage({ type: "RECORDER_GET_STATUS" });
+const stopped = await chrome.runtime.sendMessage({ type: "RECORDER_STOP" });
+const flow = stopped.result.export;
+const exported = await chrome.runtime.sendMessage({ type: "RECORDER_EXPORT" });
+```
+
+All responses use the service-worker message envelope:
+
+```json
+{ "ok": true, "result": { "...": "..." } }
+```
+
+Supported recorder messages are `RECORDER_START`, `RECORDER_STOP`,
+`RECORDER_EXPORT`, `RECORDER_GET_STATUS`, and `RECORDER_CLEAR`.
+`RECORDER_EVENT` is internal to the injected content script.
+
+The export schema is `cloakbrowser.secure-action-recording.v1`. It includes a
+deterministic `prompt`, ordered `steps`, and `secretRefs`. Navigation URLs are
+normalized to drop token/session/password-style query parameters. Input events
+store selectors, field metadata, sensitivity, and value length only. Sensitive
+fields are represented as opaque `secretref-*` identifiers; raw passwords,
+cookies, OTP/TOTP, passkeys, payment values, bearer/session tokens, and typed
+field values are never persisted in the recording or popup export. A recording
+expires after 30 minutes and stops after 500 events. Events from a different tab
+are rejected.

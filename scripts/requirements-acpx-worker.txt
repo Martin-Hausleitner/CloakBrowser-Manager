@@ -1,0 +1,5 @@
+# LEGACY NON-PRODUCTION compatibility list.
+# Production ACPX worker installs must use:
+# scripts/requirements-acpx-worker.linux-x86_64.py312.txt
+mcp==1.28.1
+playwright==1.61.0

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
-  type ExtensionDefaultItem,
   type ProfileCreateData,
   type ProfileHarness,
   type ProfileTemplate,
@@ -28,8 +27,6 @@ export function CreateProfileFlow({
 }: CreateProfileFlowProps) {
   const [mode, setMode] = useState<Mode>("generate");
   const [templates, setTemplates] = useState<ProfileTemplate[]>([]);
-  const [defaults, setDefaults] = useState<ExtensionDefaultItem[]>([]);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [templateId, setTemplateId] = useState("generate-new");
   const [name, setName] = useState("");
   const [quickHarness, setQuickHarness] = useState<ProfileHarness>(harness);
@@ -43,13 +40,8 @@ export function CreateProfileFlow({
   useEffect(() => {
     void (async () => {
       try {
-        const [templateRows, defaultsPayload] = await Promise.all([
-          api.listProfileTemplates(),
-          api.getExtensionDefaults(),
-        ]);
+        const templateRows = await api.listProfileTemplates();
         setTemplates(templateRows);
-        setDefaults(defaultsPayload.extensions || defaultsPayload.items || []);
-        setSelectedIds(defaultsPayload.selected_ids || []);
         const first = templateRows.find((row) => row.id === "generate-new") || templateRows[0];
         if (first) {
           setTemplateId(first.id);
@@ -66,17 +58,6 @@ export function CreateProfileFlow({
     () => templates.find((row) => row.id === templateId) || null,
     [templateId, templates],
   );
-
-  const persistDefaults = async (next: string[]) => {
-    setSelectedIds(next);
-    try {
-      const updated = await api.updateExtensionDefaults(next);
-      setDefaults(updated.extensions || updated.items || []);
-      setSelectedIds(updated.selected_ids || next);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save extension defaults");
-    }
-  };
 
   const createFromTemplate = async () => {
     setBusy(true);
@@ -220,48 +201,6 @@ export function CreateProfileFlow({
             {systemPrompt || selectedTemplate?.summary}
           </div>
         ) : null}
-      </div>
-
-      <div className="rounded-xl border border-border bg-surface-1 p-3">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <div>
-            <p className="text-xs font-medium text-gray-200">Default extensions (Comet)</p>
-            <p className="text-[10px] text-gray-500">
-              Saved via PUT /api/extension/defaults · applied on create
-            </p>
-          </div>
-        </div>
-        <div className="max-h-48 space-y-1 overflow-y-auto">
-          {defaults.map((item) => (
-            <label
-              key={item.id}
-              className="flex items-start gap-2 rounded px-1.5 py-1 text-xs hover:bg-surface-2"
-            >
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={selectedIds.includes(item.id)}
-                onChange={(event) => {
-                  const next = event.target.checked
-                    ? [...selectedIds, item.id]
-                    : selectedIds.filter((id) => id !== item.id);
-                  void persistDefaults(next);
-                }}
-              />
-              <span className="min-w-0">
-                <span className="text-gray-200">{item.name}</span>
-                {item.description ? (
-                  <span className="mt-0.5 block text-[10px] text-gray-500">{item.description}</span>
-                ) : null}
-                {!item.available ? (
-                  <span className="mt-0.5 block text-[10px] text-amber-400/80">
-                    Sync to EXTENSION_CATALOG_DIR to install on launch
-                  </span>
-                ) : null}
-              </span>
-            </label>
-          ))}
-        </div>
       </div>
 
       <div className="flex justify-end gap-2">

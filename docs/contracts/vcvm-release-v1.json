@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloakbrowser.io/contracts/vcvm-release-v1.json",
+  "api_version": "cloakbrowser.io/v1",
+  "kind": "ContractSchema",
+  "metadata": {
+    "id": "vcvm-release-v1",
+    "resource_version": 1
+  },
+  "spec": {
+    "required_policy": [
+      "release_free_space_gib >= 8",
+      "new_worktree_free_space_gib >= 12",
+      "manifest records measurement_source as local, override, or vcvm-remote",
+      "apply is unavailable until transaction engine re-review passes",
+      "dry-run is the default",
+      "raw secrets and credentialed URLs are forbidden"
+    ],
+    "manifest": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "release_id",
+        "created_at",
+        "source",
+        "target",
+        "disk",
+        "artifacts",
+        "artifact_set_sha256",
+        "migrations",
+        "policy"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "vcvm-release-v1"
+        },
+        "release_id": {
+          "type": "string",
+          "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._-]{11,80}$"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "source": {
+          "type": "object",
+          "required": [
+            "kind",
+            "branch",
+            "commit",
+            "remote_name",
+            "remote",
+            "dirty",
+            "archive_sha256"
+          ],
+          "properties": {
+            "kind": {
+              "const": "git"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "remote": {
+              "type": "string"
+            },
+            "remote_name": {
+              "type": "string"
+            },
+            "dirty": {
+              "type": "boolean"
+            },
+            "archive_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "target": {
+          "type": "object",
+          "required": [
+            "host",
+            "remote_path",
+            "release_dir",
+            "current_symlink"
+          ],
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "remote_path": {
+              "type": "string"
+            },
+            "release_dir": {
+              "type": "string"
+            },
+            "current_symlink": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "disk": {
+          "type": "object",
+          "required": [
+            "path",
+            "measurement_source",
+            "total_bytes",
+            "used_bytes",
+            "free_bytes",
+            "free_gib",
+            "release_min_free_gib",
+            "new_worktree_min_free_gib"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "measurement_source": {
+              "enum": [
+                "local",
+                "override",
+                "vcvm-remote"
+              ]
+            },
+            "total_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "used_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "free_bytes": {
+              "type": "integer",
+              "minimum": 8589934592
+            },
+            "free_gib": {
+              "type": "number",
+              "minimum": 8
+            },
+            "release_min_free_gib": {
+              "const": 8
+            },
+            "new_worktree_min_free_gib": {
+              "const": 12
+            }
+          },
+          "additionalProperties": false
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "type",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "file",
+                  "directory"
+                ]
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "file_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "artifact_set_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "migrations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "source",
+              "identifier",
+              "sha256"
+            ],
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "policy": {
+          "type": "object",
+          "required": [
+            "dry_run_default",
+            "release_requires_clean_commit",
+            "apply_available",
+            "missing_apply_gates",
+            "never_prune_shared_host_resources"
+          ],
+          "properties": {
+            "dry_run_default": {
+              "const": true
+            },
+            "release_requires_clean_commit": {
+              "type": "boolean"
+            },
+            "apply_available": {
+              "const": false
+            },
+            "missing_apply_gates": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            "never_prune_shared_host_resources": {
+              "const": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

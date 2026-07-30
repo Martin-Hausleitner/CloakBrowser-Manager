@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "CloakBrowser Profile Sync",
   "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnMgj1WbHEk2Mi+/BsWru8Q3po9f8IrMKACvLPHm0eZk6lZ+Ut5tly2RRaW9+AvXclQedVVofFLKn7cUjEtJpIiA7GmcSoCbzE0STumr/yTSYrdEYY1OvadQtFa1gD7dxQBkO8m/2leQCFMNy9snnhDIdvX+51G6FCdzm2Dib/CjCfofo/sXjfXfUGTLR4Xxd+Cqpp9TMCmW8rnjpFaoyyDsqEWS7jMV7GKDcUO/y+LXPnODQ075v6YEGRcUuhdxR5J6lkzK56VqwH/Uw0LeCeqGRWHpwbB/J5nJ/gFhUOIgkLjWPuoVrtKNiIDbuIxL0rxlzGWUfes19Q8HB1UiKfwIDAQAB",
   "description": "View CloakBrowser Manager profiles and proxies; open the same profile in cloud/VCVM or locally on Mac.",
   "action": {
     "default_title": "CloakBrowser Profile Sync",
@@ -21,7 +22,7 @@
     "service_worker": "background/service-worker.js",
     "type": "module"
   },
-  "permissions": ["storage", "tabs"],
+  "permissions": ["storage", "tabs", "scripting", "activeTab"],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*"

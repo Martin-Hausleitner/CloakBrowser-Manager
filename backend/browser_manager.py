@@ -3,22 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import socket
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from cloakbrowser import launch_persistent_context_async
 
 if __package__:
     from . import live_diagnostics
+    from . import extension_catalog
+    from . import models as profile_models
+    from .proxy_bridge import ProxyBridge, proxy_requires_bridge
     from .vnc_manager import VNCManager
 else:  # Support importing browser_manager as a top-level module.
     import live_diagnostics
+    import extension_catalog
+    import models as profile_models
+    from proxy_bridge import ProxyBridge, proxy_requires_bridge
     from vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
@@ -85,6 +94,16 @@ def _validate_proxy(url: str) -> None:
         raise ValueError("Proxy URL missing hostname")
     if not port:
         raise ValueError("Proxy URL missing port")
+
+
+def _fetch_cdp_version(port: int) -> dict[str, Any]:
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{int(port)}/json/version",
+        timeout=0.5,
+    ) as response:
+        payload = response.read(64 * 1024)
+    decoded = json.loads(payload.decode("utf-8"))
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _init_profile_defaults(user_data_dir: Path, search_engine: str | None = None) -> None:
@@ -191,6 +210,8 @@ class RunningProfile:
     display: int
     ws_port: int
     cdp_port: int
+    user_data_dir: str | None = None
+    proxy_bridge: ProxyBridge | None = None
 
 
 class BrowserManager:
@@ -232,19 +253,24 @@ class BrowserManager:
 
         # Set up bookmarks and search engine on first launch
         _init_profile_defaults(user_data_dir, profile.get("search_engine"))
+        screen_width = int(profile.get("screen_width", 1920))
+        screen_height = int(profile.get("screen_height", 1080))
+        phone_viewport = min(screen_width, screen_height) <= 600 and max(
+            screen_width, screen_height
+        ) <= 1200
 
+        proxy_bridge: ProxyBridge | None = None
         try:
             # Start KasmVNC on the allocated display
             await self.vnc.start_vnc(
                 display,
                 ws_port,
-                width=profile.get("screen_width", 1920),
-                height=profile.get("screen_height", 1080),
+                width=screen_width,
+                height=screen_height,
             )
 
             # Build fingerprint args from profile settings
-            extra_args = self._build_fingerprint_args(profile)
-            extra_args += profile.get("launch_args") or []
+            extra_args = self._build_profile_launch_args(profile)
             extra_args.append(f"--remote-debugging-port={cdp_port}")
 
             # Normalize proxy format (host:port:user:pass → http://user:pass@host:port)
@@ -256,6 +282,9 @@ class BrowserManager:
                 raise ValueError("Profile proxy is configured but could not be applied")
             if proxy:
                 _validate_proxy(proxy)
+                if proxy_requires_bridge(proxy):
+                    proxy_bridge = await ProxyBridge.start(proxy)
+                    proxy = proxy_bridge.proxy_url
                 # Also pin Chromium proxy flags so Playwright env gaps cannot
                 # silently launch without the assigned proxy.
                 extra_args.append(f"--proxy-server={proxy}")
@@ -280,9 +309,13 @@ class BrowserManager:
                         color_scheme=profile.get("color_scheme") or None,
                         user_agent=profile.get("user_agent") or None,
                         viewport={
-                            "width": profile.get("screen_width", 1920),
-                            "height": profile.get("screen_height", 1080) - 133,
+                            "width": screen_width,
+                            "height": screen_height - 133,
                         },
+                        screen={"width": screen_width, "height": screen_height},
+                        device_scale_factor=1,
+                        is_mobile=phone_viewport,
+                        has_touch=phone_viewport,
                         env={**os.environ, "DISPLAY": display_value},
                     )
                 finally:
@@ -293,8 +326,8 @@ class BrowserManager:
 
             await self._fit_window_to_vnc(
                 context,
-                width=profile.get("screen_width", 1920),
-                height=profile.get("screen_height", 1080),
+                width=screen_width,
+                height=screen_height,
             )
 
             # Inject clipboard listener: captures copied text on every page
@@ -326,6 +359,8 @@ class BrowserManager:
                 display=display,
                 ws_port=ws_port,
                 cdp_port=cdp_port,
+                user_data_dir=str(user_data_dir),
+                proxy_bridge=proxy_bridge,
             )
 
             # Auto-cleanup if browser crashes or user closes Chrome via VNC
@@ -349,6 +384,8 @@ class BrowserManager:
             async with self._lock:
                 self._launching.discard(profile_id)
             live_diagnostics.live_diagnostics.mark_launch_failed(profile_id)
+            if proxy_bridge is not None:
+                await proxy_bridge.stop()
             await self.vnc.stop_vnc(display)
             raise
 
@@ -360,6 +397,8 @@ class BrowserManager:
         if running:
             logger.info("Browser closed for profile %s, cleaning up", profile_id)
             live_diagnostics.live_diagnostics.mark_stopped(profile_id)
+            if running.proxy_bridge is not None:
+                await running.proxy_bridge.stop()
             await self.vnc.stop_vnc(running.display)
 
     async def stop(self, profile_id: str):
@@ -379,6 +418,10 @@ class BrowserManager:
         except Exception as exc:
             logger.warning("Error closing context for %s: %s", profile_id, exc)
 
+        proxy_bridge = getattr(running, "proxy_bridge", None)
+        if proxy_bridge is not None:
+            await proxy_bridge.stop()
+
         await self.vnc.stop_vnc(running.display)
 
     def get_status(self, profile_id: str) -> dict[str, Any]:
@@ -392,6 +435,79 @@ class BrowserManager:
                 "cdp_url": f"/api/profiles/{profile_id}/cdp",
             }
         return {"status": "stopped", "vnc_ws_port": None, "display": None, "cdp_url": None}
+
+    async def capture_screenshot(self, profile_id: str) -> bytes:
+        """Capture the currently active page of a Manager-owned profile."""
+        running = self.running.get(profile_id)
+        if running is None:
+            raise RuntimeError("profile_not_running")
+        pages = list(getattr(running.context, "pages", []) or [])
+        if not pages:
+            raise RuntimeError("profile_page_unavailable")
+        screenshot = await pages[-1].screenshot(type="png", full_page=False)
+        if not isinstance(screenshot, bytes) or not screenshot.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError("profile_screenshot_invalid")
+        return screenshot
+
+    def validate_running_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+        """Return redacted running-profile evidence or raise for stale/wrong bindings."""
+        profile_id = str(profile.get("id") or "")
+        running = self.running.get(profile_id)
+        if running is None:
+            raise RuntimeError("profile_not_running")
+        if str(getattr(running, "profile_id", profile_id)) != profile_id:
+            raise RuntimeError("profile_binding_mismatch")
+        expected_dir = str(Path(str(profile.get("user_data_dir") or "")).resolve())
+        running_dir = getattr(running, "user_data_dir", None)
+        if running_dir is not None:
+            actual_dir = str(Path(str(running_dir)).resolve())
+            if expected_dir and actual_dir != expected_dir:
+                raise RuntimeError("profile_path_mismatch")
+        cdp_port = int(getattr(running, "cdp_port", 0) or 0)
+        if cdp_port <= 0:
+            raise RuntimeError("cdp_unavailable")
+        return {
+            "profile_id": profile_id,
+            "user_data_dir_digest": hashlib.sha256(
+                expected_dir.encode("utf-8")
+            ).hexdigest(),
+            "display": f":{int(getattr(running, 'display', 0) or 0)}",
+            "vnc_ws_port": int(getattr(running, "ws_port", 0) or 0),
+            "cdp_port": cdp_port,
+        }
+
+    async def wait_for_cdp_ready(
+        self,
+        profile: dict[str, Any],
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Poll the Manager-owned loopback CDP endpoint until Chrome answers."""
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+        last_error: str | None = None
+        while time.monotonic() < deadline:
+            evidence = self.validate_running_profile(profile)
+            port = int(evidence["cdp_port"])
+            try:
+                data = await asyncio.to_thread(_fetch_cdp_version, port)
+            except Exception as exc:  # noqa: BLE001
+                last_error = type(exc).__name__
+                await asyncio.sleep(0.1)
+                continue
+            browser = data.get("Browser") if isinstance(data, dict) else None
+            ws_url = data.get("webSocketDebuggerUrl") if isinstance(data, dict) else None
+            parsed_ws = urlparse(ws_url) if isinstance(ws_url, str) else None
+            if (
+                parsed_ws is None
+                or parsed_ws.scheme not in {"ws", "wss"}
+                or parsed_ws.hostname != "127.0.0.1"
+                or parsed_ws.port != port
+            ):
+                raise RuntimeError("cdp_profile_mismatch")
+            evidence["cdp_ready"] = True
+            evidence["cdp_browser"] = str(browser or "")
+            return evidence
+        raise RuntimeError(last_error or "cdp_not_ready")
 
     async def cleanup_all(self):
         """Stop all running profiles. Called on shutdown."""
@@ -522,4 +638,25 @@ class BrowserManager:
         if sh:
             args.append(f"--fingerprint-screen-height={sh}")
 
+        return args
+
+    def _build_profile_launch_args(self, profile: dict[str, Any]) -> list[str]:
+        """Combine safe profile flags with server-resolved catalog extensions."""
+        args = self._build_fingerprint_args(profile)
+        for raw_arg in profile.get("launch_args") or []:
+            if not isinstance(raw_arg, str):
+                continue
+            if profile_models._manager_owned_launch_arg(raw_arg):
+                logger.warning(
+                    "Ignoring manager-owned launch argument from profile %s",
+                    str(profile.get("id") or "unknown"),
+                )
+                continue
+            args.append(raw_arg)
+
+        catalog_arg = extension_catalog.load_extension_arg_for_ids(
+            profile.get("extension_ids") or []
+        )
+        if catalog_arg:
+            args.append(catalog_arg)
         return args

@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { api, type ProfileCreateData, type ProfileHarness } from "./api";
+import {
+  api,
+  isSafeProviderId,
+  type ProfileCreateData,
+  type ProfileHarness,
+  type TaskHarnessSession,
+  type TaskSessionUpdateData,
+} from "./api";
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -18,7 +25,35 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
+describe("isSafeProviderId", () => {
+  it("matches backend provider id safety rules", () => {
+    expect(isSafeProviderId("custom.agent")).toBe(true);
+    expect(isSafeProviderId("custom_agent")).toBe(true);
+    expect(isSafeProviderId("1agent")).toBe(true);
+    expect(isSafeProviderId("bad<script>")).toBe(false);
+    expect(isSafeProviderId(" custom.agent")).toBe(false);
+    expect(isSafeProviderId("custom agent")).toBe(false);
+    expect(isSafeProviderId("custom/agent")).toBe(false);
+  });
+});
+
 describe("api.authStatus", () => {
+  it("bypasses caches and includes the current browser session", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      auth_required: true,
+      access_control_enabled: true,
+      authenticated: false,
+    }));
+
+    await api.authStatus();
+
+    expect(mockFetch).toHaveBeenCalledWith("/api/auth/status", {
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      credentials: "include",
+    });
+  });
+
   it("treats a legacy open backend as the local administrator", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ auth_required: false, authenticated: false }));
 
@@ -70,6 +105,72 @@ describe("api.listProfiles", () => {
     expect(result).toEqual(profiles);
     expect(mockFetch).toHaveBeenCalledWith("/api/profiles", {
       headers: { "Content-Type": "application/json" },
+    });
+  });
+});
+
+describe("account metadata API", () => {
+  it("lists, creates, updates, reads history, records events, and deletes accounts", async () => {
+    const account = { id: "account-1", profile_id: "profile-1", auth_state: "unknown" };
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse([account]))
+      .mockResolvedValueOnce(jsonResponse(account, 201))
+      .mockResolvedValueOnce(jsonResponse({ ...account, auth_state: "signed_in" }))
+      .mockResolvedValueOnce(jsonResponse([{ id: "event-1", event_type: "created" }]))
+      .mockResolvedValueOnce(jsonResponse({ id: "event-2", event_type: "observed" }, 201))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+    await api.listAccounts({ profileId: "profile/1", authState: "needs_2fa" });
+    await api.createAccount({
+      profile_id: "profile-1",
+      provider: "github",
+      subject_label: "agent@example.invalid",
+      secret_ref: "secretref-login-1",
+    });
+    await api.updateAccount("account/1", { auth_state: "signed_in" });
+    await api.listAccountEvents("account/1", { limit: 25 });
+    await api.appendAccountEvent("account/1", { event_type: "observed" });
+    await api.deleteAccount("account/1");
+
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/accounts?profile_id=profile%2F1&auth_state=needs_2fa",
+      "/api/accounts",
+      "/api/accounts/account%2F1",
+      "/api/accounts/account%2F1/events?limit=25",
+      "/api/accounts/account%2F1/events",
+      "/api/accounts/account%2F1",
+    ]);
+    expect(JSON.parse(String(mockFetch.mock.calls[1][1]?.body))).toEqual({
+      profile_id: "profile-1",
+      provider: "github",
+      subject_label: "agent@example.invalid",
+      secret_ref: "secretref-login-1",
+    });
+    expect(mockFetch.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual([
+      "GET",
+      "POST",
+      "PUT",
+      "GET",
+      "POST",
+      "DELETE",
+    ]);
+  });
+});
+
+describe("api.captureProfileScreenshot", () => {
+  it("requests a private PNG for the encoded profile id", async () => {
+    const png = new Blob(["profile-proof"], { type: "image/png" });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      blob: () => Promise.resolve(png),
+    });
+
+    await expect(api.captureProfileScreenshot("profile/1")).resolves.toBe(png);
+    expect(mockFetch).toHaveBeenCalledWith("/api/profiles/profile%2F1/screenshot", {
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     });
   });
 });
@@ -221,14 +322,22 @@ describe("api.createTaskSession", () => {
       id: "server-session-1",
       profile_id: "1",
       sandbox_id: "default",
+      project_id: "default",
       title: null,
       status: "active" as const,
+      workflow_state: "open" as const,
+      done_at: null,
+      archived_at: null,
+      retention_class: "project" as const,
+      expires_at: null,
+      activity_at: "2026-07-21T10:00:00.000Z",
+      row_version: 1,
       created_by_kind: "user",
       created_by_id: "owner",
       created_at: "2026-07-21T10:00:00.000Z",
       updated_at: "2026-07-21T10:00:00.000Z",
       metadata: { source: "test" },
-    };
+    } satisfies TaskHarnessSession;
     mockFetch.mockResolvedValueOnce(jsonResponse(session));
 
     const result = await api.createTaskSession({
@@ -272,14 +381,22 @@ describe("api.getTaskSession", () => {
       id: "server-session-1",
       profile_id: "1",
       sandbox_id: "default",
+      project_id: "default",
       title: "Run",
       status: "active" as const,
+      workflow_state: "open" as const,
+      done_at: null,
+      archived_at: null,
+      retention_class: "project" as const,
+      expires_at: null,
+      activity_at: "2026-07-21T10:00:00.000Z",
+      row_version: 1,
       created_by_kind: "user",
       created_by_id: "owner",
       created_at: "2026-07-21T10:00:00.000Z",
       updated_at: "2026-07-21T10:00:00.000Z",
       metadata: {},
-    };
+    } satisfies TaskHarnessSession;
     mockFetch.mockResolvedValueOnce(jsonResponse(session));
 
     const result = await api.getTaskSession("server/session");
@@ -292,6 +409,53 @@ describe("api.getTaskSession", () => {
       },
     );
     expect(result).toEqual(session);
+  });
+});
+
+describe("api.updateTaskSession", () => {
+  it("patches lifecycle fields with the optimistic row version", async () => {
+    const updated = {
+      id: "server-session-1",
+      profile_id: "1",
+      sandbox_id: "default",
+      project_id: "default",
+      title: "Temp chat",
+      status: "archived" as const,
+      workflow_state: "done" as const,
+      done_at: "2026-07-21T10:05:00.000Z",
+      archived_at: "2026-07-21T10:06:00.000Z",
+      retention_class: "temporary" as const,
+      expires_at: "2026-07-28T10:06:00.000Z",
+      activity_at: "2026-07-21T10:06:00.000Z",
+      row_version: 3,
+      created_by_kind: "user",
+      created_by_id: "owner",
+      created_at: "2026-07-21T10:00:00.000Z",
+      updated_at: "2026-07-21T10:06:00.000Z",
+      metadata: { source: "test" },
+    } satisfies TaskHarnessSession;
+    const payload = {
+      row_version: 2,
+      title: "Temp chat",
+      workflow_state: "done",
+      archived: true,
+      retention_class: "temporary",
+      metadata: { source: "test" },
+    } satisfies TaskSessionUpdateData;
+    mockFetch.mockResolvedValueOnce(jsonResponse(updated));
+
+    const result = await api.updateTaskSession("server/session", payload);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/task-sessions/server%2Fsession",
+      {
+        headers: { "Content-Type": "application/json" },
+        method: "PATCH",
+        signal: undefined,
+        body: JSON.stringify(payload),
+      },
+    );
+    expect(result).toEqual(updated);
   });
 });
 
@@ -406,6 +570,371 @@ describe("api.getBenchmarkReport", () => {
     await expect(api.getBenchmarkReport("/api/benchmarks/latest")).rejects.toThrow("No benchmark report");
     expect(mockFetch.mock.calls.map(([url]) => url)).toEqual(["/api/benchmarks/latest"]);
   });
+});
+
+describe("api orca sessions", () => {
+  it("loads capabilities and starts a session with allowlisted agent", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          available: true,
+          orca_bin: "/home/coder/.local/bin/orca-ide",
+          agents: ["cursor-agent", "grok", "codex"],
+          operations: ["terminal.create"],
+          actions: {
+            start: true,
+            read: true,
+            send: true,
+            close: true,
+            pause: false,
+            resume: false,
+          },
+          notes: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            id: "orca_1",
+            profile_id: "p1",
+            sandbox_id: "default",
+            agent: "codex",
+            terminal_handle: "term_1",
+            status: "running",
+            created_at: 1,
+            capabilities: {
+              start: true,
+              read: true,
+              send: true,
+              close: true,
+              pause: false,
+              resume: false,
+            },
+            connection: {},
+          },
+          201,
+        ),
+      );
+
+    await expect(api.getOrcaCapabilities()).resolves.toMatchObject({
+      available: true,
+      actions: { pause: false, resume: false },
+    });
+    await expect(
+      api.startOrcaSession({ profile_id: "p1", agent: "codex", prompt: "go" }),
+    ).resolves.toMatchObject({ id: "orca_1", agent: "codex" });
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/orca/sessions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ profile_id: "p1", agent: "codex", prompt: "go" }),
+      }),
+    );
+  });
+
+  it("reads sends and closes with session paths", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: "orca_1",
+          terminal_handle: "term_1",
+          cursor: 0,
+          next_cursor: 2,
+          output: "hi",
+          status: "running",
+          capabilities: {
+            start: true,
+            read: true,
+            send: true,
+            close: true,
+            pause: false,
+            resume: false,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: "orca_1",
+          ok: true,
+          status: "running",
+          capabilities: {
+            start: true,
+            read: true,
+            send: true,
+            close: true,
+            pause: false,
+            resume: false,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "orca_1",
+          profile_id: "p1",
+          sandbox_id: "default",
+          agent: "codex",
+          terminal_handle: "term_1",
+          status: "closed",
+          created_at: 1,
+          capabilities: {
+            start: true,
+            read: true,
+            send: true,
+            close: true,
+            pause: false,
+            resume: false,
+          },
+          connection: {},
+        }),
+      );
+
+    await expect(api.readOrcaSessionOutput("orca_1", { cursor: 0 })).resolves.toMatchObject({
+      output: "hi",
+      next_cursor: 2,
+    });
+    await expect(api.sendOrcaSessionInput("orca_1", { text: "next" })).resolves.toMatchObject({
+      ok: true,
+    });
+    await expect(api.closeOrcaSession("orca_1")).resolves.toMatchObject({ status: "closed" });
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/orca/sessions/orca_1/output?cursor=0",
+      "/api/orca/sessions/orca_1/send",
+      "/api/orca/sessions/orca_1/close",
+    ]);
+  });
+});
+
+describe("api.taskRuns", () => {
+  it("creates polls cancels and lists typed outputs for a Browser Use run", async () => {
+    const run = {
+      id: "run-1",
+      task_session_id: "session-1",
+      task_message_id: "message-1",
+      profile_id: "profile-1",
+      profile_id_snapshot: "profile-1",
+      sandbox_id: "default",
+      harness: "browser-use",
+      agent: null,
+      status: "queued",
+      launch_if_stopped: false,
+      allowed_origins: ["https://example.com"],
+      max_steps: 20,
+      timeout_seconds: 360,
+      model_alias: "cursor-grok-4.5-low",
+      deadline_at: "2026-07-26T00:06:00Z",
+      health_snapshot: {},
+      health_decision: {
+        allowed: true,
+        waiting: false,
+        failed_reasons: [],
+        non_overridable_reasons: [],
+        policy_version: "v1",
+      },
+      retry_count: 0,
+      created_by_kind: "user",
+      created_by_id: "user-1",
+      created_at: "2026-07-26T00:00:00Z",
+      updated_at: "2026-07-26T00:00:00Z",
+    };
+    const outputs = [{
+      id: "output-1",
+      run_id: "run-1",
+      sequence: 1,
+      idempotency_key: "action-1",
+      kind: "action",
+      summary: "Opened example.com",
+      payload: { name: "navigate", url: "https://example.com" },
+      created_at: "2026-07-26T00:00:01Z",
+      artifact_expired: false,
+    }];
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(run, 201))
+      .mockResolvedValueOnce(jsonResponse(run))
+      .mockResolvedValueOnce(jsonResponse(outputs))
+      .mockResolvedValueOnce(jsonResponse({ ...run, status: "cancelled" }));
+
+    await expect(api.createTaskRun("session-1", {
+      harness: "browser-use",
+      task: "Open example.com",
+      profile_id: "profile-1",
+      allowed_origins: ["https://example.com"],
+      timeout_seconds: 360,
+      model_alias: "cursor-grok-4.5-low",
+    })).resolves.toMatchObject({ id: "run-1", status: "queued" });
+    await expect(api.getTaskRun("run-1")).resolves.toMatchObject({ id: "run-1" });
+    await expect(api.listTaskRunOutputs("run-1", { afterSequence: 0 })).resolves.toEqual(outputs);
+    await expect(api.cancelTaskRun("run-1")).resolves.toMatchObject({ status: "cancelled" });
+    expect(api.taskOutputScreenshotUrl("output/1")).toBe(
+      "/api/task-outputs/output%2F1/screenshot",
+    );
+
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/task-sessions/session-1/runs",
+      "/api/task-runs/run-1",
+      "/api/task-runs/run-1/outputs?after_sequence=0",
+      "/api/task-runs/run-1/cancel",
+    ]);
+  });
+
+  it("serializes ACPX agent selection and reads redacted worker readiness", async () => {
+    const run = {
+      id: "run-acpx",
+      harness: "acpx",
+      agent: "cursor",
+      status: "queued",
+    };
+    const presence = {
+      harness: "acpx",
+      worker_seen_recently: true,
+      state: "polling",
+      last_seen_at: "2026-07-27T00:00:00Z",
+      reason: null,
+    };
+    const preflights = {
+      harness: "acpx" as const,
+      agents: [{
+        agent: "cursor",
+        ready: true,
+        state: "ready",
+        reason_code: "ok",
+        checked_at: "2026-07-27T00:00:00Z",
+      }],
+    };
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(run, 201))
+      .mockResolvedValueOnce(jsonResponse(presence))
+      .mockResolvedValueOnce(jsonResponse(preflights));
+
+    await api.createTaskRun("session-acpx", {
+      harness: "acpx",
+      agent: "cursor",
+      task: "Inspect https://example.com",
+      profile_id: "profile-acpx",
+      allowed_origins: ["https://example.com"],
+    });
+    await expect(api.getTaskHarnessPresence("acpx")).resolves.toEqual(presence);
+    await expect(api.getTaskHarnessPreflights("acpx")).resolves.toEqual(preflights);
+
+    expect(JSON.parse(String(mockFetch.mock.calls[0][1]?.body))).toMatchObject({
+      harness: "acpx",
+      agent: "cursor",
+    });
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/task-sessions/session-acpx/runs",
+      "/api/task-harnesses/acpx/presence",
+      "/api/task-harnesses/acpx/preflights",
+    ]);
+  });
+
+  it("reads provider readiness and serializes normalized provider routing fields", async () => {
+    const readiness = {
+      providers: [
+        {
+          provider: "grok",
+          transport: "acp",
+          ready: true,
+          state: "ready",
+          reason_code: "ok",
+          checked_at: "2026-07-29T00:00:00Z",
+          model_aliases: ["grok-build"],
+        },
+        {
+          provider: "antigravity",
+          transport: "cli",
+          ready: false,
+          state: "unavailable",
+          reason_code: "adapter_unavailable",
+          checked_at: null,
+          model_aliases: [],
+        },
+      ],
+    };
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(readiness))
+      .mockResolvedValueOnce(jsonResponse({ id: "run-normalized", status: "queued" }, 201));
+
+    await expect(api.getProviderReadiness()).resolves.toEqual(readiness);
+    await api.createTaskRun("session-normalized", {
+      harness: "acpx",
+      agent: "grok-build",
+      task: "Inspect https://example.com",
+      profile_id: "profile-grok",
+      allowed_origins: ["https://example.com"],
+      model_alias: "grok-build",
+      provider: { id: "grok", transport: "acp", model_alias: "grok-build" },
+      browser_tools: [
+        { id: "unbrowse", enabled: true },
+        { id: "stagehand", enabled: false },
+        { id: "browser-harness", enabled: true },
+      ],
+      routing_policy: {
+        mode: "ordered-fallback",
+        allow_second_browser: false,
+        max_tool_attempts: 3,
+      },
+    });
+
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/providers/readiness",
+      "/api/task-sessions/session-normalized/runs",
+    ]);
+    expect(JSON.parse(String(mockFetch.mock.calls[1][1]?.body))).toEqual({
+      harness: "acpx",
+      agent: "grok-build",
+      task: "Inspect https://example.com",
+      profile_id: "profile-grok",
+      allowed_origins: ["https://example.com"],
+      model_alias: "grok-build",
+      provider: { id: "grok", transport: "acp", model_alias: "grok-build" },
+      browser_tools: [
+        { id: "unbrowse", enabled: true },
+        { id: "stagehand", enabled: false },
+        { id: "browser-harness", enabled: true },
+      ],
+      routing_policy: {
+        mode: "ordered-fallback",
+        allow_second_browser: false,
+        max_tool_attempts: 3,
+      },
+    });
+  });
+
+  it("reads canonical browser tool readiness without deriving Browser Harness from Browser Use", async () => {
+    const toolReadiness = {
+      tools: [
+        {
+          id: "unbrowse",
+          ready: true,
+          state: "ready",
+          reason_code: "ready",
+          checked_at: "2026-07-29T00:00:00Z",
+        },
+        {
+          id: "stagehand",
+          ready: false,
+          state: "failed",
+          reason_code: "auth_required",
+          checked_at: "2026-07-29T00:00:01Z",
+        },
+        {
+          id: "browser-harness",
+          ready: false,
+          state: "unavailable",
+          reason_code: "not_checked",
+          checked_at: null,
+        },
+      ],
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse(toolReadiness));
+
+    await expect(api.getBrowserToolReadiness()).resolves.toEqual(toolReadiness);
+    expect(mockFetch).toHaveBeenCalledWith("/api/browser-tools/readiness", {
+      headers: { "Content-Type": "application/json" },
+      signal: undefined,
+    });
+  });
+
 });
 
 // ── Error handling ──────────────────────────────────────────────────────────

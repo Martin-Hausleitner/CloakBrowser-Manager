@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import random
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,15 @@ ENV_DATA_DIR = "CLOAKBROWSER_MANAGER_DATA_DIR"
 DOCKER_DATA_DIR = Path("/data")
 LOCAL_DATA_DIR = Path(__file__).resolve().parent / ".data"
 PROFILE_HEALTH_SOURCE_STATES = {"missing", "measured", "derived", "unavailable", "skipped"}
+SCHEMA_MIGRATION_STATUS_UNAVAILABLE = "Schema migration status unavailable"
+PERSISTED_ROUTING_CONTRACT_ERROR = "Invalid persisted routing contract"
+
+
+class SchemaMigrationStatusError(RuntimeError):
+    """Sanitized schema migration status read failure."""
+
+    def __init__(self, *_details: object) -> None:
+        super().__init__(SCHEMA_MIGRATION_STATUS_UNAVAILABLE)
 
 
 def _is_usable_data_dir(path: Path) -> bool:
@@ -58,6 +70,797 @@ def get_db():
         conn.close()
 
 
+def list_applied_schema_migrations() -> list[str]:
+    """Return deterministic applied schema migration IDs.
+
+    If the migration table is absent, return an empty list so uninitialized
+    databases fail closed. Other SQLite failures propagate a sanitized typed
+    error for API handlers to map without leaking database details.
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT version
+                FROM schema_migrations
+                WHERE version IS NOT NULL AND TRIM(version) != ''
+                ORDER BY version
+                """
+            ).fetchall()
+    except sqlite3.Error as exc:
+        if (
+            isinstance(exc, sqlite3.OperationalError)
+            and "no such table: schema_migrations" in str(exc).lower()
+        ):
+            return []
+        raise SchemaMigrationStatusError() from exc
+    return [str(row["version"]) for row in rows]
+
+
+def _create_workspace_task_sessions_table(conn: sqlite3.Connection, table_name: str) -> None:
+    if table_name not in {"task_sessions", "task_sessions_workspace_v1"}:
+        raise ValueError("Unsupported task sessions table name")
+    conn.execute(
+        f"""CREATE TABLE {table_name} (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+            sandbox_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'default',
+            title TEXT,
+            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+            workflow_state TEXT NOT NULL DEFAULT 'open'
+                CHECK (workflow_state IN ('open', 'done')),
+            done_at TEXT,
+            archived_at TEXT,
+            retention_class TEXT NOT NULL DEFAULT 'project'
+                CHECK (retention_class IN ('temporary', 'project', 'legacy')),
+            expires_at TEXT,
+            activity_at TEXT NOT NULL,
+            row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+            created_by_kind TEXT NOT NULL,
+            created_by_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{{}}'
+        )"""
+    )
+
+
+def _migrate_agent_workspace_v1(conn: sqlite3.Connection) -> None:
+    """Snapshot legacy task ownership and make profile deletion history-safe."""
+    migration_version = "agent_workspace_v1"
+    foreign_keys_enabled = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+    conn.commit()
+    if foreign_keys_enabled:
+        conn.execute("PRAGMA foreign_keys=OFF")
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+
+        conn.execute(
+            """INSERT OR IGNORE INTO projects (
+                sandbox_id, id, name, accent_color, description, default_retention,
+                archived_at, created_by_kind, created_by_id, created_at, updated_at
+            )
+            SELECT
+                sandbox_id,
+                project_id,
+                project_id,
+                NULL,
+                NULL,
+                'project',
+                NULL,
+                'migration',
+                NULL,
+                MIN(created_at),
+                MAX(updated_at)
+            FROM profiles
+            GROUP BY sandbox_id, project_id"""
+        )
+
+        task_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_sessions)").fetchall()
+        }
+        profile_foreign_key = next(
+            (
+                row
+                for row in conn.execute("PRAGMA foreign_key_list(task_sessions)").fetchall()
+                if row["from"] == "profile_id"
+            ),
+            None,
+        )
+        required_columns = {
+            "project_id",
+            "workflow_state",
+            "done_at",
+            "archived_at",
+            "retention_class",
+            "expires_at",
+            "activity_at",
+            "row_version",
+        }
+        needs_rebuild = not required_columns.issubset(task_columns) or (
+            profile_foreign_key is None or profile_foreign_key["on_delete"] != "SET NULL"
+        )
+
+        if needs_rebuild:
+            conn.execute("DROP TABLE IF EXISTS task_sessions_workspace_v1")
+            _create_workspace_task_sessions_table(conn, "task_sessions_workspace_v1")
+
+            workflow_state = (
+                "task_sessions.workflow_state" if "workflow_state" in task_columns else "'open'"
+            )
+            done_at = "task_sessions.done_at" if "done_at" in task_columns else "NULL"
+            if "archived_at" in task_columns:
+                archived_at = "task_sessions.archived_at"
+            else:
+                archived_at = (
+                    "CASE WHEN task_sessions.status = 'archived' "
+                    "THEN task_sessions.updated_at ELSE NULL END"
+                )
+            retention_class = (
+                "task_sessions.retention_class"
+                if "retention_class" in task_columns
+                else "'legacy'"
+            )
+            expires_at = "task_sessions.expires_at" if "expires_at" in task_columns else "NULL"
+            activity_at = (
+                "task_sessions.activity_at"
+                if "activity_at" in task_columns
+                else "task_sessions.updated_at"
+            )
+            row_version = (
+                "task_sessions.row_version" if "row_version" in task_columns else "1"
+            )
+
+            conn.execute(
+                f"""INSERT INTO task_sessions_workspace_v1 (
+                    id, profile_id, sandbox_id, project_id, title, status,
+                    workflow_state, done_at, archived_at, retention_class, expires_at,
+                    activity_at, row_version, created_by_kind, created_by_id,
+                    created_at, updated_at, metadata
+                )
+                SELECT
+                    task_sessions.id,
+                    task_sessions.profile_id,
+                    COALESCE(profiles.sandbox_id, task_sessions.sandbox_id, 'default'),
+                    COALESCE(profiles.project_id, 'default'),
+                    task_sessions.title,
+                    task_sessions.status,
+                    {workflow_state},
+                    {done_at},
+                    {archived_at},
+                    {retention_class},
+                    {expires_at},
+                    {activity_at},
+                    {row_version},
+                    task_sessions.created_by_kind,
+                    task_sessions.created_by_id,
+                    task_sessions.created_at,
+                    task_sessions.updated_at,
+                    task_sessions.metadata
+                FROM task_sessions
+                LEFT JOIN profiles ON profiles.id = task_sessions.profile_id"""
+            )
+            conn.execute("DROP TABLE task_sessions")
+            conn.execute(
+                "ALTER TABLE task_sessions_workspace_v1 RENAME TO task_sessions"
+            )
+            conn.execute(
+                """CREATE INDEX idx_task_sessions_profile
+                ON task_sessions(profile_id, created_at DESC)"""
+            )
+            conn.execute(
+                """CREATE INDEX idx_task_sessions_sandbox
+                ON task_sessions(sandbox_id, created_at DESC)"""
+            )
+
+        violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            raise RuntimeError(
+                f"Foreign key violation after {migration_version}: {tuple(violation)}"
+            )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if foreign_keys_enabled:
+            conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _migrate_task_runs_v1(conn: sqlite3.Connection) -> None:
+    """Add task_runs and task_outputs without rebuilding task_sessions."""
+    migration_version = "task_runs_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+
+        # Individual executes keep DDL inside BEGIN IMMEDIATE (executescript commits).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_runs (
+                id TEXT PRIMARY KEY,
+                task_session_id TEXT NOT NULL REFERENCES task_sessions(id) ON DELETE CASCADE,
+                task_message_id TEXT NOT NULL REFERENCES task_messages(id),
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+                profile_id_snapshot TEXT NOT NULL,
+                sandbox_id TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                agent TEXT,
+                status TEXT NOT NULL CHECK (
+                    status IN (
+                        'queued', 'health_check', 'blocked_health', 'running',
+                        'succeeded', 'failed', 'cancelled', 'revoked'
+                    )
+                ),
+                launch_if_stopped BOOLEAN NOT NULL DEFAULT 0,
+                allowed_origins_json TEXT NOT NULL DEFAULT '[]',
+                max_steps INTEGER NOT NULL CHECK (max_steps >= 1),
+                timeout_seconds INTEGER NOT NULL CHECK (timeout_seconds >= 1),
+                model_alias TEXT,
+                deadline_at TEXT NOT NULL,
+                health_snapshot_json TEXT NOT NULL,
+                health_decision_json TEXT NOT NULL,
+                health_override_json TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+                first_action_sequence INTEGER,
+                first_action_at TEXT,
+                next_output_sequence INTEGER NOT NULL DEFAULT 0 CHECK (next_output_sequence >= 0),
+                claimed_by TEXT,
+                claim_expires_at TEXT,
+                worker_id TEXT,
+                claim_eligible_at TEXT,
+                cancelled_at TEXT,
+                created_by_kind TEXT NOT NULL,
+                created_by_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_runs_session
+                ON task_runs(task_session_id, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_runs_status
+                ON task_runs(status, created_at ASC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_runs_profile
+                ON task_runs(profile_id, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_outputs (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL CHECK (sequence >= 1),
+                idempotency_key TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (
+                    kind IN (
+                        'status', 'action', 'observation', 'screenshot',
+                        'extracted_data', 'link', 'metric', 'error',
+                        'approval', 'summary'
+                    )
+                ),
+                summary TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE (run_id, idempotency_key),
+                UNIQUE (run_id, sequence)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_outputs_run_sequence
+                ON task_outputs(run_id, sequence ASC)
+            """
+        )
+        violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            raise RuntimeError(
+                f"Foreign key violation after {migration_version}: {tuple(violation)}"
+            )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_worker_runtime_v1(conn: sqlite3.Connection) -> None:
+    """Worker identities plus run claim/capability columns (Task 7)."""
+    migration_version = "worker_runtime_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_identities (
+                id TEXT PRIMARY KEY,
+                key_digest TEXT NOT NULL UNIQUE,
+                active BOOLEAN NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_worker_identities_digest
+                ON worker_identities(key_digest)
+            """
+        )
+
+        task_runs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+        ).fetchone()
+        if task_runs_exists is None:
+            # Depend on task_runs_v1; retry on a later init_db without marking applied.
+            conn.rollback()
+            return
+
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if "lease_id" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN lease_id TEXT")
+        if "capability_digest" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN capability_digest TEXT")
+        if "error_code" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN error_code TEXT")
+        if "error_message" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN error_message TEXT")
+        if "queued_at" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN queued_at TEXT")
+
+        conn.execute(
+            """
+            UPDATE task_runs
+            SET queued_at = created_at
+            WHERE status = 'queued' AND queued_at IS NULL
+            """
+        )
+
+        violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            raise RuntimeError(
+                f"Foreign key violation after {migration_version}: {tuple(violation)}"
+            )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_task_runs_acpx_v1(conn: sqlite3.Connection) -> None:
+    """Add the selected ACPX agent without rebuilding existing task runs."""
+    migration_version = "task_runs_acpx_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        task_runs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+        ).fetchone()
+        if task_runs_exists is None:
+            conn.rollback()
+            return
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if "agent" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN agent TEXT")
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_task_run_routing_contract_v1(conn: sqlite3.Connection) -> None:
+    """Persist optional provider/browser-tool routing contract JSON for task runs."""
+    migration_version = "task_run_routing_contract_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        task_runs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+        ).fetchone()
+        if task_runs_exists is None:
+            conn.rollback()
+            return
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if "provider_json" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN provider_json TEXT")
+        if "browser_tools_json" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN browser_tools_json TEXT")
+        if "routing_policy_json" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN routing_policy_json TEXT")
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_worker_harness_presence_v1(conn: sqlite3.Connection) -> None:
+    """Persist harness-specific authenticated worker polls without worker details."""
+    migration_version = "worker_harness_presence_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        workers_exist = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_identities'"
+        ).fetchone()
+        if workers_exist is None:
+            conn.rollback()
+            return
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_harness_presence (
+                worker_id TEXT NOT NULL REFERENCES worker_identities(id) ON DELETE CASCADE,
+                harness TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (worker_id, harness)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_worker_harness_presence_lookup
+                ON worker_harness_presence(harness, last_seen_at DESC)
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_worker_harness_preflights_v1(conn: sqlite3.Connection) -> None:
+    """Persist redacted per-agent adapter preflight results."""
+    migration_version = "worker_harness_preflights_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        workers_exist = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_identities'"
+        ).fetchone()
+        if workers_exist is None:
+            conn.rollback()
+            return
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_harness_preflights (
+                worker_id TEXT NOT NULL REFERENCES worker_identities(id) ON DELETE CASCADE,
+                harness TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                ready BOOLEAN NOT NULL,
+                reason_code TEXT NOT NULL,
+                checked_at TEXT NOT NULL,
+                PRIMARY KEY (worker_id, harness, agent)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_worker_harness_preflights_lookup
+                ON worker_harness_preflights(harness, agent, checked_at DESC)
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_worker_provider_preflights_v1(conn: sqlite3.Connection) -> None:
+    """Persist redacted provider readiness results by active worker and transport."""
+    migration_version = "worker_provider_preflights_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        workers_exist = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_identities'"
+        ).fetchone()
+        if workers_exist is None:
+            conn.rollback()
+            return
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_provider_preflights (
+                worker_id TEXT NOT NULL REFERENCES worker_identities(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                transport TEXT NOT NULL,
+                ready BOOLEAN NOT NULL,
+                reason_code TEXT NOT NULL,
+                model_aliases_json TEXT NOT NULL DEFAULT '[]',
+                checked_at TEXT NOT NULL,
+                PRIMARY KEY (worker_id, provider, transport)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_worker_provider_preflights_lookup
+                ON worker_provider_preflights(provider, transport, checked_at DESC)
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_task_run_binding_v1(conn: sqlite3.Connection) -> None:
+    """Persist immutable run/profile binding details used before CDP capability issue."""
+    migration_version = "task_run_binding_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+        task_runs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+        ).fetchone()
+        if task_runs_exists is None:
+            conn.rollback()
+            return
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if "viewport_revision" not in cols:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN viewport_revision TEXT")
+        if "launch_evidence_json" not in cols:
+            conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN launch_evidence_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        profile_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(profiles)").fetchall()
+        }
+        width_expr = (
+            "COALESCE(profiles.screen_width, 1920)"
+            if "screen_width" in profile_cols
+            else "1920"
+        )
+        height_expr = (
+            "COALESCE(profiles.screen_height, 1080)"
+            if "screen_height" in profile_cols
+            else "1080"
+        )
+        conn.execute(
+            f"""
+            UPDATE task_runs
+            SET viewport_revision = COALESCE(
+                viewport_revision,
+                (
+                    SELECT printf('%sx%s', {width_expr}, {height_expr})
+                    FROM profiles
+                    WHERE profiles.id = task_runs.profile_id_snapshot
+                )
+            )
+            WHERE viewport_revision IS NULL
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_account_metadata_v1(conn: sqlite3.Connection) -> None:
+    """Add profile-linked account metadata and immutable auth history."""
+    migration_version = "account_metadata_v1"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (migration_version,),
+        ).fetchone()
+        if already_applied:
+            conn.commit()
+            return
+
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS accounts (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+                profile_id_snapshot TEXT NOT NULL,
+                sandbox_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'default',
+                provider TEXT NOT NULL,
+                subject_label TEXT NOT NULL,
+                display_name TEXT,
+                origin TEXT,
+                auth_state TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (auth_state IN ('unknown', 'signed_in', 'needs_2fa', 'signed_out', 'locked')),
+                second_factor_state TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (second_factor_state IN ('unknown', 'off', 'enrolled', 'required')),
+                passkey_state TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (passkey_state IN ('unknown', 'off', 'enrolled', 'required')),
+                secret_ref_digest TEXT,
+                totp_ref_digest TEXT,
+                last_seen_at TEXT,
+                row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+                created_by_kind TEXT NOT NULL,
+                created_by_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (profile_id, provider, subject_label)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_accounts_profile
+                ON accounts(profile_id, updated_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_accounts_sandbox
+                ON accounts(sandbox_id, updated_at DESC)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS account_auth_events (
+                id TEXT PRIMARY KEY,
+                account_id_snapshot TEXT NOT NULL,
+                profile_id_snapshot TEXT NOT NULL,
+                sandbox_id TEXT NOT NULL,
+                event_type TEXT NOT NULL CHECK (
+                    event_type IN (
+                        'created', 'observed', 'signed_in', 'signed_out',
+                        'auth_state_changed', 'two_factor_required',
+                        'two_factor_enrolled', 'passkey_enrolled',
+                        'secret_reference_changed'
+                    )
+                ),
+                auth_state TEXT CHECK (
+                    auth_state IS NULL OR auth_state IN (
+                        'unknown', 'signed_in', 'needs_2fa', 'signed_out', 'locked'
+                    )
+                ),
+                actor_kind TEXT NOT NULL,
+                actor_id TEXT,
+                occurred_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_account_auth_events_account
+                ON account_auth_events(account_id_snapshot, occurred_at ASC, created_at ASC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_account_auth_events_sandbox
+                ON account_auth_events(sandbox_id, created_at DESC)
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS account_auth_events_no_update
+            BEFORE UPDATE ON account_auth_events
+            BEGIN
+                SELECT RAISE(ABORT, 'account auth events are append-only');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS account_auth_events_no_delete
+            BEFORE DELETE ON account_auth_events
+            BEGIN
+                SELECT RAISE(ABORT, 'account auth events are append-only');
+            END
+            """,
+        )
+        for statement in statements:
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (migration_version, _now()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
@@ -90,6 +893,7 @@ def init_db():
                 auto_launch BOOLEAN DEFAULT 0,
                 color_scheme TEXT,
                 search_engine TEXT,
+                extension_ids TEXT NOT NULL DEFAULT '[]',
                 notes TEXT,
                 user_data_dir TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -186,12 +990,43 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                sandbox_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                accent_color TEXT,
+                description TEXT,
+                default_retention TEXT NOT NULL DEFAULT 'project'
+                    CHECK (default_retention IN ('temporary', 'project')),
+                archived_at TEXT,
+                created_by_kind TEXT NOT NULL,
+                created_by_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (sandbox_id, id)
+            );
+
             CREATE TABLE IF NOT EXISTS task_sessions (
                 id TEXT PRIMARY KEY,
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
                 sandbox_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'default',
                 title TEXT,
                 status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+                workflow_state TEXT NOT NULL DEFAULT 'open'
+                    CHECK (workflow_state IN ('open', 'done')),
+                done_at TEXT,
+                archived_at TEXT,
+                retention_class TEXT NOT NULL DEFAULT 'project'
+                    CHECK (retention_class IN ('temporary', 'project', 'legacy')),
+                expires_at TEXT,
+                activity_at TEXT NOT NULL,
+                row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
                 created_by_kind TEXT NOT NULL,
                 created_by_id TEXT,
                 created_at TEXT NOT NULL,
@@ -263,45 +1098,212 @@ def init_db():
         """)
         conn.commit()
 
-        # Migrations for existing databases
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(profiles)").fetchall()}
-        if "clipboard_sync" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN clipboard_sync BOOLEAN DEFAULT 1")
+        # Serialize legacy profile-column upgrades. Multiple API processes may
+        # initialize the same SQLite database concurrently during a rollout;
+        # the column snapshot and every ALTER must share one write lock.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(profiles)").fetchall()
+            }
+            profile_columns = {
+                "clipboard_sync": "BOOLEAN DEFAULT 1",
+                "launch_args": "TEXT DEFAULT '[]'",
+                "auto_launch": "BOOLEAN DEFAULT 0",
+                "color_scheme": "TEXT",
+                "search_engine": "TEXT",
+                "extension_ids": "TEXT NOT NULL DEFAULT '[]'",
+                "sandbox_id": "TEXT NOT NULL DEFAULT 'default'",
+                "project_id": "TEXT NOT NULL DEFAULT 'default'",
+                "folder_path": "TEXT NOT NULL DEFAULT ''",
+                "pinned": "BOOLEAN NOT NULL DEFAULT 0",
+                "accent_color": "TEXT",
+                "harness": "TEXT NOT NULL DEFAULT 'codex'",
+            }
+            for column, definition in profile_columns.items():
+                if column not in cols:
+                    conn.execute(f"ALTER TABLE profiles ADD COLUMN {column} {definition}")
             conn.commit()
-        if "launch_args" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN launch_args TEXT DEFAULT '[]'")
-            conn.commit()
-        if "auto_launch" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN auto_launch BOOLEAN DEFAULT 0")
-            conn.commit()
-        if "color_scheme" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN color_scheme TEXT")
-            conn.commit()
-        if "search_engine" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN search_engine TEXT")
-            conn.commit()
-        if "sandbox_id" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN sandbox_id TEXT NOT NULL DEFAULT 'default'")
-            conn.commit()
-        if "project_id" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'")
-            conn.commit()
-        if "folder_path" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN folder_path TEXT NOT NULL DEFAULT ''")
-            conn.commit()
-        if "pinned" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN pinned BOOLEAN NOT NULL DEFAULT 0")
-            conn.commit()
-        if "accent_color" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN accent_color TEXT")
-            conn.commit()
-        if "harness" not in cols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN harness TEXT NOT NULL DEFAULT 'codex'")
-            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        _migrate_agent_workspace_v1(conn)
+        _migrate_task_runs_v1(conn)
+        _migrate_worker_runtime_v1(conn)
+        _migrate_task_runs_acpx_v1(conn)
+        _migrate_task_run_routing_contract_v1(conn)
+        _migrate_worker_harness_presence_v1(conn)
+        _migrate_worker_harness_preflights_v1(conn)
+        _migrate_worker_provider_preflights_v1(conn)
+        _migrate_task_run_binding_v1(conn)
+        _migrate_account_metadata_v1(conn)
 
 
 def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+class OptimisticConcurrencyError(Exception):
+    """Raised when an update loses an optimistic row_version check."""
+
+
+class ProjectConflictError(Exception):
+    """Raised when creating a project that already exists in a sandbox."""
+
+
+class TaskArchivedError(Exception):
+    """Raised when appending to an archived task session."""
+
+
+def _project_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return dict(row)
+
+
+def ensure_project(
+    sandbox_id: str,
+    project_id: str,
+    *,
+    name: str | None = None,
+    created_by_kind: str = "system",
+    created_by_id: str | None = None,
+    default_retention: str = "project",
+    accent_color: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """Create a project row if missing; never overwrite an existing one."""
+    now = _now()
+    sid = str(sandbox_id or "default")
+    pid = str(project_id or "default")
+    with get_db() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO projects (
+                sandbox_id, id, name, accent_color, description, default_retention,
+                archived_at, created_by_kind, created_by_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)""",
+            (
+                sid,
+                pid,
+                name or pid,
+                accent_color,
+                description,
+                default_retention,
+                created_by_kind,
+                created_by_id,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    project = get_project(sid, pid)
+    if project is None:
+        raise RuntimeError(f"Failed to ensure project {sid}/{pid}")
+    return project
+
+
+def create_project(
+    sandbox_id: str,
+    project_id: str,
+    name: str,
+    *,
+    created_by_kind: str,
+    created_by_id: str | None = None,
+    accent_color: str | None = None,
+    description: str | None = None,
+    default_retention: str = "project",
+) -> dict[str, Any]:
+    now = _now()
+    sid = str(sandbox_id or "default")
+    pid = str(project_id)
+    with get_db() as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT 1 FROM projects WHERE sandbox_id = ? AND id = ?",
+                (sid, pid),
+            ).fetchone()
+            if existing:
+                conn.commit()
+                raise ProjectConflictError(f"Project already exists: {sid}/{pid}")
+            conn.execute(
+                """INSERT INTO projects (
+                    sandbox_id, id, name, accent_color, description, default_retention,
+                    archived_at, created_by_kind, created_by_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)""",
+                (
+                    sid,
+                    pid,
+                    name,
+                    accent_color,
+                    description,
+                    default_retention,
+                    created_by_kind,
+                    created_by_id,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            raise ProjectConflictError(f"Project already exists: {sid}/{pid}") from exc
+    project = get_project(sid, pid)
+    if project is None:
+        raise RuntimeError(f"Failed to create project {sid}/{pid}")
+    return project
+
+
+def get_project(sandbox_id: str, project_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM projects WHERE sandbox_id = ? AND id = ?",
+            (str(sandbox_id or "default"), str(project_id)),
+        ).fetchone()
+        return _project_from_row(row) if row else None
+
+
+def list_projects(sandbox_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(limit, 500))
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM projects
+            WHERE sandbox_id = ?
+            ORDER BY archived_at IS NOT NULL, name ASC, id ASC
+            LIMIT ?""",
+            (str(sandbox_id or "default"), safe_limit),
+        ).fetchall()
+        return [_project_from_row(row) for row in rows]
+
+
+def update_project(sandbox_id: str, project_id: str, **fields: Any) -> dict[str, Any] | None:
+    existing = get_project(sandbox_id, project_id)
+    if not existing:
+        return None
+
+    updates: dict[str, Any] = {}
+    if "name" in fields and fields["name"] is not None:
+        updates["name"] = fields["name"]
+    if "accent_color" in fields:
+        updates["accent_color"] = fields["accent_color"]
+    if "description" in fields:
+        updates["description"] = fields["description"]
+    if "default_retention" in fields and fields["default_retention"] is not None:
+        updates["default_retention"] = fields["default_retention"]
+    if "archived" in fields and fields["archived"] is not None:
+        updates["archived_at"] = _now() if fields["archived"] else None
+
+    if not updates:
+        return existing
+
+    updates["updated_at"] = _now()
+    columns = ", ".join(f"{column} = ?" for column in updates)
+    values = list(updates.values()) + [str(sandbox_id or "default"), str(project_id)]
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE projects SET {columns} WHERE sandbox_id = ? AND id = ?",
+            values,
+        )
+        conn.commit()
+    return get_project(sandbox_id, project_id)
 
 
 def create_profile(
@@ -314,6 +1316,8 @@ def create_profile(
     user_data_dir = str(DATA_DIR / "profiles" / profile_id)
     now = _now()
     tags = fields.pop("tags", None) or []
+    sandbox_id = fields.get("sandbox_id", "default")
+    project_id = fields.get("project_id", "default")
 
     with get_db() as conn:
         conn.execute(
@@ -322,12 +1326,12 @@ def create_profile(
                 fingerprint_seed, proxy, timezone, locale, platform,
                 user_agent, screen_width, screen_height, gpu_vendor, gpu_renderer,
                 hardware_concurrency, humanize, human_preset, headless, geoip,
-                clipboard_sync, auto_launch, color_scheme, search_engine, launch_args, notes,
+                clipboard_sync, auto_launch, color_scheme, search_engine, extension_ids, launch_args, notes,
                 user_data_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                profile_id, name, fields.get("sandbox_id", "default"),
-                fields.get("project_id", "default"),
+                profile_id, name, sandbox_id,
+                project_id,
                 fields.get("folder_path", ""),
                 fields.get("pinned", False),
                 fields.get("accent_color"),
@@ -351,6 +1355,7 @@ def create_profile(
                 fields.get("auto_launch", False),
                 fields.get("color_scheme"),
                 fields.get("search_engine"),
+                json.dumps(fields.get("extension_ids") or []),
                 json.dumps(fields.get("launch_args") or []),
                 fields.get("notes"),
                 user_data_dir, now, now,
@@ -363,6 +1368,11 @@ def create_profile(
             )
         conn.commit()
 
+    ensure_project(
+        str(sandbox_id or "default"),
+        str(project_id or "default"),
+        created_by_kind="system",
+    )
     return get_profile(profile_id)  # type: ignore[return-value]
 
 
@@ -372,6 +1382,7 @@ def get_profile(profile_id: str) -> dict[str, Any] | None:
         if not row:
             return None
         profile = dict(row)
+        profile["extension_ids"] = json.loads(profile.get("extension_ids") or "[]")
         profile["launch_args"] = json.loads(profile.get("launch_args") or "[]")
         tags = conn.execute(
             "SELECT tag, color FROM profile_tags WHERE profile_id = ?",
@@ -379,6 +1390,11 @@ def get_profile(profile_id: str) -> dict[str, Any] | None:
         ).fetchall()
         profile["tags"] = [dict(t) for t in tags]
         return profile
+
+
+def profile_viewport_revision(profile: dict[str, Any]) -> str:
+    """Return the immutable viewport binding token for a profile snapshot."""
+    return f"{int(profile.get('screen_width') or 1920)}x{int(profile.get('screen_height') or 1080)}"
 
 
 def list_profiles() -> list[dict[str, Any]]:
@@ -390,6 +1406,7 @@ def list_profiles() -> list[dict[str, Any]]:
         profiles = []
         for row in rows:
             profile = dict(row)
+            profile["extension_ids"] = json.loads(profile.get("extension_ids") or "[]")
             profile["launch_args"] = json.loads(profile.get("launch_args") or "[]")
             tags = conn.execute(
                 "SELECT tag, color FROM profile_tags WHERE profile_id = ?",
@@ -410,7 +1427,9 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
     # Only update fields that were explicitly provided
     update_cols = []
     update_vals = []
-    # Pre-serialize launch_args to JSON before the generic update loop
+    # Pre-serialize list fields before the generic update loop
+    if "extension_ids" in fields:
+        fields["extension_ids"] = json.dumps(fields["extension_ids"] or [])
     if "launch_args" in fields:
         fields["launch_args"] = json.dumps(fields["launch_args"] or [])
 
@@ -419,7 +1438,7 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
         "fingerprint_seed", "proxy", "timezone", "locale", "platform",
         "user_agent", "screen_width", "screen_height", "gpu_vendor", "gpu_renderer",
         "hardware_concurrency", "humanize", "human_preset", "headless", "geoip",
-        "clipboard_sync", "auto_launch", "color_scheme", "search_engine", "launch_args", "notes",
+        "clipboard_sync", "auto_launch", "color_scheme", "search_engine", "extension_ids", "launch_args", "notes",
     ):
         if col in fields:
             update_cols.append(f"{col} = ?")
@@ -435,11 +1454,6 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
                 f"UPDATE profiles SET {', '.join(update_cols)} WHERE id = ?",
                 update_vals,
             )
-            if "sandbox_id" in fields:
-                conn.execute(
-                    "UPDATE task_sessions SET sandbox_id = ?, updated_at = ? WHERE profile_id = ?",
-                    (fields["sandbox_id"], now, profile_id),
-                )
             conn.commit()
 
     if tags is not None:
@@ -452,7 +1466,14 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
                 )
             conn.commit()
 
-    return get_profile(profile_id)
+    updated = get_profile(profile_id)
+    if updated is not None:
+        ensure_project(
+            str(updated.get("sandbox_id") or "default"),
+            str(updated.get("project_id") or "default"),
+            created_by_kind="system",
+        )
+    return updated
 
 
 def bulk_organize_profiles(
@@ -490,6 +1511,288 @@ def delete_profile(profile_id: str) -> bool:
         return cursor.rowcount > 0
 
 
+def _reference_digest(value: str | None) -> str | None:
+    if value is None:
+        return None
+    salt = secrets.token_bytes(16)
+    digest = hashlib.sha256(salt + value.encode("utf-8")).hexdigest()
+    return f"{salt.hex()}:{digest}"
+
+
+def _account_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    data = dict(row)
+    data["has_secret_reference"] = bool(data.pop("secret_ref_digest", None))
+    data["has_totp_reference"] = bool(data.pop("totp_ref_digest", None))
+    return data
+
+
+def _account_event_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+def _insert_account_auth_event(
+    conn: sqlite3.Connection,
+    account: dict[str, Any],
+    *,
+    event_type: str,
+    auth_state: str | None,
+    actor_kind: str,
+    actor_id: str | None,
+    occurred_at: str | None = None,
+) -> dict[str, Any]:
+    event_id = str(uuid.uuid4())
+    now = _now()
+    conn.execute(
+        """INSERT INTO account_auth_events (
+            id, account_id_snapshot, profile_id_snapshot, sandbox_id,
+            event_type, auth_state, actor_kind, actor_id, occurred_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            event_id,
+            account["id"],
+            account["profile_id_snapshot"],
+            account["sandbox_id"],
+            event_type,
+            auth_state,
+            actor_kind,
+            actor_id,
+            occurred_at or now,
+            now,
+        ),
+    )
+    row = conn.execute(
+        "SELECT * FROM account_auth_events WHERE id = ?", (event_id,)
+    ).fetchone()
+    event = _account_event_from_row(row)
+    if event is None:  # pragma: no cover
+        raise RuntimeError("account auth event insert failed")
+    return event
+
+
+def create_account_metadata(
+    *,
+    profile_id: str,
+    provider: str,
+    subject_label: str,
+    actor_kind: str,
+    actor_id: str | None = None,
+    display_name: str | None = None,
+    origin: str | None = None,
+    auth_state: str = "unknown",
+    second_factor_state: str = "unknown",
+    passkey_state: str = "unknown",
+    secret_ref: str | None = None,
+    totp_ref: str | None = None,
+    last_seen_at: str | None = None,
+) -> dict[str, Any]:
+    profile = get_profile(profile_id)
+    if profile is None:
+        raise ValueError("Profile not found")
+    account_id = str(uuid.uuid4())
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """INSERT INTO accounts (
+                    id, profile_id, profile_id_snapshot, sandbox_id, project_id,
+                    provider, subject_label, display_name, origin, auth_state,
+                    second_factor_state, passkey_state, secret_ref_digest,
+                    totp_ref_digest, last_seen_at, row_version, created_by_kind,
+                    created_by_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                (
+                    account_id,
+                    profile_id,
+                    profile_id,
+                    str(profile.get("sandbox_id") or "default"),
+                    str(profile.get("project_id") or "default"),
+                    provider,
+                    subject_label,
+                    display_name,
+                    origin,
+                    auth_state,
+                    second_factor_state,
+                    passkey_state,
+                    _reference_digest(secret_ref),
+                    _reference_digest(totp_ref),
+                    last_seen_at,
+                    actor_kind,
+                    actor_id,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            raw_account = dict(row) if row is not None else None
+            if raw_account is None:  # pragma: no cover
+                raise RuntimeError("account metadata insert failed")
+            _insert_account_auth_event(
+                conn,
+                raw_account,
+                event_type="created",
+                auth_state=auth_state,
+                actor_kind=actor_kind,
+                actor_id=actor_id,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    account = get_account_metadata(account_id)
+    if account is None:  # pragma: no cover
+        raise RuntimeError("account metadata insert failed")
+    return account
+
+
+def get_account_metadata(account_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    return _account_from_row(row)
+
+
+def list_account_metadata(
+    *, profile_id: str | None = None, sandbox_id: str | None = None
+) -> list[dict[str, Any]]:
+    where: list[str] = ["profile_id IS NOT NULL"]
+    values: list[Any] = []
+    if profile_id is not None:
+        where.append("profile_id = ?")
+        values.append(profile_id)
+    if sandbox_id is not None:
+        where.append("sandbox_id = ?")
+        values.append(sandbox_id)
+    sql = "SELECT * FROM accounts"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY updated_at DESC, provider ASC, subject_label ASC, id ASC"
+    with get_db() as conn:
+        rows = conn.execute(sql, values).fetchall()
+    return [account for row in rows if (account := _account_from_row(row)) is not None]
+
+
+def update_account_metadata(
+    account_id: str,
+    *,
+    actor_kind: str,
+    actor_id: str | None = None,
+    **fields: Any,
+) -> dict[str, Any] | None:
+    existing = get_account_metadata(account_id)
+    if existing is None:
+        return None
+    updates: dict[str, Any] = {}
+    for name in (
+        "display_name",
+        "origin",
+        "auth_state",
+        "second_factor_state",
+        "passkey_state",
+        "last_seen_at",
+    ):
+        if name in fields:
+            updates[name] = fields[name]
+    if "secret_ref" in fields:
+        updates["secret_ref_digest"] = _reference_digest(fields["secret_ref"])
+    if "totp_ref" in fields:
+        updates["totp_ref_digest"] = _reference_digest(fields["totp_ref"])
+    if not updates:
+        return existing
+
+    auth_state_changed = (
+        "auth_state" in updates and updates["auth_state"] != existing.get("auth_state")
+    )
+    references_changed = "secret_ref_digest" in updates or "totp_ref_digest" in updates
+    updates["row_version"] = int(existing.get("row_version") or 1) + 1
+    updates["updated_at"] = _now()
+    columns = ", ".join(f"{name} = ?" for name in updates)
+    values = list(updates.values()) + [account_id]
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(f"UPDATE accounts SET {columns} WHERE id = ?", values)
+            row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            raw_account = dict(row) if row is not None else None
+            if raw_account is None:  # pragma: no cover
+                raise RuntimeError("account metadata update failed")
+            if auth_state_changed:
+                _insert_account_auth_event(
+                    conn,
+                    raw_account,
+                    event_type="auth_state_changed",
+                    auth_state=str(raw_account["auth_state"]),
+                    actor_kind=actor_kind,
+                    actor_id=actor_id,
+                )
+            if references_changed:
+                _insert_account_auth_event(
+                    conn,
+                    raw_account,
+                    event_type="secret_reference_changed",
+                    auth_state=str(raw_account["auth_state"]),
+                    actor_kind=actor_kind,
+                    actor_id=actor_id,
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return get_account_metadata(account_id)
+
+
+def append_account_auth_event(
+    account_id: str,
+    *,
+    event_type: str,
+    actor_kind: str,
+    actor_id: str | None = None,
+    auth_state: str | None = None,
+    occurred_at: str | None = None,
+) -> dict[str, Any]:
+    account = get_account_metadata(account_id)
+    if account is None:
+        raise ValueError("Account not found")
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            event = _insert_account_auth_event(
+                conn,
+                account,
+                event_type=event_type,
+                auth_state=auth_state,
+                actor_kind=actor_kind,
+                actor_id=actor_id,
+                occurred_at=occurred_at,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return event
+
+
+def list_account_auth_events(account_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    bounded_limit = max(1, min(int(limit), 500))
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM account_auth_events
+            WHERE account_id_snapshot = ?
+            ORDER BY occurred_at ASC, created_at ASC, id ASC
+            LIMIT ?""",
+            (account_id, bounded_limit),
+        ).fetchall()
+    return [event for row in rows if (event := _account_event_from_row(row)) is not None]
+
+
+def delete_account_metadata(account_id: str) -> bool:
+    with get_db() as conn:
+        cursor = conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 def _json_object(value: str | None) -> dict[str, Any]:
     if not value:
         return {}
@@ -514,6 +1817,94 @@ def _json_string_list(value: str | None) -> list[str]:
     except json.JSONDecodeError:
         return []
     return _bounded_string_list(decoded)
+
+
+def _json_object_list(value: str | None) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [item for item in decoded if isinstance(item, dict)]
+
+
+def _json_dump_optional(value: dict[str, Any] | list[dict[str, Any]] | None) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _strict_contract_json(value: str | None, expected_type: type) -> Any:
+    if value is None:
+        return None
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(PERSISTED_ROUTING_CONTRACT_ERROR) from exc
+    if not isinstance(decoded, expected_type):
+        raise ValueError(PERSISTED_ROUTING_CONTRACT_ERROR)
+    return decoded
+
+
+def _parse_persisted_routing_contract(
+    *,
+    harness: str,
+    agent: str | None,
+    profile_id: str,
+    provider_json: str | None,
+    browser_tools_json: str | None,
+    routing_policy_json: str | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+    provider = _strict_contract_json(provider_json, dict)
+    browser_tools = _strict_contract_json(browser_tools_json, list)
+    routing_policy = _strict_contract_json(routing_policy_json, dict)
+    if browser_tools is None:
+        browser_tools = []
+    if provider is None and browser_tools == [] and routing_policy is None:
+        return None, [], None
+    if provider_json is None or browser_tools_json is None or routing_policy_json is None:
+        raise ValueError(PERSISTED_ROUTING_CONTRACT_ERROR)
+    try:
+        if __package__:
+            from .models import TaskRunCreate
+        else:  # pragma: no cover - flat uvicorn import path
+            from models import TaskRunCreate
+
+        body = TaskRunCreate(
+            harness=harness,
+            agent=agent,
+            task="persisted routing contract",
+            profile_id=profile_id,
+            provider=provider,
+            browser_tools=browser_tools,
+            routing_policy=routing_policy,
+        )
+    except Exception as exc:
+        raise ValueError(PERSISTED_ROUTING_CONTRACT_ERROR) from exc
+    return (
+        body.provider.model_dump(exclude_none=True) if body.provider else None,
+        [tool.model_dump() for tool in body.browser_tools],
+        body.routing_policy.model_dump() if body.routing_policy else None,
+    )
+
+
+def _parse_persisted_routing_contract_from_row(
+    row: sqlite3.Row | dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+    profile_id = str(
+        row["profile_id"] or row["profile_id_snapshot"] or "persisted-routing-contract"
+    )
+    return _parse_persisted_routing_contract(
+        harness=str(row["harness"] or ""),
+        agent=row["agent"],
+        profile_id=profile_id,
+        provider_json=row["provider_json"],
+        browser_tools_json=row["browser_tools_json"],
+        routing_policy_json=row["routing_policy_json"],
+    )
 
 
 def _bounded_string_map(value: object, *, max_length: int = 64) -> dict[str, str]:
@@ -665,16 +2056,24 @@ def create_task_session(
     session_id = str(uuid.uuid4())
     now = _now()
     with get_db() as conn:
+        profile = conn.execute(
+            "SELECT project_id FROM profiles WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+        project_id = str(profile["project_id"] or "default") if profile else "default"
         conn.execute(
             """INSERT INTO task_sessions
-            (id, profile_id, sandbox_id, title, status, created_by_kind, created_by_id,
+            (id, profile_id, sandbox_id, project_id, title, status, workflow_state,
+             retention_class, activity_at, row_version, created_by_kind, created_by_id,
              created_at, updated_at, metadata)
-            VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, 'active', 'open', 'project', ?, 1, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 profile_id,
                 sandbox_id,
+                project_id,
                 title,
+                now,
                 created_by_kind,
                 created_by_id,
                 now,
@@ -683,6 +2082,7 @@ def create_task_session(
             ),
         )
         conn.commit()
+    ensure_project(str(sandbox_id or "default"), project_id, created_by_kind="system")
     return get_task_session(session_id)  # type: ignore[return-value]
 
 
@@ -705,6 +2105,118 @@ def list_task_sessions(profile_id: str, limit: int = 100) -> list[dict[str, Any]
         return [_task_session_from_row(row) for row in rows]
 
 
+def update_task_session(
+    session_id: str,
+    *,
+    expected_row_version: int,
+    title: str | None = None,
+    workflow_state: str | None = None,
+    archived: bool | None = None,
+    retention_class: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Apply lifecycle updates with optimistic concurrency on row_version."""
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM task_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        current = _task_session_from_row(row)
+        if int(current["row_version"]) != int(expected_row_version):
+            conn.commit()
+            raise OptimisticConcurrencyError(
+                f"Task session row_version conflict for {session_id}"
+            )
+
+        updates: dict[str, Any] = {
+            "updated_at": now,
+            "activity_at": now,
+            "row_version": int(current["row_version"]) + 1,
+        }
+        if title is not None:
+            updates["title"] = title
+        if metadata is not None:
+            updates["metadata"] = json.dumps(metadata, separators=(",", ":"))
+        if retention_class is not None:
+            if retention_class not in {"temporary", "project"}:
+                conn.commit()
+                raise ValueError("retention_class must be temporary or project")
+            updates["retention_class"] = retention_class
+        if workflow_state is not None:
+            if workflow_state not in {"open", "done"}:
+                conn.commit()
+                raise ValueError("workflow_state must be open or done")
+            updates["workflow_state"] = workflow_state
+            updates["done_at"] = now if workflow_state == "done" else None
+        if archived is not None:
+            if archived:
+                updates["archived_at"] = now
+                updates["status"] = "archived"
+            else:
+                updates["archived_at"] = None
+                updates["status"] = "active"
+
+        columns = ", ".join(f"{column} = ?" for column in updates)
+        values = list(updates.values()) + [session_id, int(expected_row_version)]
+        cursor = conn.execute(
+            f"""UPDATE task_sessions
+            SET {columns}
+            WHERE id = ? AND row_version = ?""",
+            values,
+        )
+        if cursor.rowcount != 1:
+            conn.commit()
+            raise OptimisticConcurrencyError(
+                f"Task session row_version conflict for {session_id}"
+            )
+
+        # Couple artifact retention into the same BEGIN IMMEDIATE transaction.
+        if archived is not None:
+            artifacts_table = conn.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'task_artifacts'
+                """
+            ).fetchone()
+            if artifacts_table is not None:
+                if archived:
+                    raw_archived = str(updates["archived_at"])
+                    if raw_archived.endswith("Z"):
+                        raw_archived = raw_archived[:-1] + "+00:00"
+                    archived_at = datetime.datetime.fromisoformat(raw_archived)
+                    if archived_at.tzinfo is None:
+                        archived_at = archived_at.replace(tzinfo=datetime.timezone.utc)
+                    expires_at = (
+                        archived_at + datetime.timedelta(days=7)
+                    ).astimezone(datetime.timezone.utc).isoformat()
+                    conn.execute(
+                        """
+                        UPDATE task_artifacts
+                        SET expires_at = ?
+                        WHERE task_session_id = ?
+                          AND deleted_at IS NULL
+                        """,
+                        (expires_at, session_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE task_artifacts
+                        SET expires_at = NULL, delete_failed_at = NULL
+                        WHERE task_session_id = ?
+                          AND deleted_at IS NULL
+                        """,
+                        (session_id,),
+                    )
+        conn.commit()
+    return get_task_session(session_id)
+
+
 def append_task_message(
     session_id: str,
     role: str,
@@ -716,6 +2228,16 @@ def append_task_message(
     message_id = str(uuid.uuid4())
     now = _now()
     with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, archived_at FROM task_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is not None and (
+            row["status"] == "archived" or row["archived_at"] is not None
+        ):
+            conn.commit()
+            raise TaskArchivedError(f"Task session is archived: {session_id}")
         conn.execute(
             """INSERT INTO task_messages
             (id, session_id, role, content, created_by_kind, created_by_id, created_at, metadata)
@@ -731,7 +2253,10 @@ def append_task_message(
                 json.dumps(metadata or {}, separators=(",", ":")),
             ),
         )
-        conn.execute("UPDATE task_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+        conn.execute(
+            "UPDATE task_sessions SET updated_at = ?, activity_at = ? WHERE id = ?",
+            (now, now, session_id),
+        )
         conn.commit()
     return get_task_message(message_id)  # type: ignore[return-value]
 
@@ -800,6 +2325,1021 @@ def list_task_events(session_id: str, limit: int = 100) -> list[dict[str, Any]]:
             (session_id, safe_limit),
         ).fetchall()
         return [_task_event_from_row(row) for row in rows]
+
+
+# ── Task run persistence ─────────────────────────────────────────────────────
+
+
+TASK_RUN_STATUSES = frozenset(
+    {
+        "queued",
+        "health_check",
+        "blocked_health",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "revoked",
+    }
+)
+TASK_RUN_CANCELABLE_STATUSES = frozenset(
+    {"queued", "health_check", "blocked_health", "running"}
+)
+TASK_RUN_TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "revoked"}
+)
+
+
+@dataclass(frozen=True)
+class HealthRunReconciliationResult:
+    reconciled_count: int = 0
+    lease_ids: tuple[str, ...] = ()
+
+
+class TaskOutputConflictError(Exception):
+    """Raised when an idempotency key is reused with a conflicting payload."""
+
+
+def _task_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    run = dict(row)
+    run["launch_if_stopped"] = bool(run.get("launch_if_stopped"))
+    run["allowed_origins"] = _json_string_list(run.pop("allowed_origins_json", None))
+    provider, browser_tools, routing_policy = _parse_persisted_routing_contract(
+        harness=str(run.get("harness") or ""),
+        agent=run.get("agent"),
+        profile_id=str(
+            run.get("profile_id")
+            or run.get("profile_id_snapshot")
+            or "persisted-routing-contract"
+        ),
+        provider_json=run.pop("provider_json", None),
+        browser_tools_json=run.pop("browser_tools_json", None),
+        routing_policy_json=run.pop("routing_policy_json", None),
+    )
+    run["provider"] = provider
+    run["browser_tools"] = browser_tools
+    run["routing_policy"] = routing_policy
+    launch_evidence = run.pop("launch_evidence_json", None)
+    run["launch_evidence"] = _json_object(launch_evidence)
+    run["health_snapshot"] = _json_object(run.pop("health_snapshot_json", None))
+    run["health_decision"] = _json_object(run.pop("health_decision_json", None))
+    override = run.pop("health_override_json", None)
+    run["health_override"] = _json_object(override) if override else None
+    run.pop("next_output_sequence", None)
+    # Digests are never exposed on public API responses.
+    run.pop("capability_digest", None)
+    return run
+
+
+def _task_output_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    output = dict(row)
+    stored_payload = _json_object(output.pop("payload_json", None))
+    art_id = output.pop("art_id", None)
+    art_width = output.pop("art_width", None)
+    art_height = output.pop("art_height", None)
+    art_media_type = output.pop("art_media_type", None)
+    art_sha256 = output.pop("art_sha256", None)
+    # Prefer SQL-computed artifact_expired when present; default False.
+    if "artifact_expired" in output:
+        output["artifact_expired"] = bool(output["artifact_expired"])
+    else:
+        output["artifact_expired"] = False
+    if output.get("kind") == "screenshot":
+        # Server-derived only; ignore any caller/forged task_outputs.payload_json.
+        if art_id:
+            output["payload"] = {
+                "artifact_id": str(art_id),
+                "width": int(art_width),
+                "height": int(art_height),
+                "media_type": str(art_media_type),
+                "sha256": str(art_sha256),
+            }
+        else:
+            output["payload"] = {}
+    else:
+        output["payload"] = stored_payload
+    return output
+
+
+def _artifact_expired_sql(now_iso: str) -> str:
+    """Expression that is 1 when screenshot bytes are expired or deleted."""
+    # Bound the now literal carefully — callers pass a server ISO timestamp.
+    safe_now = now_iso.replace("'", "''")
+    return f"""
+        CASE
+            WHEN a.id IS NULL THEN 0
+            WHEN a.deleted_at IS NOT NULL THEN 1
+            WHEN a.expires_at IS NOT NULL AND a.expires_at < '{safe_now}' THEN 1
+            ELSE 0
+        END
+    """
+
+
+def _task_artifacts_table_exists(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_artifacts'"
+    ).fetchone()
+    return row is not None
+
+
+def _select_task_output_sql(conn: sqlite3.Connection, *, now_iso: str | None = None) -> str:
+    art_cols = """
+        NULL AS art_id,
+        NULL AS art_width,
+        NULL AS art_height,
+        NULL AS art_media_type,
+        NULL AS art_sha256
+    """
+    if not _task_artifacts_table_exists(conn):
+        return f"""
+            SELECT o.*, 0 AS artifact_expired, {art_cols}
+            FROM task_outputs o
+        """
+    stamp = now_iso or _now()
+    return f"""
+        SELECT o.*,
+               {_artifact_expired_sql(stamp)} AS artifact_expired,
+               a.id AS art_id,
+               a.width AS art_width,
+               a.height AS art_height,
+               a.media_type AS art_media_type,
+               a.sha256 AS art_sha256
+        FROM task_outputs o
+        LEFT JOIN task_artifacts a ON a.output_id = o.id
+    """
+
+
+def get_task_output(output_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        sql = _select_task_output_sql(conn)
+        row = conn.execute(
+            f"{sql} WHERE o.id = ?",
+            (output_id,),
+        ).fetchone()
+        return _task_output_from_row(row) if row else None
+
+
+def list_task_outputs(
+    run_id: str,
+    *,
+    after_sequence: int = 0,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_after = max(0, int(after_sequence))
+    safe_limit = max(1, min(int(limit), 200))
+    with get_db() as conn:
+        sql = _select_task_output_sql(conn)
+        rows = conn.execute(
+            f"""{sql}
+            WHERE o.run_id = ? AND o.sequence > ?
+            ORDER BY o.sequence ASC
+            LIMIT ?""",
+            (run_id, safe_after, safe_limit),
+        ).fetchall()
+        return [_task_output_from_row(row) for row in rows]
+
+
+def _status_from_health_decision(decision: dict[str, Any]) -> str:
+    if decision.get("waiting"):
+        return "health_check"
+    if not decision.get("allowed"):
+        return "blocked_health"
+    return "queued"
+
+
+def build_run_health_gate(profile_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Copy an immutable health snapshot/decision from the current profile row."""
+    if __package__:
+        from .profile_health import ProfileHealthResult, map_profile_health_gate_fields
+        from .run_health import HEALTH_POLICY_VERSION, HealthSnapshot, evaluate_health
+    else:  # pragma: no cover - flat uvicorn import path
+        from profile_health import ProfileHealthResult, map_profile_health_gate_fields
+        from run_health import HEALTH_POLICY_VERSION, HealthSnapshot, evaluate_health
+
+    row = get_profile_health(profile_id)
+    if row is None:
+        snapshot = HealthSnapshot(
+            state="unavailable",
+            checked_at=None,
+            proxy_configured=False,
+            proxy_reachable=None,
+            measured_authenticity_score=None,
+            inferred_authenticity_score=None,
+            measured_authenticity_source=None,
+            reasons=(),
+            measurement_error=True,
+            policy_version=HEALTH_POLICY_VERSION,
+            outbound_ip_masked=None,
+        )
+    else:
+        result = ProfileHealthResult(
+            state=str(row["state"]),
+            checked_at=str(row["checked_at"] or ""),
+            proxy_configured=bool(row["proxy_configured"]),
+            proxy_reachable=row.get("proxy_reachable"),
+            outbound_ip_masked=row.get("outbound_ip_masked"),
+            proxy_latency_ms=row.get("proxy_latency_ms"),
+            proxy_risk_score=row.get("proxy_risk_score"),
+            proxy_authenticity_score=row.get("proxy_authenticity_score"),
+            fingerprint_consistency_score=row.get("fingerprint_consistency_score"),
+            browser_scan_score=row.get("browser_scan_score"),
+            warnings=tuple(row.get("warnings") or ()),
+            blockers=tuple(row.get("blockers") or ()),
+            error_code=row.get("error_code"),
+            sources=dict(row.get("sources") or {}),
+        )
+        fields = map_profile_health_gate_fields(result)
+        checked_raw = row.get("checked_at")
+        snapshot = HealthSnapshot(
+            state=str(fields["state"]),
+            checked_at=(
+                datetime.datetime.fromisoformat(str(checked_raw))
+                if isinstance(checked_raw, str) and checked_raw
+                else None
+            ),
+            proxy_configured=bool(fields["proxy_configured"]),
+            proxy_reachable=fields["proxy_reachable"],  # type: ignore[arg-type]
+            measured_authenticity_score=fields["measured_authenticity_score"],  # type: ignore[arg-type]
+            inferred_authenticity_score=fields["inferred_authenticity_score"],  # type: ignore[arg-type]
+            measured_authenticity_source=fields["measured_authenticity_source"],  # type: ignore[arg-type]
+            reasons=tuple(fields["reasons"]),  # type: ignore[arg-type]
+            measurement_error=bool(fields["measurement_error"]),
+            policy_version=str(fields["policy_version"]),
+            outbound_ip_masked=(
+                str(fields["outbound_ip_masked"])
+                if fields.get("outbound_ip_masked") is not None
+                else None
+            ),
+        )
+    decision = evaluate_health(snapshot)
+    return snapshot.to_dict(), decision.to_dict()
+
+
+def _insert_task_run_on_conn(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    task_session_id: str,
+    task_message_id: str,
+    profile_id: str,
+    sandbox_id: str,
+    harness: str,
+    agent: str | None,
+    status: str,
+    launch_if_stopped: bool,
+    allowed_origins: list[str],
+    max_steps: int,
+    timeout_seconds: int,
+    model_alias: str | None,
+    provider: dict[str, Any] | None,
+    browser_tools: list[dict[str, Any]],
+    routing_policy: dict[str, Any] | None,
+    deadline_at: str,
+    health_snapshot: dict[str, Any],
+    health_decision: dict[str, Any],
+    created_by_kind: str,
+    created_by_id: str | None,
+    now: str,
+) -> None:
+    """Insert a task_run and bump session activity on an open connection."""
+    profile = conn.execute(
+        "SELECT screen_width, screen_height, updated_at FROM profiles WHERE id = ?",
+        (profile_id,),
+    ).fetchone()
+    viewport_revision = (
+        f"{int(profile['screen_width'] or 1920)}x{int(profile['screen_height'] or 1080)}"
+        if profile is not None
+        else "1920x1080"
+    )
+    conn.execute(
+        """INSERT INTO task_runs (
+            id, task_session_id, task_message_id, profile_id, profile_id_snapshot,
+            sandbox_id, harness, agent, status, launch_if_stopped, allowed_origins_json,
+            max_steps, timeout_seconds, model_alias, deadline_at,
+            provider_json, browser_tools_json, routing_policy_json,
+            health_snapshot_json, health_decision_json, health_override_json,
+            retry_count, first_action_sequence, first_action_at, next_output_sequence,
+            claimed_by, claim_expires_at, worker_id, claim_eligible_at, cancelled_at,
+            created_by_kind, created_by_id, created_at, updated_at,
+            lease_id, capability_digest, error_code, error_message, queued_at,
+            viewport_revision, launch_evidence_json
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+            0, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?,
+            NULL, NULL, NULL, NULL, ?, ?, '{}'
+        )""",
+        (
+            run_id,
+            task_session_id,
+            task_message_id,
+            profile_id,
+            profile_id,
+            sandbox_id,
+            harness,
+            agent,
+            status,
+            bool(launch_if_stopped),
+            json.dumps(list(allowed_origins), separators=(",", ":")),
+            int(max_steps),
+            int(timeout_seconds),
+            model_alias,
+            deadline_at,
+            _json_dump_optional(provider),
+            _json_dump_optional(browser_tools) if browser_tools else None,
+            _json_dump_optional(routing_policy),
+            json.dumps(health_snapshot, separators=(",", ":"), sort_keys=True),
+            json.dumps(health_decision, separators=(",", ":"), sort_keys=True),
+            created_by_kind,
+            created_by_id,
+            now,
+            now,
+            now if status == "queued" else None,
+            viewport_revision,
+        ),
+    )
+    conn.execute(
+        "UPDATE task_sessions SET updated_at = ?, activity_at = ? WHERE id = ?",
+        (now, now, task_session_id),
+    )
+
+
+def create_task_run(
+    *,
+    task_session_id: str,
+    task_message_id: str,
+    profile_id: str,
+    sandbox_id: str,
+    harness: str,
+    agent: str | None = None,
+    launch_if_stopped: bool,
+    allowed_origins: list[str],
+    max_steps: int,
+    timeout_seconds: int,
+    model_alias: str | None,
+    health_snapshot: dict[str, Any],
+    health_decision: dict[str, Any],
+    created_by_kind: str,
+    created_by_id: str | None = None,
+    provider: dict[str, Any] | None = None,
+    browser_tools: list[dict[str, Any]] | None = None,
+    routing_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    run_id = str(uuid.uuid4())
+    now = _now()
+    created_at = datetime.datetime.fromisoformat(now)
+    deadline_at = (
+        created_at + datetime.timedelta(seconds=int(timeout_seconds))
+    ).isoformat()
+    status = _status_from_health_decision(health_decision)
+    with get_db() as conn:
+        _insert_task_run_on_conn(
+            conn,
+            run_id=run_id,
+            task_session_id=task_session_id,
+            task_message_id=task_message_id,
+            profile_id=profile_id,
+            sandbox_id=sandbox_id,
+            harness=harness,
+            agent=agent,
+            status=status,
+            launch_if_stopped=launch_if_stopped,
+            allowed_origins=allowed_origins,
+            max_steps=max_steps,
+            timeout_seconds=timeout_seconds,
+            model_alias=model_alias,
+            provider=provider,
+            browser_tools=browser_tools or [],
+            routing_policy=routing_policy,
+            deadline_at=deadline_at,
+            health_snapshot=health_snapshot,
+            health_decision=health_decision,
+            created_by_kind=created_by_kind,
+            created_by_id=created_by_id,
+            now=now,
+        )
+        conn.commit()
+    run = get_task_run(run_id)
+    if run is None:  # pragma: no cover
+        raise RuntimeError("task run insert did not create a row")
+    return run
+
+
+def create_task_run_with_message(
+    *,
+    task_session_id: str,
+    content: str,
+    profile_id: str,
+    sandbox_id: str,
+    harness: str,
+    agent: str | None = None,
+    launch_if_stopped: bool,
+    allowed_origins: list[str],
+    max_steps: int,
+    timeout_seconds: int,
+    model_alias: str | None,
+    health_snapshot: dict[str, Any],
+    health_decision: dict[str, Any],
+    created_by_kind: str,
+    created_by_id: str | None = None,
+    message_metadata: dict[str, Any] | None = None,
+    provider: dict[str, Any] | None = None,
+    browser_tools: list[dict[str, Any]] | None = None,
+    routing_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Insert the user task message and task_run in one BEGIN IMMEDIATE transaction."""
+    run_id = str(uuid.uuid4())
+    message_id = str(uuid.uuid4())
+    now = _now()
+    created_at = datetime.datetime.fromisoformat(now)
+    deadline_at = (
+        created_at + datetime.timedelta(seconds=int(timeout_seconds))
+    ).isoformat()
+    status = _status_from_health_decision(health_decision)
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT status, archived_at FROM task_sessions WHERE id = ?",
+                (task_session_id,),
+            ).fetchone()
+            if row is not None and (
+                row["status"] == "archived" or row["archived_at"] is not None
+            ):
+                conn.commit()
+                raise TaskArchivedError(f"Task session is archived: {task_session_id}")
+            conn.execute(
+                """INSERT INTO task_messages
+                (id, session_id, role, content, created_by_kind, created_by_id, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    message_id,
+                    task_session_id,
+                    "user",
+                    content,
+                    created_by_kind,
+                    created_by_id,
+                    now,
+                    json.dumps(message_metadata or {}, separators=(",", ":")),
+                ),
+            )
+            _insert_task_run_on_conn(
+                conn,
+                run_id=run_id,
+                task_session_id=task_session_id,
+                task_message_id=message_id,
+                profile_id=profile_id,
+                sandbox_id=sandbox_id,
+                harness=harness,
+                agent=agent,
+                status=status,
+                launch_if_stopped=launch_if_stopped,
+                allowed_origins=allowed_origins,
+                max_steps=max_steps,
+                timeout_seconds=timeout_seconds,
+                model_alias=model_alias,
+                provider=provider,
+                browser_tools=browser_tools or [],
+                routing_policy=routing_policy,
+                deadline_at=deadline_at,
+                health_snapshot=health_snapshot,
+                health_decision=health_decision,
+                created_by_kind=created_by_kind,
+                created_by_id=created_by_id,
+                now=now,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    run = get_task_run(run_id)
+    if run is None:  # pragma: no cover
+        raise RuntimeError("task run insert did not create a row")
+    return run
+
+
+def get_task_run(run_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        return _task_run_from_row(row) if row else None
+
+
+def record_task_run_launch_evidence(
+    run_id: str,
+    *,
+    evidence: dict[str, Any],
+) -> dict[str, Any] | None:
+    now = _now()
+    allowed_fields = {
+        "profile_id",
+        "user_data_dir_digest",
+        "display",
+        "vnc_ws_port",
+        "cdp_port",
+        "cdp_ready",
+        "cdp_browser",
+        "source",
+        "launched",
+        "validated_at",
+    }
+    safe_evidence: dict[str, Any] = {}
+    for key, value in evidence.items():
+        if key not in allowed_fields or not isinstance(
+            value, (str, int, float, bool, type(None))
+        ):
+            continue
+        safe_evidence[str(key)] = value[:512] if isinstance(value, str) else value
+    encoded = json.dumps(safe_evidence, separators=(",", ":"), sort_keys=True)
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE task_runs
+            SET launch_evidence_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (encoded, now, run_id),
+        )
+        conn.commit()
+    return get_task_run(run_id)
+
+
+def cancel_task_run(run_id: str) -> dict[str, Any] | None:
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        current = _task_run_from_row(row)
+        if current["status"] in TASK_RUN_TERMINAL_STATUSES:
+            conn.commit()
+            return current
+        if current["status"] not in TASK_RUN_CANCELABLE_STATUSES:
+            conn.commit()
+            return current
+        conn.execute(
+            """UPDATE task_runs
+            SET status = 'cancelled', cancelled_at = ?, updated_at = ?
+            WHERE id = ? AND status IN ('queued', 'health_check', 'blocked_health', 'running')""",
+            (now, now, run_id),
+        )
+        conn.commit()
+    return get_task_run(run_id)
+
+
+
+def _active_profile_automation_lease_on_conn(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    *,
+    now: str,
+) -> bool:
+    table = conn.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = ? AND name = ?
+        """,
+        ("table", "automation_leases"),
+    ).fetchone()
+    if table is None:
+        return False
+    row = conn.execute(
+        """
+        SELECT expires_at
+        FROM automation_leases
+        WHERE profile_id = ? AND released_at IS NULL
+        LIMIT 1
+        """,
+        (profile_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    raw_expires = str(row["expires_at"])
+    raw_now = str(now)
+    if raw_expires.endswith("Z"):
+        raw_expires = raw_expires[:-1] + "+00:00"
+    if raw_now.endswith("Z"):
+        raw_now = raw_now[:-1] + "+00:00"
+    expires_at = datetime.datetime.fromisoformat(raw_expires)
+    now_at = datetime.datetime.fromisoformat(raw_now)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+    if now_at.tzinfo is None:
+        now_at = now_at.replace(tzinfo=datetime.timezone.utc)
+    return expires_at.astimezone(datetime.timezone.utc) > now_at.astimezone(
+        datetime.timezone.utc
+    )
+
+
+def _refresh_profile_claim_eligibility_on_conn(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    *,
+    now: str,
+) -> None:
+    prior = conn.execute(
+        """
+        SELECT id, claim_eligible_at
+        FROM task_runs
+        WHERE profile_id = ?
+          AND status = 'queued'
+          AND claim_eligible_at IS NOT NULL
+        """,
+        (profile_id,),
+    ).fetchall()
+    prior_map = {str(item["id"]): item["claim_eligible_at"] for item in prior}
+    conn.execute(
+        """
+        UPDATE task_runs
+        SET claim_eligible_at = NULL
+        WHERE profile_id = ? AND status = 'queued'
+        """,
+        (profile_id,),
+    )
+    if _active_profile_automation_lease_on_conn(conn, profile_id, now=now):
+        return
+    head = conn.execute(
+        """
+        SELECT r.id
+        FROM task_runs r
+        JOIN profiles p ON p.id = r.profile_id
+        WHERE r.profile_id = ?
+          AND r.status = 'queued'
+          AND p.sandbox_id = r.sandbox_id
+        ORDER BY r.created_at ASC, r.id ASC
+        LIMIT 1
+        """,
+        (profile_id,),
+    ).fetchone()
+    if head is None:
+        return
+    head_id = str(head["id"])
+    conn.execute(
+        "UPDATE task_runs SET claim_eligible_at = ? WHERE id = ?",
+        (prior_map.get(head_id) or now, head_id),
+    )
+
+
+def _release_task_run_claim_on_conn(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    now: str,
+    status: str,
+    reason: str,
+) -> list[str]:
+    """Release a run claim/lease while preserving the task run for requeue/block."""
+    lease_ids: list[str] = []
+    lease_id = row["lease_id"]
+    if lease_id:
+        lease_ids.append(str(lease_id))
+        conn.execute(
+            """
+            UPDATE automation_leases
+            SET released_at = ?,
+                release_reason = ?,
+                token_digest = ?
+            WHERE id = ? AND released_at IS NULL
+            """,
+            (now, reason, "placeholder:" + uuid.uuid4().hex, lease_id),
+        )
+    conn.execute(
+        """
+        UPDATE task_runs
+        SET status = ?,
+            claimed_by = NULL,
+            worker_id = NULL,
+            claim_expires_at = NULL,
+            lease_id = NULL,
+            capability_digest = NULL,
+            claim_eligible_at = ?,
+            updated_at = ?
+        WHERE id = ?
+          AND status IN ('queued', 'health_check', 'blocked_health', 'running')
+          AND cancelled_at IS NULL
+        """,
+        (status, None, now, row["id"]),
+    )
+    profile_id = str(row["profile_id"] or "")
+    if profile_id:
+        _refresh_profile_claim_eligibility_on_conn(
+            conn,
+            profile_id,
+            now=now,
+        )
+    return lease_ids
+
+
+def reconcile_profile_health_waiting_task_runs(
+    profile_id: str,
+) -> HealthRunReconciliationResult:
+    """Re-evaluate health_check task runs for a profile after a fresh measurement."""
+    safe_profile_id = str(profile_id)
+    if not safe_profile_id:
+        return HealthRunReconciliationResult()
+    snapshot, decision = build_run_health_gate(safe_profile_id)
+    status = _status_from_health_decision(decision)
+    now = _now()
+    updated_count = 0
+    lease_ids: list[str] = []
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """SELECT * FROM task_runs
+            WHERE profile_id = ?
+              AND status = ?
+              AND cancelled_at IS NULL
+            ORDER BY created_at ASC, id ASC""",
+            (safe_profile_id, "health_check"),
+        ).fetchall()
+        for row in rows:
+            released = _release_task_run_claim_on_conn(
+                conn,
+                row,
+                now=now,
+                status=status,
+                reason="profile_health_completed",
+            )
+            cursor = conn.execute(
+                """UPDATE task_runs
+                SET health_snapshot_json = ?,
+                    health_decision_json = ?,
+                    updated_at = ?,
+                    queued_at = CASE WHEN ? = ? THEN COALESCE(queued_at, ?) ELSE queued_at END
+                WHERE id = ?
+                  AND status = ?
+                  AND cancelled_at IS NULL""",
+                (
+                    json.dumps(snapshot, separators=(",", ":"), sort_keys=True),
+                    json.dumps(decision, separators=(",", ":"), sort_keys=True),
+                    now,
+                    status,
+                    "queued",
+                    now,
+                    row["id"],
+                    status,
+                ),
+            )
+            updated_count += int(cursor.rowcount or 0)
+            lease_ids.extend(released)
+        if updated_count:
+            _refresh_profile_claim_eligibility_on_conn(
+                conn,
+                safe_profile_id,
+                now=now,
+            )
+        conn.commit()
+    return HealthRunReconciliationResult(
+        reconciled_count=updated_count,
+        lease_ids=tuple(dict.fromkeys(lease_ids)),
+    )
+
+
+def retry_task_run_health(run_id: str) -> dict[str, Any] | None:
+    run = get_task_run(run_id)
+    if run is None:
+        return None
+    if run["status"] in TASK_RUN_TERMINAL_STATUSES:
+        return run
+    profile_id = run.get("profile_id") or run.get("profile_id_snapshot")
+    if not profile_id:
+        return run
+    # Health measurement may run outside the DB lock; re-check under BEGIN IMMEDIATE.
+    snapshot, decision = build_run_health_gate(str(profile_id))
+    status = _status_from_health_decision(decision)
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        current = _task_run_from_row(row)
+        if current["status"] in TASK_RUN_TERMINAL_STATUSES:
+            conn.commit()
+            return current
+        if current["status"] not in TASK_RUN_CANCELABLE_STATUSES:
+            conn.commit()
+            return current
+        lease_ids = _release_task_run_claim_on_conn(
+            conn,
+            row,
+            now=now,
+            status=status,
+            reason="health_retry",
+        )
+        conn.execute(
+            """UPDATE task_runs
+            SET health_snapshot_json = ?,
+                health_decision_json = ?,
+                retry_count = retry_count + 1,
+                updated_at = ?
+            WHERE id = ?
+              AND status = ?
+              AND cancelled_at IS NULL""",
+            (
+                json.dumps(snapshot, separators=(",", ":"), sort_keys=True),
+                json.dumps(decision, separators=(",", ":"), sort_keys=True),
+                now,
+                run_id,
+                status,
+            ),
+        )
+        conn.commit()
+    updated = get_task_run(run_id)
+    if updated is not None and lease_ids:
+        updated["_cleanup_lease_ids"] = lease_ids
+    return updated
+
+
+def override_task_run_health(
+    run_id: str,
+    *,
+    reason: str,
+    actor_kind: str,
+    actor_id: str | None,
+) -> dict[str, Any] | None:
+    if __package__:
+        from .run_health import NON_OVERRIDABLE_REASON_CODES
+    else:  # pragma: no cover
+        from run_health import NON_OVERRIDABLE_REASON_CODES
+
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        current = _task_run_from_row(row)
+        if current["status"] in TASK_RUN_TERMINAL_STATUSES:
+            conn.commit()
+            return current
+        decision = dict(current.get("health_decision") or {})
+        failed_reasons = [
+            item for item in decision.get("failed_reasons", []) if isinstance(item, str)
+        ]
+        non_overridable = [
+            item for item in failed_reasons if item in NON_OVERRIDABLE_REASON_CODES
+        ]
+        if non_overridable:
+            override = {
+                "applied": False,
+                "reason": reason,
+                "actor_kind": actor_kind,
+                "actor_id": actor_id,
+                "applied_at": now,
+                "failed_reasons": failed_reasons,
+                "non_overridable_reasons": non_overridable,
+                "policy_version": decision.get("policy_version"),
+            }
+            conn.execute(
+                """UPDATE task_runs
+                SET health_override_json = ?, updated_at = ?
+                WHERE id = ?
+                  AND status NOT IN ('succeeded', 'failed', 'cancelled', 'revoked')""",
+                (
+                    json.dumps(override, separators=(",", ":"), sort_keys=True),
+                    now,
+                    run_id,
+                ),
+            )
+            conn.commit()
+            return get_task_run(run_id)
+
+        override = {
+            "applied": True,
+            "reason": reason,
+            "actor_kind": actor_kind,
+            "actor_id": actor_id,
+            "applied_at": now,
+            "failed_reasons": failed_reasons,
+            "non_overridable_reasons": [],
+            "policy_version": decision.get("policy_version"),
+        }
+        updated_decision = {
+            **decision,
+            "allowed": True,
+            "waiting": False,
+            "failed_reasons": [],
+            "non_overridable_reasons": [],
+        }
+        lease_ids = _release_task_run_claim_on_conn(
+            conn,
+            row,
+            now=now,
+            status="queued",
+            reason="health_override",
+        )
+        conn.execute(
+            """UPDATE task_runs
+            SET health_override_json = ?,
+                health_decision_json = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND status = 'queued'
+              AND cancelled_at IS NULL""",
+            (
+                json.dumps(override, separators=(",", ":"), sort_keys=True),
+                json.dumps(updated_decision, separators=(",", ":"), sort_keys=True),
+                now,
+                run_id,
+            ),
+        )
+        conn.commit()
+    updated = get_task_run(run_id)
+    if updated is not None and lease_ids:
+        updated["_cleanup_lease_ids"] = lease_ids
+    return updated
+
+
+def append_task_output(
+    run_id: str,
+    *,
+    idempotency_key: str,
+    kind: str,
+    summary: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Atomically append a typed output with idempotent retries."""
+    now = _now()
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        run_row = conn.execute(
+            "SELECT * FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            conn.commit()
+            raise KeyError(run_id)
+
+        existing = conn.execute(
+            """SELECT * FROM task_outputs
+            WHERE run_id = ? AND idempotency_key = ?""",
+            (run_id, idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            # Compare against persisted payload_json, not derived screenshot views.
+            same = (
+                existing["kind"] == kind
+                and existing["summary"] == summary
+                and str(existing["payload_json"] or "") == payload_json
+            )
+            output_id = str(existing["id"])
+            conn.commit()
+            if same:
+                current = get_task_output(output_id)
+                if current is None:  # pragma: no cover
+                    raise RuntimeError("task output disappeared during idempotent append")
+                return current
+            raise TaskOutputConflictError(
+                f"Conflicting output for idempotency key {idempotency_key}"
+            )
+
+        next_sequence = int(run_row["next_output_sequence"]) + 1
+        output_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT INTO task_outputs (
+                id, run_id, sequence, idempotency_key, kind, summary, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                output_id,
+                run_id,
+                next_sequence,
+                idempotency_key,
+                kind,
+                summary,
+                payload_json,
+                now,
+            ),
+        )
+        if kind == "action" and run_row["first_action_sequence"] is None:
+            conn.execute(
+                """UPDATE task_runs
+                SET next_output_sequence = ?,
+                    first_action_sequence = ?,
+                    first_action_at = ?,
+                    updated_at = ?
+                WHERE id = ?""",
+                (next_sequence, next_sequence, now, now, run_id),
+            )
+        else:
+            conn.execute(
+                """UPDATE task_runs
+                SET next_output_sequence = ?, updated_at = ?
+                WHERE id = ?""",
+                (next_sequence, now, run_id),
+            )
+        conn.execute(
+            "UPDATE task_sessions SET updated_at = ?, activity_at = ? WHERE id = ?",
+            (now, now, run_row["task_session_id"]),
+        )
+        conn.commit()
+    output = get_task_output(output_id)
+    if output is None:  # pragma: no cover
+        raise RuntimeError("task output insert did not create a row")
+    return output
 
 
 # ── Access control persistence ───────────────────────────────────────────────
@@ -1136,6 +3676,57 @@ def get_access_agent_by_key_hash(key_hash: str) -> dict[str, Any] | None:
         agent = dict(row)
         agent["grants"] = _access_grants(conn, "agent", agent["id"])
         return agent
+
+
+def get_worker_identity(worker_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, key_digest, active, created_at, updated_at FROM worker_identities WHERE id = ?",
+            (worker_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_worker_identity_by_key_hash(key_hash: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, key_digest, active, created_at, updated_at FROM worker_identities WHERE key_digest = ?",
+            (key_hash,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_worker_identity(worker_id: str, key_digest: str, *, active: bool = True) -> dict[str, Any]:
+    """Persist worker id + key digest only. Never stores plaintext keys."""
+    now = _now()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = conn.execute(
+                "SELECT id, key_digest FROM worker_identities WHERE id = ?",
+                (worker_id,),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """INSERT INTO worker_identities (id, key_digest, active, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (worker_id, key_digest, 1 if active else 0, now, now),
+                )
+            else:
+                conn.execute(
+                    """UPDATE worker_identities
+                       SET key_digest = ?, active = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (key_digest, 1 if active else 0, now, worker_id),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    row = get_worker_identity(worker_id)
+    if row is None:  # pragma: no cover
+        raise RuntimeError("worker identity upsert failed")
+    return row
 
 
 def list_access_agents() -> list[dict[str, Any]]:

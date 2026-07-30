@@ -1,0 +1,39 @@
+#!/usr/bin/env sh
+set -eu
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+ROOT_DIR=$SCRIPT_DIR/..
+
+reject_python() {
+  printf '%s\n' "cbm-mcp: invalid CBM_MCP_PYTHON: $1" >&2
+  exit 1
+}
+
+validate_python() {
+  candidate=$1
+  label=$2
+  case "$candidate" in
+    /*) ;;
+    *) reject_python "$label must be absolute" ;;
+  esac
+  case "$candidate" in
+    *[[:space:]]*) reject_python "$label must not contain whitespace" ;;
+  esac
+  if [ ! -f "$candidate" ] || [ ! -x "$candidate" ]; then
+    reject_python "$label must be an existing executable file"
+  fi
+}
+
+if [ "${CBM_MCP_PYTHON+x}" = x ] && [ -n "$CBM_MCP_PYTHON" ]; then
+  MCP_PYTHON=$CBM_MCP_PYTHON
+  validate_python "$MCP_PYTHON" "CBM_MCP_PYTHON"
+elif [ "${VIRTUAL_ENV+x}" = x ] && [ -n "$VIRTUAL_ENV" ] \
+  && [ -f "$VIRTUAL_ENV/bin/python" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+  MCP_PYTHON=$VIRTUAL_ENV/bin/python
+elif [ -f "$ROOT_DIR/.venv/bin/python" ] && [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+  MCP_PYTHON=$ROOT_DIR/.venv/bin/python
+else
+  MCP_PYTHON=python3
+fi
+
+cd "$ROOT_DIR"
+exec "$MCP_PYTHON" -m scripts.cbm_mcp

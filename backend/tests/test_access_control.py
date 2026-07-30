@@ -952,7 +952,16 @@ def test_paperclip_agent_key_is_scoped_and_rotation_revokes_old_key(client_acces
     denied = client_access.get(f"/api/profiles/{alpha['id']}/cdp", headers=agent_headers)
     assert denied.status_code == 404
     assert denied.json()["detail"] == "Profile not found"
-    allowed = client_access.get(f"/api/profiles/{beta['id']}/cdp", headers=agent_headers)
+    lease = client_access.post(
+        f"/api/profiles/{beta['id']}/automation-leases",
+        headers=agent_headers,
+    )
+    assert lease.status_code == 200, lease.text
+    lease_headers = {
+        **agent_headers,
+        "X-CBM-Automation-Lease": lease.json()["token"],
+    }
+    allowed = client_access.get(f"/api/profiles/{beta['id']}/cdp", headers=lease_headers)
     assert allowed.status_code == 404
     assert allowed.json()["detail"] == "Profile not running"
     assert client_access.post(f"/api/profiles/{beta['id']}/launch", headers=agent_headers).status_code == 404
@@ -1109,6 +1118,15 @@ def test_open_cdp_closes_immediately_after_agent_access_revoked(
         },
     ).json()
     agent_headers = {"Authorization": f"Bearer {created['api_key']}"}
+    lease = client_access.post(
+        f"/api/profiles/{profile['id']}/automation-leases",
+        headers=agent_headers,
+    )
+    assert lease.status_code == 200, lease.text
+    ws_headers = {
+        **agent_headers,
+        "X-CBM-Automation-Lease": lease.json()["token"],
+    }
     upstream = _BlockingWebSocketUpstream()
     monkeypatch.setattr("websockets.connect", lambda *_args, **_kwargs: upstream)
     main.browser_mgr.running[profile["id"]] = SimpleNamespace(
@@ -1118,7 +1136,7 @@ def test_open_cdp_closes_immediately_after_agent_access_revoked(
     try:
         with client_access.websocket_connect(
             f"/api/profiles/{profile['id']}/cdp/devtools/page/REVOCABLE",
-            headers=agent_headers,
+            headers=ws_headers,
         ) as websocket:
             updated = client_access.put(
                 f"/api/access/agents/{created['id']}",

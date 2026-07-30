@@ -242,7 +242,9 @@ def test_legacy_commands_route_rejects_more_than_twenty_commands(client_access: 
     assert too_many.status_code == 422
 
 
-def test_task_session_history_follows_profile_sandbox_move(client_access: TestClient):
+def test_task_session_history_keeps_immutable_sandbox_after_profile_move(
+    client_access: TestClient,
+):
     profile = db.create_profile("Movable browser", sandbox_id="alpha")
     session = db.create_task_session(profile["id"], "alpha", "bootstrap")
     db.append_task_message(session["id"], "user", "move-safe history", "bootstrap")
@@ -250,20 +252,13 @@ def test_task_session_history_follows_profile_sandbox_move(client_access: TestCl
     updated = client_access.put(
         f"/api/profiles/{profile['id']}",
         headers=bootstrap_headers(),
-        json={"sandbox_id": "beta"},
+        json={"sandbox_id": "beta", "project_id": "beta-project"},
     )
     assert updated.status_code == 200
     assert updated.json()["sandbox_id"] == "beta"
-    assert db.get_task_session(session["id"])["sandbox_id"] == "beta"
+    assert updated.json()["project_id"] == "beta-project"
 
-    old_password = create_user(client_access, "old-alpha-viewer", "alpha", "view")
-    login(client_access, "old-alpha-viewer", old_password)
-    old_view = client_access.get(f"/api/task-sessions/{session['id']}/messages")
-    assert old_view.status_code == 404
-    assert old_view.json()["detail"] == "Task session not found"
-
-    new_password = create_user(client_access, "new-beta-viewer", "beta", "view")
-    login(client_access, "new-beta-viewer", new_password)
-    new_view = client_access.get(f"/api/task-sessions/{session['id']}/messages")
-    assert new_view.status_code == 200
-    assert new_view.json()[0]["content"] == "move-safe history"
+    historical_task = db.get_task_session(session["id"])
+    assert historical_task["sandbox_id"] == "alpha"
+    assert historical_task["project_id"] == "default"
+    assert db.list_task_messages(session["id"])[0]["content"] == "move-safe history"

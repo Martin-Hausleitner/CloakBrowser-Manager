@@ -1,0 +1,18 @@
+[Unit]
+Description=CloakBrowser Browser-Use host worker
+Documentation=@DOCUMENTATION@
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKING_DIRECTORY@
+ExecStart=@VENV_PYTHON@ -m scripts.browser_use_worker --manager-url @MANAGER_URL@ --worker-id @WORKER_ID@ --token-file @TOKEN_FILE@ --llm-provider @LLM_PROVIDER@
+Restart=on-failure
+RestartSec=5
+UMask=0077
+# Keep cursor-agent on the host PATH; do not mount Cursor credential dirs into containers.
+Environment=@PATH_ENVIRONMENT@
+
+[Install]
+WantedBy=default.target

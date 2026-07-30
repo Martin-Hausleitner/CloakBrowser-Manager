@@ -1,0 +1,577 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+  CI_ARTIFACT_DIR: artifacts/ci
+
+jobs:
+  project-gates:
+    name: Schema, env, version, and disk gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dev dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Prepare artifacts
+        run: mkdir -p "${CI_ARTIFACT_DIR}"
+
+      - name: Schema gate
+        run: |
+          python -m pytest backend/tests/test_models.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/schema-junit.xml"
+
+      - name: Environment gate
+        run: |
+          set -euo pipefail
+          tracked_env_files="$(git ls-files | grep -E '(^|/)\.env($|\.|/)|(^|/).*(secret|token).*$' || true)"
+          if [ -n "${tracked_env_files}" ]; then
+            printf '%s\n' "${tracked_env_files}" | tee "${CI_ARTIFACT_DIR}/tracked-env-files.txt"
+            exit 1
+          fi
+          printf 'no tracked env/token/secret files\n' | tee "${CI_ARTIFACT_DIR}/tracked-env-files.txt"
+
+      - name: Version gate
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          package = json.loads(Path("frontend/package.json").read_text(encoding="utf-8"))
+          version = package.get("version", "")
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version):
+              raise SystemExit(f"frontend/package.json version is not semver: {version!r}")
+
+          requirements = Path("backend/requirements.txt").read_text(encoding="utf-8")
+          if "cloakbrowser[geoip]>=" not in requirements:
+              raise SystemExit("backend requirements must keep an explicit cloakbrowser[geoip] lower bound")
+
+          Path("artifacts/ci/version-gate.txt").write_text(
+              f"frontend_version={version}\ncloakbrowser_requirement=present\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Disk gate
+        run: |
+          set -euo pipefail
+          df -h . | tee "${CI_ARTIFACT_DIR}/disk.txt"
+          python - <<'PY'
+          import shutil
+
+          free_gib = shutil.disk_usage(".").free / (1024 ** 3)
+          if free_gib < 2:
+              raise SystemExit(f"less than 2 GiB free for CI workspace: {free_gib:.2f} GiB")
+          print(f"free_gib={free_gib:.2f}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: project-gates
+          path: artifacts/ci/
+
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dev dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run backend tests
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          python -m pytest backend/tests -q \
+            --junitxml="${CI_ARTIFACT_DIR}/backend-junit.xml"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-tests
+          path: artifacts/ci/
+
+  e2e-tests:
+    name: E2E tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dev dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run E2E tests
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          python -m pytest e2e/tests -q \
+            --junitxml="${CI_ARTIFACT_DIR}/e2e-junit.xml"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-tests
+          path: artifacts/ci/
+
+  migration-tests:
+    name: Migration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dev dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run migration tests
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          python -m pytest backend/tests/test_workspace_migration.py backend/tests/test_database.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/migration-junit.xml"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: migration-tests
+          path: artifacts/ci/
+
+  frontend-tests:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: |
+          mkdir -p ../artifacts/ci
+          npm test -- --reporter=default --reporter=junit --outputFile=../artifacts/ci/frontend-junit.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-tests
+          path: artifacts/ci/
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-build
+          path: frontend/dist/
+
+  feature-manifest:
+    name: Feature manifest gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Prepare artifacts
+        run: mkdir -p "${CI_ARTIFACT_DIR}"
+
+      - name: Verify feature manifest
+        run: |
+          python scripts/verify_feature_manifest.py \
+            --json-output "${CI_ARTIFACT_DIR}/feature-manifest.json"
+
+      - name: Run feature manifest tests
+        run: |
+          python -m pytest scripts/test_verify_feature_manifest.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/feature-manifest-junit.xml"
+
+      - name: Run optional live feature smoke
+        if: ${{ env.FEATURE_MANIFEST_SMOKE_BASE_URL != '' }}
+        run: |
+          python -m pip install playwright
+          python -m playwright install chromium
+          python scripts/verify_feature_manifest.py \
+            --smoke-base-url "${FEATURE_MANIFEST_SMOKE_BASE_URL}" \
+            --artifact-dir "${CI_ARTIFACT_DIR}/feature-manifest-smoke" \
+            --json-output "${CI_ARTIFACT_DIR}/feature-manifest-smoke.json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: feature-manifest
+          path: artifacts/ci/
+
+  lint:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install lint dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run ruff correctness lint
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          python -m ruff check backend scripts --select E9,F63,F7,F82 \
+            --output-format=github | tee "${CI_ARTIFACT_DIR}/ruff.txt"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint
+          path: artifacts/ci/
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for high-confidence secrets
+        run: |
+          set -euo pipefail
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          pattern='(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{36,255}|github_pat_[A-Za-z0-9_]{22,255}|xox[baprs]-[A-Za-z0-9-]{10,255}|-----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY-----|sk-[A-Za-z0-9]{32,})'
+          if git grep -nE -I -e "${pattern}" -- . ':!frontend/package-lock.json' ':!uv.lock' > "${CI_ARTIFACT_DIR}/secret-candidates.txt"; then
+            cat "${CI_ARTIFACT_DIR}/secret-candidates.txt"
+            exit 1
+          fi
+          printf 'no high-confidence secret patterns found\n' | tee "${CI_ARTIFACT_DIR}/secret-candidates.txt"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: secret-scan
+          path: artifacts/ci/
+
+  docker-smoke:
+    name: Docker smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start smoke compose
+        run: |
+          set -euo pipefail
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          docker compose -f deploy/ci/docker-compose.smoke.yml up -d --build
+
+      - name: Wait for health
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18080/health > "${CI_ARTIFACT_DIR}/docker-health.json"; then
+              cat "${CI_ARTIFACT_DIR}/docker-health.json"
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose -f deploy/ci/docker-compose.smoke.yml ps
+          exit 1
+
+      - name: Capture compose logs
+        if: always()
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}"
+          docker compose -f deploy/ci/docker-compose.smoke.yml ps > "${CI_ARTIFACT_DIR}/docker-compose-ps.txt" || true
+          docker compose -f deploy/ci/docker-compose.smoke.yml logs --no-color > "${CI_ARTIFACT_DIR}/docker-smoke.log" || true
+
+      - name: Stop smoke compose
+        if: always()
+        run: docker compose -f deploy/ci/docker-compose.smoke.yml down -v --remove-orphans
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-smoke
+          path: artifacts/ci/
+
+  extension-static-checks:
+    name: Extension static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Validate extension sources
+        run: |
+          set -euo pipefail
+          mkdir -p "${CI_ARTIFACT_DIR}/acpx-secure-recorder"
+          node --check extensions/cloak-profile-sync/background/service-worker.js
+          node --check extensions/cloak-profile-sync/content/recorder-content.js
+          node --check extensions/cloak-profile-sync/lib/action-recorder.js
+          node --check extensions/cloak-profile-sync/lib/api.js
+          node --check extensions/cloak-profile-sync/lib/local-control.js
+          node --check extensions/cloak-profile-sync/lib/mask.js
+          node --check extensions/cloak-profile-sync/lib/open-links.js
+          node --check extensions/cloak-profile-sync/popup/popup.js
+          npm --prefix extensions/cloak-profile-sync test
+          python -m json.tool extensions/cloak-profile-sync/manifest.json > "${CI_ARTIFACT_DIR}/acpx-secure-recorder/extension-manifest.json"
+          python -m py_compile extensions/cloak-profile-sync/host/local_bridge.py
+          python -m py_compile extensions/cloak-profile-sync/scripts/verify_against_manager.py
+          python -m py_compile scripts/cbm_extension_bridge.py
+          python -m py_compile scripts/cbm_extension_ctl.py
+          python -m py_compile scripts/cbm_extension_mcp.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acpx-extension-static-checks
+          path: artifacts/ci/acpx-secure-recorder/
+
+  backend-contract-security-tests:
+    name: ACPX backend contract and security tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dev dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run backend contract and security tests
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}/acpx-secure-recorder"
+          python -m pytest backend/tests/test_secure_action_recorder.py backend/tests/test_models.py backend/tests/test_worker_auth.py backend/tests/test_browser_use_internal_api.py backend/tests/test_proxy_bridge.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/acpx-secure-recorder/backend-contract-security-junit.xml"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acpx-backend-contract-security-tests
+          path: artifacts/ci/acpx-secure-recorder/
+
+  browser-use-smoke-contract:
+    name: Browser Use smoke contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run Browser Use smoke contract tests
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}/acpx-secure-recorder"
+          python -m pytest scripts/test_secure_recording_compiler.py scripts/test_browser_use_worker.py scripts/test_browser_harness_adapter.py scripts/test_browser_tool_router.py scripts/test_provider_readiness.py scripts/test_cbm_extension_bridge.py scripts/test_cbm_extension_ctl.py scripts/test_cbm_extension_mcp.py scripts/test_extension_local_bridge_security.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/acpx-secure-recorder/browser-use-smoke-contract-junit.xml"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acpx-browser-use-smoke-contract
+          path: artifacts/ci/acpx-secure-recorder/
+
+  recorder-watchdog:
+    name: Recorder watchdog tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run watchdog unit tests
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}/acpx-secure-recorder"
+          python -m pytest scripts/test_secure_recorder_watchdog.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/acpx-secure-recorder/recorder-watchdog-junit.xml"
+
+      - name: Run dry watchdog probe without restarting
+        run: |
+          python scripts/secure_recorder_watchdog.py \
+            --service cloakbrowser-recorder-bridge.service \
+            --validate-only \
+            --max-restarts 0 \
+            --output-json "${CI_ARTIFACT_DIR}/acpx-secure-recorder/recorder-watchdog-dry.json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acpx-recorder-watchdog
+          path: artifacts/ci/acpx-secure-recorder/
+
+  package-artifact:
+    name: ACPX package artifact
+    runs-on: ubuntu-latest
+    needs:
+      - extension-static-checks
+      - backend-contract-security-tests
+      - browser-use-smoke-contract
+      - secret-scan
+      - recorder-watchdog
+      - e2e-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Create review package
+        run: |
+          set -euo pipefail
+          mkdir -p "${CI_ARTIFACT_DIR}/acpx-secure-recorder"
+          git archive --format=tar --prefix=cloakbrowser-manager/ HEAD > "${CI_ARTIFACT_DIR}/acpx-secure-recorder/source.tar"
+          tar --delete -f "${CI_ARTIFACT_DIR}/acpx-secure-recorder/source.tar" cloakbrowser-manager/frontend/node_modules 2>/dev/null || true
+          gzip -n "${CI_ARTIFACT_DIR}/acpx-secure-recorder/source.tar"
+          sha256sum "${CI_ARTIFACT_DIR}/acpx-secure-recorder/source.tar.gz" | tee "${CI_ARTIFACT_DIR}/acpx-secure-recorder/source.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acpx-secure-recorder-package
+          path: |
+            artifacts/ci/acpx-secure-recorder/source.tar.gz
+            artifacts/ci/acpx-secure-recorder/source.sha256
+            frontend/dist/
+
+  deploy-rollback-gates:
+    name: ACPX deploy and rollback gates
+    runs-on: ubuntu-latest
+    needs:
+      - package-artifact
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run release transaction gate tests
+        run: |
+          mkdir -p "${CI_ARTIFACT_DIR}/acpx-secure-recorder"
+          python -m pytest scripts/test_vcvm_release_transaction.py scripts/test_vcvm_release_remote.py -q \
+            --junitxml="${CI_ARTIFACT_DIR}/acpx-secure-recorder/deploy-rollback-junit.xml"
+
+      - name: Validate dry-run deploy and rollback commands
+        run: |
+          bash scripts/deploy_vcvm.sh | tee "${CI_ARTIFACT_DIR}/acpx-secure-recorder/deploy-dry-run.txt"
+          bash scripts/rollback_vcvm_release.sh | tee "${CI_ARTIFACT_DIR}/acpx-secure-recorder/rollback-dry-run.txt"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acpx-deploy-rollback-gates
+          path: artifacts/ci/acpx-secure-recorder/

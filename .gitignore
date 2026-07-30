@@ -18,6 +18,13 @@ artifacts/
 
 # Deploy
 deploy.sh
+.env.vcvm
+.env.worker.vcvm
+.env.dev.vcvm
+.env.worker.vcvm.bak*
+.env.*.bak*
+.env*.tmp
+*.tmp
 
 # Claude Code
 .claude/
@@ -26,3 +33,4 @@ publish-docker.sh
 .beads
 debug
 backend/.data/
+.cbm/state/

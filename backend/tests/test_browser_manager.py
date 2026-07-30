@@ -9,8 +9,10 @@ from pathlib import Path
 import pytest
 
 import socket
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from backend import extension_catalog
 from backend.browser_manager import (
     BASE_CDP_PORT,
     CDP_PORT_RANGE,
@@ -18,6 +20,7 @@ from backend.browser_manager import (
     _normalize_proxy,
     _validate_proxy,
     BrowserManager,
+    RunningProfile,
 )
 
 
@@ -130,10 +133,221 @@ def test_auto_launch_failure_redacts_exception_details(monkeypatch, caplog):
     assert leaked_proxy not in caplog.text
 
 
+# ── authenticated proxy launch handling ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_launch_auth_http_proxy_passes_only_loopback_proxy_to_cloakbrowser(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(42, 6042)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+    monkeypatch.setattr(mgr, "_fit_window_to_vnc", AsyncMock())
+
+    captured: dict[str, object] = {}
+
+    class FakeBridge:
+        proxy_url = "http://127.0.0.1:39123"
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    fake_bridge = FakeBridge()
+
+    async def fake_start(proxy: str) -> FakeBridge:
+        assert proxy == "http://proxy-user:top-secret@proxy.test:8080"
+        return fake_bridge
+
+    context = MagicMock()
+    context.pages = []
+    context.add_init_script = AsyncMock()
+    context.close = AsyncMock()
+    context.on = MagicMock()
+
+    async def fake_launch(**kwargs: object) -> MagicMock:
+        captured.update(kwargs)
+        return context
+
+    monkeypatch.setattr("backend.browser_manager.ProxyBridge.start", fake_start)
+    monkeypatch.setattr(
+        "backend.browser_manager.launch_persistent_context_async", fake_launch
+    )
+
+    profile = {
+        "id": "auth-proxy-profile",
+        "user_data_dir": str(tmp_path),
+        "proxy": "http://proxy-user:top-secret@proxy.test:8080",
+    }
+
+    running = await mgr.launch(profile)
+
+    assert captured["proxy"] == "http://127.0.0.1:39123"
+    assert "proxy-user" not in str(captured)
+    assert "top-secret" not in str(captured)
+    assert getattr(running, "proxy_bridge") is fake_bridge
+
+    await mgr.stop(profile["id"])
+    assert fake_bridge.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_launch_auth_proxy_stops_bridge_when_browser_launch_fails(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(43, 6043)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+
+    fake_bridge = SimpleNamespace(
+        proxy_url="http://127.0.0.1:40001", stop=AsyncMock()
+    )
+
+    async def fake_start(proxy: str) -> object:
+        assert proxy == "http://proxy-user:top-secret@proxy.test:8080"
+        return fake_bridge
+
+    async def fail_launch(**kwargs: object) -> None:
+        assert kwargs["proxy"] == "http://127.0.0.1:40001"
+        raise RuntimeError("browser launch failed")
+
+    monkeypatch.setattr("backend.browser_manager.ProxyBridge.start", fake_start)
+    monkeypatch.setattr(
+        "backend.browser_manager.launch_persistent_context_async", fail_launch
+    )
+
+    profile = {
+        "id": "failed-auth-proxy-profile",
+        "user_data_dir": str(tmp_path),
+        "proxy": "http://proxy-user:top-secret@proxy.test:8080",
+    }
+
+    with pytest.raises(RuntimeError, match="browser launch failed"):
+        await mgr.launch(profile)
+
+    fake_bridge.stop.assert_awaited_once()
+    mgr.vnc.stop_vnc.assert_awaited_once_with(43)
+
+
+@pytest.mark.asyncio
+async def test_launch_phone_viewport_enables_mobile_touch_context(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(45, 6045)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+    monkeypatch.setattr(mgr, "_fit_window_to_vnc", AsyncMock())
+
+    captured: dict[str, object] = {}
+    context = MagicMock()
+    context.pages = []
+    context.add_init_script = AsyncMock()
+    context.close = AsyncMock()
+    context.on = MagicMock()
+
+    async def fake_launch(**kwargs: object) -> MagicMock:
+        captured.update(kwargs)
+        return context
+
+    monkeypatch.setattr(
+        "backend.browser_manager.launch_persistent_context_async", fake_launch
+    )
+
+    profile = {
+        "id": "phone-fit-profile",
+        "user_data_dir": str(tmp_path),
+        "screen_width": 390,
+        "screen_height": 844,
+    }
+
+    await mgr.launch(profile)
+
+    assert captured["is_mobile"] is True
+    assert captured["has_touch"] is True
+    assert captured["device_scale_factor"] == 1
+    assert captured["screen"] == {"width": 390, "height": 844}
+
+    await mgr.stop(profile["id"])
+
+
+@pytest.mark.asyncio
+async def test_launch_landscape_phone_viewport_stays_mobile(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(46, 6046)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+    monkeypatch.setattr(mgr, "_fit_window_to_vnc", AsyncMock())
+
+    captured: dict[str, object] = {}
+    context = MagicMock()
+    context.pages = []
+    context.add_init_script = AsyncMock()
+    context.close = AsyncMock()
+    context.on = MagicMock()
+
+    async def fake_launch(**kwargs: object) -> MagicMock:
+        captured.update(kwargs)
+        return context
+
+    monkeypatch.setattr(
+        "backend.browser_manager.launch_persistent_context_async", fake_launch
+    )
+
+    profile = {
+        "id": "landscape-phone-fit-profile",
+        "user_data_dir": str(tmp_path),
+        "screen_width": 844,
+        "screen_height": 390,
+    }
+
+    await mgr.launch(profile)
+
+    assert captured["is_mobile"] is True
+    assert captured["has_touch"] is True
+
+    await mgr.stop(profile["id"])
+
+
+@pytest.mark.asyncio
+async def test_launch_rejects_authenticated_socks_proxy_before_browser_launch(
+    monkeypatch, tmp_path: Path
+):
+    mgr = BrowserManager()
+    monkeypatch.setattr(mgr.vnc, "allocate", AsyncMock(return_value=(44, 6044)))
+    monkeypatch.setattr(mgr.vnc, "start_vnc", AsyncMock())
+    monkeypatch.setattr(mgr.vnc, "stop_vnc", AsyncMock())
+
+    profile = {
+        "id": "auth-socks-profile",
+        "user_data_dir": str(tmp_path),
+        "proxy": "socks5://proxy-user:top-secret@proxy.test:1080",
+    }
+
+    with pytest.raises(
+        ValueError, match="Authenticated SOCKS proxies are not supported"
+    ):
+        await mgr.launch(profile)
+
+    mgr.vnc.stop_vnc.assert_awaited_once_with(44)
+
+
 # ── _build_fingerprint_args ──────────────────────────────────────────────────
 
 # Use the BrowserManager instance to call the method
 _mgr = BrowserManager()
+
+
+@pytest.fixture()
+def anyio_backend():
+    return "asyncio"
 
 
 def test_build_args_always_includes_base():
@@ -184,21 +398,29 @@ def test_build_args_empty_profile():
     assert len(args) == 3
 
 
-# ── launch_args appended to extra_args ────────────────────────────────────────
+# ── trusted profile launch arguments ─────────────────────────────────────────
 
 
-def test_launch_args_appended_to_fingerprint_args():
-    """launch_args from profile should appear in the args list after fingerprint args."""
+def test_profile_launch_args_use_catalog_extensions_not_profile_paths(monkeypatch: pytest.MonkeyPatch):
+    """Legacy profile paths cannot load code; catalog ids resolve server-side at launch."""
     profile = {
         "fingerprint_seed": 42,
         "platform": "windows",
-        "launch_args": ["--load-extension=/tmp/ext", "--disable-features=Foo"],
+        "extension_ids": ["catalog-extension"],
+        "launch_args": ["--load-extension=/tmp/untrusted", "--disable-features=Foo"],
     }
-    args = _mgr._build_fingerprint_args(profile)
-    args += profile.get("launch_args") or []
-    assert "--load-extension=/tmp/ext" in args
+    monkeypatch.setattr(
+        extension_catalog,
+        "load_extension_arg_for_ids",
+        lambda ids: "--load-extension=/srv/catalog/catalog-extension",
+    )
+
+    assert hasattr(_mgr, "_build_profile_launch_args")
+    args = _mgr._build_profile_launch_args(profile)
+
+    assert "--load-extension=/tmp/untrusted" not in args
+    assert "--load-extension=/srv/catalog/catalog-extension" in args
     assert "--disable-features=Foo" in args
-    # Fingerprint args still present
     assert "--fingerprint=42" in args
 
 
@@ -216,6 +438,147 @@ def test_launch_args_none_no_effect():
     base_count = len(args)
     args += profile.get("launch_args") or []
     assert len(args) == base_count
+
+
+def test_validate_running_profile_rejects_wrong_user_data_dir(tmp_path: Path):
+    mgr = BrowserManager()
+    profile_dir = tmp_path / "profile"
+    other_dir = tmp_path / "other"
+    profile_dir.mkdir()
+    other_dir.mkdir()
+    profile = {
+        "id": "profile-1",
+        "user_data_dir": str(profile_dir),
+    }
+    mgr.running["profile-1"] = SimpleNamespace(
+        profile_id="profile-1",
+        user_data_dir=str(other_dir),
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+
+    with pytest.raises(RuntimeError, match="profile_path_mismatch"):
+        mgr.validate_running_profile(profile)
+
+
+def test_validate_running_profile_hashes_manager_owned_path(tmp_path: Path):
+    mgr = BrowserManager()
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    profile = {"id": "profile-1", "user_data_dir": str(profile_dir)}
+    mgr.running["profile-1"] = SimpleNamespace(
+        profile_id="profile-1",
+        user_data_dir=str(profile_dir),
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+
+    evidence = mgr.validate_running_profile(profile)
+
+    assert evidence["user_data_dir_digest"]
+    assert str(profile_dir) not in str(evidence)
+
+
+@pytest.mark.asyncio
+async def test_capture_screenshot_returns_png_from_active_page():
+    mgr = BrowserManager()
+    page = AsyncMock()
+    page.screenshot = AsyncMock(return_value=b"\x89PNG\r\n\x1a\nproof")
+    context = MagicMock()
+    context.pages = [page]
+    mgr.running["profile-shot"] = RunningProfile(
+        profile_id="profile-shot",
+        context=context,
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+
+    screenshot = await mgr.capture_screenshot("profile-shot")
+
+    assert screenshot == b"\x89PNG\r\n\x1a\nproof"
+    page.screenshot.assert_awaited_once_with(type="png", full_page=False)
+
+
+@pytest.mark.asyncio
+async def test_capture_screenshot_rejects_a_non_png_result():
+    mgr = BrowserManager()
+    page = AsyncMock()
+    page.screenshot = AsyncMock(return_value=b"not-a-png")
+    context = MagicMock()
+    context.pages = [page]
+    mgr.running["profile-invalid-shot"] = RunningProfile(
+        profile_id="profile-invalid-shot",
+        context=context,
+        display=101,
+        ws_port=6101,
+        cdp_port=5101,
+    )
+
+    with pytest.raises(RuntimeError, match="^profile_screenshot_invalid$"):
+        await mgr.capture_screenshot("profile-invalid-shot")
+
+
+@pytest.mark.anyio
+async def test_wait_for_cdp_ready_rejects_wrong_loopback_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from backend import browser_manager as browser_manager_mod
+
+    mgr = BrowserManager()
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    profile = {
+        "id": "profile-1",
+        "user_data_dir": str(profile_dir),
+    }
+    mgr.running["profile-1"] = SimpleNamespace(
+        profile_id="profile-1",
+        user_data_dir=str(profile_dir),
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+
+    monkeypatch.setattr(
+        browser_manager_mod,
+        "_fetch_cdp_version",
+        lambda _port: {
+            "Browser": "Chrome/test",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:5999/devtools/browser/wrong",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="cdp_profile_mismatch"):
+        await mgr.wait_for_cdp_ready(profile, timeout_seconds=0.2)
+
+
+@pytest.mark.anyio
+async def test_wait_for_cdp_ready_requires_debugger_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from backend import browser_manager as browser_manager_mod
+
+    mgr = BrowserManager()
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    profile = {"id": "profile-1", "user_data_dir": str(profile_dir)}
+    mgr.running["profile-1"] = SimpleNamespace(
+        profile_id="profile-1",
+        user_data_dir=str(profile_dir),
+        display=100,
+        ws_port=6100,
+        cdp_port=5100,
+    )
+    monkeypatch.setattr(
+        browser_manager_mod,
+        "_fetch_cdp_version",
+        lambda _port: {"Browser": "Chrome/test"},
+    )
+
+    with pytest.raises(RuntimeError, match="cdp_profile_mismatch"):
+        await mgr.wait_for_cdp_ready(profile, timeout_seconds=0.2)
 
 
 # ── VNC browser window bounds ─────────────────────────────────────────────────
@@ -376,7 +739,6 @@ def test_init_system_default_does_not_overwrite_existing_preferences(tmp_path: P
 def test_init_idempotent(tmp_path: Path):
     _init_profile_defaults(tmp_path)
     bookmarks_path = tmp_path / "Default" / "Bookmarks"
-    original = bookmarks_path.read_text()
 
     # Write a sentinel to the file
     bookmarks_path.write_text("SENTINEL")

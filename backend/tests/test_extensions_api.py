@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend import database as db
+from backend import extension_catalog
 
 
 @pytest.fixture
@@ -32,7 +33,7 @@ def test_get_profile_extensions_empty(client: TestClient):
     assert data["extensions"] == []
 
 
-def test_get_profile_extensions_valid(client: TestClient, tmp_path: Path):
+def test_get_profile_extensions_valid(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     ext_dir = tmp_path / "sample_ext"
     ext_dir.mkdir()
     manifest_data = {
@@ -44,10 +45,19 @@ def test_get_profile_extensions_valid(client: TestClient, tmp_path: Path):
     }
     (ext_dir / "manifest.json").write_text(json.dumps(manifest_data), encoding="utf-8")
 
-    p = db.create_profile(
-        "WithExt",
-        launch_args=[f"--load-extension={ext_dir}"],
+    monkeypatch.setattr(
+        extension_catalog,
+        "list_catalog_extensions",
+        lambda **_kwargs: [
+            {
+                "id": "sample-extension",
+                "path": str(ext_dir),
+                "icon_url": "https://example.invalid/sample.png",
+                "store_url": "https://chromewebstore.google.com/detail/sample-extension",
+            }
+        ],
     )
+    p = db.create_profile("WithExt", extension_ids=["sample-extension"])
 
     resp = client.get(f"/api/profiles/{p['id']}/extensions")
     assert resp.status_code == 200
@@ -55,7 +65,10 @@ def test_get_profile_extensions_valid(client: TestClient, tmp_path: Path):
     assert data["profile_id"] == p["id"]
     assert len(data["extensions"]) == 1
     ext = data["extensions"][0]
+    assert ext["id"] == "sample-extension"
     assert ext["name"] == "Sample Extension"
     assert ext["version"] == "2.0.0"
     assert ext["trust_state"] == "valid"
     assert ext["permissions"] == ["notifications"]
+    assert ext["icon_url"] == "https://example.invalid/sample.png"
+    assert ext["store_url"] == "https://chromewebstore.google.com/detail/sample-extension"

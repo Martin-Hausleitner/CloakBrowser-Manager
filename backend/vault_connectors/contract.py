@@ -7,9 +7,10 @@ Raw secret material is never part of the public contract.
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 LOCAL_VAULT_CONNECTOR_CONTRACT_VERSION = "local-vault-connector-v1"
 

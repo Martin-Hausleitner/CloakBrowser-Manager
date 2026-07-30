@@ -1,9 +1,13 @@
 # Local Vault Connectors MVP
 
-**Date:** 2026-07-30  
-**Contract:** `local-vault-connector-v1` (`docs/contracts/local-vault-connector-v1.json`)  
-**Code:** `backend/vault_connectors/`  
-**API:** `GET /api/v2/vault-connectors`  
+**Date:** 2026-07-30
+
+**Contract:** `local-vault-connector-v1` (`docs/contracts/local-vault-connector-v1.json`)
+
+**Code:** `backend/vault_connectors/`
+
+**API:** `GET /api/v2/vault-connectors`
+
 **Capability surface:** `GET /api/v2/capabilities` → `resources.secret-references`
 
 ## Goal
@@ -40,6 +44,8 @@ Forbidden:
 ## Optional probes
 
 Set `CBM_VAULT_CONNECTOR_PROBES=1` to run short `--version` probes (2s timeout). Probes never unlock vaults, never pass credentials, and never require real accounts.
+
+Discovery results are TTL-cached (30s success / 10s failure backoff). `GET /api/v2/vault-connectors` offloads discovery onto a worker thread so the asyncio event loop does not block on PATH probes. Probes use validated absolute executable paths only.
 
 ## Fake-provider E2E
 

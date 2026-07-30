@@ -7,7 +7,9 @@ do not require real accounts.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -20,14 +22,24 @@ from backend.vault_connectors import (
     FakeVaultConnector,
     LocalVaultConnectorService,
     SecretReference,
+    clear_discovery_cache,
     discover_local_vault_connectors,
     public_connector_payload,
+    validate_absolute_executable,
 )
+from backend.vault_connectors import discovery as discovery_mod
 from backend.vault_connectors.contract import (
     PasskeyHandoffMode,
     assert_agent_safe_payload,
     is_valid_secret_ref,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_vault_discovery_cache():
+    clear_discovery_cache()
+    yield
+    clear_discovery_cache()
 
 
 def test_contract_version_is_stable():
@@ -262,3 +274,149 @@ def test_json_contract_file_exists_and_matches_version():
     assert "keepassxc" in data["spec"]["providers"]
     assert "gopass" in data["spec"]["providers"]
     assert data["spec"]["passkey_policy"]["default_mode"] == "user_presence_handoff"
+
+
+def test_validate_absolute_executable_rejects_relative_and_non_files(tmp_path):
+    assert validate_absolute_executable(None) is None
+    assert validate_absolute_executable("bw") is None
+    assert validate_absolute_executable(str(tmp_path / "missing")) is None
+    not_exec = tmp_path / "not-exec"
+    not_exec.write_text("#!/bin/sh\n", encoding="utf-8")
+    assert validate_absolute_executable(str(not_exec)) is None
+    ok = tmp_path / "ok-bin"
+    ok.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    ok.chmod(0o755)
+    resolved = validate_absolute_executable(str(ok))
+    assert resolved is not None
+    assert Path(resolved).is_absolute()
+    assert Path(resolved).is_file()
+
+
+def test_discovery_cache_avoids_repeat_which_and_probes(tmp_path, monkeypatch):
+    fake_bw = tmp_path / "bw"
+    fake_bw.write_text("#!/bin/sh\necho '1.2.3'\n", encoding="utf-8")
+    fake_bw.chmod(0o755)
+
+    which_calls: list[str] = []
+    probe_calls: list[str] = []
+
+    def counting_which(name: str) -> str | None:
+        which_calls.append(name)
+        if name == "bw":
+            return str(fake_bw)
+        return None
+
+    def counting_probe(executable: str) -> tuple[str | None, str]:
+        probe_calls.append(executable)
+        assert Path(executable).is_absolute()
+        return "1.2.3", "probe_ok"
+
+    monkeypatch.setattr(discovery_mod, "which", counting_which)
+    monkeypatch.setattr(discovery_mod, "_run_version_probe", counting_probe)
+
+    first = discover_local_vault_connectors(run_probes=True)
+    second = discover_local_vault_connectors(run_probes=True)
+    assert first == second
+    assert which_calls  # first discovery resolved PATH
+    first_which = list(which_calls)
+    first_probes = list(probe_calls)
+    assert first_probes  # probe ran once for installed bw
+    # Second call must be served from cache — no additional which/probe work.
+    assert which_calls == first_which
+    assert probe_calls == first_probes
+
+    clear_discovery_cache()
+    discover_local_vault_connectors(run_probes=True)
+    assert len(which_calls) > len(first_which)
+    assert len(probe_calls) > len(first_probes)
+
+
+def test_discovery_probes_use_validated_absolute_path(tmp_path, monkeypatch):
+    fake_bw = tmp_path / "bw"
+    fake_bw.write_text("#!/bin/sh\necho '9.9.9'\n", encoding="utf-8")
+    fake_bw.chmod(0o755)
+    seen: list[str] = []
+
+    monkeypatch.setattr(
+        discovery_mod,
+        "which",
+        lambda name: str(fake_bw) if name == "bw" else None,
+    )
+
+    real_probe = discovery_mod._run_version_probe
+
+    def wrapping_probe(executable: str) -> tuple[str | None, str]:
+        seen.append(executable)
+        return real_probe(executable)
+
+    monkeypatch.setattr(discovery_mod, "_run_version_probe", wrapping_probe)
+    results = discover_local_vault_connectors(run_probes=True, use_cache=False)
+    bw = next(item for item in results if item.provider_id == "bitwarden-cli")
+    assert bw.probe_version == "9.9.9"
+    assert seen
+    assert all(Path(path).is_absolute() for path in seen)
+    assert all(Path(path).name == "bw" for path in seen)
+
+
+@pytest.mark.asyncio
+async def test_agent_snapshot_async_keeps_event_loop_responsive(monkeypatch):
+    """Slow discovery must not monopolize the event loop when offloaded."""
+    clear_discovery_cache()
+    started = time.perf_counter()
+    ticks: list[float] = []
+
+    def slow_snapshot(self) -> dict:
+        time.sleep(0.15)
+        return {
+            "contract_version": LOCAL_VAULT_CONNECTOR_CONTRACT_VERSION,
+            "reveal_available": False,
+            "forbidden_operations": sorted(FORBIDDEN_AGENT_OPERATIONS),
+            "connectors": [],
+            "secret_references": [],
+            "passkey_policy": {"default_mode": "user_presence_handoff", "note": "test"},
+        }
+
+    monkeypatch.setattr(LocalVaultConnectorService, "agent_snapshot", slow_snapshot)
+    service = LocalVaultConnectorService(include_fake=False, run_probes=False)
+
+    async def ticker() -> None:
+        for _ in range(3):
+            await asyncio.sleep(0.02)
+            ticks.append(time.perf_counter() - started)
+
+    snap_task = asyncio.create_task(service.agent_snapshot_async())
+    tick_task = asyncio.create_task(ticker())
+    snapshot, _ = await asyncio.gather(snap_task, tick_task)
+    assert snapshot["reveal_available"] is False
+    # Ticks should complete while the slow snapshot is still running off-thread.
+    assert ticks, "event loop did not process concurrent awaits during snapshot"
+    assert ticks[0] < 0.15
+
+
+def test_api_vault_connectors_offloads_snapshot(client_access, monkeypatch):
+    headers = {"Authorization": "Bearer bootstrap-test-secret"}
+    called: list[str] = []
+
+    async def tracking_snapshot(self):
+        called.append("async")
+        return {
+            "contract_version": LOCAL_VAULT_CONNECTOR_CONTRACT_VERSION,
+            "reveal_available": False,
+            "forbidden_operations": sorted(FORBIDDEN_AGENT_OPERATIONS),
+            "connectors": [],
+            "secret_references": [],
+            "passkey_policy": {
+                "default_mode": "user_presence_handoff",
+                "note": "Device-bound passkeys require human user-presence handoff; no export.",
+            },
+        }
+
+    monkeypatch.setattr(
+        LocalVaultConnectorService,
+        "agent_snapshot_async",
+        tracking_snapshot,
+    )
+    response = client_access.get("/api/v2/vault-connectors", headers=headers)
+    assert response.status_code == 200, response.text
+    assert called == ["async"]
+    assert response.json()["spec"]["reveal_available"] is False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .contract import (
@@ -60,6 +61,10 @@ class LocalVaultConnectorService:
         }
         assert_agent_safe_payload(snapshot)
         return snapshot
+
+    async def agent_snapshot_async(self) -> dict[str, Any]:
+        """Offload discovery/probes from the asyncio event loop."""
+        return await asyncio.to_thread(self.agent_snapshot)
 
 
 def agent_capability_block(

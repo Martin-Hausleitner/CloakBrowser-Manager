@@ -2437,7 +2437,11 @@ async def get_control_plane_capabilities(request: Request):
 
 @app.get("/api/v2/vault-connectors")
 async def get_local_vault_connectors(request: Request):
-    """Provider-neutral local vault connector discovery (references/status only)."""
+    """Provider-neutral local vault connector discovery (references/status only).
+
+    Discovery/probes run in a worker thread and are TTL-cached so PATH binaries
+    are not re-executed on every request.
+    """
     _require_identity(request.scope)
     try:
         from .vault_connectors import LocalVaultConnectorService
@@ -2456,10 +2460,10 @@ async def get_local_vault_connectors(request: Request):
         "yes",
         "on",
     }
-    snapshot = LocalVaultConnectorService(
+    snapshot = await LocalVaultConnectorService(
         include_fake=include_fake,
         run_probes=run_probes,
-    ).agent_snapshot()
+    ).agent_snapshot_async()
     return {
         "api_version": "cloakbrowser.io/v1",
         "kind": "LocalVaultConnectorSet",

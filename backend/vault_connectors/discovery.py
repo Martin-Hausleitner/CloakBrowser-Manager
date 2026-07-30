@@ -2,6 +2,10 @@
 
 Default path uses ``shutil.which`` only. Optional probes may run ``--version``
 with a short timeout; they never unlock vaults or read accounts.
+
+Results are cached with a bounded TTL (and shorter failure backoff) so async
+HTTP handlers do not re-exec PATH resolution or probes on every request.
+Probes always use a validated absolute executable path.
 """
 
 from __future__ import annotations
@@ -10,11 +14,12 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 from collections.abc import Callable, Mapping
-from typing import Any
+from dataclasses import dataclass
 
 from .contract import (
-    AGENT_SAFE_OPERATIONS,
     ConnectorDiscovery,
     ConnectorStatus,
     PasskeyHandoffMode,
@@ -25,8 +30,20 @@ which: Callable[[str], str | None] = shutil.which
 
 PROBE_TIMEOUT_SECONDS = 2.0
 OUTPUT_LIMIT_BYTES = 4_096
+DISCOVERY_CACHE_TTL_SECONDS = 30.0
+DISCOVERY_CACHE_FAILURE_BACKOFF_SECONDS = 10.0
 
 _VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
+_PROBE_FAILURE_REASONS = frozenset(
+    {
+        "probe_executable_missing",
+        "probe_timeout",
+        "probe_os_error",
+        "probe_failed",
+        "probe_version_unparsed",
+        "executable_invalid",
+    }
+)
 
 # provider_id -> (provider_kind, display_name, candidate binaries, passkey mode)
 _PROVIDER_SPECS: tuple[tuple[str, str, str, tuple[str, ...], PasskeyHandoffMode], ...] = (
@@ -74,17 +91,66 @@ _BASE_CAPABILITIES = filter_agent_operations(
 )
 
 
+@dataclass
+class _CacheEntry:
+    results: tuple[ConnectorDiscovery, ...]
+    expires_at: float
+
+
+_cache_lock = threading.Lock()
+_discovery_cache: dict[bool, _CacheEntry] = {}
+
+
+def clear_discovery_cache() -> None:
+    """Drop cached discovery results (tests / explicit refresh)."""
+    with _cache_lock:
+        _discovery_cache.clear()
+
+
 def _basename(path: str | None) -> str | None:
     if not path:
         return None
     return os.path.basename(path)
 
 
+def validate_absolute_executable(path: str | None) -> str | None:
+    """Return a real, absolute, executable file path or None."""
+    if not path or not isinstance(path, str):
+        return None
+    cleaned = path.strip()
+    if not cleaned or "\x00" in cleaned:
+        return None
+    try:
+        candidate = cleaned if os.path.isabs(cleaned) else os.path.abspath(cleaned)
+        real = os.path.realpath(candidate)
+    except OSError:
+        return None
+    if not os.path.isabs(real):
+        return None
+    try:
+        if not os.path.isfile(real):
+            return None
+        if not os.access(real, os.X_OK):
+            return None
+    except OSError:
+        return None
+    return real
+
+
+def _resolve_executable(binary_name: str) -> str | None:
+    """Resolve a PATH entry via which, then validate as an absolute executable."""
+    located = which(binary_name)
+    return validate_absolute_executable(located)
+
+
 def _run_version_probe(executable: str) -> tuple[str | None, str]:
     """Return (version, reason_code). Never passes unlock/login args."""
+    absolute = validate_absolute_executable(executable)
+    if absolute is None:
+        return None, "executable_invalid"
     try:
         completed = subprocess.run(
-            [executable, "--version"],
+            [absolute, "--version"],
             capture_output=True,
             timeout=PROBE_TIMEOUT_SECONDS,
             check=False,
@@ -123,9 +189,16 @@ def _sanitized_env() -> dict[str, str]:
         upper = key.upper()
         if any(upper.startswith(prefix) or prefix in upper for prefix in blocked_prefixes):
             continue
-        if upper in {"PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT", "TMPDIR"}:
-            env[key] = value
-        elif upper.startswith("XDG_"):
+        if upper in {
+            "PATH",
+            "HOME",
+            "USER",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "SYSTEMROOT",
+            "TMPDIR",
+        } or upper.startswith("XDG_"):
             env[key] = value
     # Always preserve PATH for which resolution of relative probes.
     if "PATH" in os.environ and "PATH" not in env:
@@ -133,16 +206,16 @@ def _sanitized_env() -> dict[str, str]:
     return env
 
 
-def discover_local_vault_connectors(*, run_probes: bool = False) -> list[ConnectorDiscovery]:
-    """Discover installed local vault tooling without authenticating."""
+def _discover_uncached(*, run_probes: bool) -> list[ConnectorDiscovery]:
+    """Discover installed local vault tooling without authenticating (no cache)."""
     results: list[ConnectorDiscovery] = []
     for provider_id, provider_kind, display_name, binaries, passkey_mode in _PROVIDER_SPECS:
         found_path: str | None = None
         found_name: str | None = None
         for binary in binaries:
-            path = which(binary)
-            if path:
-                found_path = path
+            resolved = _resolve_executable(binary)
+            if resolved:
+                found_path = resolved
                 found_name = binary
                 break
 
@@ -193,6 +266,42 @@ def discover_local_vault_connectors(*, run_probes: bool = False) -> list[Connect
                 probe_ran=probe_ran,
             )
         )
+    return results
+
+
+def _cache_ttl_for(results: list[ConnectorDiscovery], *, run_probes: bool) -> float:
+    if run_probes and any(
+        item.probe_ran and item.reason_code in _PROBE_FAILURE_REASONS for item in results
+    ):
+        return DISCOVERY_CACHE_FAILURE_BACKOFF_SECONDS
+    return DISCOVERY_CACHE_TTL_SECONDS
+
+
+def discover_local_vault_connectors(
+    *,
+    run_probes: bool = False,
+    use_cache: bool = True,
+) -> list[ConnectorDiscovery]:
+    """Discover installed local vault tooling without authenticating.
+
+    Cached by default so request handlers do not re-run PATH/probe work until TTL
+    expiry (or a shorter failure backoff after probe errors).
+    """
+    if use_cache:
+        now = time.monotonic()
+        with _cache_lock:
+            entry = _discovery_cache.get(bool(run_probes))
+            if entry is not None and entry.expires_at > now:
+                return list(entry.results)
+
+    results = _discover_uncached(run_probes=run_probes)
+    if use_cache:
+        ttl = _cache_ttl_for(results, run_probes=run_probes)
+        with _cache_lock:
+            _discovery_cache[bool(run_probes)] = _CacheEntry(
+                results=tuple(results),
+                expires_at=time.monotonic() + ttl,
+            )
     return results
 
 

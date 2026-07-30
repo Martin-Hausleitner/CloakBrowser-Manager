@@ -19,7 +19,12 @@ from .contract import (
     is_valid_secret_ref,
     public_connector_payload,
 )
-from .discovery import discover_local_vault_connectors, discovery_enabled_by_env
+from .discovery import (
+    clear_discovery_cache,
+    discover_local_vault_connectors,
+    discovery_enabled_by_env,
+    validate_absolute_executable,
+)
 from .fake import FakeVaultConnector
 from .service import LocalVaultConnectorService, agent_capability_block
 
@@ -39,9 +44,11 @@ __all__ = [
     "SecretReference",
     "agent_capability_block",
     "assert_agent_safe_payload",
+    "clear_discovery_cache",
     "discover_local_vault_connectors",
     "discovery_enabled_by_env",
     "filter_agent_operations",
     "is_valid_secret_ref",
     "public_connector_payload",
+    "validate_absolute_executable",
 ]

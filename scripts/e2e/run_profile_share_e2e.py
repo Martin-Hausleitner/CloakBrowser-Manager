@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """CLI entrypoint for disposable profile share E2E.
 
 Usage:
@@ -21,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend import database as db  # noqa: E402
-from scripts.e2e.profile_share_loader import run_profile_share_e2e  # noqa: E402
+from backend import database as db
+from scripts.e2e.profile_share_loader import run_profile_share_e2e
 
 
 def main(argv: list[str] | None = None) -> int:

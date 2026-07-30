@@ -2,10 +2,11 @@
 
 Security contract:
 - only synthetic cookies on local fixture origins
-- never copy real cookies, passwords, tokens, passkeys, or proxy credentials
+- never copy real cookies, passwords, tokens, passkeys, proxy credentials, or notes
 - export/import/clone require explicit opt-in
-- extension IDs and safe launch args transfer; manager-owned flags do not
-- disposable cleanup removes DB row and user_data_dir
+- launch_args restricted to allowlisted prefixes; secret-like text rejected
+- extension evidence uses BrowserManager real launch-arg builder
+- disposable cleanup removes user_data_dir first (hard-fail), then DB row
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import pytest
 
 from backend import database as db
 from backend import profile_share
-
 
 FIXTURE_ORIGIN = "http://127.0.0.1:18765"
 SYNTHETIC_COOKIE = {
@@ -62,7 +62,7 @@ def source_profile(tmp_db: Path, catalog_ext: str) -> dict:
         extension_ids=[catalog_ext],
         launch_args=["--lang=en-US"],
         proxy="http://alice:top-secret@proxy.example:8080",
-        notes="disposable e2e source",
+        notes="Authorization: Bearer super-secret-token password=hunter2",
     )
     # Simulate a Chromium user-data tree without reading real cookie DBs.
     user_data = Path(profile["user_data_dir"])
@@ -107,6 +107,23 @@ def test_validate_synthetic_cookie_rejects_real_looking_secrets() -> None:
         )
 
 
+def test_samesite_none_requires_secure_and_https() -> None:
+    with pytest.raises(profile_share.ProfileShareError, match="SameSite=None"):
+        profile_share.validate_synthetic_cookie(
+            {**SYNTHETIC_COOKIE, "sameSite": "None", "secure": False}
+        )
+
+    with pytest.raises(profile_share.ProfileShareError, match="SameSite=None"):
+        profile_share.validate_synthetic_cookie(
+            {
+                **SYNTHETIC_COOKIE,
+                "sameSite": "None",
+                "secure": True,
+                "origin": FIXTURE_ORIGIN,  # HTTP fixture must reject
+            }
+        )
+
+
 def test_export_requires_opt_in(source_profile: dict) -> None:
     denied = profile_share.export_profile_share(source_profile, opt_in=False)
     assert denied["schema"] == profile_share.PROFILE_SHARE_SCHEMA
@@ -118,8 +135,8 @@ def test_export_requires_opt_in(source_profile: dict) -> None:
     assert denied["excluded"]["tokens"] is True
     assert denied["excluded"]["passkeys"] is True
     assert denied["excluded"]["real_cookies"] is True
+    assert denied["excluded"]["notes"] is True
 
-    # Even with cookies provided, opt_in=False must not transfer them.
     denied2 = profile_share.export_profile_share(
         source_profile,
         opt_in=False,
@@ -142,20 +159,31 @@ def test_export_opt_in_transfers_extension_ids_and_safe_launch_args(
     assert payload["metadata"]["fingerprint_seed"] == 4242
     assert payload["metadata"]["platform"] == "linux"
     assert "proxy" not in payload["metadata"]
-    assert "proxy_url" not in payload["metadata"]
-    assert payload["metadata"].get("proxy_display") is None
+    assert "notes" not in payload["metadata"]
     assert payload["synthetic_cookies"] == [
         profile_share.validate_synthetic_cookie(SYNTHETIC_COOKIE)
     ]
-    # Must never embed raw proxy credentials or Chromium store paths.
     dumped = json.dumps(payload)
     assert "top-secret" not in dumped
     assert "alice" not in dumped
     assert "Cookies" not in dumped
     assert "Login Data" not in dumped
+    assert "Bearer" not in dumped
+    assert "hunter2" not in dumped
 
 
-def test_export_strips_manager_owned_launch_args(source_profile: dict) -> None:
+def test_export_never_exports_notes_or_bearer_headers(source_profile: dict) -> None:
+    assert "Bearer" in (source_profile.get("notes") or "")
+    payload = profile_share.export_profile_share(source_profile, opt_in=True)
+    assert "notes" not in payload["metadata"]
+    dumped = json.dumps(payload)
+    assert "Bearer" not in dumped
+    assert "Authorization" not in dumped
+    assert "super-secret-token" not in dumped
+    assert "password=hunter2" not in dumped
+
+
+def test_export_strips_arbitrary_and_manager_owned_launch_args(source_profile: dict) -> None:
     source_profile = {
         **source_profile,
         "launch_args": [
@@ -163,10 +191,30 @@ def test_export_strips_manager_owned_launch_args(source_profile: dict) -> None:
             "--load-extension=/evil/path",
             "--remote-debugging-port=9222",
             "--proxy-server=http://u:p@host:1",
+            "--disable-features=Foo",
+            "--header=Authorization: Bearer leaked",
+            "--accept-lang=en-US,en",
         ],
     }
     payload = profile_share.export_profile_share(source_profile, opt_in=True)
-    assert payload["metadata"]["launch_args"] == ["--lang=en-US"]
+    assert payload["metadata"]["launch_args"] == ["--lang=en-US", "--accept-lang=en-US,en"]
+    dumped = json.dumps(payload)
+    assert "Bearer" not in dumped
+    assert "leaked" not in dumped
+    assert "--disable-features" not in dumped
+
+
+def test_safe_metadata_rejects_secret_like_user_agent(source_profile: dict) -> None:
+    dirty = {
+        **source_profile,
+        "user_agent": "Mozilla Authorization: Bearer abc.def.ghi",
+    }
+    payload = profile_share.export_profile_share(dirty, opt_in=True)
+    # Secret-like UA is dropped rather than exported.
+    assert "user_agent" not in payload["metadata"] or "Bearer" not in json.dumps(
+        payload["metadata"]
+    )
+    assert "Bearer" not in json.dumps(payload)
 
 
 def test_export_never_reads_chromium_cookie_or_password_stores(
@@ -204,14 +252,13 @@ def test_import_requires_opt_in(source_profile: dict, catalog_ext: str) -> None:
     assert created["launch_args"] == ["--lang=en-US"]
     assert created["fingerprint_seed"] == 4242
     assert created["proxy"] is None
+    assert not created.get("notes")
     assert created["name"].startswith("share-import-")
-    # Synthetic cookies land in a sidecar file, never Chromium Cookies DB.
     sidecar = Path(created["user_data_dir"]) / profile_share.SYNTHETIC_COOKIE_SIDECAR
     assert sidecar.is_file()
     cookies = json.loads(sidecar.read_text(encoding="utf-8"))
     assert cookies[0]["origin"] == FIXTURE_ORIGIN
     assert cookies[0]["name"] == "cbm_synthetic_session"
-    # Chromium cookie DB must not be fabricated from real stores.
     assert not (Path(created["user_data_dir"]) / "Default" / "Cookies").exists()
 
 
@@ -228,20 +275,23 @@ def test_clone_profile_semantics(source_profile: dict, catalog_ext: str) -> None
     assert cloned["extension_ids"] == [catalog_ext]
     assert cloned["fingerprint_seed"] == 4242
     assert cloned["proxy"] is None
+    assert not cloned.get("notes")
     assert "top-secret" not in json.dumps(cloned)
+    assert "Bearer" not in json.dumps(cloned)
 
 
-def test_extension_launch_evidence_includes_load_extension(
+def test_extension_launch_evidence_uses_browser_manager_builder(
     source_profile: dict, catalog_ext: str
 ) -> None:
     evidence = profile_share.build_extension_launch_evidence(source_profile)
     assert evidence["extension_ids"] == [catalog_ext]
     assert evidence["extensions_resolved"] is True
+    assert evidence["browser_manager_builder"] is True
+    assert evidence["loader_claim"] == "browser_manager_launch_args"
+    assert evidence["runtime_extension_proof"] == "not_run"
     assert evidence["load_extension_arg"] is not None
     assert evidence["load_extension_arg"].startswith("--load-extension=sha256:")
     assert evidence["resolved_path_count"] == 1
-    assert len(evidence["resolved_path_digests"]) == 1
-    # Redacted evidence must not embed absolute host paths.
     dumped = json.dumps(evidence)
     assert "/tmp/" not in dumped
     assert "extension-catalog" not in dumped
@@ -251,6 +301,9 @@ def test_extension_launch_evidence_includes_load_extension(
     )
     assert any(catalog_ext in path for path in raw["resolved_paths"])
     assert raw["load_extension_arg_raw"].startswith("--load-extension=")
+    # Real BrowserManager builder also emits fingerprint args.
+    assert any(arg.startswith("--fingerprint=") for arg in raw["launch_args_raw"])
+    assert any(arg.startswith("--load-extension=") for arg in raw["launch_args_raw"])
 
     args = evidence["launch_args"]
     assert any(arg.startswith("--load-extension=sha256:") for arg in args)
@@ -259,7 +312,7 @@ def test_extension_launch_evidence_includes_load_extension(
     assert evidence["redacted"] is True
 
 
-def test_redact_share_payload_strips_secrets() -> None:
+def test_redact_share_payload_strips_secrets_and_notes() -> None:
     dirty = {
         "schema": profile_share.PROFILE_SHARE_SCHEMA,
         "opt_in": True,
@@ -269,7 +322,9 @@ def test_redact_share_payload_strips_secrets() -> None:
             "password": "hunter2",
             "token": "sk-live-abc",
             "passkey": "pk-material",
+            "notes": "Authorization: Bearer nested-secret",
             "extension_ids": ["abc"],
+            "launch_args": ["--lang=en-US", "--disable-features=X", "Bearer xyz"],
         },
         "synthetic_cookies": [SYNTHETIC_COOKIE],
         "extra_secret": "should-go",
@@ -281,7 +336,10 @@ def test_redact_share_payload_strips_secrets() -> None:
     assert "sk-live-abc" not in dumped
     assert "pk-material" not in dumped
     assert "should-go" not in dumped
+    assert "Bearer" not in dumped
+    assert "notes" not in clean["metadata"]
     assert clean["metadata"]["extension_ids"] == ["abc"]
+    assert clean["metadata"]["launch_args"] == ["--lang=en-US"]
     assert "proxy" not in clean["metadata"]
 
 
@@ -291,8 +349,26 @@ def test_cleanup_disposable_profile(source_profile: dict) -> None:
     result = profile_share.cleanup_disposable_profile(source_profile["id"])
     assert result["deleted"] is True
     assert result["user_data_removed"] is True
+    assert result.get("user_data_error") is None
     assert db.get_profile(source_profile["id"]) is None
     assert not user_data.exists()
+
+
+def test_cleanup_user_data_failure_keeps_db_row(source_profile: dict) -> None:
+    user_data = Path(source_profile["user_data_dir"])
+    assert user_data.exists()
+    profile_id = source_profile["id"]
+
+    def boom(_path: object) -> None:
+        raise OSError("simulated permission denied")
+
+    result = profile_share.cleanup_disposable_profile(profile_id, rmtree=boom)
+    assert result["deleted"] is False
+    assert result["user_data_removed"] is False
+    assert result["user_data_error"] == "OSError"
+    # DB row retained so operator can retry cleanup.
+    assert db.get_profile(profile_id) is not None
+    assert user_data.exists()
 
 
 def test_reject_cookie_domain_mismatch() -> None:

@@ -5,7 +5,9 @@ This module intentionally does **not** read Chromium user-data stores
 synthetic cookies bound to local fixture origins may be transferred, and only
 when both export and import/clone pass ``opt_in=True``.
 
-Proxy credentials, passwords, tokens, and passkeys are never copied.
+Proxy credentials, passwords, tokens, passkeys, free-form notes, and arbitrary
+launch flags are never copied. Extension load paths are resolved only through
+``BrowserManager._build_profile_launch_args``.
 """
 
 from __future__ import annotations
@@ -14,8 +16,9 @@ import hashlib
 import json
 import re
 import shutil
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 
 from backend import database as db
@@ -30,6 +33,13 @@ _SYNTHETIC_COOKIE_NAME_RE = re.compile(r"^cbm_synthetic_[a-z0-9_]{1,64}$")
 _SYNTHETIC_COOKIE_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 _JWT_LIKE_RE = re.compile(r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 _FIXTURE_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# Only these Chromium user-set flags may travel in a share package.
+# Extension loading is never transferred as a free-form flag; catalog IDs are.
+SAFE_LAUNCH_ARG_PREFIXES: tuple[str, ...] = (
+    "--lang=",
+    "--accept-lang=",
+)
 
 _METADATA_ALLOWLIST = frozenset(
     {
@@ -60,7 +70,7 @@ _METADATA_ALLOWLIST = frozenset(
         "search_engine",
         "extension_ids",
         "launch_args",
-        "notes",
+        # notes intentionally excluded — free-form text is a secret leak surface
     }
 )
 
@@ -85,7 +95,24 @@ _FORBIDDEN_METADATA_KEYS = frozenset(
         "user_data_dir",
         "credential",
         "credentials",
+        "notes",
+        "note",
+        "authorization",
+        "bearer",
+        "header",
+        "headers",
     }
+)
+
+_SECRET_TEXT_RE = re.compile(
+    r"(?i)("
+    r"\bbearer\s+[A-Za-z0-9\-._~+/]+=*"
+    r"|\bauthorization\s*:\s*\S+"
+    r"|\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|token)\s*[:=]\s*\S+"
+    r"|\bsk-live-[A-Za-z0-9]+"
+    r"|\b(?:https?|socks5?)://[^/\s\"']+:[^/\s\"']+@"
+    r"|\bset-cookie\s*:"
+    r")"
 )
 
 _EXCLUDED = {
@@ -94,6 +121,8 @@ _EXCLUDED = {
     "tokens": True,
     "passkeys": True,
     "real_cookies": True,
+    "notes": True,
+    "arbitrary_launch_args": True,
 }
 
 
@@ -114,6 +143,33 @@ def is_fixture_origin(origin: str) -> bool:
     return host in _FIXTURE_HOSTS
 
 
+def _contains_secret_like_text(value: Any) -> bool:
+    """Recursively detect Bearer/header/password/token-like material."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        if _SECRET_TEXT_RE.search(value):
+            return True
+        return bool(_JWT_LIKE_RE.fullmatch(value.strip()))
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_l = str(key).lower()
+            if any(part in key_l for part in _FORBIDDEN_METADATA_KEYS):
+                return True
+            if _contains_secret_like_text(item):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_contains_secret_like_text(item) for item in value)
+    return False
+
+
+def _reject_secret_like(value: Any, *, field: str) -> Any:
+    if _contains_secret_like_text(value):
+        raise ProfileShareError(f"secret-like text rejected in {field}")
+    return value
+
+
 def validate_synthetic_cookie(cookie: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize one synthetic cookie for fixture-origin transfer."""
     if not isinstance(cookie, dict):
@@ -125,6 +181,7 @@ def validate_synthetic_cookie(cookie: dict[str, Any]) -> dict[str, Any]:
     path = str(cookie.get("path") or "/").strip() or "/"
     origin = str(cookie.get("origin") or "").strip()
     same_site = str(cookie.get("sameSite") or cookie.get("same_site") or "Lax")
+    secure = bool(cookie.get("secure", False))
 
     if not _SYNTHETIC_COOKIE_NAME_RE.fullmatch(name):
         raise ProfileShareError("cookie name must be synthetic (cbm_synthetic_*)")
@@ -134,64 +191,116 @@ def validate_synthetic_cookie(cookie: dict[str, Any]) -> dict[str, Any]:
         raise ProfileShareError("forbidden JWT-like cookie value")
     if any(marker in value.lower() for marker in ("password", "secret", "token=", "sk-live")):
         raise ProfileShareError("forbidden secret-like cookie value")
-    if not is_fixture_origin(origin):
+    _reject_secret_like(value, field="cookie.value")
+
+    try:
+        normalized_origin = normalize_origin(origin)
+    except ValueError as exc:
+        raise ProfileShareError("cookie origin must be a local HTTP fixture origin") from exc
+
+    origin_parts = urlparse(normalized_origin)
+    origin_host = (origin_parts.hostname or "").lower()
+    if origin_host not in _FIXTURE_HOSTS:
         raise ProfileShareError("cookie origin must be a local HTTP fixture origin")
 
-    normalized_origin = normalize_origin(origin)
-    origin_host = (urlparse(normalized_origin).hostname or "").lower()
-    if domain not in {origin_host, f".{origin_host}"} and domain != origin_host:
-        # Domain must match fixture host exactly (no public suffix cookies).
-        if domain != origin_host:
-            raise ProfileShareError("cookie domain must match fixture origin host")
+    # SameSite=None requires Secure + HTTPS. HTTP fixture origins must reject it.
+    if same_site not in {"Strict", "Lax", "None"}:
+        raise ProfileShareError("cookie sameSite must be Strict, Lax, or None")
+    if same_site == "None" and (not secure or origin_parts.scheme != "https"):
+        raise ProfileShareError(
+            "SameSite=None requires Secure=true and an HTTPS origin"
+        )
+
+    # Local HTTP fixtures are the only transfer surface today.
+    if origin_parts.scheme != "http":
+        raise ProfileShareError("cookie origin must be a local HTTP fixture origin")
+    if not is_fixture_origin(normalized_origin):
+        raise ProfileShareError("cookie origin must be a local HTTP fixture origin")
+
+    if domain != origin_host:
+        raise ProfileShareError("cookie domain must match fixture origin host")
 
     if path != "/" and (not path.startswith("/") or ".." in path or "\\" in path):
         raise ProfileShareError("cookie path is invalid")
-
-    if same_site not in {"Strict", "Lax", "None"}:
-        raise ProfileShareError("cookie sameSite must be Strict, Lax, or None")
 
     return {
         "name": name,
         "value": value,
         "domain": origin_host,
         "path": path,
-        "secure": bool(cookie.get("secure", False)),
+        "secure": secure,
         "httpOnly": bool(cookie.get("httpOnly", cookie.get("http_only", False))),
         "sameSite": same_site,
         "origin": normalized_origin,
     }
 
 
+def _is_safe_launch_arg_prefix(arg: str) -> bool:
+    return any(arg.startswith(prefix) for prefix in SAFE_LAUNCH_ARG_PREFIXES)
+
+
 def _safe_launch_args(raw: list[Any] | None) -> list[str]:
+    """Keep only allowlisted launch-arg prefixes free of secret-like text."""
     cleaned: list[str] = []
     for item in raw or []:
         if not isinstance(item, str):
             continue
-        if profile_models._manager_owned_launch_arg(item):
+        arg = item.strip()
+        if not arg:
             continue
-        cleaned.append(item)
+        if profile_models._manager_owned_launch_arg(arg):
+            continue
+        if not _is_safe_launch_arg_prefix(arg):
+            continue
+        if _contains_secret_like_text(arg):
+            continue
+        cleaned.append(arg)
     return cleaned
 
 
+def _safe_scalar(value: Any, *, field: str) -> Any:
+    """Allow only simple non-secret scalars for transferable metadata fields."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return _reject_secret_like(value, field=field)
+    # Nested free-form structures are not transferable.
+    raise ProfileShareError(f"unsupported metadata type for {field}")
+
+
 def _safe_metadata(profile: dict[str, Any]) -> dict[str, Any]:
+    """Export only allowlisted, non-secret profile fields.
+
+    Free-form ``notes`` and arbitrary ``launch_args`` are never exported.
+    """
     meta: dict[str, Any] = {}
-    for key in _METADATA_ALLOWLIST:
+    for key in sorted(_METADATA_ALLOWLIST):
         if key not in profile:
             continue
         if key in _FORBIDDEN_METADATA_KEYS:
             continue
         value = profile[key]
         if key == "extension_ids":
-            meta[key] = [str(item) for item in (value or []) if str(item).strip()]
+            ids = [str(item).strip() for item in (value or []) if str(item).strip()]
+            _reject_secret_like(ids, field="extension_ids")
+            meta[key] = ids
         elif key == "launch_args":
             meta[key] = _safe_launch_args(value if isinstance(value, list) else [])
-        elif key == "proxy":
-            continue
         else:
-            meta[key] = value
-    # Hard-ban any accidental secret keys.
+            try:
+                meta[key] = _safe_scalar(value, field=key)
+            except ProfileShareError:
+                # Drop unsafe field rather than fail entire export for one bad scalar.
+                continue
+
     for forbidden in _FORBIDDEN_METADATA_KEYS:
         meta.pop(forbidden, None)
+    meta.pop("notes", None)
+    # Final recursive secret sweep on the assembled object.
+    if _contains_secret_like_text(meta):
+        raise ProfileShareError("secret-like text rejected in metadata")
     return meta
 
 
@@ -244,19 +353,8 @@ def redact_share_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise ProfileShareError("share payload must be an object")
 
     metadata_in = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    safe_meta = {
-        key: value
-        for key, value in metadata_in.items()
-        if key in _METADATA_ALLOWLIST and key not in _FORBIDDEN_METADATA_KEYS
-    }
-    if "launch_args" in safe_meta:
-        safe_meta["launch_args"] = _safe_launch_args(
-            safe_meta["launch_args"] if isinstance(safe_meta["launch_args"], list) else []
-        )
-    if "extension_ids" in safe_meta:
-        safe_meta["extension_ids"] = [
-            str(item) for item in (safe_meta["extension_ids"] or []) if str(item).strip()
-        ]
+    # Re-run the same allowlist/secret filters used on export.
+    safe_meta = _safe_metadata({"id": payload.get("source_profile_id") or "payload", **metadata_in})
 
     cookies: list[dict[str, Any]] = []
     for raw in payload.get("synthetic_cookies") or []:
@@ -319,6 +417,7 @@ def import_profile_share(
         extension_ids=extension_ids,
         launch_args=launch_args,
         proxy=None,  # never import proxy credentials
+        notes=None,  # never import free-form notes
         **{
             key: value
             for key, value in metadata.items()
@@ -330,6 +429,7 @@ def import_profile_share(
                 "extension_ids",
                 "launch_args",
                 "proxy",
+                "notes",
             }
         },
     )
@@ -395,32 +495,46 @@ def _redact_load_extension_arg(load_arg: str | None) -> str | None:
     return "--load-extension=" + ",".join(f"sha256:{item}" for item in digests)
 
 
+def _browser_manager_launch_args(profile: dict[str, Any]) -> list[str]:
+    """Call the real BrowserManager launch-arg builder (not a string mock)."""
+    # Local import avoids circular import at module load (browser_manager → models).
+    from backend.browser_manager import BrowserManager
+
+    manager = BrowserManager()
+    return list(manager._build_profile_launch_args(profile))
+
+
 def build_extension_launch_evidence(
     profile: dict[str, Any],
     *,
     include_raw_paths: bool = False,
 ) -> dict[str, Any]:
-    """Return redacted evidence that catalog extension IDs resolve into launch args.
+    """Return redacted evidence from BrowserManager's real launch-arg builder.
 
-    Absolute host paths are digested by default so evidence artifacts never
-    embed machine-local filesystem locations. Pass ``include_raw_paths=True``
-    only for in-process assertions that never leave the test process.
+    This proves the Manager would emit ``--load-extension=…`` for the profile's
+    catalog IDs. It is **not** runtime proof that Chromium loaded the extension;
+    callers must run a disposable browser session for that claim.
     """
     extension_ids = [str(item) for item in (profile.get("extension_ids") or [])]
     paths = extension_catalog.catalog_paths_for_ids(extension_ids)
-    load_arg = extension_catalog.load_extension_arg_for_ids(extension_ids)
-
-    # Compose the same safe launch surface BrowserManager uses (without CDP/proxy).
-    launch_args = _safe_launch_args(profile.get("launch_args") or [])
-    if load_arg:
-        launch_args = [arg for arg in launch_args if not arg.startswith("--load-extension=")]
-        launch_args.append(load_arg)
+    manager_args = _browser_manager_launch_args(profile)
+    load_args = [arg for arg in manager_args if arg.startswith("--load-extension=")]
+    load_arg = load_args[-1] if load_args else None
 
     redacted_load = _redact_load_extension_arg(load_arg)
-    redacted_launch_args = [
-        _redact_load_extension_arg(arg) if arg.startswith("--load-extension=") else arg
-        for arg in launch_args
-    ]
+    redacted_launch_args: list[str] = []
+    for arg in manager_args:
+        if arg.startswith("--load-extension="):
+            redacted = _redact_load_extension_arg(arg)
+            if redacted is not None:
+                redacted_launch_args.append(redacted)
+        elif arg.startswith("--remote-debugging-port"):
+            # Manager-owned; omit from redacted evidence.
+            continue
+        elif _is_safe_launch_arg_prefix(arg) or arg.startswith("--fingerprint"):
+            if not _contains_secret_like_text(arg):
+                redacted_launch_args.append(arg)
+        # Drop other free-form args from evidence payloads.
 
     evidence: dict[str, Any] = {
         "profile_id": str(profile.get("id") or ""),
@@ -430,12 +544,16 @@ def build_extension_launch_evidence(
         "load_extension_arg": redacted_load,
         "launch_args": redacted_launch_args,
         "extensions_resolved": bool(paths) and load_arg is not None,
+        "browser_manager_builder": True,
+        "loader_claim": "browser_manager_launch_args",
+        "runtime_extension_proof": "not_run",
         "redacted": True,
     }
     if include_raw_paths:
         # In-process only — never write this branch into reports or CLI stdout.
         evidence["resolved_paths"] = paths
         evidence["load_extension_arg_raw"] = load_arg
+        evidence["launch_args_raw"] = manager_args
     return evidence
 
 
@@ -445,31 +563,60 @@ def cleanup_disposable_profile(
     remove_user_data: bool = True,
     get_profile: Callable[[str], dict[str, Any] | None] | None = None,
     delete_profile: Callable[[str], bool] | None = None,
+    rmtree: Callable[[str | Path], None] | None = None,
 ) -> dict[str, Any]:
-    """Delete a disposable profile row and optionally its user_data_dir tree."""
+    """Remove user_data_dir first (hard-fail), then the DB row.
+
+    Order is intentional: a failed filesystem delete must not orphan a missing
+    DB row that still has on-disk profile state. ``shutil.rmtree`` is called
+    **without** ``ignore_errors``.
+    """
     loader = get_profile or db.get_profile
     deleter = delete_profile or db.delete_profile
+    remove_tree = rmtree or shutil.rmtree
     profile = loader(profile_id)
     if profile is None:
         return {
             "deleted": False,
             "user_data_removed": False,
             "profile_id": profile_id,
+            "redacted": True,
         }
 
     user_data_dir = Path(str(profile.get("user_data_dir") or ""))
-    deleted = bool(deleter(profile_id))
     user_data_removed = False
-    if remove_user_data and user_data_dir and str(user_data_dir) not in {"", ".", "/"}:
+    user_data_error: str | None = None
+
+    if remove_user_data and str(user_data_dir) not in {"", ".", "/"}:
         if user_data_dir.exists():
-            shutil.rmtree(user_data_dir, ignore_errors=True)
-            user_data_removed = not user_data_dir.exists()
+            try:
+                remove_tree(user_data_dir)
+            except OSError as exc:
+                user_data_error = type(exc).__name__
+                return {
+                    "deleted": False,
+                    "user_data_removed": False,
+                    "user_data_error": user_data_error,
+                    "profile_id": profile_id,
+                    "redacted": True,
+                }
+            if user_data_dir.exists():
+                return {
+                    "deleted": False,
+                    "user_data_removed": False,
+                    "user_data_error": "PathStillExists",
+                    "profile_id": profile_id,
+                    "redacted": True,
+                }
+            user_data_removed = True
         else:
             user_data_removed = True
 
+    deleted = bool(deleter(profile_id))
     return {
         "deleted": deleted,
-        "user_data_removed": user_data_removed,
+        "user_data_removed": user_data_removed if remove_user_data else False,
+        "user_data_error": user_data_error,
         "profile_id": profile_id,
         "redacted": True,
     }

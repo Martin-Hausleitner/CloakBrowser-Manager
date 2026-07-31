@@ -1,6 +1,8 @@
 [ Lmgr · R2190 ] 🟣 codex · Modell: GPT-5.5 · 🧠 IDR: ja · 🕐 vor 0 min
 
 > 🧠 NotebookLM: https://notebooklm.google.com/notebook/270598c3-713d-4188-81b8-0f0567c71572
+>
+> Absoluter Berichtsstand: 31. Juli 2026, 12:17 CEST. Die relative Zeit in der Kopfzeile bezeichnet den Erstellzeitpunkt.
 
 # CloakBrowser Manager — Overnight-Status 31. Juli 2026
 
@@ -8,7 +10,7 @@
 
 Über Nacht wurden mehrere belastbare Funktionsstränge **auf Feature-Branches veröffentlicht**, aber noch nicht auf `main` zusammengeführt. Der stärkste vollständig dokumentierte Nachweis ist der PhoneFit-Fix auf der VCVM: 152 Frontend-Tests, Production-Build, unabhängige Freigabe, Gitleaks und ein realer Browserlauf bei `390 × 844` sind grün. Parallel entstanden veröffentlichte Bausteine für ACPX-Agent-Families, Passkey/OAuth-Benchmarks, sichere Recorder-/Vault-Steuerung sowie eine echte Chromium-MV3-Teststrecke.
 
-Der Gesamtstand ist deshalb **gelb, nicht grün**: `main` und die öffentliche VCVM enthalten den neuen Stand noch nicht. Der macOS-MV3-Lauf erreicht einen echten Chrome-for-Testing-Service-Worker, wird aber weiterhin durch Chrome 150 Local Network Access beim Loopback-Zugriff blockiert. Der Repository-Checkout wurde inzwischen frisch aus Martins Fork wiederhergestellt; der frühere lokale Produkt-Worktree mit nicht gepushten Mac-/Bridge-/OpenSpec-Änderungen fehlt jedoch weiterhin und muss aus den vorhandenen Belegen rekonstruiert werden.
+Der Gesamtstand ist deshalb **gelb, nicht grün**: `main` und die öffentliche VCVM enthalten den neuen Stand noch nicht. Der veröffentlichte MV3-Lauf erreicht einen echten Chromium-Service-Worker, aber der Command-Poll scheitert, weil die Folgeanfrage ohne `Origin` auf eine Bridge trifft, die `Origin` plus Session-Bearer verlangt. Ein späterer, nicht veröffentlichter macOS-Probe-Lauf deutete zusätzlich auf Chrome-150-Local-Network-Access als möglichen Loopback-Blocker hin; da der zugehörige Worktree fehlt, ist das eine zu reproduzierende Beobachtung und keine veröffentlichte Root Cause. Der Repository-Checkout wurde inzwischen frisch aus Martins Fork wiederhergestellt; der frühere lokale Produkt-Worktree mit nicht gepushten Mac-/Bridge-/OpenSpec-Änderungen fehlt jedoch weiterhin und muss aus den vorhandenen Belegen rekonstruiert werden.
 
 ## Aktueller Ampelstand
 
@@ -20,7 +22,7 @@ Der Gesamtstand ist deshalb **gelb, nicht grün**: `main` und die öffentliche V
 | Recorder, Vault Discovery, Profile Sharing | 🟢 Branch | Veröffentlicht; Fail-closed-Artefaktgates und lokale/private Betriebsmodi |
 | `main` | 🔴 veraltet | Letzter Main-Stand ist vom 24. Juli; die Arbeit vom 30./31. Juli ist dort nicht enthalten |
 | Öffentliche VCVM | 🟡 | Bewusst nicht überschrieben, weil Transaction-/Rollback-Gate noch fehlt |
-| macOS Extension E2E | 🔴 blockiert | MV3-Service-Worker lädt; Chrome 150 blockiert den Loopback-Bridge-Zugriff über Local Network Access |
+| macOS Extension E2E | 🔴 blockiert | Veröffentlicht: Command-Poll ohne `Origin`; lokal/unveröffentlicht: zusätzlicher Chrome-150-LNA-Verdacht |
 | Direkter Tailscale-Pfad | 🟡 | Weiter über `DERP(nue)` statt direkt; höhere Latenz bleibt offen |
 
 ## Was über Nacht umgesetzt wurde
@@ -131,24 +133,25 @@ Der Browser ist als große Arbeitsfläche sichtbar; Viewport-, Screenshot- und M
 | MV3 Branch-Suite | veröffentlicht | Real-Chromium-Harness vorhanden; vollständiger Release-Pass noch ausstehend |
 | VCVM Bridge nach False-Green-Korrektur | 28 fokussierte Tests bestanden | Lokal verifiziert; damaliger Worktree nicht mehr vorhanden, daher noch nicht als Branch-Release gewertet |
 | macOS Helper-/Extension-Tests | 14 Python + 7 Extension bestanden | Lokal verifiziert; nicht veröffentlicht |
-| macOS Real-Chromium-E2E | blockiert | Service Worker lädt, Loopback-Bridge durch Chrome 150 LNA blockiert |
+| macOS Real-Chromium-E2E | blockiert | Branch-Beleg: Command-Poll ohne `Origin`; spätere lokale LNA-Beobachtung muss reproduziert werden |
 | Ältere Browser-Use-Worktrees | nicht grün | Audit fand 4 bzw. 24 zuletzt fehlgeschlagene Tests in pytest-Caches; kein frischer Overnight-Pass ableitbar |
 
 ## Offene Risiken und Blocker
 
 1. **Nicht auf Main:** Die Arbeit vom 30./31. Juli liegt auf mehreren Feature-Branches. Ein pauschales Merge wäre ohne gemeinsame CI- und Konfliktprüfung riskant.
 2. **Öffentliche VCVM veraltet:** Der öffentliche Stand wurde bewusst nicht überschrieben, solange der Transaction-/Rollback-Apply-Pfad nicht grün ist.
-3. **macOS Local Network Access:** Chrome 150 lädt die MV3-Extension, lässt deren Loopback-Bridge aber nicht zuverlässig bis zum lokalen Manager durch. Erforderlich ist ein unterstützter Permission-/Onboarding-Pfad oder ein sauberer Native-Messaging-Adapter — keine unsicheren Disable-Flags.
-4. **Lokaler Worktree-Verlust:** Der Repository-Checkout ist wiederhergestellt, aber der ursprüngliche lokale Produkt-Worktree und `extension-p0-macos` waren beim Audit nicht mehr vorhanden. Verlorene, nicht gepushte Änderungen müssen rekonstruiert und neu getestet werden.
-5. **Tailscale-Latenz:** Manager-Loopback lag laut PhoneFit-Bericht bei p50 5,704 ms / p95 8,787 ms, die öffentliche Tailnet-Route bei p50 269,853 ms / p95 432,817 ms. Der direkte Pfad ist der größte Performance-Hebel.
-6. **Harness-Reife:** Browser Use ist am weitesten integriert. ACPX und weitere Browser-Tools benötigen pro Provider einen echten Readiness-/E2E-Nachweis; Fallback- oder reine UI-Anzeigen gelten nicht als Funktionsbeleg.
+3. **MV3 Origin-/Session-Vertrag:** Der veröffentlichte Branch belegt, dass der Service Worker lädt, der CLI-/MCP-Command-Poll aber ohne `Origin` an der absichtlich strengen Bridge scheitert. Zuerst muss dieser Vertrag sicher repariert und real neu geprüft werden.
+4. **macOS Local Network Access als offene Hypothese:** Ein späterer lokaler Chrome-150-Lauf deutete auf eine zusätzliche Loopback-/LNA-Sperre hin. Ohne erhaltenen Worktree oder Artefakt wird das nicht als bewiesene Branch-Ursache ausgegeben. Falls es nach dem Origin-Fix reproduzierbar bleibt, ist ein unterstützter Permission-/Onboarding-Pfad oder Native Messaging erforderlich — keine unsicheren Disable-Flags.
+5. **Lokaler Worktree-Verlust:** Der Repository-Checkout ist wiederhergestellt, aber der ursprüngliche lokale Produkt-Worktree und `extension-p0-macos` waren beim Audit nicht mehr vorhanden. Verlorene, nicht gepushte Änderungen müssen rekonstruiert und neu getestet werden.
+6. **Tailscale-Latenz:** Manager-Loopback lag laut PhoneFit-Bericht bei p50 5,704 ms / p95 8,787 ms, die öffentliche Tailnet-Route bei p50 269,853 ms / p95 432,817 ms. Der direkte Pfad ist der größte Performance-Hebel.
+7. **Harness-Reife:** Browser Use ist am weitesten integriert. ACPX und weitere Browser-Tools benötigen pro Provider einen echten Readiness-/E2E-Nachweis; Fallback- oder reine UI-Anzeigen gelten nicht als Funktionsbeleg.
 
 ## Empfohlene nächste Schritte
 
 ### P0 — Wiederherstellung und sichere Veröffentlichung
 
 1. Den lokalen Arbeitsstand aus den veröffentlichten Branches frisch rekonstruieren.
-2. Die validierte VCVM-Bridge-Korrektur und macOS-LNA-Diagnostik in einem neuen, kleinen Branch neu aufbauen.
+2. Die sichere Origin-/Session-Korrektur für den MV3-Command-Poll sowie die macOS-LNA-Diagnostik in einem neuen, kleinen Branch reproduzierbar neu aufbauen.
 3. Real-Chromium-E2E als harte CI-Bedingung verwenden: Service Worker, Session-Bearer, CLI-Operationen und Artefaktstatus müssen gemeinsam grün sein.
 4. Die fünf Feature-Branches nicht blind mergen, sondern über eine Integrationsbranch mit Backend-, Frontend-, Extension-, Security- und Deploy-Gates zusammenführen.
 
@@ -157,7 +160,7 @@ Der Browser ist als große Arbeitsfläche sichtbar; Viewport-, Screenshot- und M
 5. Transaction-/Rollback-Gate für den VCVM-Deploy abschließen und erst danach die öffentliche Version aktualisieren.
 6. Den direkten Tailscale-Pfad wiederherstellen und RTT/FPS vor und nach der Änderung messen.
 7. ACPX, Antigravity/Grok-CLI, Browser Harness, Unbrowse und Stagehand einzeln als Provider-/Tool-Kombination testen und die Ergebnisse fail-closed speichern.
-8. macOS-Loopback entweder über explizites Local-Network-Onboarding oder Native Messaging lösen und auf mindestens zwei Chrome-Versionen benchmarken.
+8. Nach dem Origin-/Session-Fix macOS-Loopback neu prüfen; nur bei reproduzierbarem LNA-Blocker explizites Local-Network-Onboarding oder Native Messaging umsetzen und auf mindestens zwei Chrome-Versionen benchmarken.
 
 ### P2 — UX-Konsolidierung
 
@@ -167,7 +170,7 @@ Der Browser ist als große Arbeitsfläche sichtbar; Viewport-, Screenshot- und M
 ## Ehrlichkeitsgrenze
 
 - **Veröffentlicht und belegt:** die oben verlinkten Feature-Branches und der PhoneFit-VCVM-Bericht.
-- **Lokal verifiziert, aber nicht veröffentlicht:** VCVM-Bridge-False-Green-Fix, macOS-Hilfstests und LNA-Diagnostik.
+- **Lokal verifiziert, aber nicht veröffentlicht:** VCVM-Bridge-False-Green-Fix und macOS-Hilfstests. Die spätere LNA-Beobachtung ist wegen des verlorenen Worktrees nur als zu reproduzierende Hypothese dokumentiert.
 - **Nicht erledigt:** Merge auf `main`, öffentliche VCVM-Aktualisierung, vollständiger macOS-MV3-Steuerungslauf und direkter Tailscale-Pfad.
 - **Nicht rekonstruierbar aus frischer lokaler Historie:** nicht gepushte Änderungen im verschwundenen ursprünglichen Worktree. Sie werden deshalb nicht als abgeschlossen ausgegeben.
 

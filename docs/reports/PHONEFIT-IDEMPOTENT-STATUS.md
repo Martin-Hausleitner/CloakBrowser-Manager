@@ -19,6 +19,10 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
    re-tap idempotent check **or** omits mutate-traffic zeros in that check's
    evidence payload **or** omits proof that the page mutate counters were
    installed (false-zero guard).
+5. The durable live proof script must use the **same** page mutate counters +
+   `phone_fit_idempotent_state` contract as the gate (not Playwright-only),
+   dual-witness zeros (page + Playwright), and emit release-shaped evidence
+   (`trafficChecked`, `trafficOk`, `counterInstalled`, zero counts).
 
 ## Steps completed
 
@@ -65,7 +69,7 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
    status running, screen 390x844, `updated_at` unchanged, VNC port unchanged.
 4. Live re-proof: **16/16 PASS**.
 
-### Slice G (this session)
+### Slice G (commit `b0f090a`)
 
 1. Mutate-counter **read** always reports `installed` from
    `window.__phoneFitMutateInstalled` (install already set the flag).
@@ -79,7 +83,22 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
    (in addition to traffic zeros).
 5. Unit tests: **15/15** mobile gate; release phonefit cases green
    (pre-existing: python3.11 mise shim FAIL on this host only).
-6. Fresh live re-proof: **16/16 PASS**, traffic 0/0/0, profile stable.
+6. Fresh live re-proof: traffic 0/0/0, profile stable.
+
+### Slice H (this session)
+
+1. Durable proof script imports `mobile_ui_gate` page counter install/read +
+   `phone_fit_idempotent_state` (parity with live gate path).
+2. Re-tap installs page hooks before click; fails if install returns false.
+3. Dual-witness traffic: page counters **and** Playwright request intercept
+   must both be zero; missing `counterInstalled` fails closed.
+4. Emits canonical check name `fullscreen Phone fit re-tap stays idempotent`
+   with release-shaped evidence (`build_retap_gate_evidence`).
+5. Unit test: proof builder evidence satisfies
+   `assert_phone_fit_re_tap_traffic_evidence`; missing hooks / page leak /
+   Playwright leak all fail.
+6. Fresh live re-proof: **19/19 PASS**, page 0/0/0 + Playwright 0/0/0,
+   `counterInstalled=true`, profile `updated_at` + `vnc_ws_port` stable.
 
 ## Code
 
@@ -106,6 +125,10 @@ phone_fit_idempotent_state(..., counter_installed=)
 PHONE_FIT_RE_TAP_CHECK in REQUIRED_MOBILE_CHECKS
 assert_phone_fit_re_tap_traffic_evidence(checks)
 # requires trafficChecked + trafficOk + counterInstalled + zeros
+
+# scripts/phonefit_idempotent_retap_proof.py
+build_retap_gate_evidence(...)  # page + Playwright dual witness
+# live: install page counters, re-tap, emit gate-shaped check
 ```
 
 ## Proof (this session)
@@ -115,19 +138,15 @@ Command: python3 scripts/test_mobile_ui_gate.py -v
 Result:  Ran 15 tests  OK
 
 Command: python3 scripts/test_release_acceptance_gate.py -v
-Result:  PhoneFit re-tap required check OK
-         re-tap mutate-traffic + counterInstalled fail-closed OK
-         release pass/fail suite green
+Result:  PhoneFit re-tap + proof-builder contract OK
          (pre-existing: python3.11 mise shim FAIL on this host only)
-
-Command: cd frontend && npm test -- --run src/App.test.tsx \
-           src/components/mobile/MobileSplitScreen.test.tsx
-Result:  Tests  50 passed (50)
 
 Command: python3 scripts/phonefit_idempotent_retap_proof.py
          (Vite:5190 + Manager:18115, profile a8b99a1f-...)
-Result:  PASS — 16/16 checks
-         update/stop/launch on re-tap: 0/0/0
+Result:  PASS — 19/19 checks
+         page update/stop/launch: 0/0/0, counterInstalled=true
+         playwright update/stop/launch: 0/0/0
+         gate check evidence release-compatible
          profile updated_at unchanged; vnc_ws_port 6100 unchanged
          PNG SHA-256 bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea
 ```
@@ -142,15 +161,16 @@ Key tests / checks:
 - `test_phone_fit_mutate_counter_js_classifies_profile_mutate_paths`
 - `test_required_mobile_checks_include_phonefit_re_tap_idempotent`
 - `test_phone_fit_re_tap_requires_zero_mutate_traffic_evidence`
-- live: `re-tap no update/stop/launch traffic`
+- `test_proof_builder_evidence_satisfies_release_traffic_contract`
+- live: `re-tap page counters installed flag`
+- live: `re-tap no update/stop/launch traffic` (page + Playwright)
+- live: `fullscreen Phone fit re-tap stays idempotent` (gate-shaped)
 - live: `profile updated_at unchanged after re-tap`
 - live: `profile vnc/cdp endpoints unchanged after re-tap`
 
 Changed files this session:
 
-- `scripts/mobile_ui_gate.py`
-- `scripts/test_mobile_ui_gate.py`
-- `scripts/release_acceptance_gate.py`
+- `scripts/phonefit_idempotent_retap_proof.py`
 - `scripts/test_release_acceptance_gate.py`
 - `docs/reports/PHONEFIT-IDEMPOTENT-STATUS.md`
 - `docs/reports/PHONEFIT-IDEMPOTENT-LOCAL-PROOF-2026-08-02.md`
@@ -176,9 +196,10 @@ Changed files this session:
 
 - apply-path guard
 - honest status copy
-- unit proof (50/50 focused frontend; 15/15 mobile gate)
+- unit proof (focused frontend; 15/15 mobile gate)
 - gate re-tap contract + traffic counters + installed-hook guard
 - release acceptance requires re-tap name, mutate-traffic zeros, **and**
   `counterInstalled`
-- durable live re-tap proof (16 checks: UI + traffic + profile stability)
+- durable live re-tap proof uses **same page counters** as gate + Playwright
+  dual witness + release-shaped evidence (19 checks)
 - prior VCVM E2E evidence retained on-branch

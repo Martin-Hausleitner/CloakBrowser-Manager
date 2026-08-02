@@ -3,6 +3,11 @@
 
 Idempotent local proof against a branch Vite UI proxied to a real Manager.
 
+Uses the same page mutate counters + phone_fit_idempotent_state contract as
+scripts/mobile_ui_gate.py so durable proof evidence satisfies release acceptance
+(trafficChecked + trafficOk + counterInstalled + zero counts). Playwright
+request interception is a second independent zero-traffic witness.
+
 Env:
   PHONEFIT_BASE_URL     default http://127.0.0.1:5190/
   PHONEFIT_PROFILE_ID   default a8b99a1f-bd77-4249-917f-0ad681ea5519
@@ -25,6 +30,9 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
+# Same gate helpers used by mobile_ui_gate live re-tap + release acceptance.
+import mobile_ui_gate
+
 BASE = os.environ.get("PHONEFIT_BASE_URL", "http://127.0.0.1:5190/")
 PROFILE_ID = os.environ.get(
     "PHONEFIT_PROFILE_ID", "a8b99a1f-bd77-4249-917f-0ad681ea5519"
@@ -42,6 +50,54 @@ REPORT_PATH = Path(
     )
 )
 W, H = 390, 844
+# Must match release_acceptance_gate.PHONE_FIT_RE_TAP_CHECK
+PHONE_FIT_RE_TAP_CHECK = "fullscreen Phone fit re-tap stays idempotent"
+
+
+def build_retap_gate_evidence(
+    *,
+    status_text: str,
+    canvas_count: Any,
+    width: Any,
+    height: Any,
+    page_mutate: dict[str, Any],
+    playwright_mutate: dict[str, int],
+) -> dict[str, Any]:
+    """Compose re-tap evidence matching mobile_ui_gate + release traffic contract.
+
+    Page counters are authoritative for counterInstalled / updateCount / stopCount /
+    launchCount. Playwright network is a dual witness: both paths must show zeros.
+    """
+    installed = bool(page_mutate.get("installed"))
+    state = mobile_ui_gate.phone_fit_idempotent_state(
+        status_text=status_text,
+        canvas_count=canvas_count,
+        width=width,
+        height=height,
+        expected_width=W,
+        expected_height=H,
+        update_count=int(page_mutate.get("update") or 0),
+        stop_count=int(page_mutate.get("stop") or 0),
+        launch_count=int(page_mutate.get("launch") or 0),
+        counter_installed=installed,
+    )
+    pw_zeros = (
+        int(playwright_mutate.get("update") or 0) == 0
+        and int(playwright_mutate.get("stop") or 0) == 0
+        and int(playwright_mutate.get("launch") or 0) == 0
+    )
+    # Fail closed if either witness sees mutate traffic or hooks are missing.
+    state = dict(state)
+    state["playwrightTraffic"] = dict(playwright_mutate)
+    state["playwrightTrafficOk"] = pw_zeros
+    state["pageMutate"] = {
+        "installed": installed,
+        "update": int(page_mutate.get("update") or 0),
+        "stop": int(page_mutate.get("stop") or 0),
+        "launch": int(page_mutate.get("launch") or 0),
+    }
+    state["passed"] = bool(state.get("passed")) and pw_zeros and installed
+    return state
 
 
 def fetch_profile_snapshot() -> dict[str, Any]:
@@ -244,6 +300,11 @@ def main() -> int:
             f"{w1}x{h1}",
         )
 
+        # Page-level hooks (same as mobile_ui_gate) + Playwright dual witness.
+        installed_ok = bool(
+            page.evaluate(mobile_ui_gate.phone_fit_mutate_counter_install_js())
+        )
+        check("re-tap page mutate counters installed", installed_ok)
         mutate["update"] = mutate["stop"] = mutate["launch"] = 0
         tracking["enabled"] = True
         phone_fit.first.click()
@@ -264,29 +325,51 @@ def main() -> int:
         w2 = root.locator("#mobile-fullscreen-viewport-width").input_value()
         h2 = root.locator("#mobile-fullscreen-viewport-height").input_value()
         canvas = page.locator(".mobile-browser-content canvas").count()
-        claims_restart = (
-            "Restarting live browser" in text2
-            or "Restarts live browser to apply" in text2
+        page_mutate = page.evaluate(mobile_ui_gate.phone_fit_mutate_counter_read_js()) or {}
+        re_tap_state = build_retap_gate_evidence(
+            status_text=text2,
+            canvas_count=canvas,
+            width=w2,
+            height=h2,
+            page_mutate=page_mutate if isinstance(page_mutate, dict) else {},
+            playwright_mutate=dict(mutate),
         )
+        claims_restart = bool(re_tap_state.get("claimsRestart"))
         check(
             "re-tap settled",
-            "Saved" in text2 or "Already matches - no restart" in text2,
+            bool(re_tap_state.get("settled")),
             text2[:160],
         )
         check("re-tap no restart claim", not claims_restart, text2[:160])
         check(
             "re-tap size still 390x844",
-            w2 == str(W) and h2 == str(H),
+            bool(re_tap_state.get("sizeOk")),
             f"{w2}x{h2}",
         )
         check(
-            "re-tap no update/stop/launch traffic",
-            mutate["update"] == 0
-            and mutate["stop"] == 0
-            and mutate["launch"] == 0,
-            dict(mutate),
+            "re-tap page counters installed flag",
+            re_tap_state.get("counterInstalled") is True,
+            re_tap_state.get("pageMutate"),
         )
-        check("re-tap single canvas (content)", canvas == 1, canvas)
+        check(
+            "re-tap no update/stop/launch traffic",
+            bool(re_tap_state.get("trafficOk"))
+            and bool(re_tap_state.get("playwrightTrafficOk"))
+            and re_tap_state.get("updateCount") == 0
+            and re_tap_state.get("stopCount") == 0
+            and re_tap_state.get("launchCount") == 0,
+            {
+                "page": re_tap_state.get("pageMutate"),
+                "playwright": re_tap_state.get("playwrightTraffic"),
+            },
+        )
+        check("re-tap single canvas (content)", bool(re_tap_state.get("canvasOk")), canvas)
+        # Canonical gate-shaped check for release acceptance parity.
+        check(
+            PHONE_FIT_RE_TAP_CHECK,
+            bool(re_tap_state.get("passed")),
+            re_tap_state,
+        )
 
         page.screenshot(path=str(shot), full_page=False)
         digest = hashlib.sha256(shot.read_bytes()).hexdigest()
@@ -332,13 +415,28 @@ def main() -> int:
         },
     )
 
+    re_tap_evidence = next(
+        (
+            c.get("evidence")
+            for c in checks
+            if c.get("name") == PHONE_FIT_RE_TAP_CHECK and isinstance(c.get("evidence"), dict)
+        ),
+        None,
+    )
     report = {
         "outcome": "PASS",
         "base_url": BASE,
         "manager_api": MANAGER_API,
         "profile_id": PROFILE_ID,
         "viewport": f"{W}x{H}",
-        "mutate_on_retap": mutate,
+        "mutate_on_retap": {
+            "playwright": mutate,
+            "page": (re_tap_evidence or {}).get("pageMutate"),
+            "counterInstalled": (re_tap_evidence or {}).get("counterInstalled"),
+            "trafficChecked": (re_tap_evidence or {}).get("trafficChecked"),
+            "trafficOk": (re_tap_evidence or {}).get("trafficOk"),
+        },
+        "retap_gate_evidence": re_tap_evidence,
         "profile_before": before,
         "profile_after": after,
         "checks": checks,

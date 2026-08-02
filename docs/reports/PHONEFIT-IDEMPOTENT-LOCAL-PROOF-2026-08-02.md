@@ -20,18 +20,21 @@ Script: `scripts/phonefit_idempotent_retap_proof.py` (re-runnable)
 }
 ```
 
-### Checks
+### Checks (19/19)
 - [PASS] profile running at matching 390x844 before re-tap
 - [PASS] fullscreen control present/open
 - [PASS] viewport panel open
 - [PASS] Phone fit available
 - [PASS] first Phone fit settled
 - [PASS] first Phone fit size 390x844
+- [PASS] re-tap page mutate counters installed
 - [PASS] re-tap settled
 - [PASS] re-tap no restart claim
 - [PASS] re-tap size still 390x844
-- [PASS] re-tap no update/stop/launch traffic
+- [PASS] re-tap page counters installed flag (`counterInstalled=true`)
+- [PASS] re-tap no update/stop/launch traffic (page 0/0/0 + Playwright 0/0/0)
 - [PASS] re-tap single canvas (content)
+- [PASS] fullscreen Phone fit re-tap stays idempotent (gate-shaped evidence)
 - [PASS] screenshot written
 - [PASS] profile still running after re-tap
 - [PASS] profile screen size unchanged after re-tap
@@ -45,14 +48,17 @@ SHA-256: `bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea`
 
 ![PhoneFit re-tap](../evidence/phonefit-idempotent-local-retap-2026-08-02.png)
 
-### Gate contract (Slice G)
+### Gate contract (Slice H)
 
-Release acceptance fails closed unless re-tap evidence includes:
+Durable proof now matches release acceptance evidence shape:
 
+- page mutate counters installed (`__phoneFitMutateInstalled`)
 - `trafficChecked=true`
 - `trafficOk=true`
-- `counterInstalled=true` (page mutate hooks present; no false-zero)
+- `counterInstalled=true`
 - `updateCount=0`, `stopCount=0`, `launchCount=0`
+- Playwright dual witness also 0/0/0
+- canonical check name: `fullscreen Phone fit re-tap stays idempotent`
 
 ### Re-run
 ```bash

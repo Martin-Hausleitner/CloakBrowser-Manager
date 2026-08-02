@@ -21,6 +21,22 @@ release_gate = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = release_gate
 SPEC.loader.exec_module(release_gate)
 
+PROOF_PATH = REPO_ROOT / "scripts" / "phonefit_idempotent_retap_proof.py"
+PROOF_SPEC = importlib.util.spec_from_file_location(
+    "phonefit_idempotent_retap_proof", PROOF_PATH
+)
+assert PROOF_SPEC and PROOF_SPEC.loader
+# mobile_ui_gate is imported by the proof script; load it under the same name first.
+_MOBILE_PATH = REPO_ROOT / "scripts" / "mobile_ui_gate.py"
+_MOBILE_SPEC = importlib.util.spec_from_file_location("mobile_ui_gate", _MOBILE_PATH)
+assert _MOBILE_SPEC and _MOBILE_SPEC.loader
+_mobile_ui_gate = importlib.util.module_from_spec(_MOBILE_SPEC)
+sys.modules["mobile_ui_gate"] = _mobile_ui_gate
+_MOBILE_SPEC.loader.exec_module(_mobile_ui_gate)
+phonefit_proof = importlib.util.module_from_spec(PROOF_SPEC)
+sys.modules[PROOF_SPEC.name] = phonefit_proof
+PROOF_SPEC.loader.exec_module(phonefit_proof)
+
 
 NOW = "2026-07-21T16:00:00+00:00"
 
@@ -485,6 +501,65 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
             24,
         )
         self.assertTrue(summary["passed"])
+
+    def test_proof_builder_evidence_satisfies_release_traffic_contract(self) -> None:
+        """Durable proof evidence must be shape-compatible with release fail-closed."""
+        healthy = phonefit_proof.build_retap_gate_evidence(
+            status_text="Already matches - no restart",
+            canvas_count=1,
+            width="390",
+            height="844",
+            page_mutate={"installed": True, "update": 0, "stop": 0, "launch": 0},
+            playwright_mutate={"update": 0, "stop": 0, "launch": 0},
+        )
+        self.assertTrue(healthy["passed"])
+        self.assertTrue(healthy["counterInstalled"])
+        self.assertTrue(healthy["trafficChecked"])
+        self.assertTrue(healthy["trafficOk"])
+        self.assertTrue(healthy["playwrightTrafficOk"])
+        # Release acceptance must accept this evidence blob as-is.
+        release_gate.assert_phone_fit_re_tap_traffic_evidence(
+            [
+                {
+                    "name": release_gate.PHONE_FIT_RE_TAP_CHECK,
+                    "passed": True,
+                    "evidence": healthy,
+                }
+            ]
+        )
+
+        missing_hooks = phonefit_proof.build_retap_gate_evidence(
+            status_text="Already matches - no restart",
+            canvas_count=1,
+            width="390",
+            height="844",
+            page_mutate={"installed": False, "update": 0, "stop": 0, "launch": 0},
+            playwright_mutate={"update": 0, "stop": 0, "launch": 0},
+        )
+        self.assertFalse(missing_hooks["passed"])
+        self.assertIs(missing_hooks["counterInstalled"], False)
+
+        pw_leak = phonefit_proof.build_retap_gate_evidence(
+            status_text="Already matches - no restart",
+            canvas_count=1,
+            width="390",
+            height="844",
+            page_mutate={"installed": True, "update": 0, "stop": 0, "launch": 0},
+            playwright_mutate={"update": 0, "stop": 0, "launch": 1},
+        )
+        self.assertFalse(pw_leak["passed"])
+        self.assertFalse(pw_leak["playwrightTrafficOk"])
+
+        page_leak = phonefit_proof.build_retap_gate_evidence(
+            status_text="Already matches - no restart",
+            canvas_count=1,
+            width="390",
+            height="844",
+            page_mutate={"installed": True, "update": 1, "stop": 0, "launch": 0},
+            playwright_mutate={"update": 0, "stop": 0, "launch": 0},
+        )
+        self.assertFalse(page_leak["passed"])
+        self.assertFalse(page_leak["trafficOk"])
 
     def test_redaction_covers_tailnet_ipv6_and_local_paths(self) -> None:
         source = (

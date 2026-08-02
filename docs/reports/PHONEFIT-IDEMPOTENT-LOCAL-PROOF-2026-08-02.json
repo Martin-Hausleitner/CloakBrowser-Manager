@@ -50,6 +50,36 @@
       "launch": 0
     }
   },
+  "second_retap_gate_evidence": {
+    "settled": true,
+    "applying": false,
+    "claimsRestart": false,
+    "sizeOk": true,
+    "canvasOk": true,
+    "trafficChecked": true,
+    "trafficOk": true,
+    "counterInstalled": true,
+    "updateCount": 0,
+    "stopCount": 0,
+    "launchCount": 0,
+    "passed": true,
+    "statusText": "Viewport width\n\u00d7\nViewport height\nApply\nPhone fit\nMobile\nTablet\nDesktop\n\nSaved",
+    "width": "390",
+    "height": "844",
+    "canvasCount": 1,
+    "playwrightTraffic": {
+      "update": 0,
+      "stop": 0,
+      "launch": 0
+    },
+    "playwrightTrafficOk": true,
+    "pageMutate": {
+      "installed": true,
+      "update": 0,
+      "stop": 0,
+      "launch": 0
+    }
+  },
   "profile_before": {
     "status": "running",
     "screen_width": 390,
@@ -155,6 +185,90 @@
       "name": "re-tap single canvas (content)",
       "passed": true,
       "evidence": 1
+    },
+    {
+      "name": "second re-tap page mutate counters installed",
+      "passed": true,
+      "evidence": null
+    },
+    {
+      "name": "second re-tap settled",
+      "passed": true,
+      "evidence": "Viewport width\n\u00d7\nViewport height\nApply\nPhone fit\nMobile\nTablet\nDesktop\n\nSaved"
+    },
+    {
+      "name": "second re-tap no restart claim",
+      "passed": true,
+      "evidence": "Viewport width\n\u00d7\nViewport height\nApply\nPhone fit\nMobile\nTablet\nDesktop\n\nSaved"
+    },
+    {
+      "name": "second re-tap size still 390x844",
+      "passed": true,
+      "evidence": "390x844"
+    },
+    {
+      "name": "second re-tap page counters installed flag",
+      "passed": true,
+      "evidence": {
+        "installed": true,
+        "update": 0,
+        "stop": 0,
+        "launch": 0
+      }
+    },
+    {
+      "name": "second re-tap no update/stop/launch traffic",
+      "passed": true,
+      "evidence": {
+        "page": {
+          "installed": true,
+          "update": 0,
+          "stop": 0,
+          "launch": 0
+        },
+        "playwright": {
+          "update": 0,
+          "stop": 0,
+          "launch": 0
+        }
+      }
+    },
+    {
+      "name": "second re-tap single canvas (content)",
+      "passed": true,
+      "evidence": 1
+    },
+    {
+      "name": "second re-tap stays dual-zero like first",
+      "passed": true,
+      "evidence": {
+        "first": {
+          "page": {
+            "installed": true,
+            "update": 0,
+            "stop": 0,
+            "launch": 0
+          },
+          "playwright": {
+            "update": 0,
+            "stop": 0,
+            "launch": 0
+          }
+        },
+        "second": {
+          "page": {
+            "installed": true,
+            "update": 0,
+            "stop": 0,
+            "launch": 0
+          },
+          "playwright": {
+            "update": 0,
+            "stop": 0,
+            "launch": 0
+          }
+        }
+      }
     },
     {
       "name": "fullscreen Phone fit re-tap stays idempotent",

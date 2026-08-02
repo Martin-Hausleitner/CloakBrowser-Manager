@@ -300,71 +300,109 @@ def main() -> int:
             f"{w1}x{h1}",
         )
 
-        # Page-level hooks (same as mobile_ui_gate) + Playwright dual witness.
-        installed_ok = bool(
-            page.evaluate(mobile_ui_gate.phone_fit_mutate_counter_install_js())
-        )
-        check("re-tap page mutate counters installed", installed_ok)
-        mutate["update"] = mutate["stop"] = mutate["launch"] = 0
-        tracking["enabled"] = True
-        phone_fit.first.click()
-        for _ in range(40):
-            text = root.inner_text()
-            if (
-                ("Saved" in text or "Already matches - no restart" in text)
-                and "Restarting" not in text
-                and "Keeping live" not in text
-                and "Saving viewport" not in text
-            ):
-                break
-            page.wait_for_timeout(250)
-        tracking["enabled"] = False
-        page.wait_for_timeout(300)
+        def wait_phone_fit_settled() -> str:
+            for _ in range(40):
+                text = root.inner_text()
+                if (
+                    ("Saved" in text or "Already matches - no restart" in text)
+                    and "Restarting" not in text
+                    and "Keeping live" not in text
+                    and "Saving viewport" not in text
+                ):
+                    return text
+                page.wait_for_timeout(250)
+            return root.inner_text()
 
-        text2 = root.inner_text()
-        w2 = root.locator("#mobile-fullscreen-viewport-width").input_value()
-        h2 = root.locator("#mobile-fullscreen-viewport-height").input_value()
-        canvas = page.locator(".mobile-browser-content canvas").count()
-        page_mutate = page.evaluate(mobile_ui_gate.phone_fit_mutate_counter_read_js()) or {}
-        re_tap_state = build_retap_gate_evidence(
-            status_text=text2,
-            canvas_count=canvas,
-            width=w2,
-            height=h2,
-            page_mutate=page_mutate if isinstance(page_mutate, dict) else {},
-            playwright_mutate=dict(mutate),
-        )
-        claims_restart = bool(re_tap_state.get("claimsRestart"))
+        def run_retap(label: str) -> dict[str, Any]:
+            """One re-tap with page hooks + Playwright dual witness (counters reset)."""
+            installed_ok = bool(
+                page.evaluate(mobile_ui_gate.phone_fit_mutate_counter_install_js())
+            )
+            check(f"{label} page mutate counters installed", installed_ok)
+            mutate["update"] = mutate["stop"] = mutate["launch"] = 0
+            tracking["enabled"] = True
+            phone_fit.first.click()
+            wait_phone_fit_settled()
+            tracking["enabled"] = False
+            page.wait_for_timeout(300)
+
+            status_text = root.inner_text()
+            width = root.locator("#mobile-fullscreen-viewport-width").input_value()
+            height = root.locator("#mobile-fullscreen-viewport-height").input_value()
+            canvas_count = page.locator(".mobile-browser-content canvas").count()
+            page_mutate = (
+                page.evaluate(mobile_ui_gate.phone_fit_mutate_counter_read_js()) or {}
+            )
+            state = build_retap_gate_evidence(
+                status_text=status_text,
+                canvas_count=canvas_count,
+                width=width,
+                height=height,
+                page_mutate=page_mutate if isinstance(page_mutate, dict) else {},
+                playwright_mutate=dict(mutate),
+            )
+            check(
+                f"{label} settled",
+                bool(state.get("settled")),
+                status_text[:160],
+            )
+            check(
+                f"{label} no restart claim",
+                not bool(state.get("claimsRestart")),
+                status_text[:160],
+            )
+            check(
+                f"{label} size still 390x844",
+                bool(state.get("sizeOk")),
+                f"{width}x{height}",
+            )
+            check(
+                f"{label} page counters installed flag",
+                state.get("counterInstalled") is True,
+                state.get("pageMutate"),
+            )
+            check(
+                f"{label} no update/stop/launch traffic",
+                bool(state.get("trafficOk"))
+                and bool(state.get("playwrightTrafficOk"))
+                and state.get("updateCount") == 0
+                and state.get("stopCount") == 0
+                and state.get("launchCount") == 0,
+                {
+                    "page": state.get("pageMutate"),
+                    "playwright": state.get("playwrightTraffic"),
+                },
+            )
+            check(
+                f"{label} single canvas (content)",
+                bool(state.get("canvasOk")),
+                canvas_count,
+            )
+            return state
+
+        # First re-tap: page hooks + Playwright dual witness.
+        re_tap_state = run_retap("re-tap")
+        # Second re-tap: repeated Phone fit must stay zero-traffic (idempotent N).
+        re_tap2_state = run_retap("second re-tap")
         check(
-            "re-tap settled",
-            bool(re_tap_state.get("settled")),
-            text2[:160],
-        )
-        check("re-tap no restart claim", not claims_restart, text2[:160])
-        check(
-            "re-tap size still 390x844",
-            bool(re_tap_state.get("sizeOk")),
-            f"{w2}x{h2}",
-        )
-        check(
-            "re-tap page counters installed flag",
-            re_tap_state.get("counterInstalled") is True,
-            re_tap_state.get("pageMutate"),
-        )
-        check(
-            "re-tap no update/stop/launch traffic",
-            bool(re_tap_state.get("trafficOk"))
-            and bool(re_tap_state.get("playwrightTrafficOk"))
-            and re_tap_state.get("updateCount") == 0
-            and re_tap_state.get("stopCount") == 0
-            and re_tap_state.get("launchCount") == 0,
+            "second re-tap stays dual-zero like first",
+            bool(re_tap2_state.get("passed"))
+            and re_tap2_state.get("updateCount") == 0
+            and re_tap2_state.get("stopCount") == 0
+            and re_tap2_state.get("launchCount") == 0
+            and re_tap2_state.get("playwrightTrafficOk") is True,
             {
-                "page": re_tap_state.get("pageMutate"),
-                "playwright": re_tap_state.get("playwrightTraffic"),
+                "first": {
+                    "page": re_tap_state.get("pageMutate"),
+                    "playwright": re_tap_state.get("playwrightTraffic"),
+                },
+                "second": {
+                    "page": re_tap2_state.get("pageMutate"),
+                    "playwright": re_tap2_state.get("playwrightTraffic"),
+                },
             },
         )
-        check("re-tap single canvas (content)", bool(re_tap_state.get("canvasOk")), canvas)
-        # Canonical gate-shaped check for release acceptance parity.
+        # Canonical gate-shaped check for release acceptance parity (first re-tap).
         check(
             PHONE_FIT_RE_TAP_CHECK,
             bool(re_tap_state.get("passed")),
@@ -437,6 +475,7 @@ def main() -> int:
             "trafficOk": (re_tap_evidence or {}).get("trafficOk"),
         },
         "retap_gate_evidence": re_tap_evidence,
+        "second_retap_gate_evidence": re_tap2_state,
         "profile_before": before,
         "profile_after": after,
         "checks": checks,

@@ -20,7 +20,7 @@ Script: `scripts/phonefit_idempotent_retap_proof.py` (re-runnable)
 }
 ```
 
-### Checks (19/19)
+### Checks (27/27)
 - [PASS] profile running at matching 390x844 before re-tap
 - [PASS] fullscreen control present/open
 - [PASS] viewport panel open
@@ -34,6 +34,14 @@ Script: `scripts/phonefit_idempotent_retap_proof.py` (re-runnable)
 - [PASS] re-tap page counters installed flag (`counterInstalled=true`)
 - [PASS] re-tap no update/stop/launch traffic (page 0/0/0 + Playwright 0/0/0)
 - [PASS] re-tap single canvas (content)
+- [PASS] second re-tap page mutate counters installed
+- [PASS] second re-tap settled
+- [PASS] second re-tap no restart claim
+- [PASS] second re-tap size still 390x844
+- [PASS] second re-tap page counters installed flag
+- [PASS] second re-tap no update/stop/launch traffic (page 0/0/0 + Playwright 0/0/0)
+- [PASS] second re-tap single canvas (content)
+- [PASS] second re-tap stays dual-zero like first
 - [PASS] fullscreen Phone fit re-tap stays idempotent (gate-shaped evidence)
 - [PASS] screenshot written
 - [PASS] profile still running after re-tap
@@ -48,17 +56,20 @@ SHA-256: `bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea`
 
 ![PhoneFit re-tap](../evidence/phonefit-idempotent-local-retap-2026-08-02.png)
 
-### Gate contract (Slice H)
+### Gate contract (Slice I)
 
-Durable proof now matches release acceptance evidence shape:
+Durable proof matches release acceptance evidence shape and extends it:
 
 - page mutate counters installed (`__phoneFitMutateInstalled`)
 - `trafficChecked=true`
 - `trafficOk=true`
 - `counterInstalled=true`
 - `updateCount=0`, `stopCount=0`, `launchCount=0`
-- Playwright dual witness also 0/0/0
+- Playwright dual witness also 0/0/0 (`playwrightTrafficOk=true`)
+- second re-tap also dual-zero (idempotent under repeated taps)
 - canonical check name: `fullscreen Phone fit re-tap stays idempotent`
+- release fail-closed when Playwright dual witness is present and non-zero
+- unit test locks committed proof JSON via `assert_phone_fit_durable_proof_report`
 
 ### Re-run
 ```bash

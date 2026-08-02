@@ -23,6 +23,10 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
    `phone_fit_idempotent_state` contract as the gate (not Playwright-only),
    dual-witness zeros (page + Playwright), and emit release-shaped evidence
    (`trafficChecked`, `trafficOk`, `counterInstalled`, zero counts).
+6. When durable proof attaches a Playwright dual witness, release acceptance
+   must fail closed if that witness is non-zero. A second re-tap must also
+   stay dual-zero. The committed durable proof JSON itself is validated by
+   unit tests against the release contract.
 
 ## Steps completed
 
@@ -85,7 +89,7 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
    (pre-existing: python3.11 mise shim FAIL on this host only).
 6. Fresh live re-proof: traffic 0/0/0, profile stable.
 
-### Slice H (this session)
+### Slice H (commit `901ab8a`)
 
 1. Durable proof script imports `mobile_ui_gate` page counter install/read +
    `phone_fit_idempotent_state` (parity with live gate path).
@@ -99,6 +103,22 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
    Playwright leak all fail.
 6. Fresh live re-proof: **19/19 PASS**, page 0/0/0 + Playwright 0/0/0,
    `counterInstalled=true`, profile `updated_at` + `vnc_ws_port` stable.
+
+### Slice I (this session)
+
+1. Release acceptance dual-witness fail-closed: when evidence includes
+   `playwrightTrafficOk` / `playwrightTraffic`, require zeros there too
+   (page-only mobile gate reports remain valid without those keys).
+2. `assert_phone_fit_durable_proof_report` validates durable proof JSON
+   (outcome PASS, all checks pass, re-tap name + traffic contract).
+3. Durable proof runs a **second re-tap** with counters reset; both re-taps
+   must be dual-zero (idempotent under repeated taps).
+4. Unit test loads committed
+   `docs/reports/PHONEFIT-IDEMPOTENT-LOCAL-PROOF-2026-08-02.json` and
+   asserts the release contract.
+5. Host-tolerant python3.11 compile test: skip when mise shim is broken
+   (was a permanent FAIL on this host).
+6. Fresh live re-proof: **27/27 PASS**.
 
 ## Code
 
@@ -125,10 +145,12 @@ phone_fit_idempotent_state(..., counter_installed=)
 PHONE_FIT_RE_TAP_CHECK in REQUIRED_MOBILE_CHECKS
 assert_phone_fit_re_tap_traffic_evidence(checks)
 # requires trafficChecked + trafficOk + counterInstalled + zeros
+# + optional Playwright dual witness when present
+assert_phone_fit_durable_proof_report(report)
 
 # scripts/phonefit_idempotent_retap_proof.py
 build_retap_gate_evidence(...)  # page + Playwright dual witness
-# live: install page counters, re-tap, emit gate-shaped check
+# live: re-tap + second re-tap, both dual-zero
 ```
 
 ## Proof (this session)
@@ -138,14 +160,14 @@ Command: python3 scripts/test_mobile_ui_gate.py -v
 Result:  Ran 15 tests  OK
 
 Command: python3 scripts/test_release_acceptance_gate.py -v
-Result:  PhoneFit re-tap + proof-builder contract OK
-         (pre-existing: python3.11 mise shim FAIL on this host only)
+Result:  Ran 15 tests  OK (skipped=1 python3.11 host)
+         dual-witness + durable proof contract OK
 
 Command: python3 scripts/phonefit_idempotent_retap_proof.py
          (Vite:5190 + Manager:18115, profile a8b99a1f-...)
-Result:  PASS — 19/19 checks
-         page update/stop/launch: 0/0/0, counterInstalled=true
-         playwright update/stop/launch: 0/0/0
+Result:  PASS — 27/27 checks
+         re-tap page 0/0/0 + playwright 0/0/0, counterInstalled=true
+         second re-tap page 0/0/0 + playwright 0/0/0
          gate check evidence release-compatible
          profile updated_at unchanged; vnc_ws_port 6100 unchanged
          PNG SHA-256 bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea
@@ -162,14 +184,15 @@ Key tests / checks:
 - `test_required_mobile_checks_include_phonefit_re_tap_idempotent`
 - `test_phone_fit_re_tap_requires_zero_mutate_traffic_evidence`
 - `test_proof_builder_evidence_satisfies_release_traffic_contract`
-- live: `re-tap page counters installed flag`
-- live: `re-tap no update/stop/launch traffic` (page + Playwright)
+- `test_phone_fit_durable_proof_report_contract`
+- live: `re-tap` + `second re-tap` dual-zero traffic
 - live: `fullscreen Phone fit re-tap stays idempotent` (gate-shaped)
 - live: `profile updated_at unchanged after re-tap`
 - live: `profile vnc/cdp endpoints unchanged after re-tap`
 
 Changed files this session:
 
+- `scripts/release_acceptance_gate.py`
 - `scripts/phonefit_idempotent_retap_proof.py`
 - `scripts/test_release_acceptance_gate.py`
 - `docs/reports/PHONEFIT-IDEMPOTENT-STATUS.md`
@@ -198,8 +221,9 @@ Changed files this session:
 - honest status copy
 - unit proof (focused frontend; 15/15 mobile gate)
 - gate re-tap contract + traffic counters + installed-hook guard
-- release acceptance requires re-tap name, mutate-traffic zeros, **and**
-  `counterInstalled`
-- durable live re-tap proof uses **same page counters** as gate + Playwright
-  dual witness + release-shaped evidence (19 checks)
+- release acceptance requires re-tap name, mutate-traffic zeros,
+  `counterInstalled`, and optional Playwright dual witness
+- durable live re-tap proof: same page counters as gate + Playwright dual
+  witness + second re-tap + release-shaped evidence (27 checks)
+- committed durable proof JSON locked by unit test
 - prior VCVM E2E evidence retained on-branch

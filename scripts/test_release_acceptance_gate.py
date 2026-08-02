@@ -120,8 +120,22 @@ def streaming_report() -> dict[str, object]:
     }
 
 
+def _python311_usable() -> bool:
+    """True only when python3.11 is a real interpreter (not a broken mise shim)."""
+    python_311 = shutil.which("python3.11")
+    if not python_311:
+        return False
+    probe = subprocess.run(
+        [python_311, "-c", "import sys; print(sys.version_info[:2])"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return probe.returncode == 0 and "3, 11" in (probe.stdout or "")
+
+
 class ReleaseAcceptanceGateTest(unittest.TestCase):
-    @unittest.skipUnless(shutil.which("python3.11"), "Python 3.11 is not installed")
+    @unittest.skipUnless(_python311_usable(), "Python 3.11 interpreter not usable on host")
     def test_release_gate_compiles_on_python_311(self) -> None:
         python_311 = shutil.which("python3.11")
         assert python_311
@@ -549,6 +563,33 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
         )
         self.assertFalse(pw_leak["passed"])
         self.assertFalse(pw_leak["playwrightTrafficOk"])
+        # Dual witness present with leak must fail release acceptance.
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "Playwright dual witness",
+        ):
+            release_gate.assert_phone_fit_re_tap_traffic_evidence(
+                [
+                    {
+                        "name": release_gate.PHONE_FIT_RE_TAP_CHECK,
+                        "passed": True,
+                        "evidence": {
+                            "trafficChecked": True,
+                            "trafficOk": True,
+                            "counterInstalled": True,
+                            "updateCount": 0,
+                            "stopCount": 0,
+                            "launchCount": 0,
+                            "playwrightTrafficOk": False,
+                            "playwrightTraffic": {
+                                "update": 0,
+                                "stop": 0,
+                                "launch": 1,
+                            },
+                        },
+                    }
+                ]
+            )
 
         page_leak = phonefit_proof.build_retap_gate_evidence(
             status_text="Already matches - no restart",
@@ -560,6 +601,52 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
         )
         self.assertFalse(page_leak["passed"])
         self.assertFalse(page_leak["trafficOk"])
+
+        # Page-only evidence (mobile_ui_gate path) without Playwright keys still OK.
+        release_gate.assert_phone_fit_re_tap_traffic_evidence(
+            [
+                {
+                    "name": release_gate.PHONE_FIT_RE_TAP_CHECK,
+                    "passed": True,
+                    "evidence": phone_fit_re_tap_check()["evidence"],
+                }
+            ]
+        )
+
+    def test_phone_fit_durable_proof_report_contract(self) -> None:
+        """Committed durable proof JSON must satisfy release fail-closed contract."""
+        proof_path = (
+            REPO_ROOT
+            / "docs"
+            / "reports"
+            / "PHONEFIT-IDEMPOTENT-LOCAL-PROOF-2026-08-02.json"
+        )
+        self.assertTrue(proof_path.is_file(), f"missing proof artifact: {proof_path}")
+        report = json.loads(proof_path.read_text(encoding="utf-8"))
+        summary = release_gate.assert_phone_fit_durable_proof_report(report)
+        self.assertTrue(summary["passed"])
+        self.assertTrue(summary["has_retap"])
+        self.assertGreaterEqual(summary["checks"], 19)
+
+        bad_outcome = dict(report)
+        bad_outcome["outcome"] = "FAIL"
+        with self.assertRaisesRegex(release_gate.GateError, "outcome must be PASS"):
+            release_gate.assert_phone_fit_durable_proof_report(bad_outcome)
+
+        missing_retap = dict(report)
+        missing_retap["checks"] = [
+            item
+            for item in report["checks"]
+            if not (
+                isinstance(item, dict)
+                and item.get("name") == release_gate.PHONE_FIT_RE_TAP_CHECK
+            )
+        ]
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "missing required check",
+        ):
+            release_gate.assert_phone_fit_durable_proof_report(missing_retap)
 
     def test_redaction_covers_tailnet_ipv6_and_local_paths(self) -> None:
         source = (

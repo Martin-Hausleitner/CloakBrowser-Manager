@@ -249,6 +249,10 @@ def assert_phone_fit_re_tap_traffic_evidence(checks: list[Any]) -> None:
     explicit trafficChecked + counterInstalled + zero update/stop/launch counts
     in evidence. Without counterInstalled, a missing page hook can still report
     false-zero traffic.
+
+    When durable proof attaches a Playwright dual witness
+    (`playwrightTrafficOk` and/or `playwrightTraffic`), that witness must also
+    show zeros. Mobile gate reports without Playwright keys stay page-only.
     """
     re_tap_checks = [
         check
@@ -279,6 +283,69 @@ def assert_phone_fit_re_tap_traffic_evidence(checks: list[Any]) -> None:
                 f"trafficOk={evidence.get('trafficOk')!r} "
                 f"counterInstalled={evidence.get('counterInstalled')!r})"
             )
+        # Optional dual witness from durable proof / Playwright intercept.
+        has_pw = "playwrightTrafficOk" in evidence or "playwrightTraffic" in evidence
+        if has_pw:
+            pw_ok = evidence.get("playwrightTrafficOk") is True
+            pw = evidence.get("playwrightTraffic")
+            pw_zeros = True
+            if isinstance(pw, dict):
+                pw_zeros = (
+                    int(pw.get("update") or 0) == 0
+                    and int(pw.get("stop") or 0) == 0
+                    and int(pw.get("launch") or 0) == 0
+                )
+            if not (pw_ok and pw_zeros):
+                raise GateError(
+                    f"{PHONE_FIT_RE_TAP_CHECK} Playwright dual witness must be "
+                    f"zero mutate traffic (playwrightTrafficOk="
+                    f"{evidence.get('playwrightTrafficOk')!r} "
+                    f"playwrightTraffic={pw!r})"
+                )
+
+
+def assert_phone_fit_durable_proof_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed if a durable PhoneFit proof JSON is not release-shaped.
+
+    Accepts the artifact written by scripts/phonefit_idempotent_retap_proof.py
+    (checks list + retap_gate_evidence). Used to lock the committed local proof
+    into the same contract as mobile gate re-tap evidence.
+    """
+    if not isinstance(report, dict):
+        raise GateError("phonefit durable proof must be an object")
+    if report.get("outcome") != "PASS":
+        raise GateError(
+            f"phonefit durable proof outcome must be PASS "
+            f"(got {report.get('outcome')!r})"
+        )
+    checks = report.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise GateError("phonefit durable proof has no checks")
+    failed = [
+        check.get("name")
+        for check in checks
+        if isinstance(check, dict) and check.get("passed") is not True
+    ]
+    if failed:
+        raise GateError(
+            "phonefit durable proof contains failed checks: " + ", ".join(map(str, failed))
+        )
+    assert_phone_fit_re_tap_traffic_evidence(checks)
+    names = {
+        str(check.get("name"))
+        for check in checks
+        if isinstance(check, dict) and isinstance(check.get("name"), str)
+    }
+    if PHONE_FIT_RE_TAP_CHECK not in names:
+        raise GateError(
+            f"phonefit durable proof missing required check: {PHONE_FIT_RE_TAP_CHECK}"
+        )
+    return {
+        "passed": True,
+        "checks": len(checks),
+        "has_retap": True,
+        "outcome": "PASS",
+    }
 
 
 def summarize_mobile(report: dict[str, Any], now: datetime, max_age_hours: float) -> dict[str, Any]:

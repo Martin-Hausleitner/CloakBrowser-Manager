@@ -53,6 +53,78 @@ class MobileUiGateTest(unittest.TestCase):
             "Codex Computer Use test harness accepted: Mobile gate iphone",
         )
 
+    def test_fullscreen_viewport_apply_settled_js_accepts_match_copy(self) -> None:
+        script = mobile_ui_gate.fullscreen_viewport_apply_settled_js()
+        self.assertIn("Saved", script)
+        self.assertIn("Already matches - no restart", script)
+        # In-progress copy must not count as settled.
+        self.assertIn("Keeping live session", script)
+        self.assertIn("return false", script)
+
+    def test_phone_fit_idempotent_state_passes_when_match_copy_and_single_canvas(self) -> None:
+        state = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Phone fit\nAlready matches - no restart",
+            canvas_count=1,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+        )
+        self.assertTrue(state["passed"])
+        self.assertTrue(state["settled"])
+        self.assertFalse(state["claimsRestart"])
+        self.assertFalse(state["applying"])
+        self.assertTrue(state["canvasOk"])
+        self.assertTrue(state["sizeOk"])
+
+    def test_phone_fit_idempotent_state_passes_when_saved_after_noop(self) -> None:
+        state = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Saved",
+            canvas_count=1,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+        )
+        self.assertTrue(state["passed"])
+
+    def test_phone_fit_idempotent_state_fails_when_still_applying(self) -> None:
+        state = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Keeping live session...",
+            canvas_count=1,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+        )
+        self.assertFalse(state["passed"])
+        self.assertTrue(state["applying"])
+        self.assertFalse(state["settled"])
+
+    def test_phone_fit_idempotent_state_fails_when_restart_is_claimed(self) -> None:
+        state = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Restarting live browser...",
+            canvas_count=1,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+        )
+        self.assertFalse(state["passed"])
+        self.assertTrue(state["claimsRestart"])
+
+    def test_phone_fit_idempotent_state_fails_when_canvas_duplicates(self) -> None:
+        state = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Saved",
+            canvas_count=2,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+        )
+        self.assertFalse(state["passed"])
+        self.assertFalse(state["canvasOk"])
+
     def test_mobile_gate_init_script_injects_available_codex_host_harness(self) -> None:
         script = mobile_ui_gate.mobile_gate_init_script()
 

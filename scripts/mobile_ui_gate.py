@@ -232,6 +232,67 @@ def add_check(result: dict[str, Any], name: str, passed: bool, evidence: Any) ->
         raise GateError(f"{name} failed: {evidence}")
 
 
+def fullscreen_viewport_status_text_js(root_expr: str = 'document.querySelector(\'[aria-label="Fullscreen viewport controls"]\')') -> str:
+    """JS expression returning the fullscreen viewport editor status text (or empty string)."""
+    return f"({root_expr}?.innerText ?? '')"
+
+
+def fullscreen_viewport_apply_settled_js() -> str:
+    """True when a viewport apply finished (not still applying).
+
+    Accepts both a successful save ('Saved') and the PhoneFit match idle copy
+    ('Already matches - no restart') so re-taps that short-circuit
+    update/stop/launch still pass the gate. In-progress strings
+    ('Keeping live session...', 'Restarting live browser...', 'Saving viewport...')
+    must stay false so wait_for does not return early.
+    """
+    text = fullscreen_viewport_status_text_js()
+    return (
+        f"(() => {{ const t = {text}; "
+        "if (t.includes('Keeping live session') || t.includes('Restarting live browser') "
+        "|| t.includes('Saving viewport') || t.includes('Applying')) return false; "
+        "return t.includes('Saved') || t.includes('Already matches - no restart'); })()"
+    )
+
+
+def phone_fit_idempotent_state(
+    *,
+    status_text: str,
+    canvas_count: Any,
+    width: Any,
+    height: Any,
+    expected_width: int,
+    expected_height: int,
+) -> dict[str, Any]:
+    """Evaluate a second Phone-fit re-tap against the match-aware UI contract."""
+    text = status_text or ""
+    applying = (
+        "Keeping live session" in text
+        or "Restarting live browser" in text
+        or "Saving viewport" in text
+    )
+    claims_restart = "Restarting live browser" in text or "Restarts live browser to apply" in text
+    settled = (
+        not applying
+        and ("Saved" in text or "Already matches - no restart" in text)
+        and not claims_restart
+    )
+    size_ok = str(width) == str(expected_width) and str(height) == str(expected_height)
+    canvas_ok = int(canvas_count or 0) == 1
+    return {
+        "settled": settled,
+        "applying": applying,
+        "claimsRestart": claims_restart,
+        "sizeOk": size_ok,
+        "canvasOk": canvas_ok,
+        "passed": bool(settled and size_ok and canvas_ok and not claims_restart),
+        "statusText": text,
+        "width": width,
+        "height": height,
+        "canvasCount": canvas_count,
+    }
+
+
 def mobile_shortcut_toggle_state(
     *,
     tools_after_k: Any,
@@ -2375,16 +2436,22 @@ def run_viewport(
             apply_check_name = "fullscreen viewport apply action available"
         add_check(result, apply_check_name, bool(applied), {"clicked": applied})
         browser.wait_for(
-            "document.querySelector('[aria-label=\"Fullscreen viewport controls\"]')?.innerText.includes('Saved')",
+            fullscreen_viewport_apply_settled_js(),
             "fullscreen viewport save",
             timeout,
         )
         if name == "iphone-14-portrait":
             phone_fit_state = browser.eval(r"""(() => {
               const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
+              const text = root?.innerText ?? '';
               const width = root?.querySelector('#mobile-fullscreen-viewport-width')?.value ?? null;
               const height = root?.querySelector('#mobile-fullscreen-viewport-height')?.value ?? null;
-              return {width, height, saved: root?.innerText.includes('Saved') ?? false};
+              return {
+                width,
+                height,
+                saved: text.includes('Saved') || text.includes('Already matches - no restart'),
+                statusText: text,
+              };
             })()""")
             add_check(
                 result,
@@ -2393,6 +2460,51 @@ def run_viewport(
                 and phone_fit_state.get("height") == str(height)
                 and bool(phone_fit_state.get("saved")),
                 phone_fit_state,
+            )
+            # Re-tap Phone fit: when dims already match, apply must stay idempotent
+            # (no restart claim; single live canvas; same width/height).
+            re_tapped = browser.eval(r"""(() => {
+              const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
+              const phoneFit = [...(root?.querySelectorAll('button') ?? [])]
+                .find((button) => button.textContent?.trim() === 'Phone fit' && !button.disabled);
+              if (!phoneFit) return false;
+              phoneFit.click();
+              return true;
+            })()""")
+            add_check(
+                result,
+                "fullscreen Phone fit re-tap action available",
+                bool(re_tapped),
+                {"clicked": bool(re_tapped)},
+            )
+            browser.wait_for(
+                fullscreen_viewport_apply_settled_js(),
+                "fullscreen Phone fit re-tap settled",
+                timeout,
+            )
+            re_tap_raw = browser.eval(r"""(() => {
+              const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
+              const text = root?.innerText ?? '';
+              return {
+                statusText: text,
+                width: root?.querySelector('#mobile-fullscreen-viewport-width')?.value ?? null,
+                height: root?.querySelector('#mobile-fullscreen-viewport-height')?.value ?? null,
+                canvasCount: document.querySelectorAll('.mobile-browser-content canvas').length,
+              };
+            })()""")
+            re_tap_state = phone_fit_idempotent_state(
+                status_text=str(re_tap_raw.get("statusText") or ""),
+                canvas_count=re_tap_raw.get("canvasCount"),
+                width=re_tap_raw.get("width"),
+                height=re_tap_raw.get("height"),
+                expected_width=width,
+                expected_height=height,
+            )
+            add_check(
+                result,
+                "fullscreen Phone fit re-tap stays idempotent",
+                bool(re_tap_state.get("passed")),
+                re_tap_state,
             )
         take_screenshot(browser, result, output_dir, name, "fullscreen-viewport", width, height)
         if (

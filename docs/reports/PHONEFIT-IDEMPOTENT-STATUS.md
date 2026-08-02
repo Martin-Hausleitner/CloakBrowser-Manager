@@ -13,7 +13,8 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
 2. The mobile viewport editor status copy must match that behavior: matching
    dimensions must not claim a live restart.
 3. The mobile UI gate must accept match-aware status copy and assert a second
-   Phone-fit re-tap stays idempotent (no restart claim, single canvas, same size).
+   Phone-fit re-tap stays idempotent (no restart claim, single canvas, same size,
+   and zero update/stop/launch traffic when counters are available).
 4. The release acceptance gate must fail closed if mobile evidence omits the
    re-tap idempotent check.
 
@@ -34,23 +35,26 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
 ### Slice C (commit `fc24100`)
 
 1. Hardened `scripts/mobile_ui_gate.py` for PhoneFit idempotency.
-2. Pure unit tests in `scripts/test_mobile_ui_gate.py` (**12/12 OK**).
+2. Pure unit tests in `scripts/test_mobile_ui_gate.py`.
 3. Ported prior VCVM E2E evidence onto this branch.
 
-### Slice D (this session)
+### Slice D (commit `d14e0ec`)
 
 1. Added `fullscreen Phone fit re-tap stays idempotent` to
-   `REQUIRED_MOBILE_CHECKS` in `scripts/release_acceptance_gate.py` so releases
-   fail closed without re-tap evidence.
+   `REQUIRED_MOBILE_CHECKS` in `scripts/release_acceptance_gate.py`.
 2. Unit test: missing re-tap check raises GateError.
-3. Live local proof on this branch SHA:
-   - Vite UI `127.0.0.1:5190` (branch) proxied to Manager `127.0.0.1:18115`
-   - Profile `a8b99a1f-...` (VCVM Mobile Demo) running at 390x844
-   - Full View -> Viewport -> Phone fit -> re-tap Phone fit
-   - re-tap: settled, no restart claim, size 390x844, content canvas=1
+3. Live local Playwright re-tap proof (traffic 0/0/0).
+
+### Slice E (this session)
+
+1. Gate re-tap now installs page-level mutate counters (`fetch` + XHR) and requires
+   `update=0 stop=0 launch=0` via `phone_fit_idempotent_state`.
+2. Pure unit tests: traffic fail-closed + counter JS contract (**14/14 OK**).
+3. Durable proof script: `scripts/phonefit_idempotent_retap_proof.py`.
+4. Fresh live re-proof on Vite:5190 + Manager:18115:
+   - re-tap settled, no restart claim, size 390x844, canvas=1
    - re-tap traffic: update=0 stop=0 launch=0
-   - screenshot SHA-256
-     `bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea`
+   - PNG SHA-256 `bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea`
 
 ## Code
 
@@ -68,8 +72,9 @@ if (profile.screen_width === width && profile.screen_height === height) return t
 
 ```py
 # scripts/mobile_ui_gate.py
-fullscreen_viewport_apply_settled_js()
-phone_fit_idempotent_state(...)
+phone_fit_mutate_counter_install_js()
+phone_fit_mutate_counter_read_js()
+phone_fit_idempotent_state(..., update_count=, stop_count=, launch_count=)
 # check: "fullscreen Phone fit re-tap stays idempotent"
 
 # scripts/release_acceptance_gate.py
@@ -80,19 +85,20 @@ REQUIRED_MOBILE_CHECKS includes
 ## Proof (this session)
 
 ```text
-Command: cd frontend && npm test -- src/App.test.tsx src/components/mobile/MobileSplitScreen.test.tsx
-Result:  Tests  50 passed (50)
-
 Command: python3 scripts/test_mobile_ui_gate.py -v
-Result:  Ran 12 tests  OK
+Result:  Ran 14 tests  OK
 
 Command: python3 scripts/test_release_acceptance_gate.py -v
 Result:  PhoneFit re-tap required check OK
          release pass/fail suite green
          (pre-existing: python3.11 mise shim FAIL on this host only)
 
-Command: Playwright local re-tap (Vite:5190 + Manager:18115)
-Result:  PASS — 13/13 checks
+Command: cd frontend && npm test -- src/App.test.tsx src/components/mobile/MobileSplitScreen.test.tsx
+Result:  Tests  50 passed (50)
+
+Command: python3 scripts/phonefit_idempotent_retap_proof.py
+         (Vite:5190 + Manager:18115, profile a8b99a1f-...)
+Result:  PASS — 11/11 checks
          update/stop/launch on re-tap: 0/0/0
          PNG SHA-256 bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea
 ```
@@ -102,18 +108,20 @@ Key tests / checks:
 - `keeps a running profile connected when the requested viewport is already applied`
 - `stays idempotent on a second Phone-fit apply with the same dimensions`
 - `does not claim a restart when live Phone-fit dimensions already match`
-- `test_phone_fit_idempotent_state_*` (6 pure cases)
+- `test_phone_fit_idempotent_state_*` (including traffic zero-required)
+- `test_phone_fit_mutate_counter_js_classifies_profile_mutate_paths`
 - `test_required_mobile_checks_include_phonefit_re_tap_idempotent`
 - live: `re-tap no update/stop/launch traffic`
 
 Changed files this session:
 
-- `scripts/release_acceptance_gate.py`
-- `scripts/test_release_acceptance_gate.py`
+- `scripts/mobile_ui_gate.py`
+- `scripts/test_mobile_ui_gate.py`
+- `scripts/phonefit_idempotent_retap_proof.py`
 - `docs/reports/PHONEFIT-IDEMPOTENT-STATUS.md`
 - `docs/reports/PHONEFIT-IDEMPOTENT-LOCAL-PROOF-2026-08-02.md`
+- `docs/reports/PHONEFIT-IDEMPOTENT-LOCAL-PROOF-2026-08-02.json`
 - `docs/evidence/phonefit-idempotent-local-retap-2026-08-02.png`
-- `docs/GOAL-ACCEPTANCE-MATRIX-2026-07-22.md` (PhoneFit row)
 
 ## Prior art
 
@@ -135,7 +143,7 @@ Changed files this session:
 - apply-path guard
 - honest status copy
 - unit proof (50/50 focused)
-- gate re-tap contract + pure tests (12/12)
+- gate re-tap contract + traffic counters + pure tests (14/14)
 - release acceptance requires re-tap evidence (fail-closed)
-- live local re-tap proof on this SHA (no mutate traffic)
+- durable live re-tap proof script + fresh local PASS (no mutate traffic)
 - prior VCVM E2E evidence retained on-branch

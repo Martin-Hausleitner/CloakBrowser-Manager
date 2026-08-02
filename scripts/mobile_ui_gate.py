@@ -255,6 +255,77 @@ def fullscreen_viewport_apply_settled_js() -> str:
     )
 
 
+def phone_fit_mutate_counter_install_js() -> str:
+    """Install page-level counters for profile update/stop/launch XHR/fetch.
+
+    Used around a Phone-fit re-tap so the gate can fail closed if the UI claims
+    idempotency while still mutating the live profile.
+    """
+    return r"""(() => {
+      const reset = () => {
+        window.__phoneFitMutate = { update: 0, stop: 0, launch: 0 };
+      };
+      if (window.__phoneFitMutateInstalled) {
+        reset();
+        return true;
+      }
+      reset();
+      const classify = (url, method) => {
+        const u = String(url || '');
+        const m = String(method || 'GET').toUpperCase();
+        if (!u.includes('/api/profiles/')) return;
+        if (m === 'POST' && /\/api\/profiles\/[^/?#]+\/stop(?:[/?#]|$)/.test(u)) {
+          window.__phoneFitMutate.stop += 1;
+          return;
+        }
+        if (m === 'POST' && /\/api\/profiles\/[^/?#]+\/launch(?:[/?#]|$)/.test(u)) {
+          window.__phoneFitMutate.launch += 1;
+          return;
+        }
+        if ((m === 'PUT' || m === 'PATCH') && /\/api\/profiles\/[^/?#]+(?:[/?#]|$)/.test(u)
+            && !/\/api\/profiles\/[^/?#]+\/(?:stop|launch|health|clipboard|cdp)/.test(u)) {
+          window.__phoneFitMutate.update += 1;
+        }
+      };
+      const origFetch = window.fetch.bind(window);
+      window.fetch = (input, init = undefined) => {
+        try {
+          const url = typeof input === 'string' ? input : (input && input.url) || '';
+          const method = (init && init.method)
+            || (typeof input === 'object' && input && input.method)
+            || 'GET';
+          classify(url, method);
+        } catch (_err) { /* never break app traffic */ }
+        return origFetch(input, init);
+      };
+      const open = XMLHttpRequest.prototype.open;
+      const send = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        this.__phoneFitMethod = method;
+        this.__phoneFitUrl = url;
+        return open.call(this, method, url, ...rest);
+      };
+      XMLHttpRequest.prototype.send = function(...args) {
+        try { classify(this.__phoneFitUrl, this.__phoneFitMethod); } catch (_err) {}
+        return send.apply(this, args);
+      };
+      window.__phoneFitMutateInstalled = true;
+      return true;
+    })()"""
+
+
+def phone_fit_mutate_counter_read_js() -> str:
+    """Read installed update/stop/launch counters after a Phone-fit re-tap."""
+    return r"""(() => {
+      const c = window.__phoneFitMutate || { update: 0, stop: 0, launch: 0 };
+      return {
+        update: Number(c.update) || 0,
+        stop: Number(c.stop) || 0,
+        launch: Number(c.launch) || 0,
+      };
+    })()"""
+
+
 def phone_fit_idempotent_state(
     *,
     status_text: str,
@@ -263,8 +334,15 @@ def phone_fit_idempotent_state(
     height: Any,
     expected_width: int,
     expected_height: int,
+    update_count: Any = None,
+    stop_count: Any = None,
+    launch_count: Any = None,
 ) -> dict[str, Any]:
-    """Evaluate a second Phone-fit re-tap against the match-aware UI contract."""
+    """Evaluate a second Phone-fit re-tap against the match-aware UI contract.
+
+    When update/stop/launch counts are provided, require all three to be zero so
+    a matching re-tap cannot silently restart the live profile.
+    """
     text = status_text or ""
     applying = (
         "Keeping live session" in text
@@ -279,13 +357,27 @@ def phone_fit_idempotent_state(
     )
     size_ok = str(width) == str(expected_width) and str(height) == str(expected_height)
     canvas_ok = int(canvas_count or 0) == 1
+    traffic_checked = (
+        update_count is not None or stop_count is not None or launch_count is not None
+    )
+    update_n = int(update_count or 0)
+    stop_n = int(stop_count or 0)
+    launch_n = int(launch_count or 0)
+    traffic_ok = (not traffic_checked) or (update_n == 0 and stop_n == 0 and launch_n == 0)
     return {
         "settled": settled,
         "applying": applying,
         "claimsRestart": claims_restart,
         "sizeOk": size_ok,
         "canvasOk": canvas_ok,
-        "passed": bool(settled and size_ok and canvas_ok and not claims_restart),
+        "trafficChecked": traffic_checked,
+        "trafficOk": traffic_ok,
+        "updateCount": update_n if traffic_checked else None,
+        "stopCount": stop_n if traffic_checked else None,
+        "launchCount": launch_n if traffic_checked else None,
+        "passed": bool(
+            settled and size_ok and canvas_ok and not claims_restart and traffic_ok
+        ),
         "statusText": text,
         "width": width,
         "height": height,
@@ -2462,7 +2554,8 @@ def run_viewport(
                 phone_fit_state,
             )
             # Re-tap Phone fit: when dims already match, apply must stay idempotent
-            # (no restart claim; single live canvas; same width/height).
+            # (no restart claim; single live canvas; same width/height; no mutate traffic).
+            browser.eval(phone_fit_mutate_counter_install_js())
             re_tapped = browser.eval(r"""(() => {
               const root = document.querySelector('[aria-label="Fullscreen viewport controls"]');
               const phoneFit = [...(root?.querySelectorAll('button') ?? [])]
@@ -2492,6 +2585,7 @@ def run_viewport(
                 canvasCount: document.querySelectorAll('.mobile-browser-content canvas').length,
               };
             })()""")
+            mutate = browser.eval(phone_fit_mutate_counter_read_js()) or {}
             re_tap_state = phone_fit_idempotent_state(
                 status_text=str(re_tap_raw.get("statusText") or ""),
                 canvas_count=re_tap_raw.get("canvasCount"),
@@ -2499,6 +2593,9 @@ def run_viewport(
                 height=re_tap_raw.get("height"),
                 expected_width=width,
                 expected_height=height,
+                update_count=mutate.get("update"),
+                stop_count=mutate.get("stop"),
+                launch_count=mutate.get("launch"),
             )
             add_check(
                 result,

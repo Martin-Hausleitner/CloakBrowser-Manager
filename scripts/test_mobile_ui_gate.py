@@ -125,6 +125,77 @@ class MobileUiGateTest(unittest.TestCase):
         self.assertFalse(state["passed"])
         self.assertFalse(state["canvasOk"])
 
+    def test_phone_fit_idempotent_state_requires_zero_mutate_traffic_when_provided(self) -> None:
+        ok = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Already matches - no restart",
+            canvas_count=1,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+            update_count=0,
+            stop_count=0,
+            launch_count=0,
+        )
+        self.assertTrue(ok["passed"])
+        self.assertTrue(ok["trafficChecked"])
+        self.assertTrue(ok["trafficOk"])
+        self.assertEqual(ok["updateCount"], 0)
+        self.assertEqual(ok["stopCount"], 0)
+        self.assertEqual(ok["launchCount"], 0)
+
+        bad_update = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Already matches - no restart",
+            canvas_count=1,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+            update_count=1,
+            stop_count=0,
+            launch_count=0,
+        )
+        self.assertFalse(bad_update["passed"])
+        self.assertFalse(bad_update["trafficOk"])
+
+        bad_stop = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Saved",
+            canvas_count=1,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+            update_count=0,
+            stop_count=1,
+            launch_count=0,
+        )
+        self.assertFalse(bad_stop["passed"])
+        self.assertFalse(bad_stop["trafficOk"])
+
+        bad_launch = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Saved",
+            canvas_count=1,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+            update_count=0,
+            stop_count=0,
+            launch_count=1,
+        )
+        self.assertFalse(bad_launch["passed"])
+        self.assertFalse(bad_launch["trafficOk"])
+
+    def test_phone_fit_mutate_counter_js_classifies_profile_mutate_paths(self) -> None:
+        install = mobile_ui_gate.phone_fit_mutate_counter_install_js()
+        read = mobile_ui_gate.phone_fit_mutate_counter_read_js()
+        self.assertIn("__phoneFitMutate", install)
+        self.assertIn("/stop", install)
+        self.assertIn("/launch", install)
+        self.assertIn("window.fetch", install)
+        self.assertIn("XMLHttpRequest", install)
+        self.assertIn("__phoneFitMutate", read)
+
     def test_mobile_gate_init_script_injects_available_codex_host_harness(self) -> None:
         script = mobile_ui_gate.mobile_gate_init_script()
 

@@ -1,0 +1,78 @@
+{
+  "outcome": "PASS",
+  "base_url": "http://127.0.0.1:5190/",
+  "profile_id": "a8b99a1f-bd77-4249-917f-0ad681ea5519",
+  "viewport": "390x844",
+  "mutate_on_retap": {
+    "update": 0,
+    "stop": 0,
+    "launch": 0
+  },
+  "checks": [
+    {
+      "name": "fullscreen control present/open",
+      "passed": true,
+      "evidence": null
+    },
+    {
+      "name": "viewport panel open",
+      "passed": true,
+      "evidence": null
+    },
+    {
+      "name": "Phone fit available",
+      "passed": true,
+      "evidence": null
+    },
+    {
+      "name": "first Phone fit settled",
+      "passed": true,
+      "evidence": "Viewport width\n\u00d7\nViewport height\nApply\nPhone fit\nMobile\nTablet\nDesktop\n\nSaved"
+    },
+    {
+      "name": "first Phone fit size 390x844",
+      "passed": true,
+      "evidence": "390x844"
+    },
+    {
+      "name": "re-tap settled",
+      "passed": true,
+      "evidence": "Viewport width\n\u00d7\nViewport height\nApply\nPhone fit\nMobile\nTablet\nDesktop\n\nSaved"
+    },
+    {
+      "name": "re-tap no restart claim",
+      "passed": true,
+      "evidence": "Viewport width\n\u00d7\nViewport height\nApply\nPhone fit\nMobile\nTablet\nDesktop\n\nSaved"
+    },
+    {
+      "name": "re-tap size still 390x844",
+      "passed": true,
+      "evidence": "390x844"
+    },
+    {
+      "name": "re-tap no update/stop/launch traffic",
+      "passed": true,
+      "evidence": {
+        "update": 0,
+        "stop": 0,
+        "launch": 0
+      }
+    },
+    {
+      "name": "re-tap single canvas (content)",
+      "passed": true,
+      "evidence": 1
+    },
+    {
+      "name": "screenshot written",
+      "passed": true,
+      "evidence": {
+        "path": "docs/evidence/phonefit-idempotent-local-retap-2026-08-02.png",
+        "sha256": "bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea",
+        "bytes": 65028
+      }
+    }
+  ],
+  "screenshot": "docs/evidence/phonefit-idempotent-local-retap-2026-08-02.png",
+  "sha256": "bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea"
+}

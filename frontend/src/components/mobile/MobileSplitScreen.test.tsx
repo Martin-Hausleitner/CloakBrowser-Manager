@@ -846,6 +846,26 @@ describe("MobileSplitScreen", () => {
     await waitFor(() => expect(props.onViewportApply).toHaveBeenCalledWith(390, 844));
   });
 
+  it("does not claim a restart when live Phone-fit dimensions already match", async () => {
+    const apply = deferred<boolean>();
+    const onViewportApply = vi.fn().mockReturnValue(apply.promise);
+    runningSplit({ onViewportApply });
+    vi.stubGlobal("visualViewport", { width: 390, height: 844 });
+
+    openBrowserTools();
+    fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+    expect(screen.getByText("Already matches - no restart")).toBeTruthy();
+    expect(screen.queryByText("Restarts live browser to apply")).toBeNull();
+
+    fireEvent.click(screen.getByText("Phone fit"));
+    expect(await screen.findByText("Keeping live session...")).toBeTruthy();
+    expect(screen.queryByText("Restarting live browser...")).toBeNull();
+
+    apply.resolve(true);
+    expect(await screen.findByText("Saved")).toBeTruthy();
+    expect(onViewportApply).toHaveBeenCalledWith(390, 844);
+  });
+
   it("shows live viewport restart state and prevents duplicate apply submissions", async () => {
     const apply = deferred<boolean>();
     const onViewportApply = vi.fn().mockReturnValue(apply.promise);
@@ -853,8 +873,11 @@ describe("MobileSplitScreen", () => {
 
     openBrowserTools();
     fireEvent.click(screen.getByLabelText("Edit browser viewport"));
+    // Change away from the live 390x844 framebuffer so apply must restart.
+    fireEvent.click(screen.getByText("Tablet"));
     expect(screen.getByText("Restarts live browser to apply")).toBeTruthy();
     expect(screen.queryByText(/next launch/i)).toBeNull();
+    expect(screen.queryByText("Already matches - no restart")).toBeNull();
 
     const applyButton = screen.getByRole("button", { name: "Apply" });
     fireEvent.click(applyButton);

@@ -760,9 +760,16 @@ export function MobileSplitScreen({
     const editorId = fullscreen ? "mobile-fullscreen-viewport-settings" : "mobile-viewport-settings";
     const widthInputId = fullscreen ? "mobile-fullscreen-viewport-width" : "mobile-viewport-width";
     const heightInputId = fullscreen ? "mobile-fullscreen-viewport-height" : "mobile-viewport-height";
+    // Match applyProfileViewport idempotency: same framebuffer must not claim a restart.
+    const viewportMatchesProfile =
+      selected != null &&
+      selected.screen_width === viewport.width &&
+      selected.screen_height === viewport.height;
     const viewportStatus = viewportApplying
       ? selected?.status === "running"
-        ? "Restarting live browser..."
+        ? viewportMatchesProfile
+          ? "Keeping live session..."
+          : "Restarting live browser..."
         : "Saving viewport..."
       : viewportSaveFailed
         ? selected?.status === "running"
@@ -771,7 +778,9 @@ export function MobileSplitScreen({
         : viewportSaved
           ? "Saved"
           : selected?.status === "running"
-            ? "Restarts live browser to apply"
+            ? viewportMatchesProfile
+              ? "Already matches - no restart"
+              : "Restarts live browser to apply"
             : "Applied when this profile launches";
     const setViewportDimension = (dimension: "width" | "height", value: string) => {
       setViewport((current) => ({

@@ -74,6 +74,28 @@ describe("applyProfileViewport", () => {
     expect(launch).not.toHaveBeenCalled();
   });
 
+  it("stays idempotent on a second Phone-fit apply with the same dimensions", async () => {
+    const update = vi.fn();
+    const stop = vi.fn();
+    const launch = vi.fn();
+    const options = {
+      profile: runningProfile,
+      width: runningProfile.screen_width,
+      height: runningProfile.screen_height,
+      canManageProfiles: true,
+      canOperateProfile: true,
+      update,
+      stop,
+      launch,
+    };
+
+    expect(await applyProfileViewport(options)).toBe(true);
+    expect(await applyProfileViewport(options)).toBe(true);
+    expect(update).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
   it("saves stopped profile viewport without restarting", async () => {
     const update = vi.fn().mockResolvedValue({ ...stoppedProfile, screen_width: 768, screen_height: 1024 });
     const stop = vi.fn();

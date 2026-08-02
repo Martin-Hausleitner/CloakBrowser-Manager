@@ -324,6 +324,34 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
                 24,
             )
 
+    def test_required_mobile_checks_include_phonefit_re_tap_idempotent(self) -> None:
+        """Release must fail closed without PhoneFit re-tap idempotency evidence."""
+        self.assertIn(
+            "fullscreen Phone fit re-tap stays idempotent",
+            release_gate.REQUIRED_MOBILE_CHECKS,
+        )
+        report = mobile_report()
+        first_viewport = report["viewports"][0]  # type: ignore[index]
+        assert isinstance(first_viewport, dict)
+        checks = first_viewport["checks"]
+        assert isinstance(checks, list)
+        first_viewport["checks"] = [
+            item
+            for item in checks
+            if isinstance(item, dict)
+            and item.get("name") != "fullscreen Phone fit re-tap stays idempotent"
+        ]
+
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "fullscreen Phone fit re-tap stays idempotent",
+        ):
+            release_gate.summarize_mobile(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
     def test_redaction_covers_tailnet_ipv6_and_local_paths(self) -> None:
         source = (
             "http://device.example.ts.net:8080/?token=secret "

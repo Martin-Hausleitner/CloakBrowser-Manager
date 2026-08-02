@@ -31,6 +31,8 @@ REQUIRED_MOBILE_CHECKS = frozenset(
         "fullscreen local controls available",
         "fullscreen fit control applies selected mode without clipping",
         "fullscreen Phone fit applies current mobile viewport",
+        # PhoneFit re-tap: match-aware settle + no restart claim (mobile_ui_gate).
+        "fullscreen Phone fit re-tap stays idempotent",
         "fullscreen session switcher shows honest touch-safe sessions",
         "open mobile keyboard keeps browser visible and composer above keyboard",
     }

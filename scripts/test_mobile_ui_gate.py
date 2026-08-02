@@ -136,10 +136,12 @@ class MobileUiGateTest(unittest.TestCase):
             update_count=0,
             stop_count=0,
             launch_count=0,
+            counter_installed=True,
         )
         self.assertTrue(ok["passed"])
         self.assertTrue(ok["trafficChecked"])
         self.assertTrue(ok["trafficOk"])
+        self.assertTrue(ok["counterInstalled"])
         self.assertEqual(ok["updateCount"], 0)
         self.assertEqual(ok["stopCount"], 0)
         self.assertEqual(ok["launchCount"], 0)
@@ -154,6 +156,7 @@ class MobileUiGateTest(unittest.TestCase):
             update_count=1,
             stop_count=0,
             launch_count=0,
+            counter_installed=True,
         )
         self.assertFalse(bad_update["passed"])
         self.assertFalse(bad_update["trafficOk"])
@@ -168,6 +171,7 @@ class MobileUiGateTest(unittest.TestCase):
             update_count=0,
             stop_count=1,
             launch_count=0,
+            counter_installed=True,
         )
         self.assertFalse(bad_stop["passed"])
         self.assertFalse(bad_stop["trafficOk"])
@@ -182,19 +186,41 @@ class MobileUiGateTest(unittest.TestCase):
             update_count=0,
             stop_count=0,
             launch_count=1,
+            counter_installed=True,
         )
         self.assertFalse(bad_launch["passed"])
         self.assertFalse(bad_launch["trafficOk"])
+
+    def test_phone_fit_idempotent_state_fails_when_counter_not_installed(self) -> None:
+        """Missing page hooks must not pass as false-zero mutate traffic."""
+        state = mobile_ui_gate.phone_fit_idempotent_state(
+            status_text="Already matches - no restart",
+            canvas_count=1,
+            width="390",
+            height="844",
+            expected_width=390,
+            expected_height=844,
+            update_count=0,
+            stop_count=0,
+            launch_count=0,
+            counter_installed=False,
+        )
+        self.assertFalse(state["passed"])
+        self.assertFalse(state["trafficOk"])
+        self.assertIs(state["counterInstalled"], False)
 
     def test_phone_fit_mutate_counter_js_classifies_profile_mutate_paths(self) -> None:
         install = mobile_ui_gate.phone_fit_mutate_counter_install_js()
         read = mobile_ui_gate.phone_fit_mutate_counter_read_js()
         self.assertIn("__phoneFitMutate", install)
+        self.assertIn("__phoneFitMutateInstalled", install)
         self.assertIn("/stop", install)
         self.assertIn("/launch", install)
         self.assertIn("window.fetch", install)
         self.assertIn("XMLHttpRequest", install)
         self.assertIn("__phoneFitMutate", read)
+        self.assertIn("installed", read)
+        self.assertIn("__phoneFitMutateInstalled", read)
 
     def test_mobile_gate_init_script_injects_available_codex_host_harness(self) -> None:
         script = mobile_ui_gate.mobile_gate_init_script()

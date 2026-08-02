@@ -37,6 +37,7 @@ def phone_fit_re_tap_check() -> dict[str, object]:
         "evidence": {
             "trafficChecked": True,
             "trafficOk": True,
+            "counterInstalled": True,
             "updateCount": 0,
             "stopCount": 0,
             "launchCount": 0,
@@ -414,6 +415,7 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
                 item["evidence"] = {
                     "trafficChecked": True,
                     "trafficOk": False,
+                    "counterInstalled": True,
                     "updateCount": 0,
                     "stopCount": 0,
                     "launchCount": 1,
@@ -422,6 +424,49 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
         with self.assertRaisesRegex(
             release_gate.GateError,
             "must prove update/stop/launch traffic",
+        ):
+            release_gate.summarize_mobile(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
+        # Zeros without installed counter hooks must fail (false-zero guard)
+        for item in checks:
+            if isinstance(item, dict) and item.get("name") == release_gate.PHONE_FIT_RE_TAP_CHECK:
+                item["evidence"] = {
+                    "trafficChecked": True,
+                    "trafficOk": True,
+                    "counterInstalled": False,
+                    "updateCount": 0,
+                    "stopCount": 0,
+                    "launchCount": 0,
+                }
+                break
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "installed counters",
+        ):
+            release_gate.summarize_mobile(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
+        # Missing counterInstalled key must fail
+        for item in checks:
+            if isinstance(item, dict) and item.get("name") == release_gate.PHONE_FIT_RE_TAP_CHECK:
+                item["evidence"] = {
+                    "trafficChecked": True,
+                    "trafficOk": True,
+                    "updateCount": 0,
+                    "stopCount": 0,
+                    "launchCount": 0,
+                }
+                break
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "installed counters",
         ):
             release_gate.summarize_mobile(
                 report,

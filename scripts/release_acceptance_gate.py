@@ -246,7 +246,9 @@ def assert_phone_fit_re_tap_traffic_evidence(checks: list[Any]) -> None:
 
     A bare passed name is not enough: older gates could mark the re-tap check
     green from UI copy alone while still issuing update/stop/launch. Require
-    explicit trafficChecked + zero update/stop/launch counts in evidence.
+    explicit trafficChecked + counterInstalled + zero update/stop/launch counts
+    in evidence. Without counterInstalled, a missing page hook can still report
+    false-zero traffic.
     """
     re_tap_checks = [
         check
@@ -263,16 +265,19 @@ def assert_phone_fit_re_tap_traffic_evidence(checks: list[Any]) -> None:
             )
         traffic_checked = evidence.get("trafficChecked") is True
         traffic_ok = evidence.get("trafficOk") is True
+        counter_installed = evidence.get("counterInstalled") is True
         update_n = evidence.get("updateCount")
         stop_n = evidence.get("stopCount")
         launch_n = evidence.get("launchCount")
         zeros = update_n == 0 and stop_n == 0 and launch_n == 0
-        if not (traffic_checked and traffic_ok and zeros):
+        if not (traffic_checked and traffic_ok and counter_installed and zeros):
             raise GateError(
                 f"{PHONE_FIT_RE_TAP_CHECK} must prove update/stop/launch traffic "
-                f"is zero (got update={update_n!r} stop={stop_n!r} "
-                f"launch={launch_n!r} trafficChecked={evidence.get('trafficChecked')!r} "
-                f"trafficOk={evidence.get('trafficOk')!r})"
+                f"is zero with installed counters (got update={update_n!r} "
+                f"stop={stop_n!r} launch={launch_n!r} "
+                f"trafficChecked={evidence.get('trafficChecked')!r} "
+                f"trafficOk={evidence.get('trafficOk')!r} "
+                f"counterInstalled={evidence.get('counterInstalled')!r})"
             )
 
 

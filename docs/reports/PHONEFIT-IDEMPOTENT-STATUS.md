@@ -17,7 +17,8 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
    and zero update/stop/launch traffic when counters are available).
 4. The release acceptance gate must fail closed if mobile evidence omits the
    re-tap idempotent check **or** omits mutate-traffic zeros in that check's
-   evidence payload.
+   evidence payload **or** omits proof that the page mutate counters were
+   installed (false-zero guard).
 
 ## Steps completed
 
@@ -54,7 +55,7 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
 3. Durable proof script: `scripts/phonefit_idempotent_retap_proof.py`.
 4. Live re-proof: traffic 0/0/0 + PNG.
 
-### Slice F (this session)
+### Slice F (commit `33dd91b`)
 
 1. Release acceptance now **inspects re-tap evidence** and fails closed unless
    `trafficChecked=true`, `trafficOk=true`, and `updateCount/stopCount/launchCount`
@@ -62,7 +63,23 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
 2. Unit tests: missing evidence, non-zero launch, and healthy path.
 3. Proof script also asserts Manager profile markers stay put across re-tap:
    status running, screen 390x844, `updated_at` unchanged, VNC port unchanged.
-4. Fresh live re-proof: **16/16 PASS**.
+4. Live re-proof: **16/16 PASS**.
+
+### Slice G (this session)
+
+1. Mutate-counter **read** always reports `installed` from
+   `window.__phoneFitMutateInstalled` (install already set the flag).
+2. `phone_fit_idempotent_state(..., counter_installed=)` fails closed when
+   hooks are explicitly missing (`counter_installed=False`) so false-zero
+   traffic cannot pass.
+3. Live re-tap path always traffic-checks and passes
+   `counter_installed=bool(mutate.get("installed"))` — empty eval cannot
+   look like UI-only pass.
+4. Release acceptance requires `counterInstalled is True` in re-tap evidence
+   (in addition to traffic zeros).
+5. Unit tests: **15/15** mobile gate; release phonefit cases green
+   (pre-existing: python3.11 mise shim FAIL on this host only).
+6. Fresh live re-proof: **16/16 PASS**, traffic 0/0/0, profile stable.
 
 ## Code
 
@@ -80,27 +97,32 @@ if (profile.screen_width === width && profile.screen_height === height) return t
 
 ```py
 # scripts/mobile_ui_gate.py
-phone_fit_mutate_counter_install_js()
-phone_fit_mutate_counter_read_js()
-phone_fit_idempotent_state(..., update_count=, stop_count=, launch_count=)
+phone_fit_mutate_counter_install_js()  # sets __phoneFitMutateInstalled
+phone_fit_mutate_counter_read_js()     # returns {installed, update, stop, launch}
+phone_fit_idempotent_state(..., counter_installed=)
 # check: "fullscreen Phone fit re-tap stays idempotent"
 
 # scripts/release_acceptance_gate.py
 PHONE_FIT_RE_TAP_CHECK in REQUIRED_MOBILE_CHECKS
-assert_phone_fit_re_tap_traffic_evidence(checks)  # zeros required in evidence
+assert_phone_fit_re_tap_traffic_evidence(checks)
+# requires trafficChecked + trafficOk + counterInstalled + zeros
 ```
 
 ## Proof (this session)
 
 ```text
 Command: python3 scripts/test_mobile_ui_gate.py -v
-Result:  Ran 14 tests  OK
+Result:  Ran 15 tests  OK
 
 Command: python3 scripts/test_release_acceptance_gate.py -v
 Result:  PhoneFit re-tap required check OK
-         re-tap mutate-traffic evidence fail-closed OK
+         re-tap mutate-traffic + counterInstalled fail-closed OK
          release pass/fail suite green
          (pre-existing: python3.11 mise shim FAIL on this host only)
+
+Command: cd frontend && npm test -- --run src/App.test.tsx \
+           src/components/mobile/MobileSplitScreen.test.tsx
+Result:  Tests  50 passed (50)
 
 Command: python3 scripts/phonefit_idempotent_retap_proof.py
          (Vite:5190 + Manager:18115, profile a8b99a1f-...)
@@ -116,6 +138,7 @@ Key tests / checks:
 - `stays idempotent on a second Phone-fit apply with the same dimensions`
 - `does not claim a restart when live Phone-fit dimensions already match`
 - `test_phone_fit_idempotent_state_*` (including traffic zero-required)
+- `test_phone_fit_idempotent_state_fails_when_counter_not_installed`
 - `test_phone_fit_mutate_counter_js_classifies_profile_mutate_paths`
 - `test_required_mobile_checks_include_phonefit_re_tap_idempotent`
 - `test_phone_fit_re_tap_requires_zero_mutate_traffic_evidence`
@@ -125,9 +148,10 @@ Key tests / checks:
 
 Changed files this session:
 
+- `scripts/mobile_ui_gate.py`
+- `scripts/test_mobile_ui_gate.py`
 - `scripts/release_acceptance_gate.py`
 - `scripts/test_release_acceptance_gate.py`
-- `scripts/phonefit_idempotent_retap_proof.py`
 - `docs/reports/PHONEFIT-IDEMPOTENT-STATUS.md`
 - `docs/reports/PHONEFIT-IDEMPOTENT-LOCAL-PROOF-2026-08-02.md`
 - `docs/reports/PHONEFIT-IDEMPOTENT-LOCAL-PROOF-2026-08-02.json`
@@ -152,8 +176,9 @@ Changed files this session:
 
 - apply-path guard
 - honest status copy
-- unit proof (50/50 focused frontend; 14/14 mobile gate)
-- gate re-tap contract + traffic counters
-- release acceptance requires re-tap name **and** mutate-traffic zeros
+- unit proof (50/50 focused frontend; 15/15 mobile gate)
+- gate re-tap contract + traffic counters + installed-hook guard
+- release acceptance requires re-tap name, mutate-traffic zeros, **and**
+  `counterInstalled`
 - durable live re-tap proof (16 checks: UI + traffic + profile stability)
 - prior VCVM E2E evidence retained on-branch

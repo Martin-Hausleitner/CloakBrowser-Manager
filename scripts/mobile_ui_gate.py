@@ -315,10 +315,16 @@ def phone_fit_mutate_counter_install_js() -> str:
 
 
 def phone_fit_mutate_counter_read_js() -> str:
-    """Read installed update/stop/launch counters after a Phone-fit re-tap."""
+    """Read installed update/stop/launch counters after a Phone-fit re-tap.
+
+    Always reports whether install hooks are present. A missing install must not
+    look like "zero traffic" — callers fail closed unless installed is true.
+    """
     return r"""(() => {
+      const installed = window.__phoneFitMutateInstalled === true;
       const c = window.__phoneFitMutate || { update: 0, stop: 0, launch: 0 };
       return {
+        installed: installed,
         update: Number(c.update) || 0,
         stop: Number(c.stop) || 0,
         launch: Number(c.launch) || 0,
@@ -337,11 +343,14 @@ def phone_fit_idempotent_state(
     update_count: Any = None,
     stop_count: Any = None,
     launch_count: Any = None,
+    counter_installed: Any = None,
 ) -> dict[str, Any]:
     """Evaluate a second Phone-fit re-tap against the match-aware UI contract.
 
     When update/stop/launch counts are provided, require all three to be zero so
-    a matching re-tap cannot silently restart the live profile.
+    a matching re-tap cannot silently restart the live profile. When the page
+    mutate counter is expected (counts provided), counter_installed=False fails
+    closed so a missing hook cannot report false-zero traffic.
     """
     text = status_text or ""
     applying = (
@@ -363,7 +372,22 @@ def phone_fit_idempotent_state(
     update_n = int(update_count or 0)
     stop_n = int(stop_count or 0)
     launch_n = int(launch_count or 0)
-    traffic_ok = (not traffic_checked) or (update_n == 0 and stop_n == 0 and launch_n == 0)
+    zeros = update_n == 0 and stop_n == 0 and launch_n == 0
+    # counter_installed: True must be proven when traffic is checked live.
+    # None keeps pure unit tests that only pass counts working.
+    if not traffic_checked:
+        traffic_ok = True
+        installed_ok = True
+    elif counter_installed is False:
+        traffic_ok = False
+        installed_ok = False
+    elif counter_installed is True:
+        traffic_ok = zeros
+        installed_ok = True
+    else:
+        # Omitted install flag: zeros only (unit-test path).
+        traffic_ok = zeros
+        installed_ok = True
     return {
         "settled": settled,
         "applying": applying,
@@ -372,11 +396,21 @@ def phone_fit_idempotent_state(
         "canvasOk": canvas_ok,
         "trafficChecked": traffic_checked,
         "trafficOk": traffic_ok,
+        "counterInstalled": (
+            True if counter_installed is True
+            else False if counter_installed is False
+            else None
+        ),
         "updateCount": update_n if traffic_checked else None,
         "stopCount": stop_n if traffic_checked else None,
         "launchCount": launch_n if traffic_checked else None,
         "passed": bool(
-            settled and size_ok and canvas_ok and not claims_restart and traffic_ok
+            settled
+            and size_ok
+            and canvas_ok
+            and not claims_restart
+            and traffic_ok
+            and installed_ok
         ),
         "statusText": text,
         "width": width,
@@ -2586,6 +2620,8 @@ def run_viewport(
               };
             })()""")
             mutate = browser.eval(phone_fit_mutate_counter_read_js()) or {}
+            # Always traffic-check on the live re-tap path. A failed/empty eval
+            # must not look like "UI-only pass" — treat missing install as False.
             re_tap_state = phone_fit_idempotent_state(
                 status_text=str(re_tap_raw.get("statusText") or ""),
                 canvas_count=re_tap_raw.get("canvasCount"),
@@ -2593,9 +2629,10 @@ def run_viewport(
                 height=re_tap_raw.get("height"),
                 expected_width=width,
                 expected_height=height,
-                update_count=mutate.get("update"),
-                stop_count=mutate.get("stop"),
-                launch_count=mutate.get("launch"),
+                update_count=int(mutate.get("update") or 0),
+                stop_count=int(mutate.get("stop") or 0),
+                launch_count=int(mutate.get("launch") or 0),
+                counter_installed=bool(mutate.get("installed")),
             )
             add_check(
                 result,

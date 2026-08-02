@@ -29,7 +29,29 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def phone_fit_re_tap_check() -> dict[str, object]:
+    """Minimal re-tap check that satisfies traffic fail-closed evidence."""
+    return {
+        "name": release_gate.PHONE_FIT_RE_TAP_CHECK,
+        "passed": True,
+        "evidence": {
+            "trafficChecked": True,
+            "trafficOk": True,
+            "updateCount": 0,
+            "stopCount": 0,
+            "launchCount": 0,
+            "passed": True,
+        },
+    }
+
+
 def mobile_report() -> dict[str, object]:
+    checks: list[dict[str, object]] = []
+    for name in sorted(release_gate.REQUIRED_MOBILE_CHECKS):
+        if name == release_gate.PHONE_FIT_RE_TAP_CHECK:
+            checks.append(phone_fit_re_tap_check())
+        else:
+            checks.append({"name": name, "passed": True})
     return {
         "passed": True,
         "finished_at": "2026-07-21T15:50:00+00:00",
@@ -38,10 +60,7 @@ def mobile_report() -> dict[str, object]:
             {
                 "name": "iphone-14-portrait",
                 "passed": True,
-                "checks": [
-                    {"name": name, "passed": True}
-                    for name in sorted(release_gate.REQUIRED_MOBILE_CHECKS)
-                ],
+                "checks": checks,
                 "screenshots": [{"path": "/Users/example/private/screen.png"}],
             },
             {
@@ -327,7 +346,7 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
     def test_required_mobile_checks_include_phonefit_re_tap_idempotent(self) -> None:
         """Release must fail closed without PhoneFit re-tap idempotency evidence."""
         self.assertIn(
-            "fullscreen Phone fit re-tap stays idempotent",
+            release_gate.PHONE_FIT_RE_TAP_CHECK,
             release_gate.REQUIRED_MOBILE_CHECKS,
         )
         report = mobile_report()
@@ -339,7 +358,7 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
             item
             for item in checks
             if isinstance(item, dict)
-            and item.get("name") != "fullscreen Phone fit re-tap stays idempotent"
+            and item.get("name") != release_gate.PHONE_FIT_RE_TAP_CHECK
         ]
 
         with self.assertRaisesRegex(
@@ -351,6 +370,76 @@ class ReleaseAcceptanceGateTest(unittest.TestCase):
                 release_gate.parse_time(NOW, "now"),
                 24,
             )
+
+    def test_phone_fit_re_tap_requires_zero_mutate_traffic_evidence(self) -> None:
+        """Re-tap check name alone is not enough; traffic zeros must be proven."""
+        report = mobile_report()
+        first_viewport = report["viewports"][0]  # type: ignore[index]
+        assert isinstance(first_viewport, dict)
+        checks = first_viewport["checks"]
+        assert isinstance(checks, list)
+        for item in checks:
+            if isinstance(item, dict) and item.get("name") == release_gate.PHONE_FIT_RE_TAP_CHECK:
+                item["evidence"] = {"passed": True}  # UI-only, no traffic
+                break
+
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "must prove update/stop/launch traffic",
+        ):
+            release_gate.summarize_mobile(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
+        # Missing evidence object entirely
+        for item in checks:
+            if isinstance(item, dict) and item.get("name") == release_gate.PHONE_FIT_RE_TAP_CHECK:
+                item.pop("evidence", None)
+                break
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "missing mutate-traffic evidence",
+        ):
+            release_gate.summarize_mobile(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
+        # Non-zero launch must fail
+        for item in checks:
+            if isinstance(item, dict) and item.get("name") == release_gate.PHONE_FIT_RE_TAP_CHECK:
+                item["evidence"] = {
+                    "trafficChecked": True,
+                    "trafficOk": False,
+                    "updateCount": 0,
+                    "stopCount": 0,
+                    "launchCount": 1,
+                }
+                break
+        with self.assertRaisesRegex(
+            release_gate.GateError,
+            "must prove update/stop/launch traffic",
+        ):
+            release_gate.summarize_mobile(
+                report,
+                release_gate.parse_time(NOW, "now"),
+                24,
+            )
+
+        # Healthy traffic evidence passes
+        for item in checks:
+            if isinstance(item, dict) and item.get("name") == release_gate.PHONE_FIT_RE_TAP_CHECK:
+                item["evidence"] = phone_fit_re_tap_check()["evidence"]
+                break
+        summary = release_gate.summarize_mobile(
+            report,
+            release_gate.parse_time(NOW, "now"),
+            24,
+        )
+        self.assertTrue(summary["passed"])
 
     def test_redaction_covers_tailnet_ipv6_and_local_paths(self) -> None:
         source = (

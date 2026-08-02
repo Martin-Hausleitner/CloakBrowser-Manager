@@ -25,6 +25,8 @@ from urllib.parse import urlsplit, urlunsplit
 SCHEMA_VERSION = 1
 DEFAULT_MAX_AGE_HOURS = 24.0
 
+PHONE_FIT_RE_TAP_CHECK = "fullscreen Phone fit re-tap stays idempotent"
+
 REQUIRED_MOBILE_CHECKS = frozenset(
     {
         "compact primary controls are Full Tools Chat and Send",
@@ -32,7 +34,7 @@ REQUIRED_MOBILE_CHECKS = frozenset(
         "fullscreen fit control applies selected mode without clipping",
         "fullscreen Phone fit applies current mobile viewport",
         # PhoneFit re-tap: match-aware settle + no restart claim (mobile_ui_gate).
-        "fullscreen Phone fit re-tap stays idempotent",
+        PHONE_FIT_RE_TAP_CHECK,
         "fullscreen session switcher shows honest touch-safe sessions",
         "open mobile keyboard keeps browser visible and composer above keyboard",
     }
@@ -239,6 +241,41 @@ def summarize_quality(commands: tuple[QualityCommand, ...], timeout: float) -> d
     }
 
 
+def assert_phone_fit_re_tap_traffic_evidence(checks: list[Any]) -> None:
+    """Fail closed unless the PhoneFit re-tap check proves zero mutate traffic.
+
+    A bare passed name is not enough: older gates could mark the re-tap check
+    green from UI copy alone while still issuing update/stop/launch. Require
+    explicit trafficChecked + zero update/stop/launch counts in evidence.
+    """
+    re_tap_checks = [
+        check
+        for check in checks
+        if isinstance(check, dict) and check.get("name") == PHONE_FIT_RE_TAP_CHECK
+    ]
+    if not re_tap_checks:
+        return
+    for check in re_tap_checks:
+        evidence = check.get("evidence")
+        if not isinstance(evidence, dict):
+            raise GateError(
+                f"{PHONE_FIT_RE_TAP_CHECK} is missing mutate-traffic evidence"
+            )
+        traffic_checked = evidence.get("trafficChecked") is True
+        traffic_ok = evidence.get("trafficOk") is True
+        update_n = evidence.get("updateCount")
+        stop_n = evidence.get("stopCount")
+        launch_n = evidence.get("launchCount")
+        zeros = update_n == 0 and stop_n == 0 and launch_n == 0
+        if not (traffic_checked and traffic_ok and zeros):
+            raise GateError(
+                f"{PHONE_FIT_RE_TAP_CHECK} must prove update/stop/launch traffic "
+                f"is zero (got update={update_n!r} stop={stop_n!r} "
+                f"launch={launch_n!r} trafficChecked={evidence.get('trafficChecked')!r} "
+                f"trafficOk={evidence.get('trafficOk')!r})"
+            )
+
+
 def summarize_mobile(report: dict[str, Any], now: datetime, max_age_hours: float) -> dict[str, Any]:
     timestamp = ensure_fresh(report, "mobile UI/UX gate report", now, max_age_hours)
     viewports = report.get("viewports")
@@ -261,6 +298,7 @@ def summarize_mobile(report: dict[str, Any], now: datetime, max_age_hours: float
             raise GateError("mobile UI/UX viewport contains a failed or malformed check")
         if not isinstance(screenshots, list) or not screenshots:
             raise GateError("mobile UI/UX viewport has no screenshots")
+        assert_phone_fit_re_tap_traffic_evidence(checks)
         passed_check_names.update(
             str(check.get("name"))
             for check in checks

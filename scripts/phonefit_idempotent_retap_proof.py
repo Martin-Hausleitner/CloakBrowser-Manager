@@ -17,7 +17,11 @@ import hashlib
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -26,6 +30,7 @@ PROFILE_ID = os.environ.get(
     "PHONEFIT_PROFILE_ID", "a8b99a1f-bd77-4249-917f-0ad681ea5519"
 )
 AUTH = os.environ.get("AUTH_TOKEN") or os.environ.get("MANAGER_AUTH_TOKEN") or ""
+MANAGER_API = os.environ.get("PHONEFIT_MANAGER_API", "http://127.0.0.1:18115")
 OUT_DIR = Path(os.environ.get("PHONEFIT_OUT_DIR", "docs/evidence"))
 SHOT_NAME = os.environ.get(
     "PHONEFIT_SHOT_NAME", "phonefit-idempotent-local-retap-2026-08-02.png"
@@ -37,6 +42,25 @@ REPORT_PATH = Path(
     )
 )
 W, H = 390, 844
+
+
+def fetch_profile_snapshot() -> dict[str, Any]:
+    """Read redacted runtime markers used to prove the live process stayed put."""
+    url = f"{MANAGER_API.rstrip('/')}/api/profiles/{PROFILE_ID}"
+    req = urllib.request.Request(url, method="GET")
+    if AUTH:
+        req.add_header("Authorization", f"Bearer {AUTH}")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    return {
+        "status": body.get("status"),
+        "screen_width": body.get("screen_width"),
+        "screen_height": body.get("screen_height"),
+        "updated_at": body.get("updated_at"),
+        "vnc_ws_port": body.get("vnc_ws_port"),
+        # cdp_url may be host-local; keep only host:port shape, never full path secrets
+        "cdp_host": (urlparse(str(body.get("cdp_url") or "")).netloc or None),
+    }
 
 
 def main() -> int:
@@ -52,6 +76,18 @@ def main() -> int:
         print(f"[{status}] {name}{extra}")
         if not passed:
             raise SystemExit(f"CHECK FAILED: {name}")
+
+    try:
+        before = fetch_profile_snapshot()
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as err:
+        raise SystemExit(f"CHECK FAILED: profile snapshot before: {err}") from err
+    check(
+        "profile running at matching 390x844 before re-tap",
+        before.get("status") == "running"
+        and before.get("screen_width") == W
+        and before.get("screen_height") == H,
+        before,
+    )
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -262,12 +298,49 @@ def main() -> int:
         print("SHA-256", digest)
         browser.close()
 
+    try:
+        after = fetch_profile_snapshot()
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as err:
+        raise SystemExit(f"CHECK FAILED: profile snapshot after: {err}") from err
+    check(
+        "profile still running after re-tap",
+        after.get("status") == "running",
+        after,
+    )
+    check(
+        "profile screen size unchanged after re-tap",
+        after.get("screen_width") == before.get("screen_width")
+        and after.get("screen_height") == before.get("screen_height")
+        and after.get("screen_width") == W
+        and after.get("screen_height") == H,
+        {"before": before, "after": after},
+    )
+    check(
+        "profile updated_at unchanged after re-tap",
+        after.get("updated_at") == before.get("updated_at"),
+        {"before": before.get("updated_at"), "after": after.get("updated_at")},
+    )
+    check(
+        "profile vnc/cdp endpoints unchanged after re-tap",
+        after.get("vnc_ws_port") == before.get("vnc_ws_port")
+        and after.get("cdp_host") == before.get("cdp_host"),
+        {
+            "before_vnc": before.get("vnc_ws_port"),
+            "after_vnc": after.get("vnc_ws_port"),
+            "before_cdp_host": before.get("cdp_host"),
+            "after_cdp_host": after.get("cdp_host"),
+        },
+    )
+
     report = {
         "outcome": "PASS",
         "base_url": BASE,
+        "manager_api": MANAGER_API,
         "profile_id": PROFILE_ID,
         "viewport": f"{W}x{H}",
         "mutate_on_retap": mutate,
+        "profile_before": before,
+        "profile_after": after,
         "checks": checks,
         "screenshot": str(shot),
         "sha256": hashlib.sha256(shot.read_bytes()).hexdigest(),

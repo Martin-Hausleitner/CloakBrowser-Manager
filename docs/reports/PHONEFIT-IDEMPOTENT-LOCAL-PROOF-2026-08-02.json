@@ -1,6 +1,7 @@
 {
   "outcome": "PASS",
   "base_url": "http://127.0.0.1:5190/",
+  "manager_api": "http://127.0.0.1:18115",
   "profile_id": "a8b99a1f-bd77-4249-917f-0ad681ea5519",
   "viewport": "390x844",
   "mutate_on_retap": {
@@ -8,7 +9,35 @@
     "stop": 0,
     "launch": 0
   },
+  "profile_before": {
+    "status": "running",
+    "screen_width": 390,
+    "screen_height": 844,
+    "updated_at": "2026-07-30T23:32:55.020224+00:00",
+    "vnc_ws_port": 6100,
+    "cdp_host": null
+  },
+  "profile_after": {
+    "status": "running",
+    "screen_width": 390,
+    "screen_height": 844,
+    "updated_at": "2026-07-30T23:32:55.020224+00:00",
+    "vnc_ws_port": 6100,
+    "cdp_host": null
+  },
   "checks": [
+    {
+      "name": "profile running at matching 390x844 before re-tap",
+      "passed": true,
+      "evidence": {
+        "status": "running",
+        "screen_width": 390,
+        "screen_height": 844,
+        "updated_at": "2026-07-30T23:32:55.020224+00:00",
+        "vnc_ws_port": 6100,
+        "cdp_host": null
+      }
+    },
     {
       "name": "fullscreen control present/open",
       "passed": true,
@@ -70,6 +99,58 @@
         "path": "docs/evidence/phonefit-idempotent-local-retap-2026-08-02.png",
         "sha256": "bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea",
         "bytes": 65028
+      }
+    },
+    {
+      "name": "profile still running after re-tap",
+      "passed": true,
+      "evidence": {
+        "status": "running",
+        "screen_width": 390,
+        "screen_height": 844,
+        "updated_at": "2026-07-30T23:32:55.020224+00:00",
+        "vnc_ws_port": 6100,
+        "cdp_host": null
+      }
+    },
+    {
+      "name": "profile screen size unchanged after re-tap",
+      "passed": true,
+      "evidence": {
+        "before": {
+          "status": "running",
+          "screen_width": 390,
+          "screen_height": 844,
+          "updated_at": "2026-07-30T23:32:55.020224+00:00",
+          "vnc_ws_port": 6100,
+          "cdp_host": null
+        },
+        "after": {
+          "status": "running",
+          "screen_width": 390,
+          "screen_height": 844,
+          "updated_at": "2026-07-30T23:32:55.020224+00:00",
+          "vnc_ws_port": 6100,
+          "cdp_host": null
+        }
+      }
+    },
+    {
+      "name": "profile updated_at unchanged after re-tap",
+      "passed": true,
+      "evidence": {
+        "before": "2026-07-30T23:32:55.020224+00:00",
+        "after": "2026-07-30T23:32:55.020224+00:00"
+      }
+    },
+    {
+      "name": "profile vnc/cdp endpoints unchanged after re-tap",
+      "passed": true,
+      "evidence": {
+        "before_vnc": 6100,
+        "after_vnc": 6100,
+        "before_cdp_host": null,
+        "after_cdp_host": null
       }
     }
   ],

@@ -16,7 +16,8 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
    Phone-fit re-tap stays idempotent (no restart claim, single canvas, same size,
    and zero update/stop/launch traffic when counters are available).
 4. The release acceptance gate must fail closed if mobile evidence omits the
-   re-tap idempotent check.
+   re-tap idempotent check **or** omits mutate-traffic zeros in that check's
+   evidence payload.
 
 ## Steps completed
 
@@ -45,16 +46,23 @@ Branch: `Martin-Hausleitner/cbm-phonefit`
 2. Unit test: missing re-tap check raises GateError.
 3. Live local Playwright re-tap proof (traffic 0/0/0).
 
-### Slice E (this session)
+### Slice E (commit `7a110c4`)
 
-1. Gate re-tap now installs page-level mutate counters (`fetch` + XHR) and requires
+1. Gate re-tap installs page-level mutate counters (`fetch` + XHR) and requires
    `update=0 stop=0 launch=0` via `phone_fit_idempotent_state`.
 2. Pure unit tests: traffic fail-closed + counter JS contract (**14/14 OK**).
 3. Durable proof script: `scripts/phonefit_idempotent_retap_proof.py`.
-4. Fresh live re-proof on Vite:5190 + Manager:18115:
-   - re-tap settled, no restart claim, size 390x844, canvas=1
-   - re-tap traffic: update=0 stop=0 launch=0
-   - PNG SHA-256 `bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea`
+4. Live re-proof: traffic 0/0/0 + PNG.
+
+### Slice F (this session)
+
+1. Release acceptance now **inspects re-tap evidence** and fails closed unless
+   `trafficChecked=true`, `trafficOk=true`, and `updateCount/stopCount/launchCount`
+   are all `0` (`assert_phone_fit_re_tap_traffic_evidence`).
+2. Unit tests: missing evidence, non-zero launch, and healthy path.
+3. Proof script also asserts Manager profile markers stay put across re-tap:
+   status running, screen 390x844, `updated_at` unchanged, VNC port unchanged.
+4. Fresh live re-proof: **16/16 PASS**.
 
 ## Code
 
@@ -78,8 +86,8 @@ phone_fit_idempotent_state(..., update_count=, stop_count=, launch_count=)
 # check: "fullscreen Phone fit re-tap stays idempotent"
 
 # scripts/release_acceptance_gate.py
-REQUIRED_MOBILE_CHECKS includes
-  "fullscreen Phone fit re-tap stays idempotent"
+PHONE_FIT_RE_TAP_CHECK in REQUIRED_MOBILE_CHECKS
+assert_phone_fit_re_tap_traffic_evidence(checks)  # zeros required in evidence
 ```
 
 ## Proof (this session)
@@ -90,16 +98,15 @@ Result:  Ran 14 tests  OK
 
 Command: python3 scripts/test_release_acceptance_gate.py -v
 Result:  PhoneFit re-tap required check OK
+         re-tap mutate-traffic evidence fail-closed OK
          release pass/fail suite green
          (pre-existing: python3.11 mise shim FAIL on this host only)
 
-Command: cd frontend && npm test -- src/App.test.tsx src/components/mobile/MobileSplitScreen.test.tsx
-Result:  Tests  50 passed (50)
-
 Command: python3 scripts/phonefit_idempotent_retap_proof.py
          (Vite:5190 + Manager:18115, profile a8b99a1f-...)
-Result:  PASS — 11/11 checks
+Result:  PASS — 16/16 checks
          update/stop/launch on re-tap: 0/0/0
+         profile updated_at unchanged; vnc_ws_port 6100 unchanged
          PNG SHA-256 bae3257260d6a5336a787907e8a59916cc870c543794ee1411bb85d2b9a862ea
 ```
 
@@ -111,17 +118,20 @@ Key tests / checks:
 - `test_phone_fit_idempotent_state_*` (including traffic zero-required)
 - `test_phone_fit_mutate_counter_js_classifies_profile_mutate_paths`
 - `test_required_mobile_checks_include_phonefit_re_tap_idempotent`
+- `test_phone_fit_re_tap_requires_zero_mutate_traffic_evidence`
 - live: `re-tap no update/stop/launch traffic`
+- live: `profile updated_at unchanged after re-tap`
+- live: `profile vnc/cdp endpoints unchanged after re-tap`
 
 Changed files this session:
 
-- `scripts/mobile_ui_gate.py`
-- `scripts/test_mobile_ui_gate.py`
+- `scripts/release_acceptance_gate.py`
+- `scripts/test_release_acceptance_gate.py`
 - `scripts/phonefit_idempotent_retap_proof.py`
 - `docs/reports/PHONEFIT-IDEMPOTENT-STATUS.md`
 - `docs/reports/PHONEFIT-IDEMPOTENT-LOCAL-PROOF-2026-08-02.md`
 - `docs/reports/PHONEFIT-IDEMPOTENT-LOCAL-PROOF-2026-08-02.json`
-- `docs/evidence/phonefit-idempotent-local-retap-2026-08-02.png`
+- `docs/GOAL-ACCEPTANCE-MATRIX-2026-07-22.md`
 
 ## Prior art
 
@@ -142,8 +152,8 @@ Changed files this session:
 
 - apply-path guard
 - honest status copy
-- unit proof (50/50 focused)
-- gate re-tap contract + traffic counters + pure tests (14/14)
-- release acceptance requires re-tap evidence (fail-closed)
-- durable live re-tap proof script + fresh local PASS (no mutate traffic)
+- unit proof (50/50 focused frontend; 14/14 mobile gate)
+- gate re-tap contract + traffic counters
+- release acceptance requires re-tap name **and** mutate-traffic zeros
+- durable live re-tap proof (16 checks: UI + traffic + profile stability)
 - prior VCVM E2E evidence retained on-branch

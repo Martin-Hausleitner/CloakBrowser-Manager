@@ -1,6 +1,6 @@
 {
   "outcome": "PASS",
-  "base_url": "http://127.0.0.1:5190/",
+  "base_url": "http://localhost:5190/",
   "manager_api": "http://127.0.0.1:18115",
   "profile_id": "a8b99a1f-bd77-4249-917f-0ad681ea5519",
   "viewport": "390x844",

@@ -9,7 +9,7 @@ scripts/mobile_ui_gate.py so durable proof evidence satisfies release acceptance
 request interception is a second independent zero-traffic witness.
 
 Env:
-  PHONEFIT_BASE_URL     default http://127.0.0.1:5190/
+  PHONEFIT_BASE_URL     default http://localhost:5190/
   PHONEFIT_PROFILE_ID   default a8b99a1f-bd77-4249-917f-0ad681ea5519
   AUTH_TOKEN            Manager access token when login is required
   PHONEFIT_OUT_DIR      default docs/evidence
@@ -33,7 +33,7 @@ from playwright.sync_api import sync_playwright
 # Same gate helpers used by mobile_ui_gate live re-tap + release acceptance.
 import mobile_ui_gate
 
-BASE = os.environ.get("PHONEFIT_BASE_URL", "http://127.0.0.1:5190/")
+BASE = os.environ.get("PHONEFIT_BASE_URL", "http://localhost:5190/")
 PROFILE_ID = os.environ.get(
     "PHONEFIT_PROFILE_ID", "a8b99a1f-bd77-4249-917f-0ad681ea5519"
 )
